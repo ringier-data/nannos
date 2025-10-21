@@ -1,0 +1,14 @@
+---
+account_groups:
+  - alloy
+environments:
+
+  - dev
+
+  - stg
+
+  - prod
+
+compute_type_override: 'BUILD_GENERAL1_SMALL'
+environment_type_override: 'ARM_CONTAINER'
+target_platform: 'arm64'

@@ -1,0 +1,182 @@
+# This workflow will run very often, so we have to make sure that it is as fast as possible for financial reason.
+# Logically the activities should be split into several jobs for better parallelization and readability,
+# but to avoid the overhead of initiating additional runtimes, we keep it in one long job.
+---
+name: alloy-cicd
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  alloy-standard:
+    runs-on: ubuntu-latest
+    #
+    # repo `alloy-ch/ops-ci-basics` is the golden standard for all other repositories
+    #
+    if: github.repository != 'alloy-ch/ops-ci-basics'
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
+          # refer to issue https://github.com/actions/checkout/issues/317
+          ref: ${{ github.event.pull_request.head.ref }}
+          submodules: 'recursive'
+
+      - name: Check ops-ci-shared
+        # fail earlier. the submodule conflicts with the copy operation below
+        run: |
+          if grep -q 'submodule "ops-ci-shared"' ".gitmodules"; then
+            echo "ERROR: ops-ci-shared must not be included as submodule"
+            exit 1
+          fi
+
+      - name: Check .bumpsemver.cfg
+        # fail earlier. if the file does not exist, we don't waste time on the next heavy steps
+        run: |
+          if [ ! -f .bumpsemver.cfg ]; then
+            echo "ERROR: .bumpsemver.cfg must exist"
+            exit 1
+          fi
+
+      - name: Check and update sources (if any)
+        env:
+          GITHUB_TOKEN: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
+        run: |
+          git config --global user.name "Alloy CI/CD Bot"
+          git config --global user.email "github@rcplus.io"
+          sources_files=$(find . -name sources_metadata.yml)
+          for source_file in $sources_files; do
+              input_sources=( $(yq e -o=j -I=0 '.sources[]' "$source_file" ) )
+              pushd "$(dirname "$source_file")" > /dev/null
+              source_file_relative=$(basename "$source_file")
+              for source in "${input_sources[@]}"; do
+                  owner=$(echo "$source" | jq -r '.source.owner')
+                  repo=$(echo "$source" | jq -r '.source.repo')
+                  rev=$(echo "$source" | jq -r '.source.rev')
+                  path=$(echo "$source" | jq -r '.source.path')
+                  API_URL="repos/$owner/$repo/contents/$path"
+                  destination_path=$(echo "$source" | jq -r '.path')
+                  latest_destination_path="$destination_path.latest"
+                  gh api $API_URL?ref=$rev -H "Accept: application/vnd.github.raw" > "$destination_path"
+                  if ! gh api $API_URL?ref=main -H "Accept: application/vnd.github.raw" > "$latest_destination_path"; then
+                    line=$(grep -n "$path" "$source_file_relative" | cut -d: -f1)
+                    echo "::warning file=$source_file,line=$line::The source file $path does not exist in the main branch. Is it expected?."
+                    gh pr comment ${{ github.event.pull_request.number }} --body ":information_source: The source file $path does not exist in the main branch. Is it expected?"
+                  else
+                    # NOTE: set -e is set! we can't just fail or use || true
+                    if [ ! -z "$(diff -u "$destination_path" "$latest_destination_path")" ]; then
+                        line=$(grep -n "$path" "$source_file_relative" | cut -d: -f1)
+                        echo "::warning file=$source_file,line=$line::The source file $path is not up-to-date. Please update it."
+                        gh pr comment ${{ github.event.pull_request.number }} --body ":warning: The source file $path is not up-to-date with the main branch. Please update it."
+                    fi
+                  fi
+                  rm -f "$latest_destination_path"
+                  git add "$destination_path" || true
+              done
+              popd > /dev/null
+          done
+          git diff --staged --quiet || git commit -m "ci: updated source files according to the defined revisions"
+          git push
+
+      - name: Add labels to the PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
+        # fail earlier. if the file does not exist, we don't waste time on the next heavy steps
+        run: |
+          commits=$(gh pr view ${{ github.event.pull_request.number }} --json commits --jq '.commits[]')
+          commit_headlines=$(echo $commits | jq -r '.messageHeadline')
+          commit_bodies=$(echo $commits | jq -r '.messageBody')
+          has_feat_commit=$(echo "$commit_headlines" | grep -ic '^feat' || true)
+          has_fix_commit=$(echo "$commit_headlines" | grep -ic '^fix' || true)
+          has_doc_commit=$(echo "$commit_headlines" | grep -ic '^doc' || true)
+          has_style_commit=$(echo "$commit_headlines" | grep -ic '^style' || true)
+          has_refactor_commit=$(echo "$commit_headlines" | grep -ic '^refactor' || true)
+          has_perf_commit=$(echo "$commit_headlines" | grep -ic '^perf' || true)
+          has_test_commit=$(echo "$commit_headlines" | grep -ic '^test' || true)
+          has_chore_commit=$(echo "$commit_headlines" | grep -ic '^chore' || true)
+          has_ci_commit=$(echo "$commit_headlines" | grep -ic '^ci' || true)
+          has_breaking_commit_in_message=$(echo "$commit_headlines" | grep -Eic '^[a-z]+\(?[^ ]*\)?\!:' || true)
+          has_breaking_commit_in_body=$(echo "$commit_bodies" | grep -c 'BREAKING CHANGE' || true)
+          if [ $has_breaking_commit_in_message -gt 0 ] || [ $has_breaking_commit_in_body -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label breaking-change
+          fi
+          if [ $has_feat_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label enhancement
+          fi
+          if [ $has_fix_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label bug
+          fi
+          if [ $has_doc_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label documentation
+          fi
+          if [ $has_style_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label chore
+          fi
+          if [ $has_refactor_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label refactor
+          fi
+          if [ $has_perf_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label performance
+          fi
+          if [ $has_test_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label documentation
+          fi
+          if [ $has_chore_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label chore
+          fi
+          if [ $has_ci_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label chore
+          fi
+
+      - name: Checkout the template repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
+          repository: 'alloy-ch/ops-ci-basics'
+          ref: 'main'
+          path: 'alloy_standard'
+          submodules: 'recursive'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        id: cache-pip
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('alloy_standard/requirements.txt') }}
+
+      - name: Install dependencies if cache missed
+        run: |
+          pip --quiet --disable-pip-version-check --no-color install -r alloy_standard/requirements.txt 
+          
+
+      - name: Sync files from the template repository
+        run: |
+          mkdir -p .github/workflows
+          cp -fp alloy_standard/.github/pull_request_template.md .github
+          cp -fp alloy_standard/.github/release.yml .github
+          cp -fp alloy_standard/.github/workflows/alloy-cicd.yml .github/workflows
+          cp -fp alloy_standard/VERSION .ops-ci-versions
+          cp -fp alloy_standard/LICENSE .
+          if [[ -f "buildspec.yml" ]]; then
+              rsync -a --delete --exclude '.git' --exclude 'LICENSE' --exclude '.gitignore' alloy_standard/ops-ci-shared/ ./ops-ci-shared
+              # to avoid the error "No url found for submodule path 'ops-ci-shared' in .gitmodules", just in case
+              rm -rf ./ops-ci-shared/.git ./ops-ci-shared/LICENSE ./ops-ci-shared/.gitignore
+          fi
+          rm -rf alloy_standard
+
+      - name: Commit changes if any
+        run: |
+          git config --global user.name "Alloy CI/CD Bot"
+          git config --global user.email "github@rcplus.io"
+          git add .
+          git diff --staged --quiet || git commit -m "ci: updated files from the standard repository" 
+          git push
+
+      - name: Check the version bumping management with bumpsemver
+        run: |
+          bumpsemver patch --dry-run --allow-dirty --no-commit --no-tag

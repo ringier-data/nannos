@@ -1,0 +1,22 @@
+version: 0.2
+env:
+  variables:
+    AGGRESSIVE_DEVELOPMENT: 1
+phases:
+  install:
+    on-failure: ABORT
+    commands:
+      - /usr/local/bin/start-dind.sh
+  pre_build:
+    commands:
+      - ./ops-ci-shared/scripts/ci-init.sh
+  build:
+    commands:
+      - ./ops-ci-shared/scripts/ci-deploy.sh
+    finally:
+      - ./ops-ci-shared/scripts/ci-notify-slack.sh
+cache:
+  paths:
+    - '/root/.npm/**/*'
+    - '/root/.ansible/roles/**/*'
+    - '/root/.cache/pip/**/*'
