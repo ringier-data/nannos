@@ -1,0 +1,6 @@
+**
+!app/*
+!pyproject.toml
+!uv.lock
+!main.py
+!log_conf.yml

@@ -1,0 +1,120 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Orchestrator Infrastructure - CloudFront distributions (v{{ project_version }})'
+
+
+Resources:
+
+  # CloudFront Distribution for Orchestrator Agent
+  OrchestratorAgentDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: 'cloudfront-alb-orchestrator-agent'
+            DomainName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+            CustomOriginConfig:
+              OriginProtocolPolicy: 'https-only'
+              OriginKeepaliveTimeout: '{{ [60, ((alb_http_keepalive_timeout_seconds | int) - 2)] | min }}'
+        Enabled: true
+        HttpVersion: 'http1.1'
+        IPV6Enabled: true
+        Comment: 'Alloy Orchestrator Agent - A2A protocol agent at root'
+        Aliases:
+          - '{{ orchestrator_agent_fqdn }}'
+        DefaultCacheBehavior:
+          Compress: true
+          AllowedMethods:
+            - 'GET'
+            - 'HEAD'
+            - 'POST'
+            - 'PUT'
+            - 'PATCH'
+            - 'DELETE'
+            - 'OPTIONS'
+          CachedMethods:
+            - 'GET'
+            - 'HEAD'
+          CachePolicyId: !Ref NoCacheCachePolicy
+          OriginRequestPolicyId: !Ref OrchestratorAgentOriginRequestPolicy
+          TargetOriginId: 'cloudfront-alb-orchestrator-agent'
+          ViewerProtocolPolicy: 'redirect-to-https'
+        PriceClass: 'PriceClass_100'
+        ViewerCertificate:
+          AcmCertificateArn: '{{ cloudfront_ssl_certificate }}'
+          SslSupportMethod: 'sni-only'
+          MinimumProtocolVersion: 'TLSv1.2_2021'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent-distribution' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  NoCacheCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-no-cache'
+        Comment: 'No cache policy for orchestrator services'
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          EnableAcceptEncodingBrotli: false
+          HeadersConfig:
+            HeaderBehavior: 'none'
+          QueryStringsConfig:
+            QueryStringBehavior: 'none'
+          CookiesConfig:
+            CookieBehavior: 'none'
+
+  OrchestratorAgentOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+        Comment: 'Alloy Orchestrator Agent origin request policy'
+        CookiesConfig:
+          CookieBehavior: 'none'
+        HeadersConfig:
+          HeaderBehavior: 'allViewer'
+        QueryStringsConfig:
+          QueryStringBehavior: 'all'
+
+  # Route53 Records for Orchestrator Agent
+  OrchestratorAgentRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: '{{ orchestrator_agent_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'A'
+      AliasTarget:
+        DNSName: !GetAtt OrchestratorAgentDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+
+  OrchestratorAgentRoute53RecordSetIPv6:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      Name: '{{ orchestrator_agent_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'AAAA'
+      AliasTarget:
+        DNSName: !GetAtt OrchestratorAgentDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+
+
+Outputs:
+
+  OrchestratorAgentCloudFrontDistributionId:
+    Description: 'Orchestrator Agent CloudFront Distribution ID'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-orchestrator-agent-cloudfront-distribution-id'
+    Value: !Ref OrchestratorAgentDistribution
+  
+  OrchestratorAgentCloudFrontDomainName:
+    Description: 'Orchestrator Agent CloudFront Domain Name'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-orchestrator-agent-cloudfront-domain'
+    Value: !GetAtt OrchestratorAgentDistribution.DomainName

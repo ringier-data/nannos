@@ -1,0 +1,27 @@
+---
+
+okta_domain: 'https://dev-123456.okta.com'  # TODO: placeholder, replace with actual domain
+okta_client_id: '0oab123456XYZ7890'  # TODO: placeholder, replace with actual client ID
+okta_audience: 'api://default'  # TODO: placeholder, replace with actual audience
+
+azure_openai_chat_deployment: 'chatgpt-4o'
+azure_openai_chat_model_name: 'gpt-4o'
+azure_openai_endpoint: 'https://rcplus-alloy-eu-prod.openai.azure.com'
+openai_api_version: '2024-08-01-preview'
+
+langsmith_endpoint: https://eu.api.smith.langchain.com
+
+orchestrator_agent_public_api_port: 10001
+chat_ui_public_api_port: 8080
+
+
+orchestrator_agent_fqdn: 'orchestrator.{{ domain_prefix }}alloy.ch'
+chat_ui_fqdn: 'chat.{{ domain_prefix }}alloy.ch'
+orchestrator_agent_task_cpu: 512
+orchestrator_agent_task_memory: 1024
+chat_ui_task_cpu: 256
+chat_ui_task_memory: 512
+orchestrator_agent_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+chat_ui_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+response_2xx_ratio_threshold: 0.95
+response_2xx_treat_missing_data: 'notBreaching'

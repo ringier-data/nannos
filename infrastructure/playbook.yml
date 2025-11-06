@@ -15,5 +15,5 @@
       - include_vars: 'environment_vars/{{ env }}.yml'
     roles:
       - 'ringier.aws_cicd.init_workspace'
-      - 'inspector'
+      - 'orchestrator'
       - 'ringier.aws_cicd.del_workspace'

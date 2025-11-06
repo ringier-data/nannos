@@ -1,0 +1,34 @@
+[project]
+name = "currency-converter-a2a-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "a2a-sdk[http-server]>=0.3.9",
+    "uvicorn>=0.38.0",
+    "click>=8.1.8",
+    "httpx>=0.28.1",
+    "langchain>=1.0.0",
+    "langchain-google-genai>=2.0.10",
+    "langchain-openai>=0.1.0",
+    "pydantic>=2.10.6",
+    "python-dotenv>=1.1.0",
+    "sse-starlette>=2.3.6",
+    "starlette>=0.46.2",
+    "deepagents>=0.1.4",
+    "rcplus-alloy-common>=8.6.1",
+    "langchain-mcp-adapters>=0.1.11",
+    "langgraph-checkpoint-amazon-dynamodb>=0.1.2",
+    "pyjwt[crypto]>=2.8.0",
+    "pytest>=8.4.2",
+]
+
+[dependency-groups]
+dev = [
+    "moto>=5.1.15",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+]

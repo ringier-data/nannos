@@ -1,0 +1,25 @@
+---
+- name: 'gather shared alb stack outputs'
+  ringier.aws_cicd.gather_stack_outputs:
+    stack_name: '{{ env }}-{{ project_id }}-shared-alb-v2'
+  register: shared_alb_stack
+
+- name: 'get Cloudfront SSL certificate for us-east-1 region'
+  command: aws cloudformation list-exports --region us-east-1 --query 'Exports[?Name==`{{ project_id }}-certificate-alloy-domain-wildcard`].Value' --output text
+  register: r_ssl_certificate
+
+
+- set_fact:
+    # Add seconds so the Node connection keep-alive is longer than the ALB
+    alb_http_keepalive_timeout_seconds: '{{ 1000 * (shared_alb_stack.outputs.PublicAlbConnectionTimeout | int + 2) }}'
+    cloudfront_ssl_certificate: '{{ r_ssl_certificate.stdout }}'
+    cloudformation_template: '{{ role_path }}/files/cf-cloudfront.yml'
+    ass_web_acl_arn: {}
+
+
+- name: 'deploy CloudFront distribution'
+  include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-cloudfront-distribution'
+    template: '{{ cloudformation_template }}'

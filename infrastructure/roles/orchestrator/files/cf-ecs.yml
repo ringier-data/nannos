@@ -1,0 +1,698 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Orchestrator Infrastructure - ECS task and service (v{{ project_version }})'
+
+
+Conditions:
+  IsProd:
+    !Equals ['{{ env }}', 'prod']
+
+
+Resources:
+
+  OrchestratorEcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role'
+      Description: 'Alloy Orchestrator Infrastructure ECS task execution role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-execution-role-arn'
+      Policies:
+        - PolicyName: 'OrchestratorTaskExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'ECRGetImageOrchestratorAgent'
+                Effect: 'Allow'
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/{{ orchestrator_agent_ecr_repository_name }}'
+              - Sid: 'ECRGetImageChatUI'
+                Effect: 'Allow'
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/{{ chat_ui_ecr_repository_name }}'
+              - Sid: 'GetOrchestratorSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_gatana_api_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_openai_api_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_langsmith_api_key }}'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  OrchestratorEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role'
+      Description: 'Alloy Orchestrator Infrastructure ECS task role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-task-role-arn'
+      Policies:
+        - PolicyName: 'OrchestratorTaskPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  # Task Definition for Orchestrator Agent (single container + logs router)
+  OrchestratorAgentTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+      TaskRoleArn: !GetAtt OrchestratorEcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt OrchestratorEcsExecutionRole.Arn
+      Cpu: '{{ orchestrator_agent_task_cpu }}'
+      Memory: '{{ orchestrator_agent_task_memory }}'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities: [ 'FARGATE' ]
+      RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
+      ContainerDefinitions:
+        - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+          DependsOn:
+            - ContainerName: '{{ project_id }}-logs-router'
+              Condition: 'START'
+          Image: '{{ orchestrator_agent_docker_image }}'
+          Essential: true
+          Interactive: true
+          PortMappings:
+            - { ContainerPort: '{{ orchestrator_agent_public_api_port }}', Protocol: 'tcp' }
+          LogConfiguration:
+            LogDriver: 'awsfirelens'
+          Environment:
+            - { Name: 'LOG_MODE', Value: 'JSON' }
+            - { Name: 'LOG_LEVEL', Value: '{{ log_level }}' }
+            - { Name: 'LOG_SET_EXCEPTHOOK', Value: '1' }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'AWS_REGION', Value: !Ref 'AWS::Region' }
+            - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
+            - { Name: 'OKTA_DOMAIN', Value: '{{ okta_domain }}' }
+            - { Name: 'OKTA_CLIENT_ID', Value: '{{ okta_client_id }}' }
+            - { Name: 'OKTA_AUDIENCE', Value: '{{ okta_audience }}' }
+            - { Name: 'MOCK_OKTA', Value: 'true' }
+            - { Name: 'OPENAI_API_VERSION', Value: '{{ openai_api_version }}' }
+            - { Name: 'AZURE_OPENAI_CHAT_MODEL_NAME', Value: '{{ azure_openai_chat_model_name }}' }
+            - { Name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', Value: '{{ azure_openai_chat_deployment }}' }
+            - { Name: 'AZURE_OPENAI_ENDPOINT', Value: '{{ azure_openai_endpoint }}' }
+            - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing }}' }
+            - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
+            - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
+            - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
+          Secrets:
+            - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
+            - { Name: 'GATANA_API_KEY', ValueFrom: '{{ ssmkey_gatana_api_key }}' }
+            - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
+          HealthCheck:
+            Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ orchestrator_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
+            Interval: 60
+            Retries: 3
+            StartPeriod: 60
+            Timeout: 5
+        # Container 2: Logs Router (FluentBit sidecar)
+        - Name: '{{ project_id }}-logs-router'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
+          Essential: true
+          Environment:
+            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
+            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
+            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
+            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}.ecs.{{ software_component }}.{{ env }}-orchestrator' }
+          FirelensConfiguration:
+            Type: 'fluentbit'
+            Options:
+              enable-ecs-log-metadata: false
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
+              awslogs-region: !Sub '${AWS::Region}'
+              awslogs-stream-prefix: '{{ software_component }}-orchestrator'
+          HealthCheck:
+            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
+            Interval: 30
+            Retries: 2
+            StartPeriod: 30
+            Timeout: 5
+
+  # Task Definition for Chat UI (single container + logs router)
+  ChatUITaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+      TaskRoleArn: !GetAtt OrchestratorEcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt OrchestratorEcsExecutionRole.Arn
+      Cpu: '{{ chat_ui_task_cpu }}'
+      Memory: '{{ chat_ui_task_memory }}'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities: [ 'FARGATE' ]
+      RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
+      ContainerDefinitions:
+        - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+          DependsOn:
+            - ContainerName: '{{ project_id }}-logs-router'
+              Condition: 'START'
+          Image: '{{ chat_ui_docker_image }}'
+          Essential: true
+          Interactive: true
+          PortMappings:
+            - { ContainerPort: '{{ chat_ui_public_api_port }}', Protocol: 'tcp' }
+          LogConfiguration:
+            LogDriver: 'awsfirelens'
+          Environment:
+            - { Name: "ENVIRONMENT", Value: "{{ env }}" }
+            - { Name: "VERSION", Value: "{{ project_version }}" }
+          HealthCheck:
+            Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8080/\").read()" || exit 1']
+            Interval: 60
+            Retries: 3
+            StartPeriod: 30
+            Timeout: 5
+        # Container 2: Logs Router (FluentBit sidecar)
+        - Name: '{{ project_id }}-logs-router'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
+          Essential: true
+          Environment:
+            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
+            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
+            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
+            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}.ecs.{{ software_component }}.{{ env }}-chat-ui' }
+          FirelensConfiguration:
+            Type: 'fluentbit'
+            Options:
+              enable-ecs-log-metadata: false
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
+              awslogs-region: !Sub '${AWS::Region}'
+              awslogs-stream-prefix: '{{ software_component }}-chat-ui'
+          HealthCheck:
+            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
+            Interval: 30
+            Retries: 2
+            StartPeriod: 30
+            Timeout: 5
+
+  OrchestratorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      GroupDescription: 'Alloy Orchestrator Infrastructure security group'
+      SecurityGroupIngress:
+        # Orchestrator Agent
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpc-cidr4', Description: 'Orchestrator Agent - Local VPC (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpc-cidr6', Description: 'Orchestrator Agent - Local VPC (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpn-cidr4', Description: 'Orchestrator Agent - VPN (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpn-cidr6', Description: 'Orchestrator Agent - VPN (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', SourceSecurityGroupId: !ImportValue '{{ project_id }}-public-alb-v2-security-group-id', Description: 'Orchestrator Agent - LoadBalancer'}
+        # Chat UI
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpc-cidr4', Description: 'Chat UI - Local VPC (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpc-cidr6', Description: 'Chat UI - Local VPC (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpn-cidr4', Description: 'Chat UI - VPN (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpn-cidr6', Description: 'Chat UI - VPN (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', SourceSecurityGroupId: !ImportValue '{{ project_id }}-public-alb-v2-security-group-id', Description: 'Chat UI - LoadBalancer'}
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-sg' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  OrchestratorAgentTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/.well-known/agent-card.json'
+      HealthCheckPort: '{{ orchestrator_agent_public_api_port }}'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Port: '{{ orchestrator_agent_public_api_port }}'
+      Protocol: 'HTTP'
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: !If [IsProd, '30', '0']
+        - Key: 'stickiness.enabled'
+          Value: false
+      TargetType: 'ip'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  ChatUITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/'
+      HealthCheckPort: '{{ chat_ui_public_api_port }}'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Port: '{{ chat_ui_public_api_port }}'
+      Protocol: 'HTTP'
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: !If [IsProd, '30', '0']
+        - Key: 'stickiness.enabled'
+          Value: false
+      TargetType: 'ip'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  OrchestratorAgentAlbListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref OrchestratorAgentTargetGroup
+      Conditions:
+        - Field: 'host-header'
+          HostHeaderConfig:
+            Values:
+              - '{{ orchestrator_agent_fqdn }}'
+      ListenerArn: !ImportValue '{{ project_id }}-public-alb-v2-https-listener'
+      # NOTE: The Priority is global and must have unique value across all services we have
+      Priority: 601
+
+  ChatUIAlbListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref ChatUITargetGroup
+      Conditions:
+        - Field: 'host-header'
+          HostHeaderConfig:
+            Values:
+              - '{{ chat_ui_fqdn }}'
+      ListenerArn: !ImportValue '{{ project_id }}-public-alb-v2-https-listener'
+      # NOTE: The Priority is global and must have unique value across all services we have
+      Priority: 602
+
+  # ECS Service for Orchestrator Agent
+  OrchestratorAgentService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+      Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+      LaunchType: 'FARGATE'
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      # Do not change DesiredCount. This will cause a re-deployment of the below specified TaskDefinition
+      # which we do not want. If you want to update the number of tasks running, edit instead
+      # the resource OrchestratorAgentScalableTarget below.
+      DesiredCount: 1 # ! __WARNING__ : See comment above
+      TaskDefinition: !Ref OrchestratorAgentTaskDefinition
+      EnableECSManagedTags: true
+      EnableExecuteCommand: true
+      PropagateTags: 'TASK_DEFINITION'
+      HealthCheckGracePeriodSeconds: 300
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref OrchestratorSecurityGroup
+            - !ImportValue '{{ project_id }}-public-alb-v2-security-group-id'
+          Subnets:
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1a'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1b'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1c'
+      LoadBalancers:
+        - TargetGroupArn: !Ref OrchestratorAgentTargetGroup
+          ContainerPort: '{{ orchestrator_agent_public_api_port }}'
+          ContainerName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+
+  # ECS Service for Chat UI
+  ChatUIService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+      Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+      LaunchType: 'FARGATE'
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      # Do not change DesiredCount. This will cause a re-deployment of the below specified TaskDefinition
+      # which we do not want. If you want to update the number of tasks running, edit instead
+      # the resource ChatUIScalableTarget below.
+      DesiredCount: 1 # ! __WARNING__ : See comment above
+      TaskDefinition: !Ref ChatUITaskDefinition
+      EnableECSManagedTags: true
+      EnableExecuteCommand: true
+      PropagateTags: 'TASK_DEFINITION'
+      HealthCheckGracePeriodSeconds: 300
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref OrchestratorSecurityGroup
+            - !ImportValue '{{ project_id }}-public-alb-v2-security-group-id'
+          Subnets:
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1a'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1b'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1c'
+      LoadBalancers:
+        - TargetGroupArn: !Ref ChatUITargetGroup
+          ContainerPort: '{{ chat_ui_public_api_port }}'
+          ContainerName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+
+  # Auto-Scaling for Orchestrator Agent Service
+  OrchestratorAgentScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !If [IsProd, 2, 1]
+      MinCapacity: !If [IsProd, 1, 1]
+      RoleARN: !GetAtt OrchestratorEcsAutoScalingRole.Arn
+      ServiceNamespace: 'ecs'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId:
+        !Sub
+          - 'service/${Cluster}/${Name}'
+          - Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+            Name: !GetAtt OrchestratorAgentService.Name
+
+  OrchestratorAgentEcsAutoScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent-target-tracking-cpu50'
+      PolicyType: 'TargetTrackingScaling'
+      ScalingTargetId: !Ref OrchestratorAgentScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: 'ECSServiceAverageCPUUtilization'
+
+  # Auto-Scaling for Chat UI Service
+  ChatUIScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !If [IsProd, 2, 1]
+      MinCapacity: !If [IsProd, 1, 1]
+      RoleARN: !GetAtt OrchestratorEcsAutoScalingRole.Arn
+      ServiceNamespace: 'ecs'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId:
+        !Sub
+          - 'service/${Cluster}/${Name}'
+          - Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+            Name: !GetAtt ChatUIService.Name
+
+  ChatUIEcsAutoScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-target-tracking-cpu50'
+      PolicyType: 'TargetTrackingScaling'
+      ScalingTargetId: !Ref ChatUIScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: 'ECSServiceAverageCPUUtilization'
+
+  OrchestratorEcsAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-autoscaling'
+      Description: 'Alloy Orchestrator Infrastructure ECS auto-scaling role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs.application-autoscaling.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'AllowCloudwatchAlarms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action: 'ecs:UpdateService'
+                Resource:
+                  - !Ref OrchestratorAgentService
+                  - !Ref ChatUIService
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-autoscaling-role' }
+        - { Key: 'Project', Value: '{{ project_id }}'}
+        - { Key: 'Environment', Value: '{{ env }}'}
+        - { Key: 'Version', Value: 'v{{ project_version }}'}
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  # CloudWatch Alarms for Orchestrator Agent Service
+  OrchestratorAgentCpuUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentCpuUtilizationHigh'
+      AlarmDescription: 'Alloy Orchestrator Agent - CPUUtilization is higher than 90% for 20 minutes'
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt OrchestratorAgentService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  OrchestratorAgentMemoryUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentMemoryUtilizationHigh'
+      AlarmDescription: 'Alloy Orchestrator Agent - MemoryUtilization is higher than 90% for 20 minutes'
+      MetricName: 'MemoryUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt OrchestratorAgentService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  # CloudWatch Alarms for Chat UI Service
+  ChatUICpuUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'ChatUICpuUtilizationHigh'
+      AlarmDescription: 'Alloy Chat UI - CPUUtilization is higher than 90% for 20 minutes'
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt ChatUIService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  ChatUIMemoryUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'ChatUIMemoryUtilizationHigh'
+      AlarmDescription: 'Alloy Chat UI - MemoryUtilization is higher than 90% for 20 minutes'
+      MetricName: 'MemoryUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt ChatUIService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  OrchestratorAgentHealthyHostCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentHealthyHostCount'
+      AlarmDescription: 'Alloy Orchestrator Agent - HealthyHostCount is lower than 1 for 1 minute'
+      MetricName: 'HealthyHostCount'
+      ComparisonOperator: 'LessThanThreshold'
+      Namespace: 'AWS/ApplicationELB'
+      Dimensions:
+        - Name: 'LoadBalancer'
+          Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+        - Name: 'TargetGroup'
+          Value: !GetAtt OrchestratorAgentTargetGroup.TargetGroupFullName
+      Statistic: 'Maximum'
+      Threshold: 1
+      Period: 60
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  ChatUIHealthyHostCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'ChatUIHealthyHostCount'
+      AlarmDescription: 'Alloy Chat UI - HealthyHostCount is lower than 1 for 1 minute'
+      MetricName: 'HealthyHostCount'
+      ComparisonOperator: 'LessThanThreshold'
+      Namespace: 'AWS/ApplicationELB'
+      Dimensions:
+        - Name: 'LoadBalancer'
+          Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+        - Name: 'TargetGroup'
+          Value: !GetAtt ChatUITargetGroup.TargetGroupFullName
+      Statistic: 'Maximum'
+      Threshold: 1
+      Period: 60
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  OrchestratorAgentResponsesStatus2xxRatioAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentResponsesStatus2xxRatio'
+      AlarmDescription: 'Orchestrator Agent responses status 2xx ratio'
+      ComparisonOperator: 'LessThanThreshold'
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: {{ response_2xx_ratio_threshold }}
+      TreatMissingData: '{{ response_2xx_treat_missing_data }}'
+      Metrics:
+        - Id: ratio
+          Label: 'Status 2xx ratio'
+          Expression: 'status_2xx_count / requests_count'
+          ReturnData: true
+        - Id: requests_count
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: 'Sum'
+            Unit: 'Count'
+            Metric:
+              Namespace: 'AWS/ApplicationELB'
+              MetricName: 'RequestCount'
+              Dimensions:
+                - Name: 'LoadBalancer'
+                  Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+                - Name: 'TargetGroup'
+                  Value: !GetAtt OrchestratorAgentTargetGroup.TargetGroupFullName
+        - Id: status_2xx_count
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: 'Sum'
+            Unit: 'Count'
+            Metric:
+              Namespace: 'AWS/ApplicationELB'
+              MetricName: 'HTTPCode_Target_2XX_Count'
+              Dimensions:
+                - Name: 'LoadBalancer'
+                  Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+                - Name: 'TargetGroup'
+                  Value: !GetAtt OrchestratorAgentTargetGroup.TargetGroupFullName
+
+  # Route53 Records for Chat UI (Direct ALB access, bypassing CloudFront)
+  # This enables Socket.IO WebSocket connections without CloudFront limitations
+  ChatUIRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: '{{ chat_ui_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'A'
+      AliasTarget:
+        DNSName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+        HostedZoneId: !ImportValue '{{ project_id }}-public-alb-v2-hosted-zone-id'
+
+  ChatUIRoute53RecordSetIPv6:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      Name: '{{ chat_ui_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'AAAA'
+      AliasTarget:
+        DNSName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+        HostedZoneId: !ImportValue '{{ project_id }}-public-alb-v2-hosted-zone-id'
