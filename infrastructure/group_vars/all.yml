@@ -21,3 +21,39 @@ langsmith_api_key: !vault |
   63313661396337373636613834313336306165656161396463623236313639383737303164343663
   34646565306434303933323263633438333938313230313239323839396434363433303363613632
   306137633031656332343835376338383662
+
+okta_domain: 'https://login.alloy.ch'
+okta_client_id: 'web-client'
+okta_audience: 'api://default'  # TODO: placeholder, replace with actual audience
+okta_issuer: '{{ okta_domain }}/realms/a2a'
+chat_ui_okta_client_secret: !vault |
+  $ANSIBLE_VAULT;1.1;AES256
+  63646637396235353062363461323430616361343363353735346432623361663735366531303739
+  6439636464333331346333336664393337616639326437610a363339613064313163666431363433
+  63653465393131626137383739666463303935306532656466383837343133653265313066326637
+  3034373034376638380a613961653135376437333866376633366564323835366635353061356164
+  63346333373935656337346637393033363434316135303231343530653532303234303436656666
+  6132363933616134343565373265366531393435663963653330
+ssmkey_chat_ui_okta_client_secret: '/{{ project_id }}/{{ software_component }}/okta-chat-ui-client-secret'
+
+azure_openai_chat_deployment: 'chatgpt-4o'
+azure_openai_chat_model_name: 'gpt-4o'
+azure_openai_endpoint: 'https://rcplus-alloy-eu-prod.openai.azure.com'
+openai_api_version: '2024-08-01-preview'
+
+langsmith_endpoint: https://eu.api.smith.langchain.com
+
+orchestrator_agent_public_api_port: 10001
+chat_ui_public_api_port: 8080
+ssmkey_chat_ui_secret_key: '/{{ project_id }}/{{ software_component }}/chat-ui-secret-key'
+
+orchestrator_agent_fqdn: 'orchestrator.{{ domain_prefix }}alloy.ch'
+chat_ui_fqdn: 'chat.{{ domain_prefix }}alloy.ch'
+orchestrator_agent_task_cpu: 512
+orchestrator_agent_task_memory: 1024
+chat_ui_task_cpu: 256
+chat_ui_task_memory: 512
+orchestrator_agent_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+chat_ui_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+response_2xx_ratio_threshold: 0.95
+response_2xx_treat_missing_data: 'notBreaching'

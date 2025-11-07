@@ -1,0 +1,401 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - ChatUI Infrastructure - ECS task and service (v{{ project_version }})'
+
+
+Conditions:
+  IsProd:
+    !Equals ['{{ env }}', 'prod']
+
+
+Resources:
+
+  ChatUIEcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-ecs-execution-role'
+      Description: 'Alloy ChatUI Infrastructure ECS task execution role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-execution-role-arn'
+      Policies:
+        - PolicyName: 'ChatUITaskExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'ECRGetImageChatUI'
+                Effect: 'Allow'
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/{{ chat_ui_ecr_repository_name }}'
+              - Sid: 'GetOrchestratorSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_okta_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_secret_key }}'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-ecs-execution-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  ChatUIEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-task-role'
+      Description: 'Alloy ChatUI Infrastructure ECS task role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-task-role-arn'
+      Policies:
+        - PolicyName: 'ChatUITaskPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-task-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  ChatUITaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+      TaskRoleArn: !GetAtt ChatUIEcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt ChatUIEcsExecutionRole.Arn
+      Cpu: '{{ chat_ui_task_cpu }}'
+      Memory: '{{ chat_ui_task_memory }}'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities: [ 'FARGATE' ]
+      RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
+      ContainerDefinitions:
+        - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+          DependsOn:
+            - ContainerName: '{{ project_id }}-logs-router'
+              Condition: 'START'
+          Image: '{{ chat_ui_docker_image }}'
+          Essential: true
+          Interactive: true
+          PortMappings:
+            - { ContainerPort: '{{ chat_ui_public_api_port }}', Protocol: 'tcp' }
+          LogConfiguration:
+            LogDriver: 'awsfirelens'
+          Environment:
+            - { Name: "ENVIRONMENT", Value: "{{ env }}" }
+            - { Name: "VERSION", Value: "{{ project_version }}" }
+            - { Name: "SOFTWARE_COMPONENT", Value: "{{ software_component }}" }
+            - { Name: "PROJECT_ID", Value: "{{ project_id }}" }
+            - { Name: "REPOSITORY", Value: "{{ git_info.repo_name }}" }
+            - { Name: "DYNAMODB_USERS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-users-table-name' }
+            - { Name: "DYNAMODB_SESSIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-name' }
+            - { Name: "CHAT_UI_PUBLIC_API_PORT", Value: "{{ chat_ui_public_api_port }}" }
+            - { Name: "OKTA_DOMAIN", Value: '{{ okta_domain }}' }
+            - { Name: "OKTA_CLIENT_ID", Value: '{{ okta_client_id }}' }
+            - { Name: "OKTA_ISSUER", Value: '{{ okta_issuer }}' }
+            - { Name: "BASE_DOMAIN", Value: '{{ chat_ui_fqdn }}' }
+          Secrets:
+            - { Name: "OKTA_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_okta_client_secret }}' }
+            - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
+          HealthCheck:
+            Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\").read()" || exit 1']
+            Interval: 60
+            Retries: 3
+            StartPeriod: 30
+            Timeout: 5
+        - Name: '{{ project_id }}-logs-router'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
+          Essential: true
+          Environment:
+            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
+            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
+            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
+            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}.ecs.{{ software_component }}.{{ env }}-chat-ui' }
+          FirelensConfiguration:
+            Type: 'fluentbit'
+            Options:
+              enable-ecs-log-metadata: false
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
+              awslogs-region: !Sub '${AWS::Region}'
+              awslogs-stream-prefix: '{{ software_component }}-chat-ui'
+          HealthCheck:
+            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
+            Interval: 30
+            Retries: 2
+            StartPeriod: 30
+            Timeout: 5
+
+  ChatUITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/'
+      HealthCheckPort: '{{ chat_ui_public_api_port }}'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Port: '{{ chat_ui_public_api_port }}'
+      Protocol: 'HTTP'
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: !If [IsProd, '30', '0']
+        - Key: 'stickiness.enabled'
+          Value: false
+      TargetType: 'ip'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  ChatUIAlbListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref ChatUITargetGroup
+      Conditions:
+        - Field: 'host-header'
+          HostHeaderConfig:
+            Values:
+              - '{{ chat_ui_fqdn }}'
+      ListenerArn: !ImportValue '{{ project_id }}-public-alb-v2-https-listener'
+      # NOTE: The Priority is global and must have unique value across all services we have
+      Priority: 602
+
+  ChatUISecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      GroupDescription: 'Chat UI Infrastructure security group'
+      SecurityGroupIngress:
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpc-cidr4', Description: 'Chat UI - Local VPC (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpc-cidr6', Description: 'Chat UI - Local VPC (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpn-cidr4', Description: 'Chat UI - VPN (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpn-cidr6', Description: 'Chat UI - VPN (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ chat_ui_public_api_port }}', ToPort: '{{ chat_ui_public_api_port }}', SourceSecurityGroupId: !ImportValue '{{ project_id }}-public-alb-v2-security-group-id', Description: 'Chat UI - LoadBalancer'}
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-sg' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  ChatUIService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+      Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+      LaunchType: 'FARGATE'
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      # Do not change DesiredCount. This will cause a re-deployment of the below specified TaskDefinition
+      # which we do not want. If you want to update the number of tasks running, edit instead
+      # the resource ChatUIScalableTarget below.
+      DesiredCount: 1 # ! __WARNING__ : See comment above
+      TaskDefinition: !Ref ChatUITaskDefinition
+      EnableECSManagedTags: true
+      EnableExecuteCommand: true
+      PropagateTags: 'TASK_DEFINITION'
+      HealthCheckGracePeriodSeconds: 300
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref ChatUISecurityGroup
+            - !ImportValue '{{ project_id }}-public-alb-v2-security-group-id'
+          Subnets:
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1a'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1b'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1c'
+      LoadBalancers:
+        - TargetGroupArn: !Ref ChatUITargetGroup
+          ContainerPort: '{{ chat_ui_public_api_port }}'
+          ContainerName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+
+  ChatUIEcsAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-ecs-autoscaling'
+      Description: 'Alloy Chat UI Infrastructure ECS auto-scaling role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs.application-autoscaling.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'AllowCloudwatchAlarms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action: 'ecs:UpdateService'
+                Resource:
+                  - !Ref ChatUIService
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-ecs-autoscaling-role' }
+        - { Key: 'Project', Value: '{{ project_id }}'}
+        - { Key: 'Environment', Value: '{{ env }}'}
+        - { Key: 'Version', Value: 'v{{ project_version }}'}
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  ChatUIScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !If [IsProd, 2, 1]
+      MinCapacity: !If [IsProd, 1, 1]
+      RoleARN: !GetAtt ChatUIEcsAutoScalingRole.Arn
+      ServiceNamespace: 'ecs'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId:
+        !Sub
+          - 'service/${Cluster}/${Name}'
+          - Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+            Name: !GetAtt ChatUIService.Name
+
+  ChatUIEcsAutoScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-target-tracking-cpu50'
+      PolicyType: 'TargetTrackingScaling'
+      ScalingTargetId: !Ref ChatUIScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: 'ECSServiceAverageCPUUtilization'
+
+  ChatUICpuUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'ChatUICpuUtilizationHigh'
+      AlarmDescription: 'Alloy Chat UI - CPUUtilization is higher than 90% for 20 minutes'
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt ChatUIService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  ChatUIMemoryUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'ChatUIMemoryUtilizationHigh'
+      AlarmDescription: 'Alloy Chat UI - MemoryUtilization is higher than 90% for 20 minutes'
+      MetricName: 'MemoryUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt ChatUIService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  ChatUIHealthyHostCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'ChatUIHealthyHostCount'
+      AlarmDescription: 'Alloy Chat UI - HealthyHostCount is lower than 1 for 1 minute'
+      MetricName: 'HealthyHostCount'
+      ComparisonOperator: 'LessThanThreshold'
+      Namespace: 'AWS/ApplicationELB'
+      Dimensions:
+        - Name: 'LoadBalancer'
+          Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+        - Name: 'TargetGroup'
+          Value: !GetAtt ChatUITargetGroup.TargetGroupFullName
+      Statistic: 'Maximum'
+      Threshold: 1
+      Period: 60
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  # Route53 Records for Chat UI (Direct ALB access, bypassing CloudFront)
+  # This enables Socket.IO WebSocket connections without CloudFront limitations
+  ChatUIRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: '{{ chat_ui_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'A'
+      AliasTarget:
+        DNSName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+        HostedZoneId: !ImportValue '{{ project_id }}-public-alb-v2-hosted-zone-id'
+
+  ChatUIRoute53RecordSetIPv6:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      Name: '{{ chat_ui_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'AAAA'
+      AliasTarget:
+        DNSName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+        HostedZoneId: !ImportValue '{{ project_id }}-public-alb-v2-hosted-zone-id'

@@ -1,0 +1,12 @@
+---
+
+- name: 'set cloudformation template'
+  set_fact:
+    cloudformation_template: '{{ role_path }}/files/cf-dynamodb.yml'
+
+- name: 'deploy DynamoDB'
+  include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-basis-dynamodb-table'
+    template: '{{ cloudformation_template }}'

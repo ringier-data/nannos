@@ -4,8 +4,6 @@ Description: 'RC+/Alloy - Orchestrator Infrastructure - CloudFront distributions
 
 
 Resources:
-
-  # CloudFront Distribution for Orchestrator Agent
   OrchestratorAgentDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -83,7 +81,6 @@ Resources:
         QueryStringsConfig:
           QueryStringBehavior: 'all'
 
-  # Route53 Records for Orchestrator Agent
   OrchestratorAgentRoute53RecordSet:
     Type: AWS::Route53::RecordSet
     Properties:

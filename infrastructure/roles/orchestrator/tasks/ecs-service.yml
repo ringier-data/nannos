@@ -1,5 +1,4 @@
 ---
-# Build and push Orchestrator Agent Docker image
 - name: 'build and push the Orchestrator Agent Docker image to ECR'
   include_role:
     name: 'ringier.aws_cicd.build_push_docker_image'
@@ -12,24 +11,10 @@
   set_fact:
     orchestrator_agent_docker_image: '{{ docker_image_full_name_and_tag }}'
 
-# Build and push Chat UI Docker image
-- name: 'build and push the Chat UI Docker image to ECR'
-  include_role:
-    name: 'ringier.aws_cicd.build_push_docker_image'
-  vars:
-    ecr_repository_name: '{{ chat_ui_ecr_repository_name }}'
-    code_path: '{{ playbook_dir }}/../app/a2a-inspector'
-    adhoc_deploy: true
-
-- name: 'set chat ui docker image fact'
-  set_fact:
-    chat_ui_docker_image: '{{ docker_image_full_name_and_tag }}'
-
 - name: 'set cloudformation template'
   set_fact:
     cloudformation_template: '{{ role_path }}/files/cf-ecs.yml'
 
-# Deploy the ECS service and adjacent resources
 - name: 'deploy the ECS and adjacent resources'
   include_role:
     name: 'ringier.aws_cicd.run_cloudformation'
