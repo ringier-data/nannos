@@ -123,10 +123,9 @@ Resources:
             - { Name: 'ENV', Value: '{{ env }}' }
             - { Name: 'AWS_REGION', Value: !Ref 'AWS::Region' }
             - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
-            - { Name: 'OKTA_DOMAIN', Value: '{{ okta_domain }}' }
-            - { Name: 'OKTA_CLIENT_ID', Value: '{{ okta_client_id }}' }
-            - { Name: 'OKTA_AUDIENCE', Value: '{{ okta_audience }}' }
-            - { Name: 'MOCK_OKTA', Value: 'true' }
+            - { Name: 'OKTA_ISSUER', Value: '{{ okta_issuer }}' }
+            - { Name: 'OKTA_CLIENT_ID', Value: '{{ orchestrator_okta_client_id }}' }
+            - { Name: 'MOCK_OKTA', Value: 'false' }
             - { Name: 'OPENAI_API_VERSION', Value: '{{ openai_api_version }}' }
             - { Name: 'AZURE_OPENAI_CHAT_MODEL_NAME', Value: '{{ azure_openai_chat_model_name }}' }
             - { Name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', Value: '{{ azure_openai_chat_deployment }}' }
@@ -135,10 +134,12 @@ Resources:
             - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
+            - { Name: 'JWT_SESSION_EXPIRY_MINUTES', Value: '{{ orchestrator_jwt_session_expiry_minutes }}' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'GATANA_API_KEY', ValueFrom: '{{ ssmkey_gatana_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
+            - { Name: 'JWT_SECRET_KEY', ValueFrom: '{{ ssmkey_orchestrator_jwt_secret_key }}' }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ orchestrator_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
             Interval: 60

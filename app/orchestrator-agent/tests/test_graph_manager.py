@@ -4,7 +4,6 @@ from unittest.mock import Mock, patch, MagicMock
 from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langchain_core.tools import BaseTool
-from deepagents import CompiledSubAgent
 
 from app.core import GraphManager
 

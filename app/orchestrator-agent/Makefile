@@ -22,7 +22,7 @@ python:
 
 .PHONY: start-app
 start-app:
-	uv run python main.py
+	uv run python main.py --host localhost
 
 .PHONY: stop-app
 stop-app:

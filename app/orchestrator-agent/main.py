@@ -123,9 +123,7 @@ def main(host, port):
         # OktaAuthMiddleware runs FIRST (validates JWT, sets request.state.user)
         app.add_middleware(
             OktaAuthMiddleware,
-            okta_domain=os.getenv("OKTA_DOMAIN", "rcplus.okta.com"),
             client_id=os.getenv("OKTA_CLIENT_ID", "0oa3zlngyfw75WGYl417"),
-            audience=os.getenv("OKTA_AUDIENCE", "api://default"),
         )
         log_config = yaml.safe_load("log_conf.yml")
         uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False, use_colors=False)

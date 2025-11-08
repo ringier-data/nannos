@@ -13,6 +13,7 @@ dependencies = [
     "langchain-google-genai>=2.0.10",
     "langchain-openai>=0.1.0",
     "pydantic>=2.10.6",
+    "pyjwt>=2.10.1",
     "python-dotenv>=1.1.0",
     "sse-starlette>=2.3.6",
     "starlette>=0.46.2",
@@ -20,7 +21,6 @@ dependencies = [
     "rcplus-alloy-common>=8.6.1",
     "langchain-mcp-adapters>=0.1.11",
     "langgraph-checkpoint-amazon-dynamodb>=0.1.2",
-    "pyjwt[crypto]>=2.8.0",
     "pytest>=8.4.2",
 ]
 

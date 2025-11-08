@@ -35,7 +35,10 @@ chat_ui_okta_client_secret: !vault |
   63346333373935656337346637393033363434316135303231343530653532303234303436656666
   6132363933616134343565373265366531393435663963653330
 ssmkey_chat_ui_okta_client_secret: '/{{ project_id }}/{{ software_component }}/okta-chat-ui-client-secret'
-
+## Orchestrator
+orchestrator_okta_client_id: 'orchestrator'
+ssmkey_orchestrator_jwt_secret_key: '/{{ project_id }}/{{ software_component }}/orchestrator-jwt-secret-key'
+orchestrator_jwt_session_expiry_minutes: 15
 azure_openai_chat_deployment: 'chatgpt-4o'
 azure_openai_chat_model_name: 'gpt-4o'
 azure_openai_endpoint: 'https://rcplus-alloy-eu-prod.openai.azure.com'
