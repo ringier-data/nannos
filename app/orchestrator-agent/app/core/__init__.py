@@ -20,14 +20,14 @@ Usage:
 """
 
 from .agent import OrchestratorDeepAgent
-from .executor import AgentExecutor  
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
+from .executor import AgentExecutor
 from .graph_manager import GraphManager
 
 __all__ = [
     "OrchestratorDeepAgent",
     "AgentExecutor",
-    "AgentDiscoveryService", 
+    "AgentDiscoveryService",
     "ToolDiscoveryService",
     "GraphManager",
 ]

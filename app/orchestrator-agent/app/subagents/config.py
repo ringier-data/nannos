@@ -4,19 +4,20 @@ Configuration for A2A client.
 Provides configuration options for timeouts, authentication, telemetry,
 and circuit breaker functionality for Agent-to-Agent communication.
 """
+
 from typing import Any
 
 
 class A2AClientConfig:
     """Configuration for A2A client.
-    
+
     Note: Retry logic should be configured at the LangGraph level using retry policies,
     not within this A2A client wrapper. See LangGraph documentation:
     https://langchain-ai.github.io/langgraph/how-tos/graph-api/#add-retry-policies
-    
+
     Example:
         from langgraph.types import RetryPolicy
-        
+
         graph = create_deep_agent(...).with_retry(
             retry_policy=RetryPolicy(
                 max_attempts=3,
@@ -25,7 +26,7 @@ class A2AClientConfig:
             )
         )
     """
-    
+
     def __init__(
         self,
         *,
@@ -39,7 +40,7 @@ class A2AClientConfig:
         circuit_breaker_timeout: float = 30.0,
     ):
         """Initialize A2A configuration.
-        
+
         Args:
             timeout_connect: Connection timeout in seconds (default: 10.0)
             timeout_read: Read timeout in seconds (default: 60.0)

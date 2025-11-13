@@ -16,12 +16,11 @@ between concurrent requests.
 
 import logging
 from contextvars import ContextVar
-from typing import Callable, Optional, Dict, Any
+from typing import Any, Callable, Dict, Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
 
 logger = logging.getLogger(__name__)
 

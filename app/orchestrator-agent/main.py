@@ -2,34 +2,29 @@ import logging
 import os
 import sys
 
-import yaml
 import click
-import httpx
 import uvicorn
-
+import yaml
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import (
-    BasePushNotificationSender,
-    InMemoryPushNotificationConfigStore,
     InMemoryTaskStore,
 )
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentSkill,
+    AuthorizationCodeOAuthFlow,
     OAuth2SecurityScheme,
     OAuthFlows,
-    AuthorizationCodeOAuthFlow,
     SecurityScheme,
 )
+from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 
 from app.core.agent import OrchestratorDeepAgent
 from app.core.executor import OrchestratorDeepAgentExecutor
-from app.middleware import OktaAuthMiddleware, UserContextMiddleware
 from app.handlers import OrchestratorRequestContextBuilder
-from rcplus_alloy_common.logging import configure_logger, configure_existing_logger
-
+from app.middleware import OktaAuthMiddleware, UserContextMiddleware
 
 logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("app"))
@@ -96,20 +91,22 @@ def main(host, port):
             supports_authenticated_extended_card=False,
         )
 
-        httpx_client = httpx.AsyncClient()
         # ZERO-TRUST ARCHITECTURE:
         # 1. OktaAuthMiddleware validates JWT and extracts user info
         # 2. UserContextMiddleware transfers user info to A2A context
         # 3. OrchestratorRequestContextBuilder reads user info from context
         # 4. Agent executor uses verified user_id for all operations
 
-        push_config_store = InMemoryPushNotificationConfigStore()
-        push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
+        # TODO: do we need a task store?
+        # TODO: do we need push notifications?
+        # httpx_client = httpx.AsyncClient()
+        # push_config_store = InMemoryPushNotificationConfigStore()
+        # push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
         request_handler = DefaultRequestHandler(
             agent_executor=OrchestratorDeepAgentExecutor(),
             task_store=InMemoryTaskStore(),
-            push_config_store=push_config_store,
-            push_sender=push_sender,
+            # push_config_store=push_config_store,
+            # push_sender=push_sender,
             request_context_builder=OrchestratorRequestContextBuilder(),
         )
         server = A2AStarletteApplication(agent_card=agent_card, http_handler=request_handler)
@@ -123,7 +120,7 @@ def main(host, port):
         # OktaAuthMiddleware runs FIRST (validates JWT, sets request.state.user)
         app.add_middleware(
             OktaAuthMiddleware,
-            client_id=os.getenv("OKTA_CLIENT_ID", "0oa3zlngyfw75WGYl417"),
+            client_id=os.getenv("OKTA_CLIENT_ID", "orchestrator"),
         )
         log_config = yaml.safe_load("log_conf.yml")
         uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False, use_colors=False)

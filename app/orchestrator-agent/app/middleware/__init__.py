@@ -27,7 +27,7 @@ from .user_context_middleware import UserContextMiddleware
 
 __all__ = [
     "AuthErrorDetectionMiddleware",
-    "AuthErrorState", 
+    "AuthErrorState",
     "OktaAuthMiddleware",
     "TodoStatusMiddleware",
     "TodoStatusState",

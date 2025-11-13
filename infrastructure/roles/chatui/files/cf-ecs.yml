@@ -123,10 +123,11 @@ Resources:
             - { Name: "DYNAMODB_USERS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-users-table-name' }
             - { Name: "DYNAMODB_SESSIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-name' }
             - { Name: "CHAT_UI_PUBLIC_API_PORT", Value: "{{ chat_ui_public_api_port }}" }
-            - { Name: "OKTA_DOMAIN", Value: '{{ okta_domain }}' }
             - { Name: "OKTA_CLIENT_ID", Value: '{{ okta_client_id }}' }
             - { Name: "OKTA_ISSUER", Value: '{{ okta_issuer }}' }
             - { Name: "BASE_DOMAIN", Value: '{{ chat_ui_fqdn }}' }
+            - { Name: "ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
+            - { Name: "ORCHESTRATOR_CLIENT_ID", Value: '{{ orchestrator_okta_client_id }}' }
           Secrets:
             - { Name: "OKTA_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_okta_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
@@ -169,7 +170,7 @@ Resources:
       VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
       HealthCheckEnabled: true
       HealthCheckIntervalSeconds: 30
-      HealthCheckPath: '/'
+      HealthCheckPath: '/health'
       HealthCheckPort: '{{ chat_ui_public_api_port }}'
       HealthCheckProtocol: 'HTTP'
       HealthCheckTimeoutSeconds: 5
@@ -182,8 +183,13 @@ Resources:
       TargetGroupAttributes:
         - Key: 'deregistration_delay.timeout_seconds'
           Value: !If [IsProd, '30', '0']
+        # NOTE: Enable stickiness to maintain session affinity for WebSocket connections
         - Key: 'stickiness.enabled'
-          Value: false
+          Value: 'true'
+        - Key: 'stickiness.type'
+          Value: 'lb_cookie'
+        - Key: 'stickiness.lb_cookie.duration_seconds'
+          Value: '3600'  # 1 hour sticky session duration
       TargetType: 'ip'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui' }

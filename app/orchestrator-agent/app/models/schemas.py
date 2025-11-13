@@ -9,22 +9,23 @@ the A2A task status when the graph execution completes. The model considers:
 """
 
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+
 from a2a.types import TaskState
+from pydantic import BaseModel, Field
 
 
 class FinalResponseSchema(BaseModel):
     """Structured output schema for agent final response with explicit task status.
-    
+
     The model uses this to determine the appropriate A2A task state based on:
     - Current todo list state (all completed, some pending, some in progress)
     - Conversation state (waiting for auth, waiting for user input, complete)
     - Whether the task has actually been accomplished or needs more work
-    
+
     This replaces the hardcoded "completed" assumption and allows the agent
     to signal when tasks are still ongoing, need input, or have failed.
     """
-    
+
     task_state: Literal[
         TaskState.completed,
         TaskState.working,
@@ -45,7 +46,7 @@ class FinalResponseSchema(BaseModel):
             "- If an error occurred that prevents completion -> failed"
         )
     )
-    
+
     message: str = Field(
         description=(
             "The final message to display to the user. Should be:\n"
@@ -55,7 +56,7 @@ class FinalResponseSchema(BaseModel):
             "- For 'failed': Explain what went wrong and suggest possible next steps or alternatives"
         )
     )
-    
+
     reasoning: str = Field(
         description=(
             "Brief internal reasoning for why this task_state was chosen. "
@@ -63,11 +64,11 @@ class FinalResponseSchema(BaseModel):
             "This helps with debugging and transparency but is not shown to the user."
         )
     )
-    
+
     todo_summary: Optional[str] = Field(
         default=None,
         description=(
             "Optional brief summary of todo list state (e.g., '3/5 tasks completed, 2 in progress'). "
             "Useful for 'working' state to give progress visibility."
-        )
+        ),
     )

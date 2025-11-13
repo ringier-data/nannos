@@ -20,12 +20,13 @@ import os
 from typing import Optional
 
 import httpx
+from authlib.integrations.httpx_client import AsyncOAuth2Client
+from authlib.oauth2.rfc6749 import OAuth2Token
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .jwt_utils import create_session_jwt, verify_session_jwt
-
 
 logger = logging.getLogger(__name__)
 
@@ -60,40 +61,55 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
         self,
         app,
         client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
         issuer: Optional[str] = None,
     ):
         super().__init__(app)
         self.client_id = client_id or os.getenv("OKTA_CLIENT_ID")
+        self.client_secret = client_secret or os.getenv("OKTA_CLIENT_SECRET")
         self.issuer = issuer or os.getenv("OKTA_ISSUER")
-        self.well_known_url = f"{self.issuer}/.well-known/openid-configuration"
-        self.metadata: Optional[dict] = None
-        self._http_client: Optional[httpx.AsyncClient] = None
+        self._oauth_client: Optional[AsyncOAuth2Client] = None
+        self._metadata: Optional[dict] = None
 
-    async def _get_oidc_metadata(self) -> dict:
-        """Fetch OIDC metadata from the well-known configuration endpoint."""
-        client = await self._get_http_client()
-        if self.metadata is not None:
-            return self.metadata
+    async def _get_oauth_client(self, token: str) -> AsyncOAuth2Client:
+        """Get or create OAuth2 client with OIDC metadata discovery.
 
-        logger.info(f"Fetching OIDC metadata from: {self.well_known_url}")
-        response = await client.get(self.well_known_url)
-        response.raise_for_status()
-        metadata = response.json()
-        self.metadata = metadata
-        return metadata
-
-    async def _get_http_client(self) -> httpx.AsyncClient:
-        """Get or create the HTTP client for userinfo requests.
+        Uses authlib's AsyncOAuth2Client for standards-compliant OIDC integration.
+        Lazily fetches OIDC metadata from .well-known/openid-configuration endpoint.
 
         Returns:
-            An httpx AsyncClient instance
+            Configured AsyncOAuth2Client instance
         """
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient()
-        return self._http_client
+        if self._oauth_client is not None:
+            return self._oauth_client
+
+        # Fetch OIDC metadata for dynamic endpoint discovery
+        well_known_url = f"{self.issuer}/.well-known/openid-configuration"
+        logger.info(f"Fetching OIDC metadata from: {well_known_url}")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(well_known_url)
+            response.raise_for_status()
+            self._metadata = response.json()
+        if not self._metadata:
+            raise ValueError("Failed to fetch OIDC metadata")
+
+        # Create OAuth2 client with discovered metadata
+        # Note: We wouldn't necessarily need the client_secret to verify the bearer token, but since we need also
+        # to refresh tokens and eventually perform token exchange, it's good to have it configured.
+        self._oauth_client = AsyncOAuth2Client(
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            token_endpoint=self._metadata["token_endpoint"],
+            # TODO: shall we get the expiration info from the token itself?
+            token=OAuth2Token({"access_token": token, "token_type": "Bearer"}),
+        )
+
+        logger.info(f"OAuth2 client initialized with userinfo endpoint: {self._metadata.get('userinfo_endpoint')}")
+        return self._oauth_client
 
     async def _fetch_userinfo(self, token: str) -> dict:
-        """Fetch user information from the OIDC userinfo endpoint.
+        """Fetch user information from the OIDC userinfo endpoint using authlib.
 
         Args:
             token: The bearer token to use for authentication
@@ -104,13 +120,21 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
         Raises:
             httpx.HTTPStatusError: If the request fails
         """
-        client = await self._get_http_client()
-        metadata = await self._get_oidc_metadata()
-        userinfo_endpoint: Optional[str] = metadata.get("userinfo_endpoint")
-        if not userinfo_endpoint:
+        oauth_client = await self._get_oauth_client(token)
+
+        # Get userinfo endpoint from cached metadata
+        if not self._metadata or "userinfo_endpoint" not in self._metadata:
             raise ValueError("Userinfo endpoint not found in OIDC metadata")
-        logger.info(f"Fetching userinfo from endpoint: {userinfo_endpoint}")
-        response = await client.get(userinfo_endpoint, headers={"Authorization": f"Bearer {token}"})
+
+        userinfo_endpoint = self._metadata["userinfo_endpoint"]
+        logger.debug(f"Fetching userinfo from endpoint: {userinfo_endpoint}")
+
+        # Use authlib's client to make authenticated request
+        # We need to manually set the Authorization header since we're just using
+        # the client for convenience, not full OAuth2 flow
+        response = await oauth_client.get(
+            userinfo_endpoint,
+        )
 
         # Raise for HTTP errors (401, 403, etc.)
         response.raise_for_status()
@@ -118,10 +142,10 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
         return response.json()
 
     async def aclose(self) -> None:
-        """Clean up HTTP client resources."""
-        if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
+        """Clean up OAuth2 client resources."""
+        if self._oauth_client is not None:
+            await self._oauth_client.aclose()
+            self._oauth_client = None
 
     async def dispatch(self, request: Request, call_next):
         """
@@ -182,7 +206,7 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
                     "email": jwt_payload.get("email"),
                     "name": jwt_payload.get("name"),
                     "client_id": self.client_id,
-                    "token": token,
+                    "token": token,  # Always from current Authorization header
                 }
 
                 logger.debug(
@@ -199,7 +223,6 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
         try:
             userinfo = await self._fetch_userinfo(token)
 
-            # Add user info to request state for use in handlers
             request.state.user = {
                 "sub": userinfo.get("sub"),
                 "email": userinfo.get("email"),
@@ -209,6 +232,8 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
             }
 
             # Step 3: Create session JWT and set as cookie
+            # Session JWT caches stable userinfo only (no tokens)
+            # Tokens are always extracted from request headers for freshness
             session_jwt = create_session_jwt(userinfo)
 
             # Proceed with the request

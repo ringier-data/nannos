@@ -14,7 +14,6 @@ from .interceptor import SmartTokenInterceptor
 from .okta_token_exchange import (
     OktaTokenExchanger,
     ExchangedToken,
-    SubAgentTokenProvider,
     TokenExchangeError,
 )
 from .agent_security_config import (
@@ -37,7 +36,6 @@ __all__ = [
     # Token Exchange
     "OktaTokenExchanger",
     "ExchangedToken",
-    "SubAgentTokenProvider",
     "TokenExchangeError",
     
     # Security Config

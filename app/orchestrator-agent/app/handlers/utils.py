@@ -1,12 +1,11 @@
-
 import json
-from typing import Any, Dict
 import logging
+from typing import Any, Dict
+
 import httpx
 from langchain_core.tools import ToolException
 
 from ..models import A2AClientError
-
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ def handle_auth_error(exception: Exception) -> str:
 
 def should_retry(exception: Exception) -> bool:
     """Determine if an exception should trigger a retry.
-    
+
     Returns False for 401 errors (auth issues should not be retried automatically),
     Returns True for other HTTP errors, network errors, and A2A client errors.
     """
