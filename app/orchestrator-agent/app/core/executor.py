@@ -148,13 +148,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             )
 
         elif state == TaskState.working and is_final:
-            logger.info(f"Contradictory working final state, treating as completed: {content}")
-            # Treat as completed
-            await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
-                name="orchestrator_result",
+            logger.info(f"Contradictory working final state, treating as working: {content}")
+            # Treat as working
+            await updater.update_status(
+                TaskState.working,
+                new_agent_text_message(
+                    content,
+                    task.context_id,
+                    task.id,
+                ),
+                final=False,  # Not final - keep the task open
             )
-            await updater.complete()
 
         elif state == TaskState.failed:
             # Handle failure state
