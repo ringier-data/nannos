@@ -29,6 +29,58 @@ Resources:
         - { Key: 'Version', Value: 'v{{ project_version }}' }
         - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
 
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-conversations'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: conversationId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: conversationId
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-conversations' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  MessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-messages'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: conversationId
+          AttributeType: S
+        - AttributeName: sortKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: conversationId
+          KeyType: HASH
+        - AttributeName: sortKey
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-messages' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+
 Outputs:
 
   SessionsTableName:
@@ -42,3 +94,27 @@ Outputs:
     Export:
       Name: '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-arn'
     Value: !GetAtt SessionsTable.Arn
+
+  ConversationsTableName:
+    Description: 'Conversations DynamoDB table name'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-chat-ui-conversations-table-name'
+    Value: !Ref ConversationsTable
+
+  ConversationsTableArn:
+    Description: 'Conversations DynamoDB table ARN'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-chat-ui-conversations-table-arn'
+    Value: !GetAtt ConversationsTable.Arn
+
+  MessagesTableName:
+    Description: 'Messages DynamoDB table name'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-chat-ui-messages-table-name'
+    Value: !Ref MessagesTable
+
+  MessagesTableArn:
+    Description: 'Messages DynamoDB table ARN'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-chat-ui-messages-table-arn'
+    Value: !GetAtt MessagesTable.Arn
