@@ -62,8 +62,8 @@ def main(host, port):
             type="oauth2",
             flows=OAuthFlows(
                 authorization_code=AuthorizationCodeOAuthFlow(
-                    authorization_url="https://rcplus.okta.com/oauth2/v1/authorize",
-                    token_url="https://rcplus.okta.com/oauth2/v1/token",
+                    authorization_url="https://login.alloy.ch/realms/a2a/protocol/openid-connect/auth",
+                    token_url="https://login.alloy.ch/realms/a2a/protocol/openid-connect/token",
                     scopes={
                         "openid": "OpenID Connect authentication",
                         "profile": "Access to user profile information",

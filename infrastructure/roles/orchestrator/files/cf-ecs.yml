@@ -126,7 +126,6 @@ Resources:
             - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
             - { Name: 'OKTA_ISSUER', Value: '{{ okta_issuer }}' }
             - { Name: 'OKTA_CLIENT_ID', Value: '{{ orchestrator_okta_client_id }}' }
-            - { Name: 'MOCK_OKTA', Value: 'false' }
             - { Name: 'OPENAI_API_VERSION', Value: '{{ openai_api_version }}' }
             - { Name: 'AZURE_OPENAI_CHAT_MODEL_NAME', Value: '{{ azure_openai_chat_model_name }}' }
             - { Name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', Value: '{{ azure_openai_chat_deployment }}' }
