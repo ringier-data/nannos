@@ -81,6 +81,8 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
             Configured AsyncOAuth2Client instance
         """
         if self._oauth_client is not None:
+            # update token in case it has changed
+            self._oauth_client.token = OAuth2Token({"access_token": token, "token_type": "Bearer"})
             return self._oauth_client
 
         # Fetch OIDC metadata for dynamic endpoint discovery
@@ -195,7 +197,7 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
 
         # Step 1: Check for session JWT cookie (local verification, no network call)
         session_jwt = request.cookies.get(SESSION_COOKIE_NAME)
-        logger.debug(f"Cookies: {request.cookies}")
+        # logger.debug(f"Cookies: {request.cookies}")
         logger.debug(f"Found session JWT cookie: {session_jwt is not None}")
         if session_jwt:
             jwt_payload = verify_session_jwt(session_jwt)
