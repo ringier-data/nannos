@@ -18,4 +18,5 @@
       - 'basis'
       - 'orchestrator'
       - 'chatui'
+      - 'foundry-jira-agent'
       - 'ringier.aws_cicd.del_workspace'

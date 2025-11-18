@@ -1,0 +1,98 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Foundry Jira Agent Infrastructure - CloudFront distributions (v{{ project_version }})'
+
+
+Resources:
+  FoundryJiraAgentDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: 'cloudfront-alb-foundry-jira-agent'
+            DomainName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+            CustomOriginConfig:
+              OriginProtocolPolicy: 'https-only'
+              OriginKeepaliveTimeout: '{{ [60, ((alb_http_keepalive_timeout_seconds | int) - 2)] | min }}'
+        Enabled: true
+        HttpVersion: 'http1.1'
+        IPV6Enabled: true
+        Comment: 'Alloy Foundry Jira Agent - A2A protocol agent at root'
+        Aliases:
+          - '{{ foundry_jira_agent_fqdn }}'
+        DefaultCacheBehavior:
+          Compress: true
+          AllowedMethods:
+            - 'GET'
+            - 'HEAD'
+            - 'POST'
+            - 'PUT'
+            - 'PATCH'
+            - 'DELETE'
+            - 'OPTIONS'
+          CachedMethods:
+            - 'GET'
+            - 'HEAD'
+          CachePolicyId: !ImportValue '{{ project_id }}-{{ software_component }}-agents-cache-policy-id'
+          OriginRequestPolicyId: !Ref FoundryJiraAgentOriginRequestPolicy
+          TargetOriginId: 'cloudfront-alb-foundry-jira-agent'
+          ViewerProtocolPolicy: 'redirect-to-https'
+        PriceClass: 'PriceClass_100'
+        ViewerCertificate:
+          AcmCertificateArn: '{{ cloudfront_ssl_certificate }}'
+          SslSupportMethod: 'sni-only'
+          MinimumProtocolVersion: 'TLSv1.2_2021'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-distribution' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  FoundryJiraAgentOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent'
+        Comment: 'Alloy Foundry Jira Agent origin request policy'
+        CookiesConfig:
+          CookieBehavior: 'none'
+        HeadersConfig:
+          HeaderBehavior: 'allViewer'
+        QueryStringsConfig:
+          QueryStringBehavior: 'all'
+
+  FoundryJiraAgentRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: '{{ foundry_jira_agent_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'A'
+      AliasTarget:
+        DNSName: !GetAtt FoundryJiraAgentDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+
+  FoundryJiraAgentRoute53RecordSetIPv6:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      Name: '{{ foundry_jira_agent_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'AAAA'
+      AliasTarget:
+        DNSName: !GetAtt FoundryJiraAgentDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+
+
+Outputs:
+
+  FoundryJiraAgentCloudFrontDistributionId:
+    Description: 'Foundry Jira Agent CloudFront Distribution ID'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-foundry-jira-agent-cloudfront-distribution-id'
+    Value: !Ref FoundryJiraAgentDistribution
+  
+  FoundryJiraAgentCloudFrontDomainName:
+    Description: 'Foundry Jira Agent CloudFront Domain Name'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-foundry-jira-agent-cloudfront-domain'
+    Value: !GetAtt FoundryJiraAgentDistribution.DomainName

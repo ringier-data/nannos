@@ -1,0 +1,29 @@
+
+
+- name: 'upload Foundry Jira Agent Okta client secret to SSM'
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: 'changed'
+    name: '{{ ssmkey_foundry_jira_agent_okta_client_secret }}'
+    description: 'The Okta client secret for the Foundry Jira Agent component of RC+/Alloy'
+    string_type: 'SecureString'
+    value: '{{ foundry_jira_agent_okta_client_secret }}'
+    tags:
+      Name: '{{ env }}-{{ project_id }}-foundry-jira-agent-okta-client-secret'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
+
+- name: 'upload Foundry Jira Agent foundry client secret'
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: 'changed'
+    name: '{{ ssmkey_foundry_jira_agent_foundry_client_secret }}'
+    description: 'The foundry oauth app client secret for the Foundry Jira Agent component of RC+/Alloy'
+    string_type: 'SecureString'
+    value: '{{ foundry_jira_agent_foundry_client_secret }}'
+    tags:
+      Name: '{{ env }}-{{ project_id }}-foundry-jira-agent-foundry-client-secret'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
