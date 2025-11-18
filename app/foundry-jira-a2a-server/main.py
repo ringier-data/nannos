@@ -15,18 +15,22 @@ from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentSkill,
-    OpenIdConnectSecurityScheme,
+    HTTPAuthSecurityScheme,
     SecurityScheme,
 )
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
+from ringier_a2a_sdk.middleware import (
+    OrchestratorJWTMiddleware,
+    UserContextFromMetadataMiddleware,
+)
+from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
+from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 
-from a2a_server.handlers import AuthRequestContextBuilder
-from a2a_server.handlers.executor import BaseAgentExecutor
-from a2a_server.middleware import OktaAuthMiddleware, UserContextMiddleware
-from agent.agent import FoundryJiraTicketAgent
+from agent import FoundryJiraTicketAgent
 
 logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("app"))
+configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
 
 # Global reference to agent for cleanup
@@ -71,9 +75,13 @@ def main(host, port):
                 "Make a ticket: user cannot reset password",
             ],
         )
-        openid_connect = OpenIdConnectSecurityScheme(
-            type="openIdConnect",
-            open_id_connect_url="https://login.alloy.ch/realms/a2a/.well-known/openid-configuration",
+
+        # Configure JWT bearer authentication for orchestrator
+        http_auth_scheme = HTTPAuthSecurityScheme(
+            type="http",
+            scheme="bearer",
+            bearer_format="JWT",
+            description="Orchestrator service authentication via Keycloak client credentials",
         )
 
         # Support both local dev and production deployment
@@ -91,9 +99,9 @@ def main(host, port):
             default_output_modes=_agent_instance.SUPPORTED_CONTENT_TYPES,
             capabilities=capabilities,
             skills=[skill],
-            # NOTE: we assume that the key is the client_id
-            security_schemes={"foundry-jira-ticket-agent": SecurityScheme(root=openid_connect)},
-            security=[{"foundry-jira-ticket-agent": ["openid", "profile", "email"]}],
+            # JWT bearer authentication for orchestrator
+            security_schemes={"foundry-jira-ticket-agent": SecurityScheme(root=http_auth_scheme)},
+            security=[{"foundry-jira-ticket-agent": []}],
             supports_authenticated_extended_card=False,
         )
 
@@ -108,17 +116,19 @@ def main(host, port):
         # Pass lifespan to build() method to manage agent lifecycle
         app = server.build(lifespan=lifespan)
 
-        # UserContextMiddleware runs AFTER Okta (transfers user to A2A context)
-        app.add_middleware(UserContextMiddleware)
+        # UserContextFromMetadataMiddleware runs AFTER JWT auth (extracts user from A2A metadata)
+        app.add_middleware(UserContextFromMetadataMiddleware)
 
-        # OktaAuthMiddleware runs FIRST (validates JWT, sets request.state.user)
+        # OrchestratorJWTMiddleware runs FIRST (validates JWT, sets request.state.orchestrator)
         app.add_middleware(
-            OktaAuthMiddleware,
-            client_id=os.getenv("OKTA_CLIENT_ID", "foundry-jira-ticket-agent"),
+            OrchestratorJWTMiddleware,
+            issuer=os.getenv("KEYCLOAK_ISSUER", "https://login.alloy.ch/realms/a2a"),
+            expected_azp=os.getenv("ORCHESTRATOR_CLIENT_ID", "orchestrator"),
+            expected_aud=os.getenv("OIDC_CLIENT_ID", "foundry-jira-ticket-agent"),
         )
 
         # Load log configuration
-        log_conf_path = "a2a_server/log_conf.yml"
+        log_conf_path = "log_conf.yml"
         with open(log_conf_path) as f:
             log_config = yaml.safe_load(f)
 

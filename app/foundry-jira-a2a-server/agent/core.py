@@ -8,9 +8,8 @@ from foundry_sdk import AsyncFoundryClient as PlatformAsyncFoundryClient
 from foundry_sdk import Auth
 from foundry_sdk import ConfidentialClientAuth as PlatformSDKConfidentialClientAuth
 from foundry_sdk import Config as FoundryConfig
-
-from agent.base import BaseAgent
-from agent.models import AgentStreamResponse, UserConfig
+from ringier_a2a_sdk.agent import BaseAgent
+from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 
 logger = logging.getLogger(__name__)
 

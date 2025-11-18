@@ -1,5 +1,7 @@
 **
-!a2a_server/*
+!main.py
+!log_conf.yml
 !agent/*
 !pyproject.toml
 !uv.lock
+!ringier-a2a-sdk/*

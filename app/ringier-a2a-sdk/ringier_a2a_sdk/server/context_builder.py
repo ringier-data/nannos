@@ -1,12 +1,12 @@
 """
 Custom Request Context Builder for Zero-Trust Authentication.
 
-This builder extracts user information from the Okta authentication middleware
+This builder extracts user information from authentication middleware
 and makes it available to the agent executor following zero-trust principles.
 
 ZERO-TRUST PATTERN:
 - Never trust client-provided identifiers (context_id, task_id, etc.)
-- Always extract user_id from validated JWT tokens (Okta middleware)
+- Always extract user_id from validated JWT tokens (middleware)
 - User isolation is based on authenticated user_id, not client-provided values
 """
 
@@ -25,14 +25,14 @@ class AuthRequestContextBuilder(RequestContextBuilder):
     """
     Custom RequestContextBuilder implementing zero-trust authentication pattern.
 
-    Extracts verified user information from Okta JWT validation (middleware sets request.state.user):
-    - 'sub': User ID (subject claim from validated JWT) - PRIMARY IDENTIFIER
+    Extracts verified user information from JWT validation (middleware sets current_user_context):
+    - 'user_id': User ID (from validated JWT) - PRIMARY IDENTIFIER
     - 'email': User email
     - 'name': User display name
     - 'token': Original JWT token
     - 'scopes': OAuth scopes granted
 
-    The user_id ('sub' claim) is the ONLY trusted identifier for user isolation.
+    The user_id is the ONLY trusted identifier for user isolation.
     Context IDs and task IDs from clients are for conversation tracking only.
     """
 
@@ -45,10 +45,10 @@ class AuthRequestContextBuilder(RequestContextBuilder):
         context: ServerCallContext | None = None,
     ) -> RequestContext:
         """
-        Build RequestContext with verified user information from Okta middleware.
+        Build RequestContext with verified user information from authentication middleware.
 
         ZERO-TRUST: The authenticated user_id is extracted from async context variable
-        (set by UserContextMiddleware after JWT validation) and stored in call_context.state.
+        (set by UserContextFromMetadataMiddleware after JWT validation) and stored in call_context.state.
 
         Args:
             params: The A2A message send parameters
@@ -64,7 +64,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
         call_context = context if context is not None else ServerCallContext()
 
         # ZERO-TRUST: Extract verified user information from context variable
-        # This was set by UserContextMiddleware after JWT validation
+        # This was set by UserContextFromMetadataMiddleware after JWT validation
         user_context = current_user_context.get()
 
         if user_context and "user_id" in user_context:
@@ -79,7 +79,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
         else:
             # No authenticated user - mark as anonymous
             logger.warning("[ZERO-TRUST] No user context found - authentication may have been bypassed!")
-            logger.warning("Ensure OktaAuthMiddleware and UserContextMiddleware are properly configured")
+            logger.warning("Ensure JWT authentication and UserContextFromMetadataMiddleware are properly configured")
             call_context.state["user_id"] = "anonymous"  # Fallback (should trigger auth errors)
 
         # Create and return the request context

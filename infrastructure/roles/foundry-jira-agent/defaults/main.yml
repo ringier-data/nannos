@@ -1,6 +1,6 @@
 ---
-ssmkey_foundry_jira_agent_okta_client_secret: '/{{ project_id }}/{{ software_component }}/foundry-jira-agent/okta-client-secret'
-foundry_jira_agent_okta_client_secret: !vault |
+ssmkey_foundry_jira_agent_oidc_client_secret: '/{{ project_id }}/{{ software_component }}/foundry-jira-agent/oidc-client-secret'
+foundry_jira_agent_oidc_client_secret: !vault |
   $ANSIBLE_VAULT;1.1;AES256
   30323361373361383364313231643564396565303639373539616531356239393434653830336437
   6636643666636363323661646462326465373966653165640a383765616636623961373039626434
@@ -9,7 +9,7 @@ foundry_jira_agent_okta_client_secret: !vault |
   63643561656365393033386132666636396533376336393737383031653337303637616330353162
   6166636266356334316138383734613636316538633065343930
 
-foundry_jira_agent_okta_client_id: 'foundry-jira-ticket-agent'
+foundry_jira_agent_client_id: 'foundry-jira-ticket-agent'
 foundry_jira_agent_public_api_port: 8080
 foundry_jira_agent_fqdn: 'foundry-jira.{{ domain_prefix }}alloy.ch'
 foundry_jira_agent_task_cpu: 512

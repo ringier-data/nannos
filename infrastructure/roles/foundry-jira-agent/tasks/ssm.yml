@@ -1,14 +1,14 @@
 
 
-- name: 'upload Foundry Jira Agent Okta client secret to SSM'
+- name: 'upload Foundry Jira Agent OIDC client secret to SSM'
   ringier.aws_cicd.ssm_parameter:
     overwrite_value: 'changed'
-    name: '{{ ssmkey_foundry_jira_agent_okta_client_secret }}'
-    description: 'The Okta client secret for the Foundry Jira Agent component of RC+/Alloy'
+    name: '{{ ssmkey_foundry_jira_agent_oidc_client_secret }}'
+    description: 'The OIDC client secret for the Foundry Jira Agent component of RC+/Alloy'
     string_type: 'SecureString'
-    value: '{{ foundry_jira_agent_okta_client_secret }}'
+    value: '{{ foundry_jira_agent_oidc_client_secret }}'
     tags:
-      Name: '{{ env }}-{{ project_id }}-foundry-jira-agent-okta-client-secret'
+      Name: '{{ env }}-{{ project_id }}-foundry-jira-agent-oidc-client-secret'
       Project: '{{ project_id }}'
       Environment: '{{ env }}'
       Repository: '{{ git_info.repo_name }}'

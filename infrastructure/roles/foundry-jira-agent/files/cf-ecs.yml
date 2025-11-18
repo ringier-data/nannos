@@ -42,7 +42,7 @@ Resources:
                   - 'ssm:GetParameter'
                   - 'ssm:GetParameters'
                 Resource:
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_foundry_jira_agent_okta_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_foundry_jira_agent_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_foundry_jira_agent_foundry_client_secret }}'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-ecs-execution-role' }
@@ -121,11 +121,14 @@ Resources:
             - { Name: 'ENV', Value: '{{ env }}' }
             - { Name: 'AWS_REGION', Value: !Ref 'AWS::Region' }
             - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
-            - { Name: 'OKTA_ISSUER', Value: '{{ okta_issuer }}' }
-            - { Name: 'OKTA_CLIENT_ID', Value: '{{ foundry_jira_agent_okta_client_id }}' }
+            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
+            - { Name: 'ORCHESTRATOR_CLIENT_ID', Value: '{{ orchestrator_oidc_client_id }}' }
+            - { Name: 'AGENT_CLIENT_ID', Value: '{{ foundry_jira_agent_client_id }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ foundry_jira_agent_fqdn }}' }
+            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
+            - { Name: 'OIDC_CLIENT_ID', Value: '{{ foundry_jira_agent_client_id }}' }
           Secrets:
-            - { Name: 'OKTA_CLIENT_SECRET', ValueFrom: '{{ ssmkey_foundry_jira_agent_okta_client_secret }}' }
+            - { Name: 'OKTA_CLIENT_SECRET', ValueFrom: '{{ ssmkey_foundry_jira_agent_oidc_client_secret }}' }
             - { Name: 'FOUNDRY_CLIENT_SECRET', ValueFrom: '{{ ssmkey_foundry_jira_agent_foundry_client_secret }}' }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ foundry_jira_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']

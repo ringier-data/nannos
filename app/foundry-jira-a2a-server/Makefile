@@ -19,7 +19,7 @@ python:
 
 .PHONY: app
 app:
-	uv run python -m a2a_server.main --port 9996
+	uv run python -m main --port 9996
 
 # .PHONY: test
 # test:

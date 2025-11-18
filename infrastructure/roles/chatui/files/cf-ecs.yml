@@ -42,7 +42,7 @@ Resources:
                   - 'ssm:GetParameter'
                   - 'ssm:GetParameters'
                 Resource:
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_okta_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_secret_key }}'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-ecs-execution-role' }
@@ -123,13 +123,13 @@ Resources:
             - { Name: "DYNAMODB_USERS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-users-table-name' }
             - { Name: "DYNAMODB_SESSIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-name' }
             - { Name: "CHAT_UI_PUBLIC_API_PORT", Value: "{{ chat_ui_public_api_port }}" }
-            - { Name: "OKTA_CLIENT_ID", Value: '{{ okta_client_id }}' }
-            - { Name: "OKTA_ISSUER", Value: '{{ okta_issuer }}' }
+            - { Name: "OIDC_CLIENT_ID", Value: '{{ oidc_client_id }}' }
+            - { Name: "OIDC_ISSUER", Value: '{{ oidc_issuer }}' }
             - { Name: "BASE_DOMAIN", Value: '{{ chat_ui_fqdn }}' }
             - { Name: "ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
-            - { Name: "ORCHESTRATOR_CLIENT_ID", Value: '{{ orchestrator_okta_client_id }}' }
+            - { Name: "ORCHESTRATOR_CLIENT_ID", Value: '{{ orchestrator_oidc_client_id }}' }
           Secrets:
-            - { Name: "OKTA_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_okta_client_secret }}' }
+            - { Name: "OKTA_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_oidc_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\").read()" || exit 1']

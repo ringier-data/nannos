@@ -1,45 +1,44 @@
 """
-Okta OIDC Authentication Middleware for A2A Protocol.
+OIDC Userinfo Authentication Middleware.
 
-This middleware validates bearer tokens from a trusted OIDC application by fetching
-user information from the OIDC provider. The tokens are passed directly from the
-OIDC application (e.g., web-client) without JWT validation - instead, we use the
-token to fetch user information from the userinfo endpoint.
-
-To optimize performance, after the first successful Okta validation, the middleware
-issues a signed session JWT that is stored in an HttpOnly cookie. Subsequent requests
-are validated locally by verifying this JWT, eliminating the need for repeated calls
-to Okta's userinfo endpoint.
-
-Authentication information is stored in request.state.user and can be accessed
-by custom request handlers or middleware downstream.
+Validates user OIDC tokens by calling the userinfo endpoint and optionally
+caches user information in session JWTs.
 """
 
 import logging
 import os
 from typing import Optional
 
-import aiohttp
+import httpx
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from authlib.oauth2.rfc6749 import OAuth2Token
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .session_jwt import create_session_jwt, verify_session_jwt
+
 logger = logging.getLogger(__name__)
 
+# Session cookie configuration
+SESSION_COOKIE_NAME = "a2a_session"
+SESSION_COOKIE_MAX_AGE = int(os.getenv("JWT_SESSION_EXPIRY_MINUTES", "15")) * 60  # Convert to seconds
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").lower() == "true"
 
-class OktaAuthMiddleware(BaseHTTPMiddleware):
+
+class OidcUserinfoMiddleware(BaseHTTPMiddleware):
     """
-    Middleware to validate bearer tokens from trusted OIDC application.
+    Middleware to validate bearer tokens via OIDC userinfo endpoint.
 
-    This middleware receives bearer tokens from a trusted OIDC application and
-    validates them by fetching user information from the OIDC provider's userinfo
-    endpoint. This approach trusts tokens from the configured OIDC application.
+    This middleware validates bearer tokens from users by calling the OIDC
+    provider's userinfo endpoint. After first validation, it issues a session
+    JWT cookie to cache user information and avoid repeated network calls.
 
-    Configuration via environment variables:
-    - OKTA_ISSUER:
-    - OKTA_CLIENT_ID: OAuth2 client ID for this orchestrator agent (optional, for logging)
+    Configuration:
+    - issuer: OIDC issuer URL (e.g., https://login.alloy.ch/realms/a2a)
+    - client_id: OAuth2 client ID (optional, for logging)
+    - client_secret: OAuth2 client secret (optional)
+    - jwt_secret_key: Secret key for signing session JWTs (required for caching)
     """
 
     # Public endpoints that don't require authentication
@@ -53,57 +52,53 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app,
+        issuer: str,
+        jwt_secret_key: str,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
-        issuer: Optional[str] = None,
     ):
+        """
+        Initialize OIDC userinfo middleware.
+
+        Args:
+            app: The ASGI application
+            issuer: OIDC issuer URL
+            jwt_secret_key: Secret key for signing session JWTs
+            client_id: OAuth2 client ID (optional)
+            client_secret: OAuth2 client secret (optional)
+        """
         super().__init__(app)
-        self.client_id = client_id or os.getenv("OKTA_CLIENT_ID")
-        self.client_secret = client_secret or os.getenv("OKTA_CLIENT_SECRET")
-        self.issuer = issuer or os.getenv("OKTA_ISSUER")
-
-        # Disable authentication if issuer is not configured (for development)
-        self.auth_disabled = not self.issuer
-        if self.auth_disabled:
-            logger.warning(
-                "OKTA_ISSUER not configured - authentication is DISABLED. "
-                "This is only suitable for development/testing!"
-            )
-
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.issuer = issuer.rstrip("/")
+        self.jwt_secret_key = jwt_secret_key
         self._oauth_client: Optional[AsyncOAuth2Client] = None
         self._metadata: Optional[dict] = None
 
     async def _get_oauth_client(self, token: str) -> AsyncOAuth2Client:
-        """Get or create OAuth2 client with OIDC metadata discovery.
-
-        Uses authlib's AsyncOAuth2Client for standards-compliant OIDC integration.
-        Lazily fetches OIDC metadata from .well-known/openid-configuration endpoint.
-
-        Returns:
-            Configured AsyncOAuth2Client instance
-        """
+        """Get or create OAuth2 client with OIDC metadata discovery."""
         if self._oauth_client is not None:
+            # Update token in case it has changed
+            self._oauth_client.token = OAuth2Token({"access_token": token, "token_type": "Bearer"})
             return self._oauth_client
 
         # Fetch OIDC metadata for dynamic endpoint discovery
         well_known_url = f"{self.issuer}/.well-known/openid-configuration"
         logger.info(f"Fetching OIDC metadata from: {well_known_url}")
 
-        async with aiohttp.ClientSession() as client:
+        async with httpx.AsyncClient() as client:
             response = await client.get(well_known_url)
             response.raise_for_status()
-            self._metadata = await response.json()
+            self._metadata = response.json()
+
         if not self._metadata:
             raise ValueError("Failed to fetch OIDC metadata")
 
         # Create OAuth2 client with discovered metadata
-        # Note: We wouldn't necessarily need the client_secret to verify the bearer token, but since we need also
-        # to refresh tokens and eventually perform token exchange, it's good to have it configured.
         self._oauth_client = AsyncOAuth2Client(
             client_id=self.client_id,
             client_secret=self.client_secret,
             token_endpoint=self._metadata["token_endpoint"],
-            # TODO: shall we get the expiration info from the token itself?
             token=OAuth2Token({"access_token": token, "token_type": "Bearer"}),
         )
 
@@ -111,17 +106,7 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
         return self._oauth_client
 
     async def _fetch_userinfo(self, token: str) -> dict:
-        """Fetch user information from the OIDC userinfo endpoint using authlib.
-
-        Args:
-            token: The bearer token to use for authentication
-
-        Returns:
-            The user information from the userinfo endpoint
-
-        Raises:
-            aiohttp.ClientResponseError: If the request fails
-        """
+        """Fetch user information from the OIDC userinfo endpoint."""
         oauth_client = await self._get_oauth_client(token)
 
         # Get userinfo endpoint from cached metadata
@@ -132,11 +117,7 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
         logger.debug(f"Fetching userinfo from endpoint: {userinfo_endpoint}")
 
         # Use authlib's client to make authenticated request
-        # We need to manually set the Authorization header since we're just using
-        # the client for convenience, not full OAuth2 flow
-        response = await oauth_client.get(
-            userinfo_endpoint,
-        )
+        response = await oauth_client.get(userinfo_endpoint)
 
         # Raise for HTTP errors (401, 403, etc.)
         response.raise_for_status()
@@ -151,24 +132,13 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         """
-        Intercept requests and validate authentication.
+        Validate authentication via session JWT or userinfo endpoint.
 
         Priority order:
         1. Check for valid session JWT in cookie (fast, no network call)
-        2. If no valid session JWT, validate bearer token via Okta userinfo endpoint
-        3. On successful Okta validation, issue new session JWT cookie
+        2. If no valid session JWT, validate bearer token via userinfo endpoint
+        3. On successful validation, issue new session JWT cookie
         """
-        # Skip authentication if disabled (development mode)
-        if self.auth_disabled:
-            # Set dummy user for development
-            request.state.user = {
-                "sub": "dev-user-id",
-                "email": "dev@example.com",
-                "name": "Development User",
-                "token": "dev-token-placeholder",  # Placeholder token for development
-            }
-            return await call_next(request)
-
         # Allow public endpoints without authentication
         if any(request.url.path.startswith(path) for path in self.PUBLIC_PATHS):
             return await call_next(request)
@@ -176,9 +146,6 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
         # Extract Authorization header
         auth_header = request.headers.get("Authorization")
         if not auth_header:
-            # NOTE: each request will come with an Authorization header from the OIDC app even if we might not use it
-            #       since we first try to validate the session JWT cookie. But the authorization header must be present.
-            #       since it will be needed for the MCP Gateway or to exchange the token for sub-agent requests.
             logger.warning(f"Missing Authorization header for {request.url.path}")
             return JSONResponse(
                 status_code=401,
@@ -201,11 +168,33 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
             )
 
         token = parts[1]
-        # NOTE: In the case of Keycloak this token is a JWT issued by the OIDC application (e.g., web-client).
-        #       So we could validate it locally instead of validating it through the userinfo endpoint + issuing
-        #       a session JWT. However, to keep the architecture consistent across OIDC providers,
-        #       we always validate via userinfo endpoint first
 
+        # Step 1: Check for session JWT cookie (local verification, no network call)
+        session_jwt = request.cookies.get(SESSION_COOKIE_NAME)
+        logger.debug(f"Found session JWT cookie: {session_jwt is not None}")
+
+        if session_jwt:
+            jwt_payload = verify_session_jwt(session_jwt, self.jwt_secret_key)
+            if jwt_payload:
+                # Valid session JWT - use cached user info
+                request.state.user = {
+                    "sub": jwt_payload.get("sub"),
+                    "email": jwt_payload.get("email"),
+                    "name": jwt_payload.get("name"),
+                    "client_id": self.client_id,
+                    "token": token,  # Always from current Authorization header
+                }
+
+                logger.debug(
+                    f"Authenticated via session JWT: {request.state.user.get('sub')} "
+                    f"({request.state.user.get('email')})"
+                )
+
+                # Proceed with the request (no network call needed!)
+                response = await call_next(request)
+                return response
+
+        # Step 2: No valid session JWT - validate with OIDC userinfo (requires network call)
         try:
             userinfo = await self._fetch_userinfo(token)
 
@@ -217,14 +206,29 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
                 "token": token,
             }
 
+            # Step 3: Create session JWT and set as cookie
+            session_jwt = create_session_jwt(userinfo, self.jwt_secret_key)
+
             # Proceed with the request
             response = await call_next(request)
 
+            # Set session JWT cookie on response
+            response.set_cookie(
+                key=SESSION_COOKIE_NAME,
+                value=session_jwt,
+                max_age=SESSION_COOKIE_MAX_AGE,
+                httponly=True,  # Prevents JavaScript access (XSS protection)
+                secure=SESSION_COOKIE_SECURE,  # HTTPS only in production
+                samesite="lax",  # CSRF protection
+                path="/",  # Available for all paths
+            )
+
+            logger.debug(f"Authenticated via userinfo endpoint: {userinfo.get('sub')}")
             return response
 
-        except aiohttp.ClientResponseError as e:
+        except httpx.HTTPStatusError as e:
             # Handle HTTP errors from the userinfo endpoint
-            if e.response.status == 401:
+            if e.response.status_code == 401:
                 logger.warning(f"Unauthorized token for {request.url.path}: {e}")
                 return JSONResponse(
                     status_code=401,
@@ -233,10 +237,11 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
                         "message": "Bearer token is invalid or expired. Please re-authenticate.",
                     },
                 )
-            elif e.response.status == 403:
+            elif e.response.status_code == 403:
                 logger.warning(f"Forbidden token for {request.url.path}: {e}")
                 return JSONResponse(
-                    status_code=403, content={"error": "forbidden", "message": "Access forbidden with provided token."}
+                    status_code=403,
+                    content={"error": "forbidden", "message": "Access forbidden with provided token."},
                 )
             else:
                 logger.error(f"HTTP error fetching userinfo for {request.url.path}: {e}", exc_info=True)
@@ -247,7 +252,7 @@ class OktaAuthMiddleware(BaseHTTPMiddleware):
                         "message": "Failed to validate token with authentication service.",
                     },
                 )
-        except aiohttp.ClientError as e:
+        except httpx.RequestError as e:
             logger.error(f"Network error fetching userinfo: {e}", exc_info=True)
             return JSONResponse(
                 status_code=503,
