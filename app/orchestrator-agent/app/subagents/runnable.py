@@ -458,7 +458,8 @@ class A2AClientRunnable:
             input_data: Input data containing a2a_tracking
 
         Returns:
-            Tuple of (context_id, task_id)
+            Tuple of (context_id, task_id). task_id is only returned if the task
+            is incomplete or requires user intervention (auth/input).
         """
         agent_name = self.agent_card.name.replace(" ", "")
         agent_tracking = input_data.a2a_tracking.get(agent_name, {})
@@ -467,8 +468,19 @@ class A2AClientRunnable:
             logger.warning(
                 f"No tracking found for agent: {agent_name}. Available: {list(input_data.a2a_tracking.keys())}"
             )
+            return None, None
 
-        return agent_tracking.get("context_id"), agent_tracking.get("task_id")
+        context_id = agent_tracking.get("context_id")
+        task_id = agent_tracking.get("task_id")
+        is_complete = agent_tracking.get("is_complete", True)
+
+        # Always return context_id for conversation continuity
+        # Only return task_id if the task is still in progress
+        if task_id and is_complete:
+            logger.info(f"Task {task_id} complete, omitting task_id for new request")
+            task_id = None
+
+        return context_id, task_id
 
     def _create_a2a_message(self, content: str, context_id: Optional[str], task_id: Optional[str]) -> Message:
         """Create an A2A message with proper metadata.
