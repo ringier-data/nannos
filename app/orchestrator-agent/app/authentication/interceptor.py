@@ -15,9 +15,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 from a2a.client.middleware import ClientCallContext, ClientCallInterceptor
-from a2a.types import AgentCard
-
-from .agent_security_config import requires_token_exchange as check_requires_token_exchange
+from a2a.types import AgentCard, OpenIdConnectSecurityScheme
 
 if TYPE_CHECKING:
     from .okta_token_exchange import OktaTokenExchanger
@@ -49,6 +47,10 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         config = A2AClientConfig(auth_interceptor=interceptor)
     """
 
+    SUPPORTED_ISSUERS = [
+        "https://login.alloy.ch/realms/a2a",
+    ]
+
     def __init__(
         self,
         user_token: str,
@@ -67,6 +69,14 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
         # Cache of agent_name -> exchanged_token to avoid repeated exchanges
         self._token_cache: dict[str, str] = {}
+
+    def _get_openidconnect_scheme(self, agent_card: AgentCard) -> tuple[str, OpenIdConnectSecurityScheme]:
+        """Retrieve the OpenID Connect security scheme from the agent card, if present."""
+        for scheme_name, scheme in (agent_card.security_schemes or {}).items():
+            if scheme.root.type == "openIdConnect":
+                return scheme_name, scheme.root
+
+        raise ValueError(f"Agent {agent_card.name} does not have an OpenID Connect security scheme.")
 
     async def intercept(
         self,
@@ -104,42 +114,58 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             logger.warning("No AgentCard provided, headers won't include auth")
             return request_payload, http_kwargs
 
-        agent_name = agent_card.name
-
-        # Check if this agent requires token exchange
-        needs_exchange = check_requires_token_exchange(agent_card)
-
-        if not needs_exchange:
-            # Agent doesn't require OAuth2 - no auth header needed
-            logger.debug(f"Agent {agent_name} doesn't require OAuth2, skipping authentication")
-            return request_payload, http_kwargs
-
-        # Token exchange required
-        if not self.token_exchanger:
-            logger.error(
-                f"Agent {agent_name} requires token exchange but no token_exchanger provided. Request will fail."
-            )
+        # No security schemes means no authentication required
+        if agent_card.security_schemes is None or len(agent_card.security_schemes) == 0:
+            logger.info(f"Agent {agent_card.name} has no security schemes, sending request without authentication.")
             return request_payload, http_kwargs
 
         # Check cache first
-        if agent_name in self._token_cache:
-            logger.debug(f"Using cached token for {agent_name}")
-            http_kwargs["headers"]["Authorization"] = f"Bearer {self._token_cache[agent_name]}"
+        if agent_card.name in self._token_cache:
+            logger.debug(f"Using cached token for {agent_card.name}")
+            http_kwargs["headers"]["Authorization"] = f"Bearer {self._token_cache[agent_card.name]}"
             return request_payload, http_kwargs
+
+        # Determine if OpenID Connect security is configured (only OIDC supported for now)
+        try:
+            scheme_name, opendid_scheme = self._get_openidconnect_scheme(agent_card)
+        except ValueError:
+            logger.warning(
+                f"Agent {agent_card.name} does not specify OpenID Connect security scheme. "
+                f"Following schemes are present: {list((agent_card.security_schemes or {}).keys())}. "
+                "Proceeding without auth header."
+            )
+            return request_payload, http_kwargs
+
+        # Verify supported issuer
+        for issuer in self.SUPPORTED_ISSUERS:
+            if opendid_scheme.open_id_connect_url.startswith(issuer):
+                break
+        else:
+            logger.warning(
+                f"Agent {agent_card.name} uses unsupported OIDC issuer: {opendid_scheme.open_id_connect_url}. "
+                "Proceeding without auth header."
+            )
+            return request_payload, http_kwargs
+
+        # Ensure token exchanger is provided
+        if not self.token_exchanger:
+            logger.warning(
+                "Token exchanger not provided. Cannot perform token exchange for OpenID Connect secured agents. "
+                "Proceeding without auth header."
+            )
+            return request_payload, http_kwargs
+
+        # NOTE: according to https://swagger.io/specification/#security-requirement-object if openIdConnect is used,
+        # the scopes are defined per security requirement object
+        required_scopes = []
+        for security in agent_card.security or []:
+            if scheme_name in security:
+                required_scopes.extend(security[scheme_name])
+                break
 
         # Perform token exchange
         try:
-            from .agent_security_config import get_agent_client_id, get_required_scopes
-
-            target_client_id = get_agent_client_id(agent_card)
-            required_scopes = get_required_scopes(agent_card)
-
-            if not target_client_id:
-                logger.error(f"Cannot determine client_id for {agent_name}, cannot exchange token. Request will fail.")
-                return request_payload, http_kwargs
-
-            logger.info(f"Exchanging token for {agent_name} (target: {target_client_id}, scopes: {required_scopes})")
-
+            target_client_id = scheme_name
             exchanged_token = await self.token_exchanger.exchange_token(
                 subject_token=self.user_token,
                 target_client_id=target_client_id,
@@ -147,16 +173,16 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             )
 
             # Cache the exchanged token
-            self._token_cache[agent_name] = exchanged_token
+            self._token_cache[agent_card.name] = exchanged_token
 
             # Add to headers
             http_kwargs["headers"]["Authorization"] = f"Bearer {exchanged_token}"
 
-            logger.info(f"Successfully exchanged token for {agent_name}")
+            logger.info(f"Successfully exchanged token for {agent_card.name}")
 
         except Exception as e:
             logger.error(
-                f"Token exchange failed for {agent_name}: {e}. "
+                f"Token exchange failed for {agent_card.name}: {e}. "
                 "Request will be sent without authentication and will likely fail."
             )
 

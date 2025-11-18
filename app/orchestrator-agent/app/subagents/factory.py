@@ -1,9 +1,7 @@
-import asyncio
 import logging
-from typing import Any, AsyncIterable, Dict, Optional
+from typing import Any, Optional
 
 from a2a.types import AgentCard
-from langchain_core.runnables import RunnableLambda
 
 from ..authentication import SmartTokenInterceptor
 from .config import A2AClientConfig
@@ -18,7 +16,7 @@ def make_a2a_async_runnable(
     user_token: Optional[str] = None,
     token_exchanger: Optional[Any] = None,
     config: Optional[A2AClientConfig] = None,
-) -> RunnableLambda:
+) -> A2AClientRunnable:
     """
     Creates an A2A Runnable with automatic authentication.
 
@@ -70,17 +68,6 @@ def make_a2a_async_runnable(
 
     # Auto-detect authentication strategy
     if user_token:
-        from ..authentication import AgentSecurityConfig
-
-        security_config = AgentSecurityConfig(agent_card)
-        security_summary = security_config.get_summary()
-
-        logger.info(
-            f"Auto-detected security config for {agent_card.name}: "
-            f"OAuth2={security_summary['requires_oauth2']}, "
-            f"TokenExchange={security_summary['requires_token_exchange']}"
-        )
-
         config.auth_interceptor = SmartTokenInterceptor(
             user_token=user_token,
             token_exchanger=token_exchanger,
@@ -90,54 +77,8 @@ def make_a2a_async_runnable(
     else:
         logger.info(f"No user_token provided for {agent_card.name}. Agent will be called without authentication.")
 
-    # Create the runnable (already has both ainvoke and astream)
+    # Create and return the async runnable directly
+    # A2AClientRunnable already implements both ainvoke and astream
     runnable = A2AClientRunnable(agent_card, config)
 
-    # Create LangChain-compatible wrapper
-    async def _async_wrapper(input_data: Dict[str, Any]) -> Dict[str, Any]:
-        logger.debug(f"_async_wrapper called with input: {input_data}")
-        result = await runnable.ainvoke(input_data)
-        logger.debug(f"_async_wrapper returning result: {result}")
-        return result
-
-    async def _async_stream_wrapper(input_data: Dict[str, Any]) -> AsyncIterable[Dict[str, Any]]:
-        """Stream wrapper that can be used by LangChain streaming."""
-        logger.debug(f"_async_stream_wrapper called with input: {input_data}")
-        async for item in runnable.astream(input_data):
-            logger.debug(f"_async_stream_wrapper yielding: {item.get('type')}")
-            yield item
-
-    def _sync_wrapper(input_data: Any) -> Dict[str, Any]:
-        logger.debug(f"_sync_wrapper called with input: {input_data}")
-        logger.debug(f"_sync_wrapper input type: {type(input_data)}")
-
-        # Convert input to dict if needed
-        if not isinstance(input_data, dict):
-            logger.debug("Converting non-dict input to dict")
-            input_data = {"input": str(input_data)}
-        else:
-            logger.debug(f"Input is already a dict with keys: {list(input_data.keys())}")
-
-        # Try to extract context_id from LangChain config if available
-        # Note: DeepAgents' task tool creates isolated contexts, so this may not be available
-        if "config" in input_data and isinstance(input_data["config"], dict):
-            langchain_config = input_data["config"]
-            if "configurable" in langchain_config and "thread_id" in langchain_config["configurable"]:
-                context_id = langchain_config["configurable"]["thread_id"]
-                input_data["context_id"] = context_id
-                logger.debug(f"Extracted context_id from LangChain config: {context_id}")
-
-        logger.debug(f"Calling asyncio.run with input: {input_data}")
-        result = asyncio.run(_async_wrapper(input_data))
-        logger.debug(f"_sync_wrapper returning result: {result}")
-        return result
-
-    # Create a RunnableLambda with streaming support
-    # Note: The _async_stream_wrapper is available but not directly exposed through RunnableLambda
-    # DeepAgents middleware will need to detect and use the runnable.astream() method
-    wrapped_runnable = RunnableLambda(_sync_wrapper)
-
-    # Attach the streaming runnable for middleware access
-    wrapped_runnable._streaming_runnable = runnable  # type: ignore
-
-    return wrapped_runnable
+    return runnable

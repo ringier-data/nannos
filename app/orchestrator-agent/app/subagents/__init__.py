@@ -23,7 +23,6 @@ Usage:
 # Core A2A components
 # Authentication components (imported from parent module)
 from ..authentication import (
-    AgentSecurityConfig,
     AuthenticationMethod,
     AuthPayload,
     ExchangedToken,
@@ -32,9 +31,6 @@ from ..authentication import (
     ServiceAuthRequirement,
     SmartTokenInterceptor,
     TokenExchangeError,
-    get_agent_client_id,
-    get_required_scopes,
-    requires_token_exchange,
 )
 from .config import A2AClientConfig
 from .factory import make_a2a_async_runnable
@@ -57,10 +53,6 @@ __all__ = [
     "OktaTokenExchanger",
     "ExchangedToken",
     "TokenExchangeError",
-    "AgentSecurityConfig",
-    "requires_token_exchange",
-    "get_agent_client_id",
-    "get_required_scopes",
     "AuthenticationMethod",
     "ServiceAuthRequirement",
     "OAuth2ClientConfig",

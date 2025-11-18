@@ -27,7 +27,7 @@ Reference: https://www.keycloak.org/docs/latest/securing_apps/#_token-exchange
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import httpx
@@ -53,16 +53,16 @@ class ExchangedToken(BaseModel):
     issued_token_type: str = "urn:ietf:params:oauth:token-type:access_token"
 
     # Computed fields
-    expires_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __init__(self, **data):
         super().__init__(**data)
         # Calculate expiration time
-        self.expires_at = datetime.utcnow() + timedelta(seconds=self.expires_in)
+        self.expires_at = datetime.now(timezone.utc) + timedelta(seconds=self.expires_in)
 
     def is_expired(self, buffer_seconds: int = 60) -> bool:
         """Check if token is expired (with buffer for clock skew)."""
-        return datetime.utcnow() >= (self.expires_at - timedelta(seconds=buffer_seconds))
+        return datetime.now(timezone.utc) >= (self.expires_at - timedelta(seconds=buffer_seconds))
 
 
 class OktaTokenExchanger:
@@ -90,6 +90,9 @@ class OktaTokenExchanger:
             target_client_id="jira_client_id",
             requested_scopes=["jira:read", "jira:write"],
         )
+
+        # Important: Close when done to avoid event loop issues
+        await exchanger.close()
     """
 
     def __init__(
@@ -229,7 +232,7 @@ class OktaTokenExchanger:
                     "issued_token_type", "urn:ietf:params:oauth:token-type:access_token"
                 ),
             )
-
+            # logger.debug(f"Exchanged token details: {exchanged_token}")
             logger.info(f"Successfully exchanged token for {target_client_id}")
             return exchanged_token.access_token
 
@@ -240,4 +243,11 @@ class OktaTokenExchanger:
     async def close(self):
         """Clean up resources."""
         if self._oauth_client is not None:
-            await self._oauth_client.aclose()
+            try:
+                await self._oauth_client.aclose()
+            except RuntimeError as e:
+                # Ignore "Event loop is closed" errors during cleanup
+                if "Event loop is closed" not in str(e):
+                    raise
+            finally:
+                self._oauth_client = None

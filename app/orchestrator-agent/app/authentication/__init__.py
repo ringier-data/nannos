@@ -10,40 +10,26 @@ Key components:
 - AgentSecurityConfig: Analyzes AgentCard security requirements
 """
 
-from .interceptor import SmartTokenInterceptor
-from .okta_token_exchange import (
-    OktaTokenExchanger,
-    ExchangedToken,
-    TokenExchangeError,
-)
-from .agent_security_config import (
-    AgentSecurityConfig,
-    requires_token_exchange,
-    get_agent_client_id,
-    get_required_scopes,
-)
 from .in_task_auth import (
     AuthenticationMethod,
-    ServiceAuthRequirement,
-    OAuth2ClientConfig,
     AuthPayload,
+    OAuth2ClientConfig,
+    ServiceAuthRequirement,
+)
+from .interceptor import SmartTokenInterceptor
+from .okta_token_exchange import (
+    ExchangedToken,
+    OktaTokenExchanger,
+    TokenExchangeError,
 )
 
 __all__ = [
     # Interceptor
     "SmartTokenInterceptor",
-    
     # Token Exchange
     "OktaTokenExchanger",
     "ExchangedToken",
     "TokenExchangeError",
-    
-    # Security Config
-    "AgentSecurityConfig",
-    "requires_token_exchange",
-    "get_agent_client_id",
-    "get_required_scopes",
-    
     # In-Task Authentication
     "AuthenticationMethod",
     "ServiceAuthRequirement",
