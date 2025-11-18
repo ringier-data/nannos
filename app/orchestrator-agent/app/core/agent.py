@@ -27,6 +27,7 @@ from ..models import AgentFrameworkAuthError, AgentSettings, AgentStreamResponse
 from ..subagents import A2ATaskTrackingMiddleware
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 from .graph_manager import GraphManager
+from .registry import RegistryService, User
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class OrchestratorDeepAgent:
             ),
             deploy=False,
         )
+        self.registry_service = RegistryService()
 
         # Initialize retry middleware for sub-agent tool calls
         # Applies exponential backoff with jitter to all "task" tool invocations (all sub-agents)
@@ -116,6 +118,13 @@ class OrchestratorDeepAgent:
             middleware=middleware_stack,
         )
 
+    async def _get_user_from_registry(self, sub: str) -> User:
+        """Fetch agents from a service registry using the provided sub."""
+        user = await self.registry_service.get_user(sub)
+        if not user:
+            raise ValueError(f"User with sub {sub} not found in registry")
+        return user
+
     async def update_config(self, user_config: UserConfig) -> UserConfig:
         """Get configuration for the orchestrator deep agent.
 
@@ -127,15 +136,20 @@ class OrchestratorDeepAgent:
         """
         logger.debug(f"Getting config for user_id: {user_config.user_id}")
 
+        user = await self._get_user_from_registry(user_config.user_id)
+
         # Discover sub-agents with token exchange support
-        sub_agents = await self.agent_discovery_service.discover_agents(
-            user_config.access_token.get_secret_value(),
-            self.a2a_middleware,
+        sub_agents = await self.agent_discovery_service.register_agents(
+            agent_urls=user.agent_urls,
+            token=user_config.access_token.get_secret_value(),
+            streaming_middleware=self.a2a_middleware,
         )
 
         # Discover tools with token exchange support
         tools = await self.tool_discovery_service.discover_tools(
             user_config.access_token.get_secret_value(),
+            # TODO: reason better about how and if mcp tools shall be available to the orchestrator at all
+            white_list=user.tool_names if user.tool_names else None,
         )
         logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
 

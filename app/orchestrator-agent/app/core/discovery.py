@@ -39,14 +39,9 @@ class AgentDiscoveryService:
         """
         self.config = config
 
-    async def _get_agents_from_registry(self, token: str) -> List[str]:
-        """Fetch agents from a service registry using the provided token."""
-        # TODO: implement actual registry call
-        logger.debug("Fetching agent URLs from service registry")
-        return ["http://localhost:10000", "http://localhost:9999"]
-
-    async def discover_agents(
+    async def register_agents(
         self,
+        agent_urls: List[str],
         token: str,
         streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
     ) -> List[CompiledSubAgent]:
@@ -70,7 +65,6 @@ class AgentDiscoveryService:
         )
 
         sub_agents = []
-        agent_urls = await self._get_agents_from_registry(token)
         for base_url in agent_urls:
             try:
                 agent = await self._discover_single_agent(
@@ -197,6 +191,7 @@ class ToolDiscoveryService:
     async def discover_tools(
         self,
         token: str,
+        white_list: Optional[List[str]] = None,
     ) -> List[BaseTool]:
         """Discover available MCP tools with token exchange for mcp-gateway.
 
@@ -232,6 +227,7 @@ class ToolDiscoveryService:
             logger.info("Successfully exchanged token for mcp-gateway")
 
             # Use the exchanged token for MCP connection
+            # logger.debug(f"Gatana MCP gateway token: {mcp_gateway_token}")
             client = MultiServerMCPClient(
                 connections={
                     "gatana": StreamableHttpConnection(
@@ -244,10 +240,13 @@ class ToolDiscoveryService:
 
             tools = await client.get_tools()
             logger.debug(f"Discovered {len(tools)} MCP tools")
+            if white_list:
+                tools = [tool for tool in tools if tool.name in white_list]
+                logger.debug(f"Filtered tools based on white list: {len(tools)} tools remain")
             return tools
 
         except Exception as e:
-            logger.error(f"Failed to discover tools with token exchange: {e}")
+            logger.error(f"Failed to discover tools with token exchange: {e}", exc_info=True)
             return []
         finally:
             await token_exchanger.close()

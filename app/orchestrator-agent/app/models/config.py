@@ -35,6 +35,15 @@ class UserConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+class DynamoDBConfig(BaseModel):
+    """DynamoDB configuration."""
+
+    region: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "eu-central-1"))
+    users_table: str = Field(
+        default_factory=lambda: os.getenv("DYNAMODB_USERS_TABLE", "dev-alloy-infrastructure-agents-users")
+    )
+
+
 class AgentSettings:
     """Static settings for the Orchestrator Deep Agent.
 
