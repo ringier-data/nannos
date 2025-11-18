@@ -1,0 +1,35 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Infrastructure Agents Shared Cloudfront Resources (v{{ project_version }})'
+
+Resources:
+
+  # since we hit the limit of cache policies per account:
+  # "Limit exceeded for resource of type 'AWS::CloudFront::CachePolicy'. Reason: Account's Cache Policies limit reached. (Service: CloudFront, Status Code: 400, Request ID: 61c8ec96-fc25-4fa2-ac0d-4d7e0fc5dc74)
+  # we create a shared no-cache policy for all agents to use
+  AgentsCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: '{{ env }}-{{ project_id }}-{{ software_component }}-no-cache'
+        Comment: 'No cache policy for infrastructure agents'
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          EnableAcceptEncodingBrotli: false
+          HeadersConfig:
+            HeaderBehavior: 'none'
+          QueryStringsConfig:
+            QueryStringBehavior: 'none'
+          CookiesConfig:
+            CookieBehavior: 'none'
+
+Outputs:
+
+  AgentsCachePolicyId:
+    Description: 'Shared cache policy ID for infrastructure agents with no caching'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-agents-cache-policy-id'
+    Value: !Ref AgentsCachePolicy

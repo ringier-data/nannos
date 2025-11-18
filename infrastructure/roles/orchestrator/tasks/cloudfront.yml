@@ -21,5 +21,5 @@
   include_role:
     name: 'ringier.aws_cicd.run_cloudformation'
   vars:
-    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-cloudfront-distribution'
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-cloudfront-distribution'
     template: '{{ cloudformation_template }}'

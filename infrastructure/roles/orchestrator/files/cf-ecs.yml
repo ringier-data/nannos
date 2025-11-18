@@ -85,7 +85,15 @@ Resources:
                   - 'dynamodb:DescribeTable'
                 Resource:
                   - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
-
+              - Sid: 'DynamoDBUserTableReadAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }

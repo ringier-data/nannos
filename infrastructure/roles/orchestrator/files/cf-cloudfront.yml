@@ -33,7 +33,7 @@ Resources:
           CachedMethods:
             - 'GET'
             - 'HEAD'
-          CachePolicyId: !Ref NoCacheCachePolicy
+          CachePolicyId: !ImportValue '{{ project_id }}-{{ software_component }}-agents-cache-policy-id'
           OriginRequestPolicyId: !Ref OrchestratorAgentOriginRequestPolicy
           TargetOriginId: 'cloudfront-alb-orchestrator-agent'
           ViewerProtocolPolicy: 'redirect-to-https'
@@ -48,25 +48,6 @@ Resources:
         - { Key: 'Environment', Value: '{{ env }}' }
         - { Key: 'Version', Value: 'v{{ project_version }}' }
         - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
-
-  NoCacheCachePolicy:
-    Type: AWS::CloudFront::CachePolicy
-    Properties:
-      CachePolicyConfig:
-        Name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-no-cache'
-        Comment: 'No cache policy for orchestrator services'
-        DefaultTTL: 0
-        MaxTTL: 0
-        MinTTL: 0
-        ParametersInCacheKeyAndForwardedToOrigin:
-          EnableAcceptEncodingGzip: false
-          EnableAcceptEncodingBrotli: false
-          HeadersConfig:
-            HeaderBehavior: 'none'
-          QueryStringsConfig:
-            QueryStringBehavior: 'none'
-          CookiesConfig:
-            CookieBehavior: 'none'
 
   OrchestratorAgentOriginRequestPolicy:
     Type: AWS::CloudFront::OriginRequestPolicy

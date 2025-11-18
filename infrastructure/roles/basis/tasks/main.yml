@@ -1,3 +1,4 @@
 ---
 
 - import_tasks: 'dynamodb.yml'
+- import_tasks: 'cloudfront.yml'
