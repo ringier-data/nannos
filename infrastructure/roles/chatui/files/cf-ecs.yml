@@ -129,7 +129,7 @@ Resources:
             - { Name: "ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
             - { Name: "ORCHESTRATOR_CLIENT_ID", Value: '{{ orchestrator_oidc_client_id }}' }
           Secrets:
-            - { Name: "OKTA_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_oidc_client_secret }}' }
+            - { Name: "OIDC_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_oidc_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\").read()" || exit 1']

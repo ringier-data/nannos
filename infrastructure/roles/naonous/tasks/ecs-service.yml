@@ -1,11 +1,11 @@
 ---
-- name: 'copy ringier-a2a-sdk into foundry-jira-a2a-server directory'
+- name: 'copy ringier-a2a-sdk into naonous-a2a-server directory'
   block:
     # NOTE: necessary until we will distribute ringier-a2a-sdk via a package index
     - name: 'copy ringier-a2a-sdk'
       synchronize:
         src: '{{ playbook_dir }}/../app/ringier-a2a-sdk/'
-        dest: '{{ playbook_dir }}/../app/foundry-jira-a2a-server/ringier-a2a-sdk/'
+        dest: '{{ playbook_dir }}/../app/naonous-a2a-server/ringier-a2a-sdk/'
         rsync_opts:
           - '--exclude=__pycache__'
           - '--exclude=*.pyc'
@@ -16,23 +16,23 @@
           - '--exclude=.mypy_cache'
           - '--exclude=.ruff_cache'
 
-    - name: 'build and push the Foundry Jira Agent Docker image to ECR'
+    - name: 'build and push the Naonous Docker image to ECR'
       include_role:
         name: 'ringier.aws_cicd.build_push_docker_image'
       vars:
-        ecr_repository_name: '{{ foundry_jira_agent_ecr_repository_name }}'
-        code_path: '{{ playbook_dir }}/../app/foundry-jira-a2a-server'
+        ecr_repository_name: '{{ naonous_ecr_repository_name }}'
+        code_path: '{{ playbook_dir }}/../app/naonous-a2a-server'
         docker_build_args:
-          API_PORT: '{{ foundry_jira_agent_public_api_port }}'
+          API_PORT: '{{ naonous_public_api_port }}'
   always:
     - name: 'clean up copied ringier-a2a-sdk'
       file:
-        path: '{{ playbook_dir }}/../app/foundry-jira-a2a-server/ringier-a2a-sdk'
+        path: '{{ playbook_dir }}/../app/naonous-a2a-server/ringier-a2a-sdk'
         state: absent
 
-- name: 'set foundry jira agent docker image fact'
+- name: 'set naonous docker image fact'
   set_fact:
-    foundry_jira_agent_docker_image: '{{ docker_image_full_name_and_tag }}'
+    naonous_docker_image: '{{ docker_image_full_name_and_tag }}'
 
 - name: 'set cloudformation template'
   set_fact:
@@ -42,5 +42,5 @@
   include_role:
     name: 'ringier.aws_cicd.run_cloudformation'
   vars:
-    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-ecs'
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-naonous-ecs'
     template: '{{ cloudformation_template }}'

@@ -1,0 +1,117 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Naonous Infrastructure - CloudFront distributions (v{{ project_version }})'
+
+
+Resources:
+  NaonousDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: 'cloudfront-alb-naonous'
+            DomainName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+            CustomOriginConfig:
+              OriginProtocolPolicy: 'https-only'
+              OriginKeepaliveTimeout: '{{ [60, ((alb_http_keepalive_timeout_seconds | int) - 2)] | min }}'
+        Enabled: true
+        HttpVersion: 'http1.1'
+        IPV6Enabled: true
+        Comment: 'Alloy Naonous - A2A protocol agent at root'
+        Aliases:
+          - '{{ naonous_fqdn }}'
+        DefaultCacheBehavior:
+          Compress: true
+          AllowedMethods:
+            - 'GET'
+            - 'HEAD'
+            - 'POST'
+            - 'PUT'
+            - 'PATCH'
+            - 'DELETE'
+            - 'OPTIONS'
+          CachedMethods:
+            - 'GET'
+            - 'HEAD'
+          CachePolicyId: !Ref NoCacheCachePolicy
+          OriginRequestPolicyId: !Ref NaonousOriginRequestPolicy
+          TargetOriginId: 'cloudfront-alb-naonous'
+          ViewerProtocolPolicy: 'redirect-to-https'
+        PriceClass: 'PriceClass_100'
+        ViewerCertificate:
+          AcmCertificateArn: '{{ cloudfront_ssl_certificate }}'
+          SslSupportMethod: 'sni-only'
+          MinimumProtocolVersion: 'TLSv1.2_2021'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-naonous-distribution' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  NoCacheCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: '{{ env }}-{{ project_id }}-{{ software_component }}-naonous-no-cache'
+        Comment: 'No cache policy for naonous services'
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          EnableAcceptEncodingBrotli: false
+          HeadersConfig:
+            HeaderBehavior: 'none'
+          QueryStringsConfig:
+            QueryStringBehavior: 'none'
+          CookiesConfig:
+            CookieBehavior: 'none'
+
+  NaonousOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: '{{ env }}-{{ project_id }}-{{ software_component }}-naonous'
+        Comment: 'Alloy Naonous origin request policy'
+        CookiesConfig:
+          CookieBehavior: 'none'
+        HeadersConfig:
+          HeaderBehavior: 'allViewer'
+        QueryStringsConfig:
+          QueryStringBehavior: 'all'
+
+  NaonousRoute53RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: '{{ naonous_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'A'
+      AliasTarget:
+        DNSName: !GetAtt NaonousDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+
+  NaonousRoute53RecordSetIPv6:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      Name: '{{ naonous_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      Type: 'AAAA'
+      AliasTarget:
+        DNSName: !GetAtt NaonousDistribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+
+
+Outputs:
+
+  NaonousCloudFrontDistributionId:
+    Description: 'Naonous CloudFront Distribution ID'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-naonous-cloudfront-distribution-id'
+    Value: !Ref NaonousDistribution
+  
+  NaonousCloudFrontDomainName:
+    Description: 'Naonous CloudFront Domain Name'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-naonous-cloudfront-domain'
+    Value: !GetAtt NaonousDistribution.DomainName

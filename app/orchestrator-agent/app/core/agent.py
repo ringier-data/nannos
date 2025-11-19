@@ -188,7 +188,7 @@ class OrchestratorDeepAgent:
             "name": user_config.name,
         }
         sub_agents = await self.agent_discovery_service.register_agents(
-            agent_urls=[x.replace("https://foundry-jira.d.alloy.ch", "http://localhost:9996") for x in user.agent_urls],
+            agent_urls=user.agent_urls,
             token=user_config.access_token.get_secret_value(),
             user_context=user_context,
             streaming_middleware=self.a2a_middleware,
