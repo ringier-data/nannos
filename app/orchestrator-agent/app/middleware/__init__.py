@@ -7,29 +7,25 @@ context management, and status tracking.
 
 Key Components:
 - AuthErrorDetectionMiddleware: Detects and handles authentication errors
-- OktaAuthMiddleware: OAuth2 authentication via Okta
+- OidcAuthMiddleware: OAuth2 authentication via OIDC
 - TodoStatusMiddleware: Tracks and manages todo status updates
 - UserContextMiddleware: Extracts and manages user context
 
 Usage:
     from app.middleware import (
         AuthErrorDetectionMiddleware,
-        OktaAuthMiddleware,
+        OidcAuthMiddleware,
         TodoStatusMiddleware,
         UserContextMiddleware,
     )
 """
 
 from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState
-from .okta_auth_middleware import OktaAuthMiddleware
 from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
-from .user_context_middleware import UserContextMiddleware
 
 __all__ = [
     "AuthErrorDetectionMiddleware",
     "AuthErrorState",
-    "OktaAuthMiddleware",
     "TodoStatusMiddleware",
     "TodoStatusState",
-    "UserContextMiddleware",
 ]

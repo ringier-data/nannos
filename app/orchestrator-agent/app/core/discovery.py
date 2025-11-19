@@ -13,8 +13,8 @@ from deepagents import CompiledSubAgent
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
+from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..authentication.okta_token_exchange import OktaTokenExchanger
 from ..models import AgentSettings
 from ..subagents import A2ATaskTrackingMiddleware, make_a2a_async_runnable
 
@@ -31,6 +31,7 @@ class AgentDiscoveryService:
     def __init__(
         self,
         config: AgentSettings,
+        oauth2_client: OidcOAuth2Client,
     ):
         """Initialize the discovery service.
 
@@ -38,17 +39,22 @@ class AgentDiscoveryService:
             config: AgentSettings instance containing configuration
         """
         self.config = config
+        self.oauth2_client = oauth2_client
 
     async def register_agents(
         self,
         agent_urls: List[str],
         token: str,
+        user_context: Optional[dict[str, Any]] = None,
         streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
     ) -> List[CompiledSubAgent]:
         """Discover available sub-agents by fetching their agent cards.
 
         Args:
+            agent_urls: List of agent URLs to discover
             token: User's access token for authentication and token exchange
+            user_context: Optional user context dict with user_id, email, name
+            client_credentials_auth: Optional OidcClientCredentialsAuth for client credentials flow
             streaming_middleware: Optional middleware for registering streaming runnables
 
         Returns:
@@ -57,13 +63,6 @@ class AgentDiscoveryService:
 
         logger.debug("Starting agent discovery...")
 
-        # Initialize token exchanger for sub-agent authentication
-        token_exchanger = OktaTokenExchanger(
-            client_id=self.config.get_okta_client_id(),
-            client_secret=self.config.get_okta_client_secret().get_secret_value(),
-            issuer=self.config.get_okta_issuer(),
-        )
-
         sub_agents = []
         for base_url in agent_urls:
             try:
@@ -71,7 +70,7 @@ class AgentDiscoveryService:
                     base_url,
                     streaming_middleware,
                     token,
-                    token_exchanger,
+                    user_context,
                 )
                 if agent:
                     sub_agents.append(agent)
@@ -81,9 +80,6 @@ class AgentDiscoveryService:
 
         logger.debug(f"Agent discovery complete. Found {len(sub_agents)} agents")
 
-        # Clean up token exchanger
-        await token_exchanger.close()
-
         return sub_agents
 
     async def _discover_single_agent(
@@ -91,7 +87,7 @@ class AgentDiscoveryService:
         base_url: str,
         streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
         user_token: Optional[str] = None,
-        token_exchanger: Optional[Any] = None,
+        user_context: Optional[dict[str, Any]] = None,
     ) -> Optional[CompiledSubAgent]:
         """Discover a single agent from the given URL.
 
@@ -99,7 +95,7 @@ class AgentDiscoveryService:
             base_url: Base URL of the agent
             streaming_middleware: Optional middleware for registering streaming runnables
             user_token: User's access token for authentication
-            token_exchanger: Token exchanger for OAuth2 token exchange
+            user_context: Optional user context dict with user_id, email, name
 
         Returns:
             CompiledSubAgent if discovery succeeds, None otherwise
@@ -119,11 +115,12 @@ class AgentDiscoveryService:
             agent_card = AgentCard(**agent_card_data)
             logger.debug(f"Agent card parsed: name={agent_card.name}, url={agent_card.url}")
 
-        # Create the A2A runnable with the proper agent card and token exchanger
+        # Create the A2A runnable with the proper agent card and authentication
         base_runnable = make_a2a_async_runnable(
-            agent_card=agent_card,
+            agent_card,
+            self.oauth2_client,
             user_token=user_token,
-            token_exchanger=token_exchanger,
+            user_context=user_context,
         )
         logger.debug(f"A2A runnable created successfully for {agent_card.url}")
 
@@ -180,13 +177,14 @@ class ToolDiscoveryService:
     Handles connecting to MCP servers and retrieving available tools.
     """
 
-    def __init__(self, config: AgentSettings):
+    def __init__(self, config: AgentSettings, oauth2_client: OidcOAuth2Client):
         """Initialize the tool discovery service.
 
         Args:
             config: AgentSettings instance containing configuration
         """
         self.config = config
+        self.oauth2_client = oauth2_client
 
     async def discover_tools(
         self,
@@ -206,20 +204,10 @@ class ToolDiscoveryService:
             List of discovered tools
         """
         logger.debug("Discovering tools for orchestrator deep agent")
-
-        # Perform token exchange for mcp-gateway
-        from ..authentication.okta_token_exchange import OktaTokenExchanger
-
-        token_exchanger = OktaTokenExchanger(
-            client_id=self.config.get_okta_client_id(),
-            client_secret=self.config.get_okta_client_secret().get_secret_value(),
-            issuer=self.config.get_okta_issuer(),
-        )
-
         try:
             # Exchange user token for mcp-gateway token
             # The target client is 'mcp-gateway' in the same Keycloak realm
-            mcp_gateway_token = await token_exchanger.exchange_token(
+            mcp_gateway_token = await self.oauth2_client.exchange_token(
                 subject_token=token,
                 target_client_id="mcp-gateway",
                 requested_scopes=["openid", "profile", "offline_access"],
@@ -248,5 +236,5 @@ class ToolDiscoveryService:
         except Exception as e:
             logger.error(f"Failed to discover tools with token exchange: {e}", exc_info=True)
             return []
-        finally:
-            await token_exchanger.close()
+        # finally:
+        #     await self.oauth2_client.close()

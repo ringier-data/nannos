@@ -1,11 +1,33 @@
 ---
-- name: 'build and push the Orchestrator Agent Docker image to ECR'
-  include_role:
-    name: 'ringier.aws_cicd.build_push_docker_image'
-  vars:
-    ecr_repository_name: '{{ orchestrator_agent_ecr_repository_name }}'
-    code_path: '{{ playbook_dir }}/../app/orchestrator-agent'
-    adhoc_deploy: true
+- name: 'copy ringier-a2a-sdk into orchestrator-agent directory'
+  block:
+    # NOTE: necessary until we will distribute ringier-a2a-sdk via a package index
+    - name: 'copy ringier-a2a-sdk'
+      synchronize:
+        src: '{{ playbook_dir }}/../app/ringier-a2a-sdk/'
+        dest: '{{ playbook_dir }}/../app/orchestrator-agent/ringier-a2a-sdk/'
+        rsync_opts:
+          - '--exclude=__pycache__'
+          - '--exclude=*.pyc'
+          - '--exclude=.venv'
+          - '--exclude=.git'
+          - '--exclude=.pytest_cache'
+          - '--exclude=tests'
+          - '--exclude=.mypy_cache'
+          - '--exclude=.ruff_cache'
+
+    - name: 'build and push the Orchestrator Agent Docker image to ECR'
+      include_role:
+        name: 'ringier.aws_cicd.build_push_docker_image'
+      vars:
+        ecr_repository_name: '{{ orchestrator_agent_ecr_repository_name }}'
+        code_path: '{{ playbook_dir }}/../app/orchestrator-agent'
+        adhoc_deploy: true
+  always:
+    - name: 'clean up copied ringier-a2a-sdk'
+      file:
+        path: '{{ playbook_dir }}/../app/orchestrator-agent/ringier-a2a-sdk'
+        state: absent
 
 - name: 'set orchestrator agent docker image fact'
   set_fact:

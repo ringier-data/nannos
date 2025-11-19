@@ -19,13 +19,11 @@ Usage:
     )
 """
 
-from .context_builder import OrchestratorRequestContextBuilder
 from .stream_handler import StreamHandler
 from .utils import handle_auth_error, parse_tool_exception, should_retry
 
 __all__ = [
     "StreamHandler",
-    "OrchestratorRequestContextBuilder",
     "should_retry",
     "handle_auth_error",
     "parse_tool_exception",

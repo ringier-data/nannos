@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class User(BaseModel):
     """User model for DynamoDB storage."""
 
-    id: str  # Primary key (sub from Okta)
+    id: str  # Primary key (sub from OIDC)
     agent_urls: list[str] = []  # List of registered agent URLs
     tool_names: list[str] = []  # List of registered tool names
 
@@ -60,7 +60,7 @@ class RegistryService:
         """Retrieve a user by ID.
 
         Args:
-            user_id: The user's ID (sub from Okta)
+            user_id: The user's ID (sub from OIDC)
 
         Returns:
             The user or None if not found

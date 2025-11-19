@@ -45,7 +45,7 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_openai_api_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_langsmith_api_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_jwt_secret_key }}'
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_okta_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_oidc_client_secret }}'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }
@@ -132,8 +132,8 @@ Resources:
             - { Name: 'ENV', Value: '{{ env }}' }
             - { Name: 'AWS_REGION', Value: !Ref 'AWS::Region' }
             - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
-            - { Name: 'OKTA_ISSUER', Value: '{{ okta_issuer }}' }
-            - { Name: 'OKTA_CLIENT_ID', Value: '{{ orchestrator_okta_client_id }}' }
+            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
+            - { Name: 'OIDC_CLIENT_ID', Value: '{{ orchestrator_oidc_client_id }}' }
             - { Name: 'OPENAI_API_VERSION', Value: '{{ openai_api_version }}' }
             - { Name: 'AZURE_OPENAI_CHAT_MODEL_NAME', Value: '{{ azure_openai_chat_model_name }}' }
             - { Name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', Value: '{{ azure_openai_chat_deployment }}' }
@@ -147,7 +147,7 @@ Resources:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
             - { Name: 'JWT_SECRET_KEY', ValueFrom: '{{ ssmkey_orchestrator_jwt_secret_key }}' }
-            - { Name: 'OKTA_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_okta_client_secret }}' }
+            - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_oidc_client_secret }}' }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ orchestrator_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
             Interval: 60

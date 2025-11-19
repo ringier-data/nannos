@@ -20,6 +20,7 @@ from langgraph.types import Command
 
 # from langgraph.checkpoint.memory import MemorySaver
 from langgraph_checkpoint_dynamodb import DynamoDBConfig, DynamoDBSaver, DynamoDBTableConfig
+from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
 from ..handlers import StreamHandler, handle_auth_error, should_retry
 from ..middleware import AuthErrorDetectionMiddleware, TodoStatusMiddleware
@@ -30,6 +31,39 @@ from .graph_manager import GraphManager
 from .registry import RegistryService, User
 
 logger = logging.getLogger(__name__)
+
+# **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
+
+# **Instructions:**
+# YOU MUST NOT literally repeat what the agent responds unless asked to do so. Add context, summarize the conversation, and add your own thoughts.
+# YOU MUST engage in multi-turn conversations with the agents. NEVER ask the user for permission to engage multiple times with the same agent.
+# YOU MUST ALWAYS, UNDER ALL CIRCUMSTANCES, COMMUNICATE WITH ALL AGENTS NECESSARY TO COMPLETE THE TASK.
+# NEVER STOP COMMUNICATING WITH THE AGENTS UNTIL THE TASK IS COMPLETED.
+
+# If you have tools available to display information to the user, you MUST use them.
+
+# ${
+#   additionalInstructions
+#     ? `**Additional Instructions:**\n${additionalInstructions}`
+#     : ""
+# }
+
+# **Core Directives:**
+
+# * **Task Delegation:** Utilize the \`sendMessage\` function to assign actionable tasks to remote agents.
+# * **Contextual Awareness for Remote Agents:** If a remote agent repeatedly requests user confirmation, assume it lacks access to the full conversation history. In such cases, enrich the task description with all necessary contextual information relevant to that specific agent.
+# * **Autonomous Agent Engagement:** Never seek user permission before engaging with remote agents. If multiple agents are required to fulfill a request, connect with them directly without requesting user preference or confirmation.
+# * **Transparent Communication:** Always present the complete and detailed response from the remote agent to the user.
+# * **User Confirmation Relay:** If a remote agent asks for confirmation, and the user has not already provided it, relay this confirmation request to the user.
+# * **Focused Information Sharing:** Provide remote agents with only relevant contextual information. Avoid extraneous details.
+# * **No Redundant Confirmations:** Do not ask remote agents for confirmation of information or actions.
+# * **Tool Reliance:** Strictly rely on available tools to address user requests. Do not generate responses based on assumptions. If information is insufficient, request clarification from the user.
+# * **Prioritize Recent Interaction:** Focus primarily on the most recent parts of the conversation when processing requests.
+# * **Active Agent Prioritization:** If an active agent is already engaged, route subsequent related requests to that agent using the appropriate task update tool.
+
+# **Agent Roster:**
+
+# * Available Agents:
 
 
 class OrchestratorDeepAgent:
@@ -47,6 +81,15 @@ class OrchestratorDeepAgent:
             temperature=0,
             model=self.config.get_azure_model_name(),
         )
+
+        # Initialize client credentials auth for agent-to-agent communication
+        self.oauth2_client = OidcOAuth2Client(
+            client_id=self.config.get_oidc_client_id(),
+            client_secret=self.config.get_oidc_client_secret().get_secret_value(),
+            issuer=self.config.get_oidc_issuer(),
+        )
+        logger.info("Initialized OAuth2 client credentials authenticator")
+
         # OPTIMIZED GRAPH ARCHITECTURE:
         # We maintain one graph per unique configuration (tools/subagents set),
         # NOT per thread. This ensures:
@@ -60,8 +103,8 @@ class OrchestratorDeepAgent:
         # Key insight: Multiple users can share the same graph if they have
         # the same tools/subagents available. User isolation comes from thread_id.
         self.graphs = {}  # Cache of graphs by config_signature
-        self.tool_discovery_service = ToolDiscoveryService(self.config)
-        self.agent_discovery_service = AgentDiscoveryService(self.config)
+        self.tool_discovery_service = ToolDiscoveryService(self.config, oauth2_client=self.oauth2_client)
+        self.agent_discovery_service = AgentDiscoveryService(self.config, oauth2_client=self.oauth2_client)
 
         # Create memory saver for persistent conversations
         # This is shared across all users but isolates by thread_id
@@ -138,10 +181,16 @@ class OrchestratorDeepAgent:
 
         user = await self._get_user_from_registry(user_config.user_id)
 
-        # Discover sub-agents with token exchange support
+        # Discover sub-agents with token exchange and client credentials support
+        user_context = {
+            "user_id": user_config.user_id,
+            "email": user_config.email,
+            "name": user_config.name,
+        }
         sub_agents = await self.agent_discovery_service.register_agents(
-            agent_urls=user.agent_urls,
+            agent_urls=[x.replace("https://foundry-jira.d.alloy.ch", "http://localhost:9996") for x in user.agent_urls],
             token=user_config.access_token.get_secret_value(),
+            user_context=user_context,
             streaming_middleware=self.a2a_middleware,
         )
 

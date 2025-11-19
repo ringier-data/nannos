@@ -2,23 +2,25 @@
 Smart Token Interceptor for A2A Agent-to-Agent Communication.
 
 Automatically detects authentication requirements from AgentCard security configuration
-and performs OAuth2 token exchange (RFC 8693) when needed.
+and performs either OAuth2 token exchange (RFC 8693) or client credentials flow.
 
 Features:
 - Auto-detection: Examines AgentCard.security_schemes to determine auth requirements
-- Token exchange: Exchanges user token for service-specific tokens via RFC 8693
+- Token exchange: Exchanges user token for service-specific tokens via RFC 8693 (OIDC)
+- Client credentials: Uses orchestrator JWT for bearer token authentication (JWT)
 - No auth support: Skips authentication for public endpoints
-- Token caching: Caches exchanged tokens per agent to minimize API calls
+- Token caching: Caches exchanged/fetched tokens per agent to minimize API calls
+- User context propagation: Injects user context into message metadata for JWT auth
 """
 
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 from a2a.client.middleware import ClientCallContext, ClientCallInterceptor
-from a2a.types import AgentCard, OpenIdConnectSecurityScheme
+from a2a.types import AgentCard, HTTPAuthSecurityScheme
 
 if TYPE_CHECKING:
-    from .okta_token_exchange import OktaTokenExchanger
+    from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 
 
 logger = logging.getLogger(__name__)
@@ -31,18 +33,19 @@ class SmartTokenInterceptor(ClientCallInterceptor):
     This interceptor examines the target AgentCard's security configuration
     to automatically determine whether:
     1. No authentication is needed (public endpoint) - No auth header added
-    2. OAuth2 token exchange is required - Performs RFC 8693 token exchange
+    2. JWT bearer authentication (orchestrator client credentials) - Uses get_token()
+    3. OAuth2 token exchange (user token exchange) - Uses exchange_token() via RFC 8693
 
-    If token exchange is required but fails, the request proceeds without
+    If authentication is required but fails, the request proceeds without
     authentication (and will likely fail at the target agent).
 
     Usage:
-        from .okta_token_exchange import OktaTokenExchanger
+        from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 
-        token_exchanger = OktaTokenExchanger(...)
+        oauth_client = OidcOAuth2Client(...)
         interceptor = SmartTokenInterceptor(
             user_token=user_jwt,
-            token_exchanger=token_exchanger
+            oauth_client=oauth_client
         )
         config = A2AClientConfig(auth_interceptor=interceptor)
     """
@@ -54,29 +57,48 @@ class SmartTokenInterceptor(ClientCallInterceptor):
     def __init__(
         self,
         user_token: str,
-        token_exchanger: Optional["OktaTokenExchanger"] = None,  # type: ignore
+        oauth2_client: "OidcOAuth2Client",
+        user_context: Optional[dict[str, Any]] = None,
     ):
         """
         Initialize smart token interceptor.
 
         Args:
             user_token: User's authenticated access token
-            token_exchanger: Optional OktaTokenExchanger for token exchange
-                           Required if calling agents with OAuth2 security
+            user_context: Optional user context dict with user_id, email, name
+            oauth_client: Optional OidcOAuth2Client for both JWT auth and token exchange
         """
         self.user_token = user_token
-        self.token_exchanger = token_exchanger
+        self.user_context = user_context or {}
+        self.oauth2_client = oauth2_client
 
-        # Cache of agent_name -> exchanged_token to avoid repeated exchanges
+        # Cache of agent_name -> token to avoid repeated exchanges/fetches
         self._token_cache: dict[str, str] = {}
 
-    def _get_openidconnect_scheme(self, agent_card: AgentCard) -> tuple[str, OpenIdConnectSecurityScheme]:
-        """Retrieve the OpenID Connect security scheme from the agent card, if present."""
-        for scheme_name, scheme in (agent_card.security_schemes or {}).items():
-            if scheme.root.type == "openIdConnect":
-                return scheme_name, scheme.root
+    def _detect_auth_scheme(self, agent_card: AgentCard) -> tuple[str, str, Any]:
+        """
+        Detect authentication scheme from agent card.
 
-        raise ValueError(f"Agent {agent_card.name} does not have an OpenID Connect security scheme.")
+        Returns:
+            Tuple of (auth_type, scheme_name, scheme_object)
+            where auth_type is "jwt" or "oidc"
+
+        Raises:
+            ValueError: If no supported scheme found
+        """
+        for scheme_name, scheme in (agent_card.security_schemes or {}).items():
+            # Check for JWT bearer authentication
+            if scheme.root.type == "http":
+                http_scheme = scheme.root
+                if isinstance(http_scheme, HTTPAuthSecurityScheme):
+                    if http_scheme.scheme == "bearer" and http_scheme.bearer_format == "JWT":
+                        return ("jwt", scheme_name, http_scheme)
+
+            # Check for OpenID Connect
+            if scheme.root.type == "openIdConnect":
+                return ("oidc", scheme_name, scheme.root)
+
+        raise ValueError(f"Agent {agent_card.name} does not have a supported security scheme (JWT or OIDC).")
 
     async def intercept(
         self,
@@ -90,10 +112,11 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         Intelligently add authentication based on agent card security config.
 
         Process:
-        1. Check if agent_card has OAuth2 security configured
-        2. If no: don't add auth header (public endpoint)
-        3. If yes: perform token exchange via RFC 8693
-        4. If token exchange fails: don't add auth header (request will likely fail)
+        1. Check if agent_card has security configured
+        2. Detect auth scheme (JWT bearer or OIDC)
+        3. JWT: Use client credentials flow + inject user context into metadata
+        4. OIDC: Use token exchange via RFC 8693
+        5. If authentication fails: don't add auth header (request will likely fail)
 
         Args:
             method_name: A2A RPC method
@@ -103,7 +126,7 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             context: Request context
 
         Returns:
-            Tuple of (request_payload, modified_http_kwargs)
+            Tuple of (modified_request_payload, modified_http_kwargs)
         """
         # Ensure headers dict exists
         if "headers" not in http_kwargs:
@@ -123,40 +146,140 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         if agent_card.name in self._token_cache:
             logger.debug(f"Using cached token for {agent_card.name}")
             http_kwargs["headers"]["Authorization"] = f"Bearer {self._token_cache[agent_card.name]}"
+
+            # For JWT auth, still inject user context into metadata
+            try:
+                auth_type, _, _ = self._detect_auth_scheme(agent_card)
+                if auth_type == "jwt" and self.user_context:
+                    self._inject_user_context(request_payload)
+            except ValueError:
+                pass
+
             return request_payload, http_kwargs
 
-        # Determine if OpenID Connect security is configured (only OIDC supported for now)
+        # Detect authentication scheme
         try:
-            scheme_name, opendid_scheme = self._get_openidconnect_scheme(agent_card)
-        except ValueError:
+            auth_type, scheme_name, scheme_obj = self._detect_auth_scheme(agent_card)
+        except ValueError as e:
             logger.warning(
-                f"Agent {agent_card.name} does not specify OpenID Connect security scheme. "
-                f"Following schemes are present: {list((agent_card.security_schemes or {}).keys())}. "
+                f"{e} "
+                f"Available schemes: {list((agent_card.security_schemes or {}).keys())}. "
                 "Proceeding without auth header."
             )
             return request_payload, http_kwargs
 
+        # Handle JWT bearer authentication (client credentials)
+        if auth_type == "jwt":
+            return await self._handle_jwt_auth(agent_card, scheme_name, request_payload, http_kwargs)
+
+        # Handle OIDC token exchange
+        elif auth_type == "oidc":
+            return await self._handle_oidc_auth(agent_card, scheme_name, scheme_obj, request_payload, http_kwargs)
+
+        return request_payload, http_kwargs
+
+    def _inject_user_context(self, request_payload: dict[str, Any]) -> None:
+        """
+        Inject user context into A2A message metadata.
+
+        Modifies request_payload in-place to add user_context to metadata.
+        Only includes attribution data (user_id, email, name).
+        The orchestrator's JWT in the Authorization header is used for authentication.
+        """
+        if not self.user_context:
+            return
+
+        # Ensure params and metadata exist
+        if "params" not in request_payload:
+            request_payload["params"] = {}
+        if "metadata" not in request_payload["params"]:
+            request_payload["params"]["metadata"] = {}
+
+        # Inject user context for attribution only (no access token)
+        request_payload["params"]["metadata"]["user_context"] = {
+            "user_id": self.user_context.get("user_id"),
+            "email": self.user_context.get("email"),
+            "name": self.user_context.get("name"),
+        }
+
+        logger.debug(f"Injected user context into message metadata: user_id={self.user_context.get('user_id')}")
+
+    async def _handle_jwt_auth(
+        self,
+        agent_card: AgentCard,
+        scheme_name: str,
+        request_payload: dict[str, Any],
+        http_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """
+        Handle JWT bearer authentication using client credentials.
+
+        Args:
+            agent_card: Target agent card
+            scheme_name: Security scheme name (used as audience)
+            request_payload: JSON-RPC request payload
+            http_kwargs: httpx request kwargs
+
+        Returns:
+            Tuple of (modified_request_payload, modified_http_kwargs)
+        """
+        try:
+            # Get token for target agent (scheme_name is the agent's client ID)
+            target_client_id = scheme_name
+            token = await self.oauth2_client.get_token(audience=target_client_id)
+
+            # Cache the token
+            self._token_cache[agent_card.name] = token
+
+            # Add to headers
+            http_kwargs["headers"]["Authorization"] = f"Bearer {token}"
+
+            # Inject user context into message metadata
+            self._inject_user_context(request_payload)
+
+            logger.info(f"Successfully obtained client credentials token for {agent_card.name}")
+
+        except Exception as e:
+            logger.error(
+                f"Client credentials auth failed for {agent_card.name}: {e}. "
+                "Request will be sent without authentication and will likely fail."
+            )
+
+        return request_payload, http_kwargs
+
+    async def _handle_oidc_auth(
+        self,
+        agent_card: AgentCard,
+        scheme_name: str,
+        scheme_obj: Any,
+        request_payload: dict[str, Any],
+        http_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """
+        Handle OIDC authentication using token exchange.
+
+        Args:
+            agent_card: Target agent card
+            scheme_name: Security scheme name
+            scheme_obj: OpenID Connect scheme object
+            request_payload: JSON-RPC request payload
+            http_kwargs: httpx request kwargs
+
+        Returns:
+            Tuple of (request_payload, modified_http_kwargs)
+        """
         # Verify supported issuer
         for issuer in self.SUPPORTED_ISSUERS:
-            if opendid_scheme.open_id_connect_url.startswith(issuer):
+            if scheme_obj.open_id_connect_url.startswith(issuer):
                 break
         else:
             logger.warning(
-                f"Agent {agent_card.name} uses unsupported OIDC issuer: {opendid_scheme.open_id_connect_url}. "
+                f"Agent {agent_card.name} uses unsupported OIDC issuer: {scheme_obj.open_id_connect_url}. "
                 "Proceeding without auth header."
             )
             return request_payload, http_kwargs
 
-        # Ensure token exchanger is provided
-        if not self.token_exchanger:
-            logger.warning(
-                "Token exchanger not provided. Cannot perform token exchange for OpenID Connect secured agents. "
-                "Proceeding without auth header."
-            )
-            return request_payload, http_kwargs
-
-        # NOTE: according to https://swagger.io/specification/#security-requirement-object if openIdConnect is used,
-        # the scopes are defined per security requirement object
+        # Extract required scopes
         required_scopes = []
         for security in agent_card.security or []:
             if scheme_name in security:
@@ -166,7 +289,7 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         # Perform token exchange
         try:
             target_client_id = scheme_name
-            exchanged_token = await self.token_exchanger.exchange_token(
+            exchanged_token = await self.oauth2_client.exchange_token(
                 subject_token=self.user_token,
                 target_client_id=target_client_id,
                 requested_scopes=required_scopes if required_scopes else None,

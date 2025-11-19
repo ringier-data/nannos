@@ -25,12 +25,9 @@ Usage:
 from ..authentication import (
     AuthenticationMethod,
     AuthPayload,
-    ExchangedToken,
     OAuth2ClientConfig,
-    OktaTokenExchanger,
     ServiceAuthRequirement,
     SmartTokenInterceptor,
-    TokenExchangeError,
 )
 from .config import A2AClientConfig
 from .factory import make_a2a_async_runnable
@@ -50,9 +47,6 @@ __all__ = [
     "A2ATrackingState",
     # Authentication
     "SmartTokenInterceptor",
-    "OktaTokenExchanger",
-    "ExchangedToken",
-    "TokenExchangeError",
     "AuthenticationMethod",
     "ServiceAuthRequirement",
     "OAuth2ClientConfig",

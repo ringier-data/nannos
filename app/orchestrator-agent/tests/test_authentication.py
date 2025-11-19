@@ -6,38 +6,38 @@ from unittest.mock import AsyncMock, Mock
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from app.middleware.okta_auth_middleware import OktaAuthMiddleware
+from app.middleware.oidc_auth_middleware import OidcAuthMiddleware
 
 
-class TestOktaAuthMiddleware:
-    """Tests for OktaAuthMiddleware."""
+class TestOidcAuthMiddleware:
+    """Tests for OidcAuthMiddleware."""
 
     def test_middleware_initialization(self):
         """Test middleware initialization with default values."""
         app = Mock()
-        middleware = OktaAuthMiddleware(app)
+        middleware = OidcAuthMiddleware(app)
 
-        # The middleware now uses issuer instead of separate okta_domain
-        assert middleware.issuer == os.getenv("OKTA_ISSUER")
-        assert middleware.client_id == os.getenv("OKTA_CLIENT_ID")
+        # The middleware now uses issuer instead of separate oidc_domain
+        assert middleware.issuer == os.getenv("OIDC_ISSUER")
+        assert middleware.client_id == os.getenv("OIDC_CLIENT_ID")
 
     def test_middleware_initialization_with_custom_values(self):
         """Test middleware initialization with custom values."""
         app = Mock()
-        middleware = OktaAuthMiddleware(
+        middleware = OidcAuthMiddleware(
             app,
-            issuer="https://custom.okta.com/oauth2/default",
+            issuer="https://custom.oidc.com/oauth2/default",
             client_id="test-client-id",
         )
 
-        assert middleware.issuer == "https://custom.okta.com/oauth2/default"
+        assert middleware.issuer == "https://custom.oidc.com/oauth2/default"
         assert middleware.client_id == "test-client-id"
-        assert middleware.issuer == "https://custom.okta.com/oauth2/default"
+        assert middleware.issuer == "https://custom.oidc.com/oauth2/default"
 
     def test_public_paths_defined(self):
         """Test that public paths are properly defined."""
         app = Mock()
-        middleware = OktaAuthMiddleware(app)
+        middleware = OidcAuthMiddleware(app)
 
         assert "/.well-known/agent-card.json" in middleware.PUBLIC_PATHS
         assert "/health" in middleware.PUBLIC_PATHS
@@ -45,13 +45,13 @@ class TestOktaAuthMiddleware:
         assert "/openapi.json" in middleware.PUBLIC_PATHS
 
 
-class TestOktaAuthMiddlewareDispatch:
-    """Tests for OktaAuthMiddleware request dispatch."""
+class TestOidcAuthMiddlewareDispatch:
+    """Tests for OidcAuthMiddleware request dispatch."""
 
     async def test_public_path_allows_access(self):
         """Test that public paths don't require authentication."""
         app = Mock()
-        middleware = OktaAuthMiddleware(app)
+        middleware = OidcAuthMiddleware(app)
 
         # Mock request for public path
         request = Mock(spec=Request)
@@ -70,7 +70,7 @@ class TestOktaAuthMiddlewareDispatch:
     async def test_missing_authorization_header(self):
         """Test that missing Authorization header returns 401."""
         app = Mock()
-        middleware = OktaAuthMiddleware(app)
+        middleware = OidcAuthMiddleware(app)
 
         # Mock request without Authorization header
         request = Mock(spec=Request)
@@ -89,7 +89,7 @@ class TestOktaAuthMiddlewareDispatch:
     async def test_invalid_authorization_format(self):
         """Test that invalid Authorization format returns 401."""
         app = Mock()
-        middleware = OktaAuthMiddleware(app)
+        middleware = OidcAuthMiddleware(app)
 
         # Mock request with invalid Authorization format
         request = Mock(spec=Request)
@@ -107,7 +107,7 @@ class TestOktaAuthMiddlewareDispatch:
     async def test_single_word_authorization_header(self):
         """Test that single-word Authorization header returns 401."""
         app = Mock()
-        middleware = OktaAuthMiddleware(app)
+        middleware = OidcAuthMiddleware(app)
 
         # Mock request with single-word Authorization
         request = Mock(spec=Request)

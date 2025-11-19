@@ -84,7 +84,7 @@ class OAuth2ClientConfig(BaseModel):
     the ServiceAuthRequirement to avoid duplication.
 
     Attributes:
-        issuer: OAuth2 issuer URL (e.g., "https://company.okta.com")
+        issuer: OAuth2 issuer URL
         client_id: OAuth2 client ID for the service
         client_secret: OAuth2 client secret (kept secure)
         auth_method: OAuth2 grant type to use

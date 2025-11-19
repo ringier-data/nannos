@@ -10,7 +10,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
 - **Discovers Sub-Agents**: Dynamically discovers available specialized agents (currency converter, JIRA integration, etc.)
 - **Coordinates Execution**: Delegates work to appropriate sub-agents and aggregates results
 - **Provides Status Updates**: Real-time task status and pallorogress reporting
-- **Supports Authentication**: Okta OAuth2 integration for enterprise security
+- **Supports Authentication**: Oidc OAuth2 integration for enterprise security
 
 ## Architecture
 
@@ -24,7 +24,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              A2A Server (Starlette)                         │
-│  • Okta Auth Middleware                                     │
+│  • Oidc Auth Middleware                                     │
 │  • User Context Middleware                                  │
 │  • Request Handler                                          │
 └────────────────────────┬────────────────────────────────────┘
@@ -53,7 +53,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
 - **LangGraph**: State machine for agent workflows
 - **LangChain**: LLM orchestration (OpenAI/Azure/Google)
 - **DynamoDB**: Checkpoint persistence for conversation state
-- **Okta**: OAuth2 authentication and authorization
+- **Oidc**: OAuth2 authentication and authorization
 - **Starlette**: ASGI web framework
 - **SSE**: Server-Sent Events for streaming responses
 
@@ -80,7 +80,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
 - Streaming responses for immediate user feedback
 
 ### Security
-- OAuth2 authentication via Okta
+- OAuth2 authentication via Oidc
 - JWT token validation
 - Public agent card endpoint (no auth required)
 - User context propagation to sub-agents
@@ -90,7 +90,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
 ### Prerequisites
 
 - Python 3.13+
-- Okta account and application credentials
+- Oidc account and application credentials
 - OpenAI/Azure OpenAI/Google API key
 - AWS credentials (for DynamoDB checkpoints)
 
@@ -121,10 +121,10 @@ AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
 AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
 AZURE_OPENAI_API_VERSION=2024-08-01-preview
 
-# Okta Authentication
-OKTA_DOMAIN=rcplus.okta.com
-OKTA_CLIENT_ID=your-client-id
-OKTA_AUDIENCE=api://default
+# OIDC Authentication
+OIDC_DOMAIN=rcplus.oidc.com
+OIDC_CLIENT_ID=your-client-id
+OIDC_AUDIENCE=api://default
 
 # DynamoDB Checkpoints (for conversation persistence)
 AWS_DEFAULT_REGION=us-east-1
@@ -156,9 +156,9 @@ The server will start on `http://localhost:10001`
 # Check agent card (no auth required)
 curl http://localhost:10001/.well-known/agent-card.json | jq .
 
-# Test with authentication (requires Okta token)
+# Test with authentication (requires Oidc token)
 curl -X POST http://localhost:10001/message/send \
-  -H "Authorization: Bearer YOUR_OKTA_TOKEN" \
+  -H "Authorization: Bearer YOUR_OIDC_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "message": {
@@ -169,16 +169,16 @@ curl -X POST http://localhost:10001/message/send \
 
 ## Authentication
 
-### Obtaining an Okta Token
+### Obtaining an Oidc Token
 
-1. Navigate to Okta OAuth2 authorization endpoint:
+1. Navigate to Oidc OAuth2 authorization endpoint:
 ```
-https://rcplus.okta.com/oauth2/v1/authorize?client_id=YOUR_CLIENT_ID&response_type=code&scope=openid%20profile%20email&redirect_uri=YOUR_REDIRECT_URI&state=random_state
+https://rcplus.oidc.com/oauth2/v1/authorize?client_id=YOUR_CLIENT_ID&response_type=code&scope=openid%20profile%20email&redirect_uri=YOUR_REDIRECT_URI&state=random_state
 ```
 
 2. Exchange authorization code for token:
 ```bash
-curl -X POST https://rcplus.okta.com/oauth2/v1/token \
+curl -X POST https://rcplus.oidc.com/oauth2/v1/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=authorization_code&code=YOUR_AUTH_CODE&redirect_uri=YOUR_REDIRECT_URI&client_id=YOUR_CLIENT_ID&client_secret=YOUR_SECRET"
 ```
@@ -237,7 +237,7 @@ orchestrator-agent/
 │   ├── agent_executor.py           # A2A executor wrapper
 │   ├── a2a_factory.py              # A2A client factory
 │   ├── discovery.py                # Sub-agent discovery
-│   ├── okta_auth_middleware.py     # OAuth2 authentication
+│   ├── oidc_auth_middleware.py     # OAuth2 authentication
 │   ├── todo_status_middleware.py   # Status update handling
 │   ├── graph_manager.py            # LangGraph state management
 │   └── ...
@@ -256,7 +256,7 @@ orchestrator-agent/
 - `OrchestratorDeepAgent`: Main agent implementing planning and delegation logic
 - `OrchestratorDeepAgentExecutor`: A2A protocol wrapper for the agent
 - `GraphManager`: Manages LangGraph state machine and checkpointing
-- `OktaAuthMiddleware`: Validates JWT tokens and extracts user context
+- `OidcAuthMiddleware`: Validates JWT tokens and extracts user context
 - `TodoStatusMiddleware`: Intercepts todo updates and emits status messages
 
 ### Adding New Tools
@@ -291,7 +291,7 @@ See `.env.template` for complete list of configuration options.
 
 Key variables:
 - `model_source`: LLM provider (azure/openai/google)
-- `OKTA_*`: Okta authentication settings
+- `OIDC_*`: Oidc authentication settings
 - `DYNAMODB_TABLE_NAME`: Conversation checkpoint storage
 - `AGENT_REGISTRY_URL`: Sub-agent discovery endpoint
 - `LOG_LEVEL`: Logging verbosity (DEBUG/INFO/WARNING/ERROR)
@@ -301,9 +301,9 @@ Key variables:
 ### Common Issues
 
 **Authentication failures (401)**
-- Verify Okta credentials in `.env`
+- Verify Oidc credentials in `.env`
 - Check token expiration
-- Ensure `OKTA_AUDIENCE` matches token audience
+- Ensure `OIDC_AUDIENCE` matches token audience
 
 **Agent discovery failures**
 - Verify `AGENT_REGISTRY_URL` is reachable

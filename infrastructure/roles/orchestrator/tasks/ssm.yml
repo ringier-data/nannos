@@ -50,15 +50,15 @@
           Version: '{{ project_version }}'
 
 
-- name: 'upload Orchestrator Okta client secret to SSM'
+- name: 'upload Orchestrator OIDC client secret to SSM'
   ringier.aws_cicd.ssm_parameter:
     overwrite_value: 'changed'
-    name: '{{ ssmkey_orchestrator_okta_client_secret }}'
-    description: 'The Okta client secret for the Orchestrator component of RC+/Alloy'
+    name: '{{ ssmkey_orchestrator_oidc_client_secret }}'
+    description: 'The OIDC client secret for the Orchestrator component of RC+/Alloy'
     string_type: 'SecureString'
-    value: '{{ orchestrator_okta_client_secret }}'
+    value: '{{ orchestrator_oidc_client_secret }}'
     tags:
-      Name: '{{ env }}-{{ project_id }}-orchestrator-okta-client-secret'
+      Name: '{{ env }}-{{ project_id }}-orchestrator-oidc-client-secret'
       Project: '{{ project_id }}'
       Environment: '{{ env }}'
       Repository: '{{ git_info.repo_name }}'

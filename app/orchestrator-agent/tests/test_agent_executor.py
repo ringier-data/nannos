@@ -105,7 +105,10 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         # Create working state item
-        item = AgentStreamResponse.working("Processing step 1")
+        item = AgentStreamResponse(
+            state=TaskState.working,
+            content="Processing...",
+        )
 
         await executor._handle_stream_item(item, updater, task, is_final=False)
 
@@ -132,7 +135,10 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         # Create completed state item
-        item = AgentStreamResponse.completed("Task finished successfully")
+        item = AgentStreamResponse(
+            state=TaskState.completed,
+            content="Task completed successfully",
+        )
 
         await executor._handle_stream_item(item, updater, task, is_final=True)
 
@@ -156,7 +162,10 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         # Create failed state item
-        item = AgentStreamResponse.failed("An error occurred")
+        item = AgentStreamResponse(
+            state=TaskState.failed,
+            content="An error occurred during execution",
+        )
 
         await executor._handle_stream_item(item, updater, task, is_final=True)
 

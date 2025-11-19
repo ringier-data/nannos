@@ -150,16 +150,16 @@ class AgentSettings:
         return os.environ["AZURE_OPENAI_CHAT_MODEL_NAME"]
 
     @classmethod
-    def get_okta_client_id(cls) -> str:
+    def get_oidc_client_id(cls) -> str:
         """Get Okta/Keycloak OAuth2 client ID."""
-        return os.environ["OKTA_CLIENT_ID"]
+        return os.environ["OIDC_CLIENT_ID"]
 
     @classmethod
-    def get_okta_client_secret(cls) -> SecretStr:
+    def get_oidc_client_secret(cls) -> SecretStr:
         """Get Okta/Keycloak OAuth2 client secret."""
-        return SecretStr(os.environ["OKTA_CLIENT_SECRET"])
+        return SecretStr(os.environ["OIDC_CLIENT_SECRET"])
 
     @classmethod
-    def get_okta_issuer(cls) -> str:
+    def get_oidc_issuer(cls) -> str:
         """Get Okta/Keycloak issuer URL."""
-        return os.environ["OKTA_ISSUER"]
+        return os.environ["OIDC_ISSUER"]

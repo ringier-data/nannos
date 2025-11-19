@@ -54,8 +54,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         This allows seamless continuation after authentication without losing context.
 
         Authentication:
-        - User identity is validated by OktaAuthMiddleware before this method is called
-        - Only authenticated users with valid Okta OIDC tokens can reach this point
+        - User identity is validated by OidcAuthMiddleware before this method is called
+        - Only authenticated users with valid OIDC tokens can reach this point
         - User info is available in request.state.user (set by middleware) but not directly
           accessible here since A2A SDK abstracts the request layer
         """
