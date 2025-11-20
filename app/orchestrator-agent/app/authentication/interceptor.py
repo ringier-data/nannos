@@ -9,7 +9,7 @@ Features:
 - Token exchange: Exchanges user token for service-specific tokens via RFC 8693 (OIDC)
 - Client credentials: Uses orchestrator JWT for bearer token authentication (JWT)
 - No auth support: Skips authentication for public endpoints
-- Token caching: Caches exchanged/fetched tokens per agent to minimize API calls
+- Token caching: Relies on OidcOAuth2Client's per-audience token caching with expiry checks
 - User context propagation: Injects user context into message metadata for JWT auth
 """
 
@@ -71,9 +71,6 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         self.user_token = user_token
         self.user_context = user_context or {}
         self.oauth2_client = oauth2_client
-
-        # Cache of agent_name -> token to avoid repeated exchanges/fetches
-        self._token_cache: dict[str, str] = {}
 
     def _detect_auth_scheme(self, agent_card: AgentCard) -> tuple[str, str, Any]:
         """
@@ -140,21 +137,6 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         # No security schemes means no authentication required
         if agent_card.security_schemes is None or len(agent_card.security_schemes) == 0:
             logger.info(f"Agent {agent_card.name} has no security schemes, sending request without authentication.")
-            return request_payload, http_kwargs
-
-        # Check cache first
-        if agent_card.name in self._token_cache:
-            logger.debug(f"Using cached token for {agent_card.name}")
-            http_kwargs["headers"]["Authorization"] = f"Bearer {self._token_cache[agent_card.name]}"
-
-            # For JWT auth, still inject user context into metadata
-            try:
-                auth_type, _, _ = self._detect_auth_scheme(agent_card)
-                if auth_type == "jwt" and self.user_context:
-                    self._inject_user_context(request_payload)
-            except ValueError:
-                pass
-
             return request_payload, http_kwargs
 
         # Detect authentication scheme
@@ -228,9 +210,6 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             target_client_id = scheme_name
             token = await self.oauth2_client.get_token(audience=target_client_id)
 
-            # Cache the token
-            self._token_cache[agent_card.name] = token
-
             # Add to headers
             http_kwargs["headers"]["Authorization"] = f"Bearer {token}"
 
@@ -295,9 +274,6 @@ class SmartTokenInterceptor(ClientCallInterceptor):
                 requested_scopes=required_scopes if required_scopes else None,
             )
 
-            # Cache the exchanged token
-            self._token_cache[agent_card.name] = exchanged_token
-
             # Add to headers
             http_kwargs["headers"]["Authorization"] = f"Bearer {exchanged_token}"
 
@@ -312,5 +288,5 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         return request_payload, http_kwargs
 
     def clear_cache(self):
-        """Clear the token cache to force new exchanges."""
-        self._token_cache.clear()
+        """Clear the token cache in the OAuth2 client."""
+        self.oauth2_client.clear_cache()
