@@ -49,7 +49,7 @@ class OrchestratorJWTMiddleware(BaseHTTPMiddleware):
         app,
         issuer: str,
         expected_azp: str,
-        expected_aud: str,
+        expected_aud: str | None = None,
     ):
         """
         Initialize orchestrator JWT middleware.
@@ -58,7 +58,7 @@ class OrchestratorJWTMiddleware(BaseHTTPMiddleware):
             app: The ASGI application
             issuer: OIDC issuer URL
             expected_azp: Expected orchestrator client ID (authorized party)
-            expected_aud: Expected agent client ID (audience)
+            expected_aud: Expected agent client ID (audience). If None, aud claim is not validated.
         """
         super().__init__(app)
         self.issuer = issuer
