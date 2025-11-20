@@ -1,6 +1,5 @@
 """Pytest configuration and fixtures."""
 
-import os
 import sys
 from pathlib import Path
 
@@ -31,17 +30,7 @@ def pytest_configure(config):
 
 
 @pytest.fixture(scope="function")
-def aws_credentials():
-    """Mock AWS credentials for moto."""
-    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
-    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
-    os.environ["AWS_SECURITY_TOKEN"] = "testing"
-    os.environ["AWS_SESSION_TOKEN"] = "testing"
-    os.environ["AWS_DEFAULT_REGION"] = "eu-central-1"
-
-
-@pytest.fixture(scope="function")
-def dynamodb_table(aws_credentials):
+def dynamodb_table():
     """Create a mocked DynamoDB table for testing.
 
     Matches the actual CloudFormation configuration with PK/SK schema.

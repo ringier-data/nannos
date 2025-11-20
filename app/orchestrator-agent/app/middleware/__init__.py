@@ -7,16 +7,12 @@ context management, and status tracking.
 
 Key Components:
 - AuthErrorDetectionMiddleware: Detects and handles authentication errors
-- OidcAuthMiddleware: OAuth2 authentication via OIDC
 - TodoStatusMiddleware: Tracks and manages todo status updates
-- UserContextMiddleware: Extracts and manages user context
 
 Usage:
     from app.middleware import (
         AuthErrorDetectionMiddleware,
-        OidcAuthMiddleware,
         TodoStatusMiddleware,
-        UserContextMiddleware,
     )
 """
 

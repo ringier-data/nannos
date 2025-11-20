@@ -12,6 +12,9 @@ phases:
       - ./ops-ci-shared/scripts/ci-init.sh
   build:
     commands:
+      - ./ops-ci-shared/scripts/ci-test.sh app/ringier-a2a-sdk
+      - ./ops-ci-shared/scripts/ci-test.sh app/orchestrator-agent
+      # - ./ops-ci-shared/scripts/ci-test.sh app/a2a-inspector  # should be tested in its own repo
       - ./ops-ci-shared/scripts/ci-deploy.sh
     finally:
       - ./ops-ci-shared/scripts/ci-notify-slack.sh

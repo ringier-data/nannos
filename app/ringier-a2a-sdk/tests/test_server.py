@@ -13,6 +13,46 @@ from ringier_a2a_sdk.server import AuthRequestContextBuilder, BaseAgentExecutor
 class TestAuthRequestContextBuilder:
     """Tests for AuthRequestContextBuilder."""
 
+    @pytest.mark.asyncio
+    async def test_build_with_user_context(self):
+        """Test building request context with user information."""
+        builder = AuthRequestContextBuilder()
+
+        # Set user context
+        user_context = {
+            "user_id": "user-123",
+            "email": "test@example.com",
+            "name": "Test User",
+            "token": "jwt-token",
+            "scopes": ["read"],
+        }
+        
+        with patch("ringier_a2a_sdk.server.context_builder.current_user_context") as mock_context:
+            mock_context.get.return_value = user_context
+
+            # Build context (no params needed, just testing user context extraction)
+            context = await builder.build(context_id="ctx-123")
+
+            # Verify user_id is set
+            assert context.call_context.state["user_id"] == "user-123"
+            assert context.call_context.state["user_email"] == "test@example.com"
+            assert context.call_context.state["user_name"] == "Test User"
+            assert context.call_context.state["user_token"] == "jwt-token"
+            assert context.call_context.state["user_scopes"] == ["read"]
+
+    @pytest.mark.asyncio
+    async def test_build_without_user_context(self):
+        """Test building request context without user information."""
+        builder = AuthRequestContextBuilder()
+
+        with patch("ringier_a2a_sdk.server.context_builder.current_user_context") as mock_context:
+            mock_context.get.return_value = None
+
+            # Build context
+            context = await builder.build(context_id="ctx-123")
+
+            # Should fall back to anonymous
+            assert context.call_context.state["user_id"] == "anonymous"
 
 
 
