@@ -6,6 +6,9 @@
     ecr_repository_name: '{{ chat_ui_ecr_repository_name }}'
     code_path: '{{ playbook_dir }}/../app/a2a-inspector'
     adhoc_deploy: true
+    docker_build_args:
+      SSH_PRIVATE_KEY: '{{ ssh_key }}'
+      API_PORT: '{{ chat_ui_public_api_port }}'
 
 - name: 'set chat ui docker image fact'
   set_fact:
