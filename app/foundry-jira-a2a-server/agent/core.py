@@ -6,10 +6,27 @@ from typing import Literal, Optional
 from a2a.types import Task, TaskState
 from foundry_sdk import AsyncFoundryClient as PlatformAsyncFoundryClient
 from foundry_sdk import Auth, ConfidentialClientAuth
+from pydantic import BaseModel, Field, model_validator, ValidationError
 from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 
 logger = logging.getLogger(__name__)
+
+
+class StructuredResponse(BaseModel):
+    state: TaskState = Field(
+        ...,
+        description="The state of the task. In case approval or input is required, the state should be 'input_required'.",
+    )
+    message: str = Field(..., description="A human-readable message providing details about the task state.")
+
+    @model_validator(mode="before")
+    def validate_state(cls, values):
+        # input_required -> input-required
+        state = values.get("state")
+        if isinstance(state, str):
+            values["state"] = state.replace("_", "-")
+        return values
 
 
 class AsyncFoundryClient:
@@ -29,21 +46,21 @@ class AsyncFoundryClient:
             hostname: Foundry hostname
             ontology_rid: Ontology RID (uses default if not provided)
         """
-        self._ontology_rid = ontology_rid or "ri.ontology.main.ontology.10f26c02-9643-4663-91b4-aade7b78ff0f"
+        self._ontology_rid = ontology_rid or "ri.ontology.main.ontology.32a49fb7-329f-4ae0-9df8-babc1b29e750"
         self._client = PlatformAsyncFoundryClient(
             auth=auth,
             hostname=hostname,
             preview=True,  # Required for AsyncFoundryClient (beta)
         )
 
-    async def execute_query(self, query_api_name: str, parameters: dict, version: str = "1.0.0"):
+    async def execute_query(self, query_api_name: str, parameters: dict, version: str | None = None):
         """
         Execute a Foundry ontology query.
 
         Args:
             query_api_name: Name of the query in camelCase (e.g., "jiraTicketFunction")
             parameters: Parameters to pass to the query
-            version: Query version (default: "1.0.0")
+            version: Query version (default: None)
 
         Returns:
             Query execution result
@@ -112,26 +129,35 @@ class FoundryJiraTicketAgent(BaseAgent):
         """
         foundry_session_rid = self.foundry_sessions.get(task.context_id)
         results = await self.invoke(message, session_id=foundry_session_rid)
+        logger.info(f"Foundry Jira Ticket results: {results}")
+        try:
+            structured_response = StructuredResponse.model_validate_json(results.get("markdownResponse", "{}"))
+        except ValidationError as e:
+            logger.error(f"Failed to parse structured response: {e}")
+            structured_response = StructuredResponse(
+                state=self.classify(results.get("markdownResponse", "")),
+                message=results.get("markdownResponse", ""),
+            )
         # Update session RID for future calls
         if "sessionRid" in results:
             self.foundry_sessions[task.context_id] = results["sessionRid"]
-        classification = await self.classify(results.get("message", ""))
-        if classification == TaskState.input_required:
+
+        if structured_response.state == TaskState.input_required:
             yield AgentStreamResponse(
                 state=TaskState.input_required,
-                content=results.get("message", "Additional input is required."),
+                content=structured_response.message or "Additional input is required.",
                 metadata={"details": results},
             )
-        elif classification == TaskState.failed:
+        elif structured_response.state == TaskState.failed:
             yield AgentStreamResponse(
                 state=TaskState.failed,
-                content=results.get("message", "Failed to create Jira ticket."),
+                content=structured_response.message or "Failed to create Jira ticket.",
                 metadata={"details": results},
             )
         else:
             yield AgentStreamResponse(
                 state=TaskState.completed,
-                content=results.get("message", "Jira ticket created successfully."),
+                content=structured_response.message or "Jira ticket created successfully.",
                 metadata={"details": results},
             )
 
@@ -143,13 +169,19 @@ class FoundryJiraTicketAgent(BaseAgent):
         result = await self.client.execute_query(
             query_api_name="agentWrapper",  # camelCase, not snake_case!
             parameters={"userInput": message, "sessionRid": session_id},
-            version="2.0.0",
+            version=None,
         )
         return result
 
-    async def classify(self, message: str) -> Literal[TaskState.input_required, TaskState.completed, TaskState.failed]:
+    def classify(self, message: str) -> Literal[TaskState.input_required, TaskState.completed, TaskState.failed]:
         # Simple classification logic (to be replaced with actual logic)
-        if "need more info" in message.lower() or "please provide" in message.lower():
+        if (
+            "need more info" in message.lower()
+            or "please provide" in message.lower()
+            or "before proceeding" in message.lower()
+            or "before i proceed" in message.lower()
+            or "in order to proceed" in message.lower()
+        ):
             return TaskState.input_required
         elif "Failed to create ticket" in message:
             return TaskState.failed

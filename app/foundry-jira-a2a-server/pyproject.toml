@@ -13,7 +13,7 @@ dependencies = [
     #
     # the deps are necessary for "jira_ticket_app_sdk",
     "aioitertools==0.13.0",
-    "foundry-platform-sdk==1.60.0",
+    "foundry-platform-sdk==1.63.0",
     "json-stream>=2.4.1",
     "six>=1.17.0",
     "python-dateutil==2.9.0.post0",

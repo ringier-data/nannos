@@ -21,5 +21,6 @@ FROM docker.rcplus.io/python:3.13-slim AS alloy-runtime
 ARG WORKDIR
 
 WORKDIR ${WORKDIR}
+COPY --from=alloy-build ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
 COPY --from=alloy-build ${WORKDIR} .
 CMD ["./.venv/bin/python", "main.py"]

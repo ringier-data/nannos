@@ -29,7 +29,7 @@ from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 from agent import FoundryJiraTicketAgent
 
 logger = configure_logger("main")
-configure_existing_logger(logging.getLogger("app"))
+configure_existing_logger(logging.getLogger("agent"))
 configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
 
