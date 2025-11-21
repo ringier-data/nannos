@@ -363,7 +363,7 @@ wheels = [
 
 [[package]]
 name = "foundry-jira-ticket-a2a-server"
-version = "0.2.0"
+version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
