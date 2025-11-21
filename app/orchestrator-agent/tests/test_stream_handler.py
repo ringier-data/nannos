@@ -95,6 +95,7 @@ class TestBuildInputRequiredResponse:
 
         assert response.state == TaskState.input_required
         assert response.content == "Please provide additional information"
+        assert response.metadata is not None
         assert response.metadata["input_prompt"] == "Enter your name and email"
         assert response.metadata["required_fields"] == ["name", "email"]
 
@@ -137,27 +138,6 @@ class TestParseAgentResponse:
 
         assert response.state == TaskState.completed
         assert response.content == "Hello"
-
-    def test_parse_agent_response_auth_required_from_a2a_tracking(self):
-        """Test detecting auth required from a2a_tracking metadata."""
-        final_state = {
-            "messages": [HumanMessage(content="Test"), AIMessage(content="Response")],
-            "a2a_tracking": {
-                "some_agent": {
-                    "requires_auth": True,
-                    "auth_url": "https://oauth.example.com",
-                    "auth_message": "Authentication required",
-                    "error_code": "AUTH_003",
-                }
-            },
-        }
-
-        response = StreamHandler.parse_agent_response(final_state)
-
-        assert response.state == TaskState.auth_required
-        assert response.interrupt_reason == "auth_required"
-        assert response.metadata is not None
-        assert response.metadata["auth_url"] == "https://oauth.example.com"
 
     def test_parse_agent_response_with_tool_message(self):
         """Test parsing with tool message as last message."""
@@ -223,6 +203,7 @@ class TestStreamHandlerEdgeCases:
         response = StreamHandler.build_auth_response(auth_message="Auth needed", auth_url="", error_code="AUTH_004")
 
         assert response.state == TaskState.auth_required
+        assert response.metadata is not None
         assert response.metadata["auth_url"] == ""
 
     def test_build_response_methods_preserve_metadata(self):
@@ -240,6 +221,7 @@ class TestStreamHandlerEdgeCases:
         assert completed.metadata == test_metadata
         assert failed.metadata == test_metadata
         # input_req has merged metadata with input_prompt
+        assert input_req.metadata is not None
         assert input_req.metadata["key"] == "value"
         assert input_req.metadata["number"] == 42
         assert input_req.metadata["input_prompt"] == "Enter data"
@@ -266,3 +248,587 @@ class TestStreamHandlerEdgeCases:
 
         assert response.state == TaskState.completed
         assert response.content == "Normal response"
+
+
+class TestExtractCurrentTurnMessages:
+    """Test _extract_current_turn_messages static method."""
+
+    def test_extract_current_turn_single_turn(self):
+        """Test extracting messages from a single turn."""
+        messages = [
+            HumanMessage(content="User question"),
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "call_1", "type": "tool_call"}]),
+            ToolMessage(content="Tool result", tool_call_id="call_1"),
+            AIMessage(content="Final answer"),
+        ]
+
+        current_turn = StreamHandler._extract_current_turn_messages(messages)
+
+        assert len(current_turn) == 3  # All messages after HumanMessage
+        assert isinstance(current_turn[0], AIMessage)
+        assert isinstance(current_turn[1], ToolMessage)
+        assert isinstance(current_turn[2], AIMessage)
+
+    def test_extract_current_turn_multiple_turns(self):
+        """Test extracting only the current turn from multi-turn conversation."""
+        messages = [
+            HumanMessage(content="First question"),
+            AIMessage(content="First answer"),
+            HumanMessage(content="Second question"),  # Current turn starts here
+            AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "call_2", "type": "tool_call"}]),
+            ToolMessage(content="Tool result", tool_call_id="call_2"),
+            AIMessage(content="Second answer"),
+        ]
+
+        current_turn = StreamHandler._extract_current_turn_messages(messages)
+
+        assert len(current_turn) == 3  # Only messages after last HumanMessage
+        assert current_turn[0].tool_calls[0]["id"] == "call_2"
+        assert current_turn[2].content == "Second answer"
+
+    def test_extract_current_turn_no_human_message(self):
+        """Test behavior when no HumanMessage is found."""
+        messages = [
+            AIMessage(content="AI message 1"),
+            ToolMessage(content="Tool result", tool_call_id="call_1"),
+            AIMessage(content="AI message 2"),
+        ]
+
+        current_turn = StreamHandler._extract_current_turn_messages(messages)
+
+        # Should return all messages with a warning
+        assert len(current_turn) == 3
+        assert current_turn == messages
+
+    def test_extract_current_turn_empty_messages(self):
+        """Test with empty message list."""
+        messages = []
+
+        current_turn = StreamHandler._extract_current_turn_messages(messages)
+
+        assert current_turn == []
+
+    def test_extract_current_turn_only_human_message(self):
+        """Test with only a HumanMessage."""
+        messages = [HumanMessage(content="User question")]
+
+        current_turn = StreamHandler._extract_current_turn_messages(messages)
+
+        assert len(current_turn) == 0  # No messages after HumanMessage
+
+
+class TestExtractRecentlyCalledSubagents:
+    """Test _extract_recently_called_subagents static method."""
+
+    def test_extract_subagents_single_call(self):
+        """Test extracting a single sub-agent call."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Create a ticket"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "JiraAgent"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Ticket created", tool_call_id="call_1"),
+                AIMessage(content="Done"),
+            ]
+        }
+
+        subagents = StreamHandler._extract_recently_called_subagents(final_state)
+
+        assert subagents == {"JiraAgent"}
+
+    def test_extract_subagents_multiple_calls(self):
+        """Test extracting multiple sub-agent calls."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Create ticket and send email"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "JiraAgent"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Ticket created", tool_call_id="call_1"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "EmailAgent"},
+                            "id": "call_2",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Email sent", tool_call_id="call_2"),
+                AIMessage(content="All done"),
+            ]
+        }
+
+        subagents = StreamHandler._extract_recently_called_subagents(final_state)
+
+        assert subagents == {"JiraAgent", "EmailAgent"}
+
+    def test_extract_subagents_only_current_turn(self):
+        """Test that only sub-agents from current turn are extracted."""
+        final_state = {
+            "messages": [
+                # Previous turn
+                HumanMessage(content="First request"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "OldAgent"},
+                            "id": "call_old",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Old result", tool_call_id="call_old"),
+                AIMessage(content="First done"),
+                # Current turn
+                HumanMessage(content="Second request"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "NewAgent"},
+                            "id": "call_new",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="New result", tool_call_id="call_new"),
+                AIMessage(content="Second done"),
+            ]
+        }
+
+        subagents = StreamHandler._extract_recently_called_subagents(final_state)
+
+        # Should only include NewAgent from current turn, not OldAgent
+        assert subagents == {"NewAgent"}
+        assert "OldAgent" not in subagents
+
+    def test_extract_subagents_non_task_tools_ignored(self):
+        """Test that non-task tools are ignored."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Do something"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "other_tool",  # Not a 'task' tool
+                            "args": {"param": "value"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "ValidAgent"},
+                            "id": "call_2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                ToolMessage(content="Other result", tool_call_id="call_1"),
+                ToolMessage(content="Agent result", tool_call_id="call_2"),
+                AIMessage(content="Done"),
+            ]
+        }
+
+        subagents = StreamHandler._extract_recently_called_subagents(final_state)
+
+        assert subagents == {"ValidAgent"}
+
+    def test_extract_subagents_empty_messages(self):
+        """Test with empty messages."""
+        final_state = {"messages": []}
+
+        subagents = StreamHandler._extract_recently_called_subagents(final_state)
+
+        assert subagents == set()
+
+    def test_extract_subagents_no_tool_calls(self):
+        """Test with no tool calls."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Simple question"),
+                AIMessage(content="Simple answer"),
+            ]
+        }
+
+        subagents = StreamHandler._extract_recently_called_subagents(final_state)
+
+        assert subagents == set()
+
+
+class TestParseAgentResponseWithSubagentFiltering:
+    """Test parse_agent_response with sub-agent filtering for current turn."""
+
+    def test_requires_input_only_checks_current_turn(self):
+        """Test that requires_input only applies to current turn sub-agents."""
+        final_state = {
+            "messages": [
+                # Previous turn
+                HumanMessage(content="First request"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "OldAgent"},
+                            "id": "call_old",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Old result", tool_call_id="call_old"),
+                AIMessage(content="First done"),
+                # Current turn
+                HumanMessage(content="Second request"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "NewAgent"},
+                            "id": "call_new",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="New result needs input", tool_call_id="call_new"),
+                AIMessage(content="Processing"),
+            ],
+            "a2a_tracking": {
+                "OldAgent": {"requires_input": True},  # Stale state from previous turn
+                "NewAgent": {"requires_input": False},  # Current turn agent
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should be completed, not input_required, because current turn agent doesn't require input
+        assert response.state == TaskState.completed
+
+    def test_requires_auth_only_checks_current_turn(self):
+        """Test that requires_auth only applies to current turn sub-agents."""
+        final_state = {
+            "messages": [
+                # Previous turn
+                HumanMessage(content="First request"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "OldAgent"},
+                            "id": "call_old",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Old result", tool_call_id="call_old"),
+                AIMessage(content="First done"),
+                # Current turn
+                HumanMessage(content="Second request"),
+                AIMessage(content="Processing current request"),
+            ],
+            "a2a_tracking": {
+                "OldAgent": {
+                    "requires_auth": True,
+                    "auth_url": "https://old.example.com",
+                    "auth_message": "Old auth",
+                    "error_code": "OLD_AUTH",
+                },
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should be completed, not auth_required, because OldAgent wasn't called in current turn
+        assert response.state == TaskState.completed
+        assert response.content == "Processing current request"
+
+
+class TestConservativeOverrideLogic:
+    """Test conservative override logic: only override LLM when ALL agents blocked."""
+
+    def test_llm_completed_one_blocked_one_success_trusts_llm(self):
+        """Test parallel execution: LLM says completed, one blocked + one success → trust LLM."""
+        from app.models.schemas import FinalResponseSchema
+
+        # Simulate parallel execution where one agent succeeded
+        final_state = {
+            "messages": [
+                HumanMessage(content="Create ticket and send email"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "JiraAgent"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "EmailAgent"},
+                            "id": "call_2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                ToolMessage(content="Ticket needs input", tool_call_id="call_1"),
+                ToolMessage(content="Email sent successfully", tool_call_id="call_2"),
+                AIMessage(content="Done - used email"),
+            ],
+            "structured_response": FinalResponseSchema(
+                task_state=TaskState.completed,
+                message="Email sent successfully as alternative approach",
+                reasoning="Jira blocked but email succeeded",
+            ),
+            "a2a_tracking": {
+                "JiraAgent": {"requires_input": True, "is_complete": False},
+                "EmailAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.completed"},
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should trust LLM's completed decision (EmailAgent succeeded)
+        assert response.state == TaskState.completed
+        assert "Email sent successfully" in response.content
+
+    def test_llm_completed_all_blocked_overrides_to_input_required(self):
+        """Test safety override: LLM says completed, ALL agents blocked → override to input_required."""
+        from app.models.schemas import FinalResponseSchema
+
+        # LLM hallucination: says completed but all agents are blocked
+        final_state = {
+            "messages": [
+                HumanMessage(content="Create ticket and send email"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "JiraAgent"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "EmailAgent"},
+                            "id": "call_2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                ToolMessage(content="Jira needs input", tool_call_id="call_1"),
+                ToolMessage(content="Email needs input", tool_call_id="call_2"),
+                AIMessage(content="All done"),
+            ],
+            "structured_response": FinalResponseSchema(
+                task_state=TaskState.completed,
+                message="Tasks completed successfully",
+                reasoning="Both completed",  # LLM hallucination
+            ),
+            "a2a_tracking": {
+                "JiraAgent": {"requires_input": True, "is_complete": False},
+                "EmailAgent": {"requires_input": True, "is_complete": False},
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should override to input_required (safety against hallucination)
+        assert response.state == TaskState.input_required
+        assert response.interrupt_reason == "subagent_input_required"
+        assert response.metadata is not None
+        assert response.metadata["agent_name"] in ["JiraAgent", "EmailAgent"]
+
+    def test_llm_completed_all_blocked_auth_takes_priority(self):
+        """Test safety override: ALL blocked with auth + input → auth takes priority."""
+        from app.models.schemas import FinalResponseSchema
+
+        final_state = {
+            "messages": [
+                HumanMessage(content="Multi-agent request"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "Agent1"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "Agent2"},
+                            "id": "call_2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                ToolMessage(content="Auth needed", tool_call_id="call_1"),
+                ToolMessage(content="Input needed", tool_call_id="call_2"),
+                AIMessage(content="Done"),
+            ],
+            "structured_response": FinalResponseSchema(
+                task_state=TaskState.completed, message="Completed", reasoning="Done"
+            ),
+            "a2a_tracking": {
+                "Agent1": {
+                    "requires_auth": True,
+                    "auth_url": "https://auth.example.com",
+                    "auth_message": "Auth needed",
+                    "error_code": "AUTH_001",
+                },
+                "Agent2": {"requires_input": True},
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should override to auth_required (auth has priority)
+        assert response.state == TaskState.auth_required
+        assert response.metadata is not None
+        assert response.metadata["auth_url"] == "https://auth.example.com"
+
+    def test_llm_input_required_mixed_results_respects_llm(self):
+        """Test: LLM says input_required with mixed results → respect LLM decision."""
+        from app.models.schemas import FinalResponseSchema
+
+        # LLM correctly identifies need for input despite partial success
+        final_state = {
+            "messages": [
+                HumanMessage(content="Create ticket and notify team"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "JiraAgent"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "SlackAgent"},
+                            "id": "call_2",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                ToolMessage(content="Ticket needs project", tool_call_id="call_1"),
+                ToolMessage(content="Notified team", tool_call_id="call_2"),
+                AIMessage(content="Need project for ticket"),
+            ],
+            "structured_response": FinalResponseSchema(
+                task_state=TaskState.input_required,
+                message="Which project should I create the ticket in?",
+                reasoning="Slack succeeded but Jira needs project info",
+            ),
+            "a2a_tracking": {
+                "JiraAgent": {"requires_input": True, "is_complete": False},
+                "SlackAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.completed"},
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should respect LLM's input_required decision
+        assert response.state == TaskState.input_required
+        assert "Which project" in response.content
+
+    def test_llm_working_state_not_overridden(self):
+        """Test: LLM says working, blocked agents exist → respect LLM decision."""
+        from app.models.schemas import FinalResponseSchema
+
+        final_state = {
+            "messages": [
+                HumanMessage(content="Long running task"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "AsyncAgent"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Processing", tool_call_id="call_1"),
+                AIMessage(content="Still working"),
+            ],
+            "structured_response": FinalResponseSchema(
+                task_state=TaskState.working,
+                message="Task is still being processed in the background",
+                reasoning="Async operation in progress",
+            ),
+            "a2a_tracking": {
+                "AsyncAgent": {"requires_input": True, "is_complete": False},  # Might need input later
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should respect LLM's working decision (not override based on blocking)
+        assert response.state == TaskState.working
+        assert "background" in response.content
+
+    def test_single_agent_blocked_overrides_when_completed(self):
+        """Test: Single agent called, LLM says completed, agent blocked → override."""
+        from app.models.schemas import FinalResponseSchema
+
+        final_state = {
+            "messages": [
+                HumanMessage(content="Create ticket"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "JiraAgent"},
+                            "id": "call_1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Need more details", tool_call_id="call_1"),
+                AIMessage(content="Done"),
+            ],
+            "structured_response": FinalResponseSchema(
+                task_state=TaskState.completed, message="Ticket created", reasoning="Task complete"
+            ),
+            "a2a_tracking": {
+                "JiraAgent": {"requires_input": True, "is_complete": False},
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Should override (only one agent, it's blocked)
+        assert response.state == TaskState.input_required
+        assert response.metadata is not None
+        assert response.metadata["agent_name"] == "JiraAgent"

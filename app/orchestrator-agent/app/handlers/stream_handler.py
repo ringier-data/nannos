@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from a2a.types import TaskState
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from ..models import AgentStreamResponse
 
@@ -16,6 +17,170 @@ logger = logging.getLogger(__name__)
 
 class StreamHandler:
     """Handles stream response generation and state parsing."""
+
+    @staticmethod
+    def _extract_current_turn_messages(messages: list) -> list:
+        """Extract messages from the current conversation turn.
+
+        A turn starts with a HumanMessage (user input). This method finds the most
+        recent HumanMessage and returns all messages that come after it, representing
+        the current turn's conversation flow.
+
+        Args:
+            messages: List of conversation messages
+
+        Returns:
+            List of messages from the current turn (after the last HumanMessage)
+        """
+        if not messages:
+            return []
+
+        # Find the index of the most recent HumanMessage (start of current turn)
+        last_human_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                last_human_idx = i
+                break
+
+        if last_human_idx is None:
+            # No HumanMessage found, return all messages (shouldn't normally happen)
+            logger.warning("[STREAM HANDLER] No HumanMessage found in conversation, using all messages")
+            return messages
+        else:
+            # Return only messages after the last HumanMessage (current turn)
+            current_turn = messages[last_human_idx + 1 :]
+            logger.debug(
+                f"[STREAM HANDLER] Current turn starts at index {last_human_idx}, {len(current_turn)} messages in turn"
+            )
+            return current_turn
+
+    @staticmethod
+    def _extract_recently_called_subagents(final_state: Dict[str, Any]) -> set[str]:
+        """Extract the names of sub-agents that were called in the current turn.
+
+        Only examines ToolMessages from the current turn (after the last HumanMessage)
+        to ensure we're checking sub-agents that were actually called in response to
+        the current user request, not stale state from previous turns.
+
+        Args:
+            final_state: Final state dict containing messages
+
+        Returns:
+            Set of sub-agent names that were called in the current turn
+        """
+        messages = final_state.get("messages", [])
+        messages_to_check = StreamHandler._extract_current_turn_messages(messages)
+
+        recently_called = set()
+
+        # Collect all ToolMessages in the current turn
+        for i, msg in enumerate(messages_to_check):
+            if isinstance(msg, ToolMessage):
+                # Find the corresponding AIMessage with tool_calls
+                # Look backward from this ToolMessage within the current turn
+                for prev_msg in reversed(messages_to_check[:i]):
+                    if isinstance(prev_msg, AIMessage) and hasattr(prev_msg, "tool_calls") and prev_msg.tool_calls:
+                        for tool_call in prev_msg.tool_calls:
+                            if tool_call.get("id") == msg.tool_call_id and tool_call.get("name") == "task":
+                                subagent_type = tool_call.get("args", {}).get("subagent_type")
+                                if subagent_type:
+                                    recently_called.add(subagent_type)
+                                    logger.debug(f"[STREAM HANDLER] Found sub-agent in current turn: {subagent_type}")
+
+        logger.debug(f"[STREAM HANDLER] Sub-agents called in current turn: {recently_called}")
+        return recently_called
+
+    @staticmethod
+    def _check_all_agents_blocked(
+        recently_called: set[str], a2a_tracking: Dict[str, Any]
+    ) -> tuple[bool, Optional[tuple[str, Dict[str, Any]]]]:
+        """Check if ALL recently-called agents are blocked.
+
+        Args:
+            recently_called: Set of agent names called in current turn
+            a2a_tracking: A2A tracking data for all agents
+
+        Returns:
+            Tuple of (all_blocked: bool, prioritized_agent_info: Optional[tuple[agent_name, tracking_data]])
+            If all_blocked is True, returns the agent to use for override (auth prioritized over input)
+        """
+        if not recently_called:
+            return False, None
+
+        all_blocked = True
+        blocked_agent_info = None  # Stores (agent_name, tracking_data)
+        blocked_auth_agent_info = None  # Prioritize auth if present
+
+        for agent_name in recently_called:
+            tracking_data = a2a_tracking.get(agent_name, {})
+            if not isinstance(tracking_data, dict):
+                continue
+
+            is_blocked = tracking_data.get("requires_auth") or tracking_data.get("requires_input")
+
+            if is_blocked:
+                # Store first blocked agent info for potential override
+                if blocked_agent_info is None:
+                    blocked_agent_info = (agent_name, tracking_data)
+                # Prioritize auth over input
+                if tracking_data.get("requires_auth") and blocked_auth_agent_info is None:
+                    blocked_auth_agent_info = (agent_name, tracking_data)
+            else:
+                # At least one agent is NOT blocked
+                all_blocked = False
+                break
+
+        # Return prioritized agent: auth if present, otherwise first blocked
+        prioritized_agent = blocked_auth_agent_info if blocked_auth_agent_info else blocked_agent_info
+        return all_blocked, prioritized_agent
+
+    @staticmethod
+    def _build_blocked_agent_response(
+        agent_name: str, tracking_data: Dict[str, Any], messages: list
+    ) -> AgentStreamResponse:
+        """Build response for a blocked agent (auth or input required).
+
+        Args:
+            agent_name: Name of the blocked agent
+            tracking_data: A2A tracking data for the agent
+            messages: Conversation messages for context
+
+        Returns:
+            AgentStreamResponse with appropriate state (auth_required or input_required)
+        """
+        # Auth takes priority over input
+        if tracking_data.get("requires_auth"):
+            auth_message = tracking_data.get("auth_message", "Authentication required")
+            auth_url = tracking_data.get("auth_url", "")
+            error_code = tracking_data.get("error_code", "AUTH_REQUIRED")
+
+            return StreamHandler.build_auth_response(
+                auth_message=auth_message,
+                auth_url=auth_url,
+                error_code=error_code,
+                agent_name=agent_name,
+            )
+        elif tracking_data.get("requires_input"):
+            if messages:
+                last_message = messages[-1]
+                content = getattr(last_message, "content", "Additional input required to complete the task.")
+            else:
+                content = "Additional input required to complete the task."
+
+            return AgentStreamResponse(
+                state=TaskState.input_required,
+                content=content,
+                interrupt_reason="subagent_input_required",
+                metadata={"agent_name": agent_name, "tracking_data": tracking_data},
+            )
+
+        # Should not reach here, but return input_required as safe default
+        return AgentStreamResponse(
+            state=TaskState.input_required,
+            content="Additional input required to complete the task.",
+            interrupt_reason="subagent_input_required",
+            metadata={"agent_name": agent_name, "tracking_data": tracking_data},
+        )
 
     @staticmethod
     def build_auth_response(auth_message: str, auth_url: str, error_code: str, **metadata) -> AgentStreamResponse:
@@ -93,6 +258,7 @@ class StreamHandler:
                     metadata["todo_summary"] = todo_summary
 
                 # Build appropriate response based on task_state
+                # Note: If LLM explicitly chose input_required/failed/working, respect that decision
                 if task_state == TaskState.input_required:
                     return AgentStreamResponse(
                         state=TaskState.input_required,
@@ -104,31 +270,63 @@ class StreamHandler:
                     return AgentStreamResponse(state=TaskState.failed, content=message, metadata=metadata)
                 elif task_state == TaskState.working:
                     return AgentStreamResponse(state=TaskState.working, content=message, metadata=metadata)
-                else:  # completed or any other state defaults to completed
+                elif task_state == TaskState.completed:
+                    # SAFETY CHECK: LLM says "completed", but verify if ALL sub-agents are actually blocked
+                    # This prevents hallucination where LLM thinks task is done but all agents need intervention
+                    #
+                    # SCENARIO CONTEXT - Why we can't distinguish intent:
+                    #
+                    # Parallel Execution (intentional):
+                    #   Agent calls Jira + Email simultaneously
+                    #   Jira: blocked (requires_input), Email: success
+                    #   → Trust LLM: Email success might satisfy the user's request
+                    #
+                    # Sequential Fallback (de-routing):
+                    #   Agent calls Jira, gets blocked, tries Email instead
+                    #   Jira: blocked (requires_input), Email: success
+                    #   → Trust LLM: Email success might be the alternative solution
+                    #
+                    # Hallucination (what we protect against):
+                    #   Agent calls Jira + Email
+                    #   Jira: blocked, Email: blocked
+                    #   LLM incorrectly says "completed"
+                    #   → Override: Nothing actually completed, need user intervention
+                    #
+                    # STRATEGY: Only override "completed" if ALL called agents are blocked
+                    # Trust LLM judgment about partial success or alternative approaches
+
+                    if isinstance(final_state, dict) and "a2a_tracking" in final_state:
+                        a2a_tracking = final_state.get("a2a_tracking", {})
+                        recently_called = StreamHandler._extract_recently_called_subagents(final_state)
+
+                        all_blocked, prioritized_agent = StreamHandler._check_all_agents_blocked(
+                            recently_called, a2a_tracking
+                        )
+
+                        # Override ONLY if ALL agents are blocked (safety against hallucination)
+                        if all_blocked and prioritized_agent:
+                            agent_name, tracking_data = prioritized_agent
+
+                            logger.warning(
+                                f"[STREAM HANDLER] LLM said 'completed' but ALL agents blocked - overriding. "
+                                f"Agents: {recently_called}"
+                            )
+
+                            messages = final_state.get("messages", [])
+                            return StreamHandler._build_blocked_agent_response(agent_name, tracking_data, messages)
+
+                    # No override needed - return LLM's completed response
+                    return AgentStreamResponse(
+                        state=TaskState.completed, content=message, metadata=metadata if metadata else None
+                    )
+                else:
+                    # Unknown state - default to completed
                     return AgentStreamResponse(
                         state=TaskState.completed, content=message, metadata=metadata if metadata else None
                     )
 
-        # SECONDARY: Check for auth requirements from a2a_tracking
-        if isinstance(final_state, dict) and "a2a_tracking" in final_state:
-            a2a_tracking = final_state.get("a2a_tracking", {})
-            logger.debug(f"[STREAM HANDLER] Found a2a_tracking: {a2a_tracking}")
-
-            # Check each tracked agent for auth requirements
-            for agent_name, tracking_data in a2a_tracking.items():
-                if isinstance(tracking_data, dict) and tracking_data.get("requires_auth"):
-                    logger.info(f"[STREAM HANDLER] Agent {agent_name} requires authentication")
-
-                    auth_message = tracking_data.get("auth_message", "Authentication required")
-                    auth_url = tracking_data.get("auth_url", "")
-                    error_code = tracking_data.get("error_code", "AUTH_REQUIRED")
-
-                    return StreamHandler.build_auth_response(
-                        auth_message=auth_message, auth_url=auth_url, error_code=error_code, agent_name=agent_name
-                    )
-
-        # FALLBACK: Extract final message content (legacy behavior)
-        logger.warning("[STREAM HANDLER] No structured_response found, falling back to legacy behavior")
+        # FALLBACK: No structured_response (unexpected) - default to completed
+        logger.warning("[STREAM HANDLER] No structured_response found, defaulting to completed")
         messages = final_state.get("messages", []) if isinstance(final_state, dict) else []
         if messages:
             last_message = messages[-1]
