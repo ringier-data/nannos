@@ -87,7 +87,6 @@ class UserContextFromMetadataMiddleware(BaseHTTPMiddleware):
             current_user_context.set(user_context)
         else:
             # No user context found - this is OK for some operations
-            logger.debug("Request has no user context (may be a non-user operation)")
             request.state.user = None
             current_user_context.set(None)
 
