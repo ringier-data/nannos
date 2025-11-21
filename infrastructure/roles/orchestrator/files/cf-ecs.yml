@@ -94,6 +94,16 @@ Resources:
                   - 'dynamodb:DescribeTable'
                 Resource:
                   - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
+              - Sid: 'S3FilesReadAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }

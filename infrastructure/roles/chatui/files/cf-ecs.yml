@@ -84,6 +84,18 @@ Resources:
                 Resource:
                   - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-arn'
                   - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
+              - Sid: 'S3FilesFullAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-task-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }
@@ -122,7 +134,7 @@ Resources:
             - { Name: "REPOSITORY", Value: "{{ git_info.repo_name }}" }
             - { Name: "DYNAMODB_USERS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-users-table-name' }
             - { Name: "DYNAMODB_SESSIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-name' }
-            - { Name: "CHAT_UI_PUBLIC_API_PORT", Value: "{{ chat_ui_public_api_port }}" }
+            - { Name: "API_PORT", Value: "{{ chat_ui_public_api_port }}" }
             - { Name: "OIDC_CLIENT_ID", Value: '{{ oidc_client_id }}' }
             - { Name: "OIDC_ISSUER", Value: '{{ oidc_issuer }}' }
             - { Name: "BASE_DOMAIN", Value: '{{ chat_ui_fqdn }}' }
