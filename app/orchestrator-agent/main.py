@@ -1,11 +1,12 @@
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
 import click
 import uvicorn
 import yaml
-from a2a.server.apps import A2AStarletteApplication
+from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import (
     InMemoryTaskStore,
@@ -25,7 +26,9 @@ from ringier_a2a_sdk.middleware import (
 from ringier_a2a_sdk.server import AuthRequestContextBuilder
 
 from app.core.agent import OrchestratorDeepAgent
+from app.core.budget_guard import init_budget_guard
 from app.core.executor import OrchestratorDeepAgentExecutor
+from app.models.config import AgentSettings
 
 logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("app"))
@@ -33,6 +36,33 @@ configure_existing_logger(logging.getLogger("app"))
 
 class MissingAPIKeyError(Exception):
     """Exception for missing API key."""
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """Application lifespan manager for startup/shutdown tasks."""
+    # Startup: Initialize and start budget guard singleton
+    logger.info("Starting application lifespan...")
+
+    budget_guard = init_budget_guard(
+        project_name=AgentSettings.get_langsmith_project(),
+        token_limit=AgentSettings.get_budget_monthly_token_limit(),
+        check_interval_seconds=AgentSettings.get_budget_check_interval(),
+        warning_thresholds=AgentSettings.get_budget_warning_thresholds(),
+        enabled=AgentSettings.get_budget_enabled(),
+    )
+
+    # Start background polling
+    await budget_guard.start_polling()
+
+    logger.info("Application startup complete")
+
+    yield  # Application runs here
+
+    # Shutdown: Stop budget guard polling
+    logger.info("Shutting down application...")
+    await budget_guard.stop_polling()
+    logger.info("Application shutdown complete")
 
 
 @click.command()
@@ -94,10 +124,10 @@ def main(host, port):
             # push_sender=push_sender,
             request_context_builder=AuthRequestContextBuilder(),
         )
-        server = A2AStarletteApplication(agent_card=agent_card, http_handler=request_handler)
+        server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
 
         # Add authentication middleware stack (EXECUTION ORDER: bottom to top for requests)
-        app = server.build()
+        app = server.build(lifespan=lifespan)
 
         # UserContextFromRequestStateMiddleware runs AFTER OIDC (transfers user to A2A context)
         app.add_middleware(UserContextFromRequestStateMiddleware)

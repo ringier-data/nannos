@@ -163,3 +163,39 @@ class AgentSettings:
     def get_oidc_issuer(cls) -> str:
         """Get Okta/Keycloak issuer URL."""
         return os.environ["OIDC_ISSUER"]
+
+    # Budget guard configuration
+    @classmethod
+    def get_budget_enabled(cls) -> bool:
+        """Check if budget enforcement is enabled."""
+        return os.environ.get("BUDGET_ENABLED", "true").lower() == "true"
+
+    @classmethod
+    def get_budget_monthly_token_limit(cls) -> int:
+        """Get monthly token limit for budget enforcement.
+
+        Default: 100 million tokens (~$300 for Claude on Bedrock)
+        """
+        return int(os.environ.get("BUDGET_MONTHLY_TOKEN_LIMIT", "100000000"))
+
+    @classmethod
+    def get_budget_check_interval(cls) -> int:
+        """Get budget check interval in seconds.
+
+        Default: 300 seconds (5 minutes)
+        """
+        return int(os.environ.get("BUDGET_CHECK_INTERVAL_SECONDS", "300"))
+
+    @classmethod
+    def get_budget_warning_thresholds(cls) -> tuple[float, ...]:
+        """Get warning thresholds as percentages (0.0-1.0).
+
+        Default: 80%, 90%, 95%
+        """
+        thresholds_str = os.environ.get("BUDGET_WARNING_THRESHOLDS", "0.80,0.90,0.95")
+        return tuple(float(t.strip()) for t in thresholds_str.split(","))
+
+    @classmethod
+    def get_langsmith_project(cls) -> str:
+        """Get LangSmith project name for budget tracking."""
+        return os.environ.get("LANGSMITH_PROJECT", "dev-alloy-agent-framework")

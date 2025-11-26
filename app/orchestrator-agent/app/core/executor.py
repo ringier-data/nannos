@@ -21,6 +21,7 @@ from ..models.config import UserConfig
 
 # from google.adk.sessions import InMemorySessionService
 from .agent import OrchestratorDeepAgent
+from .budget_guard import get_budget_guard
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -91,6 +92,27 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             raise ServerError(error=InvalidParamsError())
 
         logger.info(f"[ZERO-TRUST] Using verified user_id for graph retrieval: {user_id}")
+
+        # Check budget guard before processing request
+        budget_guard = get_budget_guard()
+        if budget_guard and budget_guard.is_locked:
+            status = budget_guard.get_status()
+            logger.warning(
+                f"Request rejected due to budget lock. "
+                f"Usage: {status.current_usage:,}/{status.token_limit:,} tokens. "
+                f"Reason: {status.lock_reason}"
+            )
+            await updater.update_status(
+                TaskState.failed,
+                new_agent_text_message(
+                    "Service temporarily unavailable: Monthly token budget has been exceeded. "
+                    "Please contact an administrator to increase the budget or wait until next month.",
+                    task.context_id,
+                    task.id,
+                ),
+                final=True,
+            )
+            return
 
         try:
             # Create config for graph execution with interrupt support

@@ -3,3 +3,4 @@ domain_prefix: 'd.'
 langsmith_tracing: true
 langsmith_project: dev-alloy-agent-framework
 log_level: 'DEBUG'
+budget_monthly_token_limit: 100000000

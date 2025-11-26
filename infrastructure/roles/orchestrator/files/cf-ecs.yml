@@ -153,6 +153,10 @@ Resources:
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
             - { Name: 'JWT_SESSION_EXPIRY_MINUTES', Value: '{{ orchestrator_jwt_session_expiry_minutes }}' }
+            - { Name: 'BUDGET_ENABLED', Value: 'true' }
+            - { Name: 'BUDGET_MONTHLY_TOKEN_LIMIT', Value: '{{ budget_monthly_token_limit }}' }
+            - { Name: 'BUDGET_CHECK_INTERVAL_SECONDS', Value: '300' }
+            - { Name: 'BUDGET_WARNING_THRESHOLDS', Value: '0.80,0.90,0.95' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
