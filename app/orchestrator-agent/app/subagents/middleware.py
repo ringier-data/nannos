@@ -159,6 +159,25 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
             logger.debug("[A2A MIDDLEWARE before_model] Could not determine subagent_type")
             return None
 
+        # CRITICAL ERROR DETECTION: Check for "task does not exist" error BEFORE processing metadata
+        # This handles the case where the sub-agent has cleaned up a completed/failed task
+        # but the orchestrator still has a stale task_id in state, causing infinite retry loops
+        content = last_message.content if isinstance(last_message.content, str) else str(last_message.content)
+        if "task" in content.lower() and "does not exist" in content.lower():
+            logger.warning(
+                f"[A2A MIDDLEWARE before_model] Detected 'task does not exist' error for {subagent_type}. "
+                "Clearing stale task_id from state to prevent retry loop."
+            )
+            # Clear the task_id while preserving context_id and other tracking
+            current_tracking = dict(state.get("a2a_tracking", {}))
+            if subagent_type in current_tracking and "task_id" in current_tracking[subagent_type]:
+                old_task_id = current_tracking[subagent_type]["task_id"]
+                del current_tracking[subagent_type]["task_id"]
+                # Also mark as incomplete to prevent re-injection
+                current_tracking[subagent_type]["is_complete"] = True
+                logger.info(f"[A2A MIDDLEWARE before_model] Cleared stale task_id {old_task_id} for {subagent_type}")
+                return {"a2a_tracking": current_tracking}
+
         # Check if ToolMessage has A2A metadata in additional_kwargs
         # This is placed here by _unwrap_tool_message() after extracting from JSON response
         additional_kwargs = getattr(last_message, "additional_kwargs", {})
@@ -183,9 +202,25 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         if subagent_type not in current_tracking:
             current_tracking[subagent_type] = {}
 
-        # Store task_id and context_id for next invocation
-        if task_id:
+        # Check if task failed or completed - if so, clear task_id to start fresh next time
+        # This prevents trying to reuse a task_id for a task that no longer exists
+        is_complete = a2a_metadata.get("is_complete", False)
+        state_str = str(a2a_metadata.get("state", ""))
+        is_failed = "failed" in state_str.lower()
+
+        # Store task_id and context_id for next invocation ONLY if task is ongoing
+        # For failed/completed tasks, keep context_id but clear task_id
+        if task_id and not (is_complete or is_failed):
             current_tracking[subagent_type]["task_id"] = task_id
+        elif "task_id" in current_tracking[subagent_type]:
+            # Clear stale task_id if task is done or failed
+            logger.info(
+                f"[A2A MIDDLEWARE before_model] Clearing task_id for {subagent_type} "
+                f"(is_complete={is_complete}, is_failed={is_failed})"
+            )
+            del current_tracking[subagent_type]["task_id"]
+
+        # Always preserve context_id for conversation continuity
         if context_id:
             current_tracking[subagent_type]["context_id"] = context_id
 
@@ -404,6 +439,8 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         result = await handler(request)
 
         # STEP 3: Unwrap JSON-encoded A2A metadata from response
+        # Error detection (e.g., "task does not exist") is handled in before_model
+        # where we can actually update state properly
         if isinstance(result, ToolMessage):
             result = self._unwrap_tool_message(result)
         elif isinstance(result, Command):
