@@ -37,9 +37,22 @@ Resources:
       AttributeDefinitions:
         - AttributeName: conversationId
           AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: lastMessageAt
+          AttributeType: S
       KeySchema:
         - AttributeName: conversationId
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: IndexByUserID
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: lastMessageAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: false
       SSESpecification:
