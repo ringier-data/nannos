@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from a2a.types import Task, TaskState
 from foundry_sdk import AsyncFoundryClient as PlatformAsyncFoundryClient
 from foundry_sdk import Auth, ConfidentialClientAuth
-from pydantic import BaseModel, Field, model_validator, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 
@@ -167,7 +167,7 @@ class FoundryJiraTicketAgent(BaseAgent):
 
         # Execute query using camelCase name as per Foundry convention
         result = await self.client.execute_query(
-            query_api_name="agentWrapper",  # camelCase, not snake_case!
+            query_api_name="a2ATicketWriterAgent",  # camelCase, not snake_case!
             parameters={"userInput": message, "sessionRid": session_id},
             version=None,
         )
