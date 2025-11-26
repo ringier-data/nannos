@@ -8,10 +8,10 @@ the A2A task status when the graph execution completes. The model considers:
 3. Whether user input or authentication is needed
 """
 
-from typing import Literal, Optional
+from typing import Optional
 
 from a2a.types import TaskState
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class FinalResponseSchema(BaseModel):
@@ -26,12 +26,7 @@ class FinalResponseSchema(BaseModel):
     to signal when tasks are still ongoing, need input, or have failed.
     """
 
-    task_state: Literal[
-        TaskState.completed,
-        TaskState.working,
-        TaskState.input_required,
-        TaskState.failed,
-    ] = Field(
+    task_state: TaskState = Field(
         description=(
             "The A2A task state for this response. Choose based on:\n"
             "- completed: All todos done, user request fully satisfied, no further action needed\n"
@@ -72,3 +67,34 @@ class FinalResponseSchema(BaseModel):
             "Useful for 'working' state to give progress visibility."
         ),
     )
+
+    @field_validator("task_state", mode="before")
+    @classmethod
+    def normalize_task_state(cls, v):
+        """Normalize task_state to TaskState enum, handling both hyphenated strings and enum values.
+
+        The A2A protocol uses hyphenated format (e.g., 'input-required') but Python enum
+        attributes use underscores (e.g., TaskState.input_required).
+
+        Args:
+            v: Raw value (string or TaskState enum)
+
+        Returns:
+            TaskState enum value
+        """
+        # Already a TaskState enum
+        if isinstance(v, TaskState):
+            return v
+
+        # String format - normalize hyphen to underscore
+        if isinstance(v, str):
+            # Convert hyphenated format to underscored (e.g., "input-required" -> "input_required")
+            normalized = v.replace("-", "_")
+            try:
+                return TaskState[normalized]
+            except KeyError:
+                # If not found, try getting by value (in case it's already the enum value string)
+                for state in TaskState:
+                    if state.value == v:
+                        return state
+        return v  # Let Pydantic handle invalid cases
