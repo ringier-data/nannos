@@ -32,6 +32,7 @@ from app.models.config import AgentSettings
 
 logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("app"))
+configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
 
 class MissingAPIKeyError(Exception):
