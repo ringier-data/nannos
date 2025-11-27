@@ -110,8 +110,7 @@ class BudgetGuard:
             try:
                 self._client = Client()
                 logger.info(
-                    f"BudgetGuard initialized for project '{self.project_name}' "
-                    f"with limit {self.token_limit:,} tokens"
+                    f"BudgetGuard initialized for project '{self.project_name}' with limit {self.token_limit:,} tokens"
                 )
             except Exception as e:
                 logger.error(f"Failed to initialize LangSmith client: {e}")
@@ -236,7 +235,12 @@ class BudgetGuard:
         except Exception as e:
             # FAIL-CLOSED: Lock on any API error
             logger.error(f"LangSmith API error during budget refresh: {e}")
-            self._lock(f"LangSmith API error: {e}")
+            if "not found" in str(e).lower():
+                logger.info(f"Project '{self.project_name}' not found in LangSmith, allowing calls")
+                if self._lock_reason == "Budget exceeded":
+                    self._unlock()
+            else:
+                self._lock(f"LangSmith API error: {e}")
 
     async def start_polling(self) -> None:
         """Start the background polling task."""
