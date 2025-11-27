@@ -1,25 +1,26 @@
-"""Dynamic tool dispatch middleware for runtime tool injection.
+"""Dynamic tool dispatch middleware for runtime MCP tool injection and A2A subagent handling.
 
 This middleware enables a SINGLE graph instance to serve ALL users with different
-tool and subagent configurations:
+MCP tool configurations and A2A subagent registrations:
 
 1. **wrap_model_call**: Merges and binds tools from multiple sources:
-   - Original tools from create_agent (e.g., write_todos)
+   - Original tools from create_agent (e.g., write_todos, task)
    - Static tools (e.g., FinalResponseSchema for Bedrock)
-   - User's dynamic tools from GraphRuntimeContext.tool_registry
-   - Dynamic "task" tool for subagents from GraphRuntimeContext.subagent_registry
+   - User's dynamic MCP tools from GraphRuntimeContext.tool_registry
+   - Enhanced "task" tool that includes both SubAgentMiddleware's agents AND A2A subagents
 
 2. **wrap_tool_call**: Routes tool execution appropriately:
    - Tools registered with ToolNode → pass to handler (standard execution)
-   - Dynamic tools not in ToolNode → execute from GraphRuntimeContext.tool_registry
-   - "task" tool → dispatch to subagent from GraphRuntimeContext.subagent_registry
+   - Dynamic MCP tools not in ToolNode → execute from GraphRuntimeContext.tool_registry
+   - "task" tool for A2A agents → dispatch from GraphRuntimeContext.subagent_registry
+   - "task" tool for general-purpose → fall through to SubAgentMiddleware's handler
 
 Architecture:
-- Graph is created with standard tools (write_todos, etc.)
-- User tools are stored in GraphRuntimeContext.tool_registry (discovered at runtime)
-- User subagents are stored in GraphRuntimeContext.subagent_registry (discovered at runtime)
+- Graph is created with standard tools (write_todos, task, etc.)
+- User MCP tools are stored in GraphRuntimeContext.tool_registry (discovered at runtime)
+- A2A subagents are stored in GraphRuntimeContext.subagent_registry (discovered at runtime)
 - Tools are converted to dict format for model binding (bypasses ToolNode validation)
-- Dynamic tool calls are dispatched directly from registry
+- The task tool description is enhanced to include A2A agents alongside general-purpose
 
 Key Insight: Dict tools bypass factory.py validation (line 907: `if isinstance(t, dict): continue`)
 which allows runtime tool injection without graph recreation.
@@ -38,9 +39,10 @@ from langchain.agents.middleware.types import (
 )
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import HumanMessage, ToolMessage
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.types import Command
+from langsmith import traceable
 
 from ..models.config import GraphRuntimeContext
 
@@ -48,33 +50,37 @@ logger = logging.getLogger(__name__)
 
 
 class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]):
-    """Middleware for runtime tool injection and dynamic dispatch.
+    """Middleware for runtime MCP tool injection and A2A subagent handling.
 
-    Enables per-user tool injection without graph recreation:
+    Enables per-user MCP tool injection and A2A subagent handling without graph recreation:
 
     1. **Model Binding** (wrap_model_call): Merges tools from original request,
        static tools, and GraphRuntimeContext.tool_registry into dict format for model binding.
+       Also enhances the "task" tool description to include A2A subagents from subagent_registry.
 
     2. **Tool Dispatch** (wrap_tool_call): Routes tool execution:
        - ToolNode-registered tools → standard handler execution
-       - Dynamic tools → execute from GraphRuntimeContext.tool_registry
-       - "task" tool → dispatch to subagent from GraphRuntimeContext.subagent_registry
+       - Dynamic MCP tools → execute from GraphRuntimeContext.tool_registry
+       - "task" tool for A2A agents → dispatch from GraphRuntimeContext.subagent_registry
+       - "task" tool for general-purpose → fall through to SubAgentMiddleware's handler
 
     Example:
         ```python
-        # Graph can have standard tools; user tools are added at runtime
+        # Graph can have standard tools; user MCP tools and A2A agents are added at runtime
         agent = create_agent(
             model=model,
             tools=[write_todos],  # Standard tools work normally
-            middleware=[DynamicToolDispatchMiddleware(static_tools=[final_response])],
+            middleware=[
+                DynamicToolDispatchMiddleware(static_tools=[final_response]),
+            ],
             context_schema=GraphRuntimeContext,
         )
 
-        # User tools are added via GraphRuntimeContext at invocation time
+        # User MCP tools and A2A subagents are added via GraphRuntimeContext at invocation time
         user_context = GraphRuntimeContext(
             user_id="user1",
             tool_registry={"mcp_tool": mcp_tool},
-            subagent_registry={"jira-agent": jira_subagent},
+            subagent_registry={"jira-agent": jira_subagent},  # A2A agents
         )
         agent.invoke({"messages": [...]}, context=user_context)
         ```
@@ -82,20 +88,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
     state_schema = AgentState
     tools: list[BaseTool] = []  # No tools registered with middleware itself
-
-    # Task tool description template for subagents
-    TASK_TOOL_DESCRIPTION = """Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows.
-
-Available agent types and the tools they have access to:
-{available_agents}
-
-When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
-
-## Usage notes:
-1. Launch multiple agents concurrently whenever possible, to maximize performance
-2. Each agent invocation is stateless - provide complete context in the description
-3. The agent's outputs should generally be trusted
-4. Clearly tell the agent whether you expect it to create content, perform analysis, or research"""
 
     def __init__(self, static_tools: list[BaseTool] | None = None):
         """Initialize the middleware.
@@ -105,64 +97,84 @@ When using the Task tool, you must specify a subagent_type parameter to select w
                 regardless of user context (e.g., FinalResponseSchema for Bedrock).
         """
         self.static_tools = {t.name: t for t in (static_tools or [])}
-        # Cache for dynamically created task tools per user
-        self._task_tool_cache: dict[str, BaseTool] = {}
 
-    def _create_task_tool(self, user_context: GraphRuntimeContext) -> BaseTool | None:
-        """Create the 'task' tool as a StructuredTool for subagent dispatch.
+    def _enhance_task_tool_schema(
+        self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
+    ) -> dict[str, Any]:
+        """Enhance the task tool's description and subagent_type enum to include A2A subagents.
 
-        Creates a proper StructuredTool (like SubAgentMiddleware does) which works
-        with both OpenAI and Anthropic models via LangChain's convert_to_openai_tool.
+        The task tool from SubAgentMiddleware already includes general-purpose.
+        We add A2A agent descriptions and extend the subagent_type enum with A2A agent names.
 
         Args:
-            user_context: User context containing subagent_registry
+            task_tool_dict: The task tool in OpenAI dict format
+            user_context: User context with subagent_registry
 
         Returns:
-            StructuredTool for the task tool, or None if no subagents
+            Enhanced task tool dict with A2A agents in description and enum
         """
         if not user_context.subagent_registry:
-            return None
+            return task_tool_dict
 
-        # Check cache first (keyed by sorted subagent names to handle same set)
-        cache_key = ",".join(sorted(user_context.subagent_registry.keys()))
-        if cache_key in self._task_tool_cache:
-            return self._task_tool_cache[cache_key]
-
-        # Build subagent descriptions and valid names for the enum
-        subagent_descriptions = []
-        subagent_names = list(user_context.subagent_registry.keys())
+        # Build A2A agent descriptions and names
+        a2a_descriptions = []
+        a2a_agent_names = []
         for name, subagent in user_context.subagent_registry.items():
-            description = subagent.get("description", f"Subagent: {name}")
-            subagent_descriptions.append(f"- {name}: {description}")
+            description = subagent.get("description", f"A2A agent: {name}")
+            a2a_descriptions.append(f"- {name}: {description}")
+            a2a_agent_names.append(name)
 
-        subagent_description_str = "\n".join(subagent_descriptions)
-        task_description = self.TASK_TOOL_DESCRIPTION.format(available_agents=subagent_description_str)
+        if not a2a_descriptions:
+            return task_tool_dict
 
-        # Create a StructuredTool like SubAgentMiddleware does
-        # This approach works with all LLM providers (OpenAI, Anthropic, etc.)
-        def task_func(description: str, subagent_type: str) -> str:
-            """Placeholder - actual execution happens in wrap_tool_call."""
-            # This function signature defines the tool schema
-            # Actual dispatch is handled by _dispatch_task_tool in wrap_tool_call
-            return f"Task dispatched to {subagent_type}"
+        # Enhance the description
+        a2a_section = "\n\nAdditional A2A agents:\n" + "\n".join(a2a_descriptions)
+        original_description = task_tool_dict.get("function", {}).get("description", "")
+        enhanced_description = original_description + a2a_section
 
-        async def task_afunc(description: str, subagent_type: str) -> str:
-            """Async placeholder - actual execution happens in awrap_tool_call."""
-            return f"Task dispatched to {subagent_type}"
+        # Get the current parameters schema
+        function_dict = task_tool_dict.get("function", {})
+        parameters = function_dict.get("parameters", {})
+        properties = parameters.get("properties", {})
+        subagent_type_prop = properties.get("subagent_type", {})
 
-        # Build the tool with proper schema
-        # Note: We add metadata about valid subagent types in the description
-        # since StructuredTool doesn't support enum constraints directly
-        tool = StructuredTool.from_function(
-            name="task",
-            func=task_func,
-            coroutine=task_afunc,
-            description=f"{task_description}\n\nValid subagent_type values: {subagent_names}",
-        )
+        # Get existing enum values (e.g., ["general-purpose"]) or create empty list
+        existing_enum = subagent_type_prop.get("enum", [])
 
-        # Cache the tool
-        self._task_tool_cache[cache_key] = tool
-        return tool
+        # Combine existing enum with A2A agent names (avoid duplicates)
+        combined_enum = list(existing_enum) + [name for name in a2a_agent_names if name not in existing_enum]
+
+        # Create enhanced subagent_type property with enum
+        enhanced_subagent_type = {
+            **subagent_type_prop,
+            "enum": combined_enum,
+        }
+
+        # Build enhanced properties
+        enhanced_properties = {
+            **properties,
+            "subagent_type": enhanced_subagent_type,
+        }
+
+        # Build enhanced parameters
+        enhanced_parameters = {
+            **parameters,
+            "properties": enhanced_properties,
+        }
+
+        # Build enhanced function
+        enhanced_function = {
+            **function_dict,
+            "description": enhanced_description,
+            "parameters": enhanced_parameters,
+        }
+
+        # Create a copy with enhanced function
+        enhanced_tool = {
+            **task_tool_dict,
+            "function": enhanced_function,
+        }
+        return enhanced_tool
 
     def _get_tools_as_dicts(
         self, user_context: GraphRuntimeContext, original_tools: list[Any] | None = None
@@ -170,10 +182,10 @@ When using the Task tool, you must specify a subagent_type parameter to select w
         """Get all tools available to the user as OpenAI-format dicts.
 
         Merges tools from multiple sources (in order of precedence):
-        1. Original tools from request (e.g., write_todos from create_deep_agent)
+        1. Original tools from request (e.g., write_todos, task from create_deep_agent)
+           - The "task" tool is enhanced with A2A agent descriptions from subagent_registry
         2. Static tools from middleware initialization (e.g., FinalResponseSchema)
         3. User's dynamic tools from tool_registry (can override earlier tools)
-        4. Dynamic "task" tool for subagents (if subagent_registry is populated)
 
         Tools are converted to dict format to bypass LangGraph's tool validation.
 
@@ -187,16 +199,24 @@ When using the Task tool, you must specify a subagent_type parameter to select w
         tool_dicts: list[dict[str, Any]] = []
         seen_names: set[str] = set()
 
-        # 1. Add original tools from the request first (e.g., write_todos)
+        # 1. Add original tools from the request first (e.g., write_todos, task)
         # These are tools that create_deep_agent provides by default
+        # The "task" tool gets enhanced with A2A agent descriptions and enum
         for tool in original_tools or []:
             if isinstance(tool, BaseTool):
                 if tool.name not in seen_names:
-                    tool_dicts.append(convert_to_openai_tool(tool))
+                    tool_dict = convert_to_openai_tool(tool)
+                    # Enhance task tool with A2A agents (description + enum)
+                    if tool.name == "task":
+                        tool_dict = self._enhance_task_tool_schema(tool_dict, user_context)
+                    tool_dicts.append(tool_dict)
                     seen_names.add(tool.name)
             elif isinstance(tool, dict):
                 name = tool.get("function", {}).get("name") or tool.get("name")
                 if name and name not in seen_names:
+                    # Enhance task tool with A2A agents (description + enum)
+                    if name == "task":
+                        tool = self._enhance_task_tool_schema(tool, user_context)
                     tool_dicts.append(tool)
                     seen_names.add(name)
 
@@ -217,12 +237,6 @@ When using the Task tool, you must specify a subagent_type parameter to select w
                 # Already in dict format
                 tool_dicts.append(tool)
             seen_names.add(name)
-
-        # 4. Add dynamic task tool if user has subagents
-        # Use StructuredTool which works with both OpenAI and Anthropic models
-        task_tool = self._create_task_tool(user_context)
-        if task_tool and "task" not in seen_names:
-            tool_dicts.append(convert_to_openai_tool(task_tool))
 
         return tool_dicts
 
@@ -327,7 +341,7 @@ When using the Task tool, you must specify a subagent_type parameter to select w
         user_context: GraphRuntimeContext,
         state: Any,
         config: Any,
-    ) -> ToolMessage | Command:
+    ) -> ToolMessage | Command | None:
         """Dispatch 'task' tool call to the appropriate subagent.
 
         Args:
@@ -337,23 +351,24 @@ When using the Task tool, you must specify a subagent_type parameter to select w
             config: Runtime config
 
         Returns:
-            ToolMessage or Command with subagent result
+            ToolMessage or Command with subagent result, or None if subagent not found
+            (allowing fallback to SubAgentMiddleware for general-purpose agent)
         """
         tool_call_id = tool_call["id"]
         args = tool_call.get("args", {})
         description = args.get("description", "")
         subagent_type = args.get("subagent_type", "")
 
-        # Look up subagent
+        # Look up subagent in user's dynamic registry
         subagent = user_context.subagent_registry.get(subagent_type)
         if subagent is None:
-            available = list(user_context.subagent_registry.keys())
-            return ToolMessage(
-                content=f"Error: Subagent '{subagent_type}' not found. Available: {available}",
-                name="task",
-                tool_call_id=tool_call_id,
-                status="error",
+            # Subagent not in dynamic registry - return None to signal fallback
+            # This allows SubAgentMiddleware to handle general-purpose and other built-in agents
+            logger.debug(
+                f"DynamicToolDispatchMiddleware: Subagent '{subagent_type}' not in "
+                f"dynamic registry, falling back to handler (SubAgentMiddleware)"
             )
+            return None
 
         logger.debug(f"DynamicToolDispatchMiddleware: Dispatching task to subagent '{subagent_type}'")
 
@@ -372,10 +387,15 @@ When using the Task tool, you must specify a subagent_type parameter to select w
         subagent_state = {k: v for k, v in state.items() if k not in excluded_keys}
         subagent_state["messages"] = [HumanMessage(content=description)]
 
+        # Use a traced function for proper LangSmith visibility
+        @traceable(name=f"task:{subagent_type}", run_type="tool")
+        def invoke_a2a_agent(agent_state: dict) -> dict:
+            """Invoke A2A agent with tracing for LangSmith visibility."""
+            return runnable.invoke(agent_state)
+
         try:
-            # Invoke the subagent runnable
-            # NOTE: A2AClientRunnable only takes state, not config like standard LangChain runnables
-            result = runnable.invoke(subagent_state)
+            # Invoke the subagent runnable with tracing
+            result = invoke_a2a_agent(subagent_state)
 
             # Extract the result message content
             if isinstance(result, dict) and "messages" in result:
@@ -413,7 +433,7 @@ When using the Task tool, you must specify a subagent_type parameter to select w
         user_context: GraphRuntimeContext,
         state: Any,
         config: Any,
-    ) -> ToolMessage | Command:
+    ) -> ToolMessage | Command | None:
         """Async dispatch 'task' tool call to the appropriate subagent.
 
         Args:
@@ -423,23 +443,24 @@ When using the Task tool, you must specify a subagent_type parameter to select w
             config: Runtime config
 
         Returns:
-            ToolMessage or Command with subagent result
+            ToolMessage or Command with subagent result, or None if subagent not found
+            (allowing fallback to SubAgentMiddleware for general-purpose agent)
         """
         tool_call_id = tool_call["id"]
         args = tool_call.get("args", {})
         description = args.get("description", "")
         subagent_type = args.get("subagent_type", "")
 
-        # Look up subagent
+        # Look up subagent in user's dynamic registry
         subagent = user_context.subagent_registry.get(subagent_type)
         if subagent is None:
-            available = list(user_context.subagent_registry.keys())
-            return ToolMessage(
-                content=f"Error: Subagent '{subagent_type}' not found. Available: {available}",
-                name="task",
-                tool_call_id=tool_call_id,
-                status="error",
+            # Subagent not in dynamic registry - return None to signal fallback
+            # This allows SubAgentMiddleware to handle general-purpose and other built-in agents
+            logger.debug(
+                f"DynamicToolDispatchMiddleware: Subagent '{subagent_type}' not in "
+                f"dynamic registry, falling back to handler (SubAgentMiddleware)"
             )
+            return None
 
         logger.debug(f"DynamicToolDispatchMiddleware: Dispatching task to subagent '{subagent_type}'")
 
@@ -458,10 +479,15 @@ When using the Task tool, you must specify a subagent_type parameter to select w
         subagent_state = {k: v for k, v in state.items() if k not in excluded_keys}
         subagent_state["messages"] = [HumanMessage(content=description)]
 
+        # Use a traced function for proper LangSmith visibility
+        @traceable(name=f"task:{subagent_type}", run_type="tool")
+        async def ainvoke_a2a_agent(agent_state: dict) -> dict:
+            """Invoke A2A agent asynchronously with tracing for LangSmith visibility."""
+            return await runnable.ainvoke(agent_state)
+
         try:
-            # Invoke the subagent runnable asynchronously
-            # NOTE: A2AClientRunnable only takes state, not config like standard LangChain runnables
-            result = await runnable.ainvoke(subagent_state)
+            # Invoke the subagent runnable asynchronously with tracing
+            result = await ainvoke_a2a_agent(subagent_state)
 
             # Extract the result message content
             if isinstance(result, dict) and "messages" in result:
@@ -527,13 +553,21 @@ When using the Task tool, you must specify a subagent_type parameter to select w
             return handler(request)
 
         # Special handling for "task" tool (subagent dispatch)
+        # Try dynamic registry first, fall back to handler (SubAgentMiddleware) for general-purpose
         if tool_name == "task":
-            return self._dispatch_task_tool(
+            result = self._dispatch_task_tool(
                 tool_call=tool_call,
                 user_context=user_context,
                 state=request.runtime.state,
                 config=request.runtime.config,
             )
+            if result is not None:
+                return result
+            # Subagent not in dynamic registry - fall through to handler (SubAgentMiddleware)
+            logger.debug(
+                "DynamicToolDispatchMiddleware.wrap_tool_call: Task tool falling back to handler for subagent dispatch"
+            )
+            return handler(request)
 
         # If tool is registered with ToolNode, let the standard handler execute it
         # This handles tools from create_deep_agent like write_todos
@@ -626,13 +660,21 @@ When using the Task tool, you must specify a subagent_type parameter to select w
             return await handler(request)
 
         # Special handling for "task" tool (subagent dispatch)
+        # Try dynamic registry first, fall back to handler (SubAgentMiddleware) for general-purpose
         if tool_name == "task":
-            return await self._adispatch_task_tool(
+            result = await self._adispatch_task_tool(
                 tool_call=tool_call,
                 user_context=user_context,
                 state=request.runtime.state,
                 config=request.runtime.config,
             )
+            if result is not None:
+                return result
+            # Subagent not in dynamic registry - fall through to handler (SubAgentMiddleware)
+            logger.debug(
+                "DynamicToolDispatchMiddleware.awrap_tool_call: Task tool falling back to handler for subagent dispatch"
+            )
+            return await handler(request)
 
         # If tool is registered with ToolNode, let the standard handler execute it
         # This handles tools from create_deep_agent like write_todos

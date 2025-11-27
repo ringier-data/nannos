@@ -204,7 +204,7 @@ class TestMiddlewareStack:
 
         # DynamicToolDispatchMiddleware should be first
         assert isinstance(stack[0], DynamicToolDispatchMiddleware)
-        assert len(stack) == 5  # DynamicTool, Auth, Retry, A2A, Todo
+        assert len(stack) == 6  # DynamicTool, UserPreferences, Auth, Retry, A2A, Todo
 
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_bedrock_middleware_has_static_tool(self, mock_dynamodb):

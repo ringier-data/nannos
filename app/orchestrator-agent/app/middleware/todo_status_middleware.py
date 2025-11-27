@@ -123,13 +123,17 @@ class TodoStatusMiddleware(AgentMiddleware[TodoStatusState, ContextT]):
         # Execute the tool normally
         result = await handler(request)
 
-        # Emit status for any completed tasks after execution
+        # Emit status for any completed or failed tasks after execution
         if todos and stream_writer:
             for todo in todos:
                 if todo.get("status") == "completed":
                     completion_message = self._format_completion(todo)
                     logger.info(f"[TODO MIDDLEWARE] Emitting completion: {completion_message}")
                     await self._emit_event(stream_writer, completion_message, len(todos), "completion")
+                elif todo.get("status") == "failed":
+                    failure_message = self._format_failure(todo)
+                    logger.info(f"[TODO MIDDLEWARE] Emitting failure: {failure_message}")
+                    await self._emit_event(stream_writer, failure_message, len(todos), "failure")
 
         return result
 
@@ -191,6 +195,8 @@ class TodoStatusMiddleware(AgentMiddleware[TodoStatusState, ContextT]):
                 status_icon = "✅"
             elif status == "in_progress":
                 status_icon = "🔄"
+            elif status == "failed":
+                status_icon = "❌"
             else:  # pending
                 status_icon = "📌"
 
@@ -245,3 +251,20 @@ class TodoStatusMiddleware(AgentMiddleware[TodoStatusState, ContextT]):
             content = content[:97] + "..."
 
         return f"✅ **Completed**: {content}"
+
+    def _format_failure(self, todo: dict) -> str:
+        """Format a failure message for a todo.
+
+        Args:
+            todo: The failed todo
+
+        Returns:
+            Formatted failure message
+        """
+        content = todo.get("content", "Task")
+
+        # Truncate if too long
+        if len(content) > 100:
+            content = content[:97] + "..."
+
+        return f"❌ **Failed**: {content}"

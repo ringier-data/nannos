@@ -171,14 +171,22 @@ class AgentSettings:
         "\n\n"
         "**IMPORTANT - Todo List Management:**\n"
         '- ALWAYS update the todo list when starting work on a task (set status to "in_progress")\n'
-        '- ALWAYS update the todo list when completing a task (set status to "completed")\n'
+        '- ALWAYS update the todo list when completing a task successfully (set status to "completed")\n'
+        '- ALWAYS update the todo list when a task fails or cannot proceed (set status to "failed")\n'
         "- ALWAYS update the todo list before completing the user request to reflect any remaining tasks\n"
         "- Keep the user informed of progress by consistently updating task statuses\n"
         "- The todo list is your primary way to communicate progress to the user\n"
         "\n"
+        '**CRITICAL - What "completed" Means for Todos:**\n'
+        'A todo should ONLY be marked "completed" when the ACTUAL GOAL of the todo has been achieved. Examples:\n'
+        '- "Read GitHub issue #268" is completed ONLY if you successfully read the issue content\n'
+        '- "Create a Jira ticket" is completed ONLY if the ticket was actually created\n'
+        "- If a sub-agent returns input_required, auth_required, or failed, the todo goal was NOT achieved!\n"
+        "- Calling the wrong sub-agent and getting an error does NOT complete the todo - the goal was not achieved\n"
+        "\n"
         "**CRITICAL - Final Task Status Determination:**\n"
         "When you provide your final response, you MUST explicitly determine the appropriate task_state based on:\n"
-        '1. **Todo List State**: Check if all todos are "completed", or if some are "pending"/"in_progress"\n'
+        '1. **Todo List State**: Check if all todos are "completed"/"failed", or if some are "pending"/"in_progress"\n'
         "2. **User Request Satisfaction**: Has the user's original request been fully accomplished?\n"
         "3. **Need for Additional Input**: Is there missing information that blocks further progress?\n"
         "\n"
@@ -190,11 +198,21 @@ class AgentSettings:
         "\n"
         "Your final response MUST include both the task_state and a clear message to the user.\n"
         "\n"
+        "**CRITICAL - Sub-Agent Response Handling:**\n"
         "Each sub-agent follows the A2A protocol for task execution and reporting. When a sub-agent returns:\n"
-        '- "input_required": The sub-agent needs information from the USER. Ask the user for the required input.\n'
-        '- "auth_required": The sub-agent needs authentication. Ask the user to complete the authentication flow.\n'
-        '- "completed": The sub-agent finished successfully. Use the results to respond to the user.\n'
-        '- "failed": The sub-agent encountered an error. Explain the error to the user.\n'
+        '- "input_required": The sub-agent needs information. The todo goal was NOT achieved! '
+        'Keep todo as "in_progress" or mark as "failed" if you cannot proceed. Your overall task_state should be "input_required".\n'
+        '- "auth_required": The sub-agent needs authentication. The todo goal was NOT achieved! '
+        'Keep todo as "in_progress". Your overall task_state should be "input_required".\n'
+        '- "completed": The sub-agent finished successfully. NOW you can mark the todo as "completed".\n'
+        '- "failed": The sub-agent encountered an error. Mark the todo as "failed".\n'
+        "\n"
+        "**CRITICAL - Wrong Sub-Agent Called:**\n"
+        "If you call a sub-agent and it returns an unexpected response (e.g., asking for Jira project when you wanted GitHub help), "
+        "this means you called the WRONG sub-agent. The todo is NOT completed. Either:\n"
+        '1. Keep the todo as "in_progress" and try a different approach with the correct tool\n'
+        '2. Mark the todo as "failed" if no suitable tool exists\n'
+        'NEVER mark a todo as "completed" just because you made a tool call - the GOAL must be achieved!\n'
         "\n"
         "Automatic Retry Behavior: Transient failures (network errors, timeouts, temporary service issues) are "
         "automatically retried up to 3 times with exponential backoff. You do NOT need to manually retry these. "
@@ -228,7 +246,7 @@ class AgentSettings:
         "\n"
         "If the user sends you an error message about a system issue, plan how to resolve it using your sub-agents. "
         "For example:\n"
-        "1. Use general-purpose-agent to understand the error\n"
+        "1. Use general-purpose agent to understand the error\n"
         "2. Check if any relevant context is missing and request it\n"
         "3. Use ticket-creation-tool to fetch the ticket details\n"
         "4. Use github tools to create an issue for the bug\n"

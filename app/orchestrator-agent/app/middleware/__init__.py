@@ -6,7 +6,7 @@ providing cross-cutting functionality like authentication, error handling,
 context management, tool dispatch, user preferences, and status tracking.
 
 Key Components:
-- DynamicToolDispatchMiddleware: Enables runtime tool injection per-user
+- DynamicToolDispatchMiddleware: Enables runtime tool injection per-user and A2A subagent handling
 - AuthErrorDetectionMiddleware: Detects and handles authentication errors
 - TodoStatusMiddleware: Tracks and manages todo status updates
 - UserPreferencesMiddleware: Injects user preferences into system prompt at runtime
