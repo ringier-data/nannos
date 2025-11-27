@@ -148,7 +148,7 @@ Resources:
             - { Name: 'AZURE_OPENAI_CHAT_MODEL_NAME', Value: '{{ azure_openai_chat_model_name }}' }
             - { Name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', Value: '{{ azure_openai_chat_deployment }}' }
             - { Name: 'AZURE_OPENAI_ENDPOINT', Value: '{{ azure_openai_endpoint }}' }
-            - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing }}' }
+            - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing | string | lower }}' }
             - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
