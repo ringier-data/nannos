@@ -35,24 +35,15 @@ Resources:
       TableName: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-conversations'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: conversationId
-          AttributeType: S
         - AttributeName: userId
           AttributeType: S
-        - AttributeName: lastMessageAt
+        - AttributeName: conversationId
           AttributeType: S
       KeySchema:
-        - AttributeName: conversationId
+        - AttributeName: userId
           KeyType: HASH
-      GlobalSecondaryIndexes:
-        - IndexName: IndexByUserID
-          KeySchema:
-            - AttributeName: userId
-              KeyType: HASH
-            - AttributeName: lastMessageAt
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
+        - AttributeName: conversationId
+          KeyType: RANGE
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: false
       SSESpecification:

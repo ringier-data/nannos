@@ -70,7 +70,7 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: 'DynamoDBCheckpointsAccess'
+              - Sid: 'DynamoDBSessionsTableAccess'
                 Effect: 'Allow'
                 Action:
                   - 'dynamodb:Query'
@@ -83,7 +83,45 @@ Resources:
                   - 'dynamodb:DescribeTable'
                 Resource:
                   - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-arn'
+              - Sid: 'DynamoDBUsersTableAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
                   - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
+              - Sid: 'DynamoDBConversationsTableAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-conversations-table-arn'
+              - Sid: 'DynamoDBMessagesTableAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-messages-table-arn'
               - Sid: 'S3FilesFullAccess'
                 Effect: 'Allow'
                 Action:
@@ -134,6 +172,8 @@ Resources:
             - { Name: "REPOSITORY", Value: "{{ git_info.repo_name }}" }
             - { Name: "DYNAMODB_USERS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-users-table-name' }
             - { Name: "DYNAMODB_SESSIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-name' }
+            - { Name: "DYNAMODB_CONVERSATIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-conversations-table-name' }
+            - { Name: "DYNAMODB_MESSAGES_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-messages-table-name' }
             - { Name: "API_PORT", Value: "{{ chat_ui_public_api_port }}" }
             - { Name: "OIDC_CLIENT_ID", Value: '{{ oidc_client_id }}' }
             - { Name: "OIDC_ISSUER", Value: '{{ oidc_issuer }}' }
