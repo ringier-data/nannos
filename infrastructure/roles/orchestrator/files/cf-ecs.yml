@@ -104,6 +104,14 @@ Resources:
                     - '${BucketArn}/*'
                     - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
                   - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+              - Sid: 'BedrockInvokeModel'
+                Effect: 'Allow'
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }
@@ -157,6 +165,7 @@ Resources:
             - { Name: 'BUDGET_MONTHLY_TOKEN_LIMIT', Value: '{{ budget_monthly_token_limit }}' }
             - { Name: 'BUDGET_CHECK_INTERVAL_SECONDS', Value: '300' }
             - { Name: 'BUDGET_WARNING_THRESHOLDS', Value: '0.80,0.90,0.95' }
+            - { Name: "BEDROCK_MODEL_ID", Value: '{{ bedrock_model_id }}' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
