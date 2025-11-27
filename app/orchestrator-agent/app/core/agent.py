@@ -1,10 +1,15 @@
-"""
-Meta-Agent which can be instantiated with personalized configuration
+"""Meta-Agent which can be instantiated with personalized configuration
 for different users, enabling tailored interactions and responses.
 
 * get_config: Retrieves and applies user-specific configuration settings to customize agent behavior.
 * discover_sub_agents: Discovers and integrates sub-agents dynamically based on the user permissions.
 
+Architecture:
+- ONE universal graph per model type (not per capability set)
+- User context (language, preferences) injected at runtime via `context` parameter
+- Tools and sub-agents injected per-user via GraphRuntimeContext.tool_registry and subagent_registry
+- DynamicToolDispatchMiddleware handles runtime tool binding and dispatch
+- Dynamic system prompt personalizes responses based on GraphRuntimeContext
 """
 
 import logging
@@ -12,22 +17,16 @@ from collections.abc import AsyncIterable
 from typing import Any
 
 from a2a.types import TaskState
-from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.messages import HumanMessage
-from langchain_openai import AzureChatOpenAI
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
-
-# from langgraph.checkpoint.memory import MemorySaver
-from langgraph_checkpoint_dynamodb import DynamoDBConfig, DynamoDBSaver, DynamoDBTableConfig
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..handlers import StreamHandler, handle_auth_error, should_retry
-from ..middleware import AuthErrorDetectionMiddleware, TodoStatusMiddleware
+from ..handlers import StreamHandler
 from ..models import AgentFrameworkAuthError, AgentSettings, AgentStreamResponse, UserConfig
-from ..subagents import A2ATaskTrackingMiddleware
+from ..models.config import ModelType
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
-from .graph_manager import GraphManager
+from .graph_factory import DEFAULT_MODEL, GraphFactory
 from .registry import RegistryService, User
 
 logger = logging.getLogger(__name__)
@@ -70,17 +69,29 @@ class OrchestratorDeepAgent:
     """
     OrchestratorDeepAgent - a specialized assistant for planning and orchestration.
     It should be instantiated with user-specific configuration to tailor its behavior.
+
+    Architecture:
+    - ONE universal graph per model type (Bedrock vs OpenAI)
+    - User context (language, preferences) injected at runtime via `context` parameter
+    - Tools and sub-agents injected per-user via GraphRuntimeContext registries
+    - DynamicToolDispatchMiddleware handles runtime tool binding and dispatch
+    - Dynamic system prompt personalizes responses based on GraphRuntimeContext
     """
 
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
 
-    def __init__(self):
+    def __init__(
+        self,
+        model: ModelType | None = None,
+        thinking: bool = False,
+    ):
         self.config = AgentSettings()
-        self.model = AzureChatOpenAI(
-            azure_deployment=self.config.get_azure_deployment(),
-            temperature=0,
-            model=self.config.get_azure_model_name(),
-        )
+        self.thinking = thinking
+        self._default_model_type: ModelType = model or DEFAULT_MODEL
+
+        # Initialize GraphFactory - centralizes all graph-related concerns
+        # (model creation, checkpointer, middleware, graph caching)
+        self._graph_factory = GraphFactory(config=self.config, thinking=thinking)
 
         # Initialize client credentials auth for agent-to-agent communication
         self.oauth2_client = OidcOAuth2Client(
@@ -90,76 +101,27 @@ class OrchestratorDeepAgent:
         )
         logger.info("Initialized OAuth2 client credentials authenticator")
 
-        # OPTIMIZED GRAPH ARCHITECTURE:
-        # We maintain one graph per unique configuration (tools/subagents set),
-        # NOT per thread. This ensures:
-        # 1. User isolation (thread_id in checkpointer separates conversations)
-        # 2. No checkpointing of tools/subagents (baked into graph, not in state)
-        # 3. Dynamic discovery (new tools/subagents = new graph)
-        # 4. No large payloads (only pass thread_id, not tools/subagents)
-        # 5. No credentials in checkpoints (tools fetch credentials at runtime)
-        # 6. Tools in system prompt (baked into graph creation)
-        #
-        # Key insight: Multiple users can share the same graph if they have
-        # the same tools/subagents available. User isolation comes from thread_id.
-        self.graphs = {}  # Cache of graphs by config_signature
+        # Discovery services for tools and sub-agents
+        # NOTE: A2A middleware is shared from GraphFactory to track task status
         self.tool_discovery_service = ToolDiscoveryService(self.config, oauth2_client=self.oauth2_client)
         self.agent_discovery_service = AgentDiscoveryService(self.config, oauth2_client=self.oauth2_client)
 
-        # Create memory saver for persistent conversations
-        # This is shared across all users but isolates by thread_id
-        # Create a checkpointer with the custom configuration
-        self.memory = DynamoDBSaver(
-            DynamoDBConfig(
-                table_config=DynamoDBTableConfig(
-                    table_name=self.config.CHECKPOINT_TABLE_NAME,
-                    ttl_days=self.config.CHECKPOINT_TTL_DAYS,  # Enable TTL with 14 days expiration (set to None to disable)
-                ),
-                region_name=self.config.CHECKPOINT_AWS_REGION,
-                max_retries=self.config.CHECKPOINT_MAX_RETRIES,
-            ),
-            deploy=False,
-        )
+        # Registry service for user lookups
         self.registry_service = RegistryService()
 
-        # Initialize retry middleware for sub-agent tool calls
-        # Applies exponential backoff with jitter to all "task" tool invocations (all sub-agents)
-        # This provides uniform retry behavior across dynamically discovered A2A sub-agents
+    def _get_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:
+        """Get a graph for the specified model type.
 
-        self.retry_middleware = ToolRetryMiddleware(
-            max_retries=self.config.MAX_RETRIES,
-            # tools=["task"],  # we need to retry all tools not just sub-agent tasks ("task") since otherwise the on_failure won't be called for auth errors from other tools
-            backoff_factor=self.config.BACKOFF_FACTOR,  # Exponential backoff: 2s, 4s, 8s
-            retry_on=should_retry,  # Custom retry condition excluding 401 errors
-            on_failure=handle_auth_error,
-        )
+        Delegates to GraphFactory which handles model creation, caching,
+        middleware setup, and graph creation.
 
-        # Initialize the A2A task tracking middleware
-        # This will be passed to create_deep_agent, not used for manual wrapping
-        self.a2a_middleware = A2ATaskTrackingMiddleware()
+        Args:
+            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
 
-        # Initialize the authentication error detection middleware
-        # This will detect auth errors from ANY tool and emit auth_required events
-        self.auth_middleware = AuthErrorDetectionMiddleware()
-        logger.debug(f"Initialized AuthErrorDetectionMiddleware: {self.auth_middleware}")
-
-        # Initialize the todo status middleware
-        # This will intercept write_todos tool calls to emit status updates
-        self.todo_status_middleware = TodoStatusMiddleware()
-
-        # Initialize graph manager with all middleware
-        middleware_stack = [
-            self.auth_middleware,  # Auth error detection (outermost)
-            self.retry_middleware,  # Retry logic (inside auth)
-            self.a2a_middleware,  # A2A task tracking (inside retries)
-            self.todo_status_middleware,  # Todo status updates (innermost)
-        ]
-        self.graph_manager = GraphManager(
-            model=self.model,
-            checkpointer=self.memory,
-            system_prompt=self.config.SYSTEM_INSTRUCTION,
-            middleware=middleware_stack,
-        )
+        Returns:
+            CompiledStateGraph: The graph instance (cached or newly created)
+        """
+        return self._graph_factory.get_graph(model_type)
 
     async def _get_user_from_registry(self, sub: str) -> User:
         """Fetch agents from a service registry using the provided sub."""
@@ -191,7 +153,7 @@ class OrchestratorDeepAgent:
             agent_urls=user.agent_urls,
             token=user_config.access_token.get_secret_value(),
             user_context=user_context,
-            streaming_middleware=self.a2a_middleware,
+            streaming_middleware=self._graph_factory.a2a_middleware,
         )
 
         # Discover tools with token exchange support
@@ -204,54 +166,43 @@ class OrchestratorDeepAgent:
 
         user_config.tools = tools
         user_config.sub_agents = sub_agents
+        user_config.language = user.language
         logger.debug(f"Created config with {len(user_config.sub_agents) if user_config.sub_agents else 0} sub_agents")
+        logger.debug(f"User preferred language: {user.language}")
         return user_config
 
-    async def get_or_create_graph(self, user_config: UserConfig, force_refresh: bool = False) -> CompiledStateGraph:
+    async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:
         """Get or create a graph for the given user configuration.
 
-        Graphs are cached by configuration signature (tools + subagents), not by user.
-        This means multiple users with the same capabilities share the same graph instance,
-        but are isolated by thread_id in the checkpointer.
+        Architecture: ONE universal graph per model type with dynamic tool injection.
+        - Tools are NOT baked into the graph
+        - User tools/subagents come from GraphRuntimeContext at runtime via DynamicToolDispatchMiddleware
 
         Args:
-            user_config: The user's configuration
-            force_refresh: If True, clears cache and re-discovers agents
+            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
 
         Returns:
-            CompiledStateGraph: The compiled LangGraph for this user's configuration
+            CompiledStateGraph: The compiled LangGraph for this model type
         """
-        logger.debug(f"Getting or creating graph for user_id: {user_config.user_id}, force_refresh: {force_refresh}")
-
-        # If force_refresh is requested, clear caches
-        if force_refresh:
-            logger.info("Force refresh requested - clearing all caches")
-            self.graph_manager.clear_cache()
-        if user_config.tools is None or user_config.sub_agents is None:
-            user_config = await self.update_config(user_config)
-        # Use graph manager to get or create graph
-        compiled_graph = self.graph_manager.get_or_create_graph(
-            tools=user_config.tools, subagents=user_config.sub_agents
-        )
-
-        return compiled_graph
+        # Get the graph (created lazily if needed)
+        # Tools/subagents are NOT passed here - they come from GraphRuntimeContext at runtime
+        return self._get_graph(model_type)
 
     async def stream(
         self, query: str, user_config: UserConfig, context_id: str, resume: Any = None
     ) -> AsyncIterable[AgentStreamResponse]:
         """
-        Stream agent responses using standard A2A protocol states with runtime config injection.
+        Stream agent responses with runtime user context injection.
 
-        ZERO-TRUST ARCHITECTURE:
-        - user_config: Verified user configuration from OIDC provider (used for graph selection)
+        ARCHITECTURE:
+        - GraphRuntimeContext: Injected at runtime via `context` parameter for personalization
+        - thread_id: Used for conversation isolation in checkpointer
+        - ONE graph per model type: Shared across users, customized via runtime context
+
+        ZERO-TRUST PRINCIPLES:
+        - user_config: Verified user configuration from OIDC provider
         - context_id: Conversation identifier (used for thread isolation in checkpointer)
-
-        Uses a single shared graph per configuration with proper user isolation:
-        1. User isolation (verified user_id selects graph, context_id isolates conversations)
-        2. No checkpointing of tools/subagents (runtime-only)
-        3. Dynamic discovery (can change between requests)
-        4. No large payloads (config contains only thread_id)
-        5. No credentials in checkpoints (injected at runtime)
+        - No credentials in checkpoints (GraphRuntimeContext passed at runtime, not persisted)
 
         Args:
             query: User query to process
@@ -264,7 +215,7 @@ class OrchestratorDeepAgent:
             AgentStreamResponse: Structured response with state and content
 
         Examples:
-            # Normal execution with zero-trust pattern
+            # Normal execution with runtime context injection
             async for response in agent.stream("Hello", user_config, "conv-456"):
                 print(response.content)
 
@@ -275,10 +226,10 @@ class OrchestratorDeepAgent:
         logger.debug(f"Query: {query}, User ID: {user_config.user_id}, Context ID: {context_id}")
 
         try:
-            # The graph is cached by config signature (tools + subagents), not by user or conversation.
-            # Multiple users with same capabilities share the same graph, isolated by thread_id.
+            # Get or create graph for this model type
+            # Graph is shared across users, isolated by thread_id and customized by GraphRuntimeContext
             graph = await self.get_or_create_graph(
-                user_config=user_config,
+                model_type=user_config.model if user_config.model else self._default_model_type
             )
         except AgentFrameworkAuthError as e:
             logger.error(f"Authorization error while initializing: {e}")
@@ -288,18 +239,19 @@ class OrchestratorDeepAgent:
             )
             return
 
+        # Create GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
+        if user_config.tools is None or user_config.sub_agents is None:
+            user_config = await self.update_config(user_config)
+        runtime_context = user_config.to_runtime_context()
+
         # Create config with thread_id for conversation isolation
-        # Tools/subagents are baked into the graph (NOT in config, NOT checkpointed)
-        # This ensures:
-        # - No large payloads passed with each request (only thread_id)
-        # - No credentials in checkpoints (tools access them at runtime)
-        # - User isolation via thread_id in checkpointer
+        # GraphRuntimeContext is passed via `context` parameter, NOT stored in config or checkpointed
         config = {
             "configurable": {
                 "thread_id": context_id,  # For conversation memory (checkpointed)
             }
         }
-        logger.debug("Config created with thread_id for isolation")
+        logger.debug(f"Config created with thread_id={context_id}, runtime_context.language={runtime_context.language}")
 
         # Determine input based on whether we're resuming or starting fresh
         if resume is not None:
@@ -314,11 +266,12 @@ class OrchestratorDeepAgent:
             chunk_count = 0
             emitted_updates = set()  # Track emitted updates to avoid duplicates
 
-            logger.debug("Starting graph.astream...")
+            logger.debug("Starting graph.astream with runtime context injection...")
 
             # Stream the response with CUSTOM EVENTS for progressive A2A status updates
             # Using stream_mode='custom' to receive both state updates and custom events
-            async for event in graph.astream(input_data, config, stream_mode="custom"):  # type: ignore
+            # CRITICAL: Pass runtime_context via `context` parameter for runtime personalization
+            async for event in graph.astream(input_data, config, stream_mode="custom", context=runtime_context):  # type: ignore
                 chunk_count += 1
                 logger.info(f"===== EVENT {chunk_count} =====")
                 logger.info(f"Event type: {type(event)}")

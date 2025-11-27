@@ -5,9 +5,72 @@ separated from the core agent logic for better maintainability.
 """
 
 import os
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+if TYPE_CHECKING:
+    from langchain_core.tools import BaseTool
+
+# Model type literal for type safety
+ModelType = Literal["gpt4o", "claude-sonnet-4.5"]
+
+
+@dataclass
+class GraphRuntimeContext:
+    """Runtime context injected into LangGraph at invocation time.
+
+    This dataclass is passed to the graph via the `context` parameter, enabling:
+    1. Dynamic prompt customization (language, name)
+    2. Runtime tool injection (tool_registry)
+    3. Runtime subagent injection (subagent_registry)
+
+    DynamicToolDispatchMiddleware uses tool_registry and subagent_registry to:
+    - Bind tools to the model at call time (wrap_model_call)
+    - Execute tool calls without ToolNode registration (wrap_tool_call)
+
+    This enables a SINGLE graph to serve ALL users with different tool configurations.
+
+    Note: Created from UserConfig via UserConfig.to_runtime_context()
+    """
+
+    user_id: str
+    """User identifier for logging and isolation."""
+
+    name: str
+    """User's display name for personalization."""
+
+    email: str
+    """User's email address."""
+
+    language: str = "en"
+    """User's preferred language for responses (ISO 639-1 code)."""
+
+    tool_registry: dict[str, Any] = field(default_factory=dict)
+    """Registry of tool name -> BaseTool instance for this user.
+
+    Tools are discovered per-user (e.g., from MCP servers) and stored here.
+    DynamicToolDispatchMiddleware uses this to:
+    1. Bind tools to the model dynamically
+    2. Execute tool calls without ToolNode registration
+    """
+
+    subagent_registry: dict[str, Any] = field(default_factory=dict)
+    """Registry of subagent name -> callable for this user.
+
+    Subagents are discovered per-user and stored here for dynamic invocation.
+    """
+
+    @property
+    def tools(self) -> list["BaseTool"]:
+        """Get list of all tools available to this user."""
+        return list(self.tool_registry.values())
+
+    @property
+    def tool_names(self) -> list[str]:
+        """Get names of all tools available to this user."""
+        return list(self.tool_registry.keys())
 
 
 class ResponseFormat(BaseModel):
@@ -22,6 +85,7 @@ class UserConfig(BaseModel):
     """User-specific configuration for personalized agent behavior.
 
     Contains user credentials, preferences, and discovered tools/sub-agents.
+    Use to_runtime_context() to convert to GraphRuntimeContext for graph invocation.
     """
 
     user_id: str = Field(..., description="User identifier")
@@ -29,8 +93,43 @@ class UserConfig(BaseModel):
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
     language: str = Field(default="en", description="User's preferred language")
+    model: Optional[ModelType] = Field(default=None, description="LLM model to use (gpt4o or claude-sonnet-4.5)")
     sub_agents: Optional[list] = Field(default=None, description="Discovered sub-agents")
     tools: Optional[list] = Field(default=None, description="Discovered tools")
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def to_runtime_context(self) -> "GraphRuntimeContext":
+        """Convert to GraphRuntimeContext for LangGraph execution.
+
+        Transforms discovered tools and subagents lists into registries
+        for dynamic tool dispatch at runtime.
+
+        Returns:
+            GraphRuntimeContext for graph invocation
+        """
+        # Convert tools list to tool_registry (name -> tool mapping)
+        tool_registry: dict[str, Any] = {}
+        for tool in self.tools or []:
+            if hasattr(tool, "name"):
+                tool_registry[tool.name] = tool
+            elif isinstance(tool, dict):
+                tool_registry[tool.get("name", str(tool))] = tool
+
+        # Convert subagents list to subagent_registry (name -> CompiledSubAgent mapping)
+        subagent_registry: dict[str, Any] = {}
+        for subagent in self.sub_agents or []:
+            if isinstance(subagent, dict) and "name" in subagent:
+                subagent_registry[subagent["name"]] = subagent
+
+        return GraphRuntimeContext(
+            user_id=self.user_id,
+            name=self.name,
+            email=self.email,
+            language=self.language,
+            tool_registry=tool_registry,
+            subagent_registry=subagent_registry,
+        )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -163,6 +262,16 @@ class AgentSettings:
     def get_oidc_issuer(cls) -> str:
         """Get Okta/Keycloak issuer URL."""
         return os.environ["OIDC_ISSUER"]
+
+    @classmethod
+    def get_bedrock_model_id(cls) -> str:
+        """Get AWS Bedrock model ID."""
+        return os.environ["BEDROCK_MODEL_ID"]
+
+    @classmethod
+    def get_bedrock_region(cls) -> str:
+        """Get AWS Bedrock region."""
+        return os.environ.get("AWS_REGION", "eu-central-1")
 
     # Budget guard configuration
     @classmethod

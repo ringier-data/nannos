@@ -5,7 +5,7 @@ This module contains all data models, schemas, configuration classes, and except
 used throughout the application, providing a centralized location for data definitions.
 
 Key Components:
-- Configuration models (UserConfig, AgentSettings, ResponseFormat)
+- Configuration models (UserConfig, UserContext, AgentSettings, ResponseFormat)
 - Response models (AgentStreamResponse and other API response models)
 - Schema definitions (FinalResponseSchema for structured output)
 - Custom exceptions (A2AClientError, AgentFrameworkAuthError)
@@ -13,6 +13,7 @@ Key Components:
 Usage:
     from app.models import (
         UserConfig,
+        UserContext,
         AgentSettings,
         AgentStreamResponse,
         FinalResponseSchema,
@@ -20,7 +21,7 @@ Usage:
     )
 """
 
-from .config import AgentSettings, ResponseFormat, UserConfig
+from .config import AgentSettings, GraphRuntimeContext, ResponseFormat, UserConfig
 from .exceptions import A2AClientError, AgentFrameworkAuthError
 from .responses import AgentStreamResponse
 from .schemas import FinalResponseSchema
@@ -28,6 +29,7 @@ from .schemas import FinalResponseSchema
 __all__ = [
     # Configuration
     "UserConfig",
+    "GraphRuntimeContext",
     "AgentSettings",
     "ResponseFormat",
     # Responses

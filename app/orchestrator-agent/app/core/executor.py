@@ -93,6 +93,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         logger.info(f"[ZERO-TRUST] Using verified user_id for graph retrieval: {user_id}")
 
+        # Extract model preference from message metadata (client-specified, optional)
+        model_choice = None
+        if context.message and hasattr(context.message, "metadata") and context.message.metadata:
+            model_choice = context.message.metadata.get("model")
+            if model_choice:
+                logger.info(f"Model preference from client metadata: {model_choice}")
+
         # Check budget guard before processing request
         budget_guard = get_budget_guard()
         if budget_guard and budget_guard.is_locked:
@@ -122,12 +129,15 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 access_token=user_token,
                 name=user_name,
                 email=user_email,
+                model=model_choice,
             )
 
             # Check if we need to resume from an interrupt
             # Get or create graph for this user's configuration
             # ZERO-TRUST: Pass verified user_id and user_token from call_context
-            graph = await self.agent.get_or_create_graph(user_config)
+            graph = await self.agent.get_or_create_graph(
+                model_type=user_config.model if user_config.model else self.agent._default_model_type
+            )
             current_state = graph.get_state(config)  # type: ignore
 
             # Check if the graph is currently interrupted and this might be a resume request

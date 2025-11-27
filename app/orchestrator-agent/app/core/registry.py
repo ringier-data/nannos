@@ -22,6 +22,7 @@ class User(BaseModel):
     id: str  # Primary key (sub from OIDC)
     agent_urls: list[str] = []  # List of registered agent URLs
     tool_names: list[str] = []  # List of registered tool names
+    language: str = "en"  # User's preferred language
 
 
 class RegistryService:
@@ -71,6 +72,7 @@ class RegistryService:
                 id=item["id"],
                 agent_urls=item.get("agent_urls", []),
                 tool_names=item.get("tool_names", []),
+                language=item.get("language", "en"),
             )
         except ItemNotFound:
             logger.debug(f"User not found: {user_id}")

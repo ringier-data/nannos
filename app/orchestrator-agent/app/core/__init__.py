@@ -8,26 +8,26 @@ Key Components:
 - OrchestratorDeepAgent: Main orchestrator agent with personalized configuration
 - AgentExecutor: A2A executor wrapper for task execution
 - AgentDiscoveryService: Dynamic sub-agent and tool discovery
-- GraphManager: LangGraph state management and caching
+- GraphFactory: Centralized graph creation and management
 
 Usage:
     from app.core import (
         OrchestratorDeepAgent,
         AgentExecutor,
         AgentDiscoveryService,
-        GraphManager,
+        GraphFactory,
     )
 """
 
 from .agent import OrchestratorDeepAgent
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 from .executor import AgentExecutor
-from .graph_manager import GraphManager
+from .graph_factory import GraphFactory
 
 __all__ = [
     "OrchestratorDeepAgent",
     "AgentExecutor",
     "AgentDiscoveryService",
     "ToolDiscoveryService",
-    "GraphManager",
+    "GraphFactory",
 ]
