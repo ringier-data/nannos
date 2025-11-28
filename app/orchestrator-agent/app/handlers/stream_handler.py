@@ -19,6 +19,34 @@ class StreamHandler:
     """Handles stream response generation and state parsing."""
 
     @staticmethod
+    def _extract_text_from_content(content: Any) -> str:
+        """Extract text from message content, handling both string and list formats.
+
+        Bedrock models with extended thinking return content as a list of blocks:
+        [{'type': 'reasoning_content', ...}, {'type': 'text', 'text': '...'}]
+
+        GPT-4o and other models return content as a simple string.
+
+        Args:
+            content: Message content (string or list of content blocks)
+
+        Returns:
+            Extracted text content as string
+        """
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            # Extract text from content blocks
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text" and "text" in block:
+                        text_parts.append(block["text"])
+            return " ".join(text_parts) if text_parts else str(content)
+        else:
+            return str(content)
+
+    @staticmethod
     def _extract_current_turn_messages(messages: list) -> list:
         """Extract messages from the current conversation turn.
 
@@ -94,7 +122,19 @@ class StreamHandler:
     def _check_all_agents_blocked(
         recently_called: set[str], a2a_tracking: Dict[str, Any]
     ) -> tuple[bool, Optional[tuple[str, Dict[str, Any]]]]:
-        """Check if ALL recently-called agents are blocked.
+        """Check if ALL recently-called agents are blocked or incomplete.
+
+        DEFENSIVE DESIGN: Treats agents as "blocked" if they:
+        - Require auth (requires_auth=True)
+        - Require input (requires_input=True)
+        - Failed (state=TaskState.failed)
+        - Still working (state=TaskState.working or is_complete=False)
+
+        This prevents the orchestrator from claiming completion when sub-agents
+        haven't reached a terminal success state.
+
+        Note: ToolMessage status='error' is now detected earlier in A2ATaskTrackingMiddleware
+        and converted to state='TaskState.failed' in the a2a_tracking data.
 
         Args:
             recently_called: Set of agent names called in current turn
@@ -102,43 +142,63 @@ class StreamHandler:
 
         Returns:
             Tuple of (all_blocked: bool, prioritized_agent_info: Optional[tuple[agent_name, tracking_data]])
-            If all_blocked is True, returns the agent to use for override (auth prioritized over input)
+            If all_blocked is True, returns the agent to use for override (auth prioritized, then failed, then input)
         """
         if not recently_called:
             return False, None
 
         all_blocked = True
         blocked_agent_info = None  # Stores (agent_name, tracking_data)
-        blocked_auth_agent_info = None  # Prioritize auth if present
+        blocked_auth_agent_info = None  # Highest priority: auth required
+        blocked_failed_agent_info = None  # Second priority: failed
 
         for agent_name in recently_called:
             tracking_data = a2a_tracking.get(agent_name, {})
             if not isinstance(tracking_data, dict):
                 continue
 
-            is_blocked = tracking_data.get("requires_auth") or tracking_data.get("requires_input")
+            # Extract state information
+            requires_auth = tracking_data.get("requires_auth", False)
+            requires_input = tracking_data.get("requires_input", False)
+            is_complete = tracking_data.get("is_complete", True)  # Defensive: assume incomplete if missing
+            state = tracking_data.get("state", "")
+
+            # Check if state is explicitly failed (now includes ToolMessage status='error' detected by middleware)
+            is_failed = ("failed" in str(state).lower()) or (state == "TaskState.failed")
+
+            # Agent is blocked if: requires auth, requires input, failed, or not complete
+            is_blocked = requires_auth or requires_input or is_failed or not is_complete
 
             if is_blocked:
                 # Store first blocked agent info for potential override
                 if blocked_agent_info is None:
                     blocked_agent_info = (agent_name, tracking_data)
-                # Prioritize auth over input
-                if tracking_data.get("requires_auth") and blocked_auth_agent_info is None:
+                # Prioritize auth over other issues
+                if requires_auth and blocked_auth_agent_info is None:
                     blocked_auth_agent_info = (agent_name, tracking_data)
+                # Prioritize failed over input_required
+                if is_failed and blocked_failed_agent_info is None:
+                    blocked_failed_agent_info = (agent_name, tracking_data)
             else:
-                # At least one agent is NOT blocked
+                # At least one agent successfully completed
                 all_blocked = False
                 break
 
-        # Return prioritized agent: auth if present, otherwise first blocked
-        prioritized_agent = blocked_auth_agent_info if blocked_auth_agent_info else blocked_agent_info
+        # Return prioritized agent: auth > failed > other blocked
+        if blocked_auth_agent_info:
+            prioritized_agent = blocked_auth_agent_info
+        elif blocked_failed_agent_info:
+            prioritized_agent = blocked_failed_agent_info
+        else:
+            prioritized_agent = blocked_agent_info
+
         return all_blocked, prioritized_agent
 
     @staticmethod
     def _build_blocked_agent_response(
         agent_name: str, tracking_data: Dict[str, Any], messages: list
     ) -> AgentStreamResponse:
-        """Build response for a blocked agent (auth or input required).
+        """Build response for a blocked agent (auth, input, failed, or incomplete).
 
         Args:
             agent_name: Name of the blocked agent
@@ -146,9 +206,9 @@ class StreamHandler:
             messages: Conversation messages for context
 
         Returns:
-            AgentStreamResponse with appropriate state (auth_required or input_required)
+            AgentStreamResponse with appropriate state (auth_required, input_required, or failed)
         """
-        # Auth takes priority over input
+        # Priority order: auth > failed > input > incomplete
         if tracking_data.get("requires_auth"):
             auth_message = tracking_data.get("auth_message", "Authentication required")
             auth_url = tracking_data.get("auth_url", "")
@@ -160,10 +220,31 @@ class StreamHandler:
                 error_code=error_code,
                 agent_name=agent_name,
             )
+
+        # Check for failed state
+        state = tracking_data.get("state", "")
+        is_failed = ("failed" in str(state).lower()) or (state == "TaskState.failed")
+
+        if is_failed:
+            # Extract failure message from the last tool message
+            if messages:
+                last_message = messages[-1]
+                content = getattr(last_message, "content", "The agent failed to complete the task.")
+                content = StreamHandler._extract_text_from_content(content)
+            else:
+                content = "The agent failed to complete the task."
+
+            return AgentStreamResponse(
+                state=TaskState.failed,
+                content=f"{agent_name} failed: {content}",
+                metadata={"agent_name": agent_name, "tracking_data": tracking_data},
+            )
+
         elif tracking_data.get("requires_input"):
             if messages:
                 last_message = messages[-1]
                 content = getattr(last_message, "content", "Additional input required to complete the task.")
+                content = StreamHandler._extract_text_from_content(content)
             else:
                 content = "Additional input required to complete the task."
 
@@ -234,96 +315,147 @@ class StreamHandler:
         logger.debug(f"Final state for response parsing: {final_state}")
         logger.debug(f"Final state type: {type(final_state)}")
 
-        # PRIORITY: Check for structured_response from the model (FinalResponseSchema)
-        # This is the agent's explicit determination of task status
-        if isinstance(final_state, dict) and "structured_response" in final_state:
+        # PRIORITY: Extract FinalResponseSchema from current turn's tool_calls
+        # This ensures we get the LATEST response, not a stale one from checkpointer state
+        # The structured_response in final_state may be from a previous turn/model
+        structured_response = None
+
+        if isinstance(final_state, dict):
+            messages = final_state.get("messages", [])
+            if messages:
+                # Extract current turn messages only (after last HumanMessage)
+                current_turn_messages = StreamHandler._extract_current_turn_messages(messages)
+
+                # Search backwards through current turn for FinalResponseSchema tool call
+                for msg in reversed(current_turn_messages):
+                    if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                        for tool_call in msg.tool_calls:
+                            if tool_call.get("name") == "FinalResponseSchema":
+                                structured_response = tool_call.get("args", {})
+                                logger.info(
+                                    f"[STREAM HANDLER] Found FinalResponseSchema in current turn tool_calls: {structured_response}"
+                                )
+                                break
+                        if structured_response:
+                            break
+
+        # FALLBACK: Check structured_response from final_state (may be set by AutoStrategy for OpenAI)
+        # Only use if we didn't find a tool call in the current turn
+        if not structured_response and isinstance(final_state, dict) and "structured_response" in final_state:
             structured_response = final_state.get("structured_response")
-            logger.info(f"[STREAM HANDLER] Found structured_response: {structured_response}")
+            logger.info(
+                f"[STREAM HANDLER] Using structured_response from final_state (fallback): {structured_response}"
+            )
 
-            if structured_response is not None:
-                # Extract task_state, message, and metadata from structured response
-                task_state = getattr(structured_response, "task_state", TaskState.completed)
-                message = getattr(structured_response, "message", "Task completed")
-                reasoning = getattr(structured_response, "reasoning", None)
-                todo_summary = getattr(structured_response, "todo_summary", None)
+        if structured_response is not None:
+            # Parse structured response using Pydantic model validation
+            # This handles both dict (from tool_calls) and object (already validated) formats
+            from ..models.schemas import FinalResponseSchema
 
-                logger.info(f"[STREAM HANDLER] Agent determined task_state: {task_state}")
-                logger.debug(f"[STREAM HANDLER] Reasoning: {reasoning}")
+            try:
+                if isinstance(structured_response, dict):
+                    # Parse dict into FinalResponseSchema (validates and normalizes task_state)
+                    parsed = FinalResponseSchema.model_validate(structured_response)
+                elif isinstance(structured_response, FinalResponseSchema):
+                    # Already a validated FinalResponseSchema
+                    parsed = structured_response
+                else:
+                    # Try to convert to dict and parse
+                    parsed = FinalResponseSchema.model_validate(structured_response.__dict__)
 
-                # Build metadata
-                metadata = {}
-                if reasoning:
-                    metadata["reasoning"] = reasoning
-                if todo_summary:
-                    metadata["todo_summary"] = todo_summary
+                # Extract validated fields
+                task_state = parsed.task_state
+                message = parsed.message
+                reasoning = parsed.reasoning
+                todo_summary = parsed.todo_summary
+            except Exception as e:
+                logger.error(f"Failed to parse structured_response: {e}", exc_info=True)
+                # Fallback to completed with error message
+                return AgentStreamResponse(
+                    state=TaskState.completed,
+                    content="Task processing completed with validation errors.",
+                    metadata={"parse_error": str(e)},
+                )
 
-                # Build appropriate response based on task_state
-                # Note: If LLM explicitly chose input_required/failed/working, respect that decision
-                if task_state == TaskState.input_required:
-                    return AgentStreamResponse(
-                        state=TaskState.input_required,
-                        content=message,
-                        interrupt_reason="input_required",
-                        metadata=metadata,
+            logger.info(
+                f"[STREAM HANDLER] Agent determined task_state: {task_state} (raw: {structured_response.get('task_state') if isinstance(structured_response, dict) else 'N/A'})"
+            )
+            logger.debug(f"[STREAM HANDLER] Message: {message}")
+
+            # Build metadata
+            metadata = {}
+            if reasoning:
+                metadata["reasoning"] = reasoning
+            if todo_summary:
+                metadata["todo_summary"] = todo_summary
+
+            # Build appropriate response based on task_state
+            # Note: If LLM explicitly chose input_required/failed/working, respect that decision
+            if task_state == TaskState.input_required:
+                return AgentStreamResponse(
+                    state=TaskState.input_required,
+                    content=message,
+                    interrupt_reason="input_required",
+                    metadata=metadata,
+                )
+            elif task_state == TaskState.failed:
+                return AgentStreamResponse(state=TaskState.failed, content=message, metadata=metadata)
+            elif task_state == TaskState.working:
+                return AgentStreamResponse(state=TaskState.working, content=message, metadata=metadata)
+            elif task_state == TaskState.completed:
+                # SAFETY CHECK: LLM says "completed", but verify if ALL sub-agents are actually blocked
+                # This prevents hallucination where LLM thinks task is done but all agents need intervention
+                #
+                # SCENARIO CONTEXT - Why we can't distinguish intent:
+                #
+                # Parallel Execution (intentional):
+                #   Agent calls Jira + Email simultaneously
+                #   Jira: blocked (requires_input), Email: success
+                #   → Trust LLM: Email success might satisfy the user's request
+                #
+                # Sequential Fallback (de-routing):
+                #   Agent calls Jira, gets blocked, tries Email instead
+                #   Jira: blocked (requires_input), Email: success
+                #   → Trust LLM: Email success might be the alternative solution
+                #
+                # Hallucination (what we protect against):
+                #   Agent calls Jira + Email
+                #   Jira: blocked, Email: blocked
+                #   LLM incorrectly says "completed"
+                #   → Override: Nothing actually completed, need user intervention
+                #
+                # STRATEGY: Only override "completed" if ALL called agents are blocked
+                # Trust LLM judgment about partial success or alternative approaches
+
+                if isinstance(final_state, dict) and "a2a_tracking" in final_state:
+                    a2a_tracking = final_state.get("a2a_tracking", {})
+                    recently_called = StreamHandler._extract_recently_called_subagents(final_state)
+
+                    all_blocked, prioritized_agent = StreamHandler._check_all_agents_blocked(
+                        recently_called, a2a_tracking
                     )
-                elif task_state == TaskState.failed:
-                    return AgentStreamResponse(state=TaskState.failed, content=message, metadata=metadata)
-                elif task_state == TaskState.working:
-                    return AgentStreamResponse(state=TaskState.working, content=message, metadata=metadata)
-                elif task_state == TaskState.completed:
-                    # SAFETY CHECK: LLM says "completed", but verify if ALL sub-agents are actually blocked
-                    # This prevents hallucination where LLM thinks task is done but all agents need intervention
-                    #
-                    # SCENARIO CONTEXT - Why we can't distinguish intent:
-                    #
-                    # Parallel Execution (intentional):
-                    #   Agent calls Jira + Email simultaneously
-                    #   Jira: blocked (requires_input), Email: success
-                    #   → Trust LLM: Email success might satisfy the user's request
-                    #
-                    # Sequential Fallback (de-routing):
-                    #   Agent calls Jira, gets blocked, tries Email instead
-                    #   Jira: blocked (requires_input), Email: success
-                    #   → Trust LLM: Email success might be the alternative solution
-                    #
-                    # Hallucination (what we protect against):
-                    #   Agent calls Jira + Email
-                    #   Jira: blocked, Email: blocked
-                    #   LLM incorrectly says "completed"
-                    #   → Override: Nothing actually completed, need user intervention
-                    #
-                    # STRATEGY: Only override "completed" if ALL called agents are blocked
-                    # Trust LLM judgment about partial success or alternative approaches
 
-                    if isinstance(final_state, dict) and "a2a_tracking" in final_state:
-                        a2a_tracking = final_state.get("a2a_tracking", {})
-                        recently_called = StreamHandler._extract_recently_called_subagents(final_state)
+                    # Override ONLY if ALL agents are blocked (safety against hallucination)
+                    if all_blocked and prioritized_agent:
+                        agent_name, tracking_data = prioritized_agent
 
-                        all_blocked, prioritized_agent = StreamHandler._check_all_agents_blocked(
-                            recently_called, a2a_tracking
+                        logger.warning(
+                            f"[STREAM HANDLER] LLM said 'completed' but ALL agents blocked - overriding. "
+                            f"Agents: {recently_called}"
                         )
 
-                        # Override ONLY if ALL agents are blocked (safety against hallucination)
-                        if all_blocked and prioritized_agent:
-                            agent_name, tracking_data = prioritized_agent
+                        messages = final_state.get("messages", [])
+                        return StreamHandler._build_blocked_agent_response(agent_name, tracking_data, messages)
 
-                            logger.warning(
-                                f"[STREAM HANDLER] LLM said 'completed' but ALL agents blocked - overriding. "
-                                f"Agents: {recently_called}"
-                            )
-
-                            messages = final_state.get("messages", [])
-                            return StreamHandler._build_blocked_agent_response(agent_name, tracking_data, messages)
-
-                    # No override needed - return LLM's completed response
-                    return AgentStreamResponse(
-                        state=TaskState.completed, content=message, metadata=metadata if metadata else None
-                    )
-                else:
-                    # Unknown state - default to completed
-                    return AgentStreamResponse(
-                        state=TaskState.completed, content=message, metadata=metadata if metadata else None
-                    )
+                # No override needed - return LLM's completed response
+                return AgentStreamResponse(
+                    state=TaskState.completed, content=message, metadata=metadata if metadata else None
+                )
+            else:
+                # Unknown state - default to completed
+                return AgentStreamResponse(
+                    state=TaskState.completed, content=message, metadata=metadata if metadata else None
+                )
 
         # FALLBACK: No structured_response (unexpected) - default to completed
         logger.warning("[STREAM HANDLER] No structured_response found, defaulting to completed")
@@ -331,6 +463,7 @@ class StreamHandler:
         if messages:
             last_message = messages[-1]
             content = getattr(last_message, "content", str(last_message))
+            content = StreamHandler._extract_text_from_content(content)
         else:
             content = "Task completed successfully"
 

@@ -100,6 +100,14 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
     - Natural conversational flow: user provides input → LLM calls tool again
     - No interrupts needed - input consumed in subsequent tool call
 
+    Subagent Type Fallback:
+    - If the LLM tries to use a subagent_type that doesn't exist (e.g., hallucinated
+      from examples in the task tool description), the middleware automatically falls
+      back to 'general-purpose'
+    - This prevents errors when the LLM hallucinates agent types like 'content-reviewer'
+      or 'research-analyst' from the examples in the task tool prompt
+    - A warning is logged when fallback occurs
+
     Integration:
         ```python
         agent = create_deep_agent(
@@ -301,7 +309,22 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
             logger.info(f"[A2A MIDDLEWARE wrap_tool_call] No tracking for {subagent_type} - new conversation")
 
         # STEP 2: Execute the tool with injected IDs
-        result = handler(request)
+        # Fallback to 'general-purpose' if subagent_type doesn't exist
+        # This handles cases where LLM hallucinates a subagent type from examples in the prompt
+        try:
+            result = handler(request)
+        except ValueError as e:
+            error_msg = str(e)
+            if "the only allowed types are" in error_msg and subagent_type != "general-purpose":
+                logger.warning(
+                    f"[A2A MIDDLEWARE wrap_tool_call] Subagent type '{subagent_type}' not found. "
+                    f"Falling back to 'general-purpose'. Original error: {error_msg}"
+                )
+                # Modify the request to use general-purpose instead
+                request.tool_call["args"]["subagent_type"] = "general-purpose"
+                result = handler(request)
+            else:
+                raise
 
         # STEP 3: Unwrap JSON-encoded A2A metadata from response and store in additional_kwargs
         if isinstance(result, ToolMessage):
@@ -320,9 +343,15 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         This extracts the metadata and stores it in additional_kwargs where
         before_model can find it, then returns a new ToolMessage with just
         the actual content (clean message for LLM consumption).
+
+        Also detects ToolMessage status='error' and sets state to failed in metadata.
         """
         if not isinstance(tool_message.content, str):
             return tool_message
+
+        # Check if ToolMessage has status='error' - this indicates a tool execution failure
+        tool_status = getattr(tool_message, "status", None)
+        has_error_status = tool_status == "error"
 
         try:
             content_dict = json.loads(tool_message.content)
@@ -334,16 +363,40 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
 
                 logger.info(f"[A2A MIDDLEWARE unwrap] Found A2A metadata: {list(a2a_metadata.keys())}")
 
+                # If ToolMessage has status='error', override A2A metadata to mark as failed
+                if has_error_status:
+                    logger.warning("[A2A MIDDLEWARE unwrap] ToolMessage has status='error' - marking state as failed")
+                    a2a_metadata["state"] = "TaskState.failed"
+                    a2a_metadata["is_complete"] = True  # Failed tasks are considered complete
+
                 # Create new ToolMessage with unwrapped content and metadata in additional_kwargs
                 # This allows before_model to extract IDs from a consistent, known location
                 return ToolMessage(
                     content=original_content,
                     tool_call_id=tool_message.tool_call_id,
                     name=tool_message.name,
+                    status=tool_message.status,  # Preserve the status field
                     additional_kwargs={**tool_message.additional_kwargs, "a2a_metadata": a2a_metadata},
                 )
         except json.JSONDecodeError:
             pass
+
+        # If no A2A JSON metadata but ToolMessage has status='error', create synthetic failed metadata
+        if has_error_status:
+            logger.warning(
+                "[A2A MIDDLEWARE unwrap] ToolMessage has status='error' without A2A metadata - creating failed state"
+            )
+            synthetic_metadata = {
+                "state": "TaskState.failed",
+                "is_complete": True,
+            }
+            return ToolMessage(
+                content=tool_message.content,
+                tool_call_id=tool_message.tool_call_id,
+                name=tool_message.name,
+                status=tool_message.status,
+                additional_kwargs={**tool_message.additional_kwargs, "a2a_metadata": synthetic_metadata},
+            )
 
         return tool_message
 
@@ -436,7 +489,22 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
             logger.info(f"[A2A MIDDLEWARE awrap_tool_call] No tracking for {subagent_type} - new conversation")
 
         # STEP 2: Execute tool normally
-        result = await handler(request)
+        # Fallback to 'general-purpose' if subagent_type doesn't exist
+        # This handles cases where LLM hallucinates a subagent type from examples in the prompt
+        try:
+            result = await handler(request)
+        except ValueError as e:
+            error_msg = str(e)
+            if "the only allowed types are" in error_msg and subagent_type != "general-purpose":
+                logger.warning(
+                    f"[A2A MIDDLEWARE awrap_tool_call] Subagent type '{subagent_type}' not found. "
+                    f"Falling back to 'general-purpose'. Original error: {error_msg}"
+                )
+                # Modify the request to use general-purpose instead
+                request.tool_call["args"]["subagent_type"] = "general-purpose"
+                result = await handler(request)
+            else:
+                raise
 
         # STEP 3: Unwrap JSON-encoded A2A metadata from response
         # Error detection (e.g., "task does not exist") is handled in before_model

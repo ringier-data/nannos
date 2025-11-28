@@ -271,7 +271,14 @@ class A2AClientRunnable:
         return artifacts_data
 
     def _create_synthetic_message_content(self, task: Task, app_metadata: Dict[str, Any]) -> str:
-        """Create synthetic message content following A2A protocol."""
+        """Create synthetic message content following A2A protocol.
+
+        For failed/incomplete tasks, explicitly indicates the state to ensure
+        the LLM recognizes when a task did not complete successfully.
+
+        DEFENSIVE DESIGN: Treats non-terminal states (working, input_required, etc.)
+        as incomplete to prevent the orchestrator from incorrectly assuming success.
+        """
         content = "Task processed"
 
         # A2A protocol: task.status.message contains human-readable details
@@ -287,6 +294,25 @@ class A2AClientRunnable:
                 inner_part = first_part.root
                 if inner_part.kind == "text":
                     content = inner_part.text or "Task completed"
+
+        # CRITICAL: For non-successful states, explicitly indicate the issue
+        # This ensures the LLM understands the task did not complete successfully
+        if task.status.state == TaskState.failed:
+            # If content doesn't already indicate failure, prepend error marker
+            lower_content = content.lower()
+            if "failed" not in lower_content and "error" not in lower_content:
+                content = f"ERROR: Task failed - {content}"
+            else:
+                # Content already mentions failure, but ensure it's prominent
+                content = f"Task execution failed: {content}"
+        elif task.status.state == TaskState.working:
+            # Agent is still processing - this should NOT be treated as completion
+            content = f"INCOMPLETE: Agent is still working - {content}"
+        elif task.status.state not in TERMINAL_TASK_STATES:
+            # Any other non-terminal state (input_required, auth_required, etc.)
+            # Prepend state information for clarity
+            state_name = task.status.state.value if hasattr(task.status.state, "value") else str(task.status.state)
+            content = f"Agent status: {state_name} - {content}"
 
         return content
 
@@ -342,30 +368,74 @@ class A2AClientRunnable:
         Backwards compatible with existing code that expects a single result.
         Internally uses astream() and collects the final result.
 
+        IMPORTANT: If the stream ends without reaching a terminal state (completed, failed,
+        canceled, rejected), we treat it as a failure. This handles cases where the sub-agent
+        crashes or disconnects before emitting a final status.
+
         Note: May log SSE cleanup warnings ("generator didn't stop after athrow()") which are
         cosmetic and don't affect functionality. These occur when asyncio.run() tears down the
         event loop before the A2A library's SSE connection fully cleans up.
         """
         final_result = {}
+        last_state = None
 
         try:
             async for item in self.astream(input_data):
                 # Keep updating with latest data
                 if item.get("type") == "task_update" or item.get("type") == "message":
                     final_result = item.get("data", {})
+                    last_state = item.get("state")
                 # For errors, return error response immediately
                 elif item.get("type") == "error":
                     return {
                         "error": item.get("error"),
                         "error_type": item.get("error_type"),
-                        "is_complete": False,
+                        "is_complete": True,  # Mark as complete since it's a terminal error
+                        "state": str(TaskState.failed),
                         "requires_retry": item.get("requires_retry", True),
                         "messages": [AIMessage(content=f"Error: {item.get('error')}")],
                     }
 
+            # CRITICAL: Check if stream ended without reaching a terminal state
+            # This handles cases where sub-agent crashes or disconnects unexpectedly
+            if final_result:
+                result_state = final_result.get("state")
+                # Convert state string back to TaskState for comparison
+                state_str = str(result_state) if result_state else last_state
+
+                # Check if we ended in a non-terminal state
+                is_terminal = any(
+                    terminal.value in str(state_str).lower() or str(terminal) in str(state_str)
+                    for terminal in TERMINAL_TASK_STATES
+                )
+                is_intervention = "input_required" in str(state_str) or "auth_required" in str(state_str)
+
+                if not is_terminal and not is_intervention:
+                    # Stream ended without terminal state - treat as unexpected failure
+                    logger.warning(
+                        f"A2A stream ended with non-terminal state: {state_str}. "
+                        "Sub-agent may have crashed or disconnected. Treating as failure."
+                    )
+
+                    # Update the result to indicate failure
+                    original_content = ""
+                    if final_result.get("messages"):
+                        last_msg = final_result["messages"][-1]
+                        if hasattr(last_msg, "content"):
+                            original_content = last_msg.content
+
+                    error_content = (
+                        f"The agent stopped responding unexpectedly. Last status: {state_str}. {original_content}"
+                    )
+
+                    final_result["state"] = str(TaskState.failed)
+                    final_result["is_complete"] = True
+                    final_result["messages"] = [AIMessage(content=error_content)]
+
             return final_result or {
-                "is_complete": False,
-                "messages": [AIMessage(content="No response received")],
+                "is_complete": True,
+                "state": str(TaskState.failed),
+                "messages": [AIMessage(content="No response received from agent")],
             }
         except httpx.ConnectError as e:
             logger.error(f"A2A connection failed: {e}")
