@@ -31,6 +31,7 @@ from .registry import RegistryService, User
 
 logger = logging.getLogger(__name__)
 
+
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
 
 # **Instructions:**
@@ -259,15 +260,15 @@ class OrchestratorDeepAgent:
             input_data = Command(resume=resume)
             logger.info(f"Resume input data: Command(resume={resume})")
         else:
-            # Normal input format for LangChain v1.0.0 with memory
-            # Multi-user attribution: Use name= for OpenAI (native support) AND prefix content
-            # for Bedrock/Claude (Converse API doesn't support name field).
-            # Format: "[UserName]: message" or "[UserName <@SlackHandle>]: message" for Slack
-            user_prefix = runtime_context.name
-            if runtime_context.slack_user_handle:
+            if runtime_context.slack_user_handle:  # meaning we need to handle multiple actors in the conversation
+                # Multi-user attribution: Prefix content with user identity for all models
+                # Format: "[UserName]: message" or "[UserName <@SlackHandle>]: message" for Slack
+                user_prefix = runtime_context.name
                 user_prefix = f"{runtime_context.name} {runtime_context.slack_user_handle}"
-            attributed_content = f"[{user_prefix}]: {query}"
-            input_data = {"messages": [HumanMessage(content=attributed_content, name=runtime_context.name)]}
+                content = f"[{user_prefix}]: {query}"
+            else:
+                content = query
+            input_data = {"messages": [HumanMessage(content=content)]}
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0
