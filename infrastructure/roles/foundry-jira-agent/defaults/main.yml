@@ -11,7 +11,7 @@ foundry_jira_agent_oidc_client_secret: !vault |
 
 foundry_jira_agent_client_id: 'foundry-jira-ticket-agent'
 foundry_jira_agent_public_api_port: 8080
-foundry_jira_agent_fqdn: 'foundry-jira.{{ domain_prefix }}alloy.ch'
+foundry_jira_agent_fqdn: 'foundry-jira.{{ base_domain }}'
 foundry_jira_agent_task_cpu: 512
 foundry_jira_agent_task_memory: 1024
 foundry_jira_agent_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent'

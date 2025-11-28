@@ -3,4 +3,3 @@
 - import_tasks: 'ssm.yml'
 - import_tasks: 'dynamodb.yml'
 - import_tasks: 'ecs-service.yml'
-- import_tasks: 'cloudfront.yml'

@@ -2,4 +2,3 @@
 
 - import_tasks: 'dynamodb.yml'
 - import_tasks: 'storage.yml'
-- import_tasks: 'cloudfront.yml'
