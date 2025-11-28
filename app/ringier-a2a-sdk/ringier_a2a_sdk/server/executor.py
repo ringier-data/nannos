@@ -113,6 +113,26 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 await self._handle_stream_item(item, updater, task)
         except Exception as e:
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}")
+
+            # CRITICAL: Emit TaskState.failed before raising the exception
+            # This ensures the orchestrator receives a proper failure status instead of
+            # seeing the stream end abruptly with a "working" state
+            error_message = f"Agent execution failed: {e.__class__.__name__}: {e}"
+            try:
+                await updater.update_status(
+                    TaskState.failed,
+                    new_agent_text_message(
+                        error_message,
+                        task.context_id,
+                        task.id,
+                    ),
+                    final=True,
+                )
+                logger.info(f"Emitted TaskState.failed to orchestrator: {error_message}")
+            except Exception as emit_error:
+                # If we can't emit the failure status, log but don't mask the original error
+                logger.error(f"Failed to emit TaskState.failed: {emit_error}")
+
             raise ServerError(error=InternalError()) from e
 
     async def _handle_stream_item(self, item, updater, task) -> None:
