@@ -442,7 +442,7 @@ Resources:
     Type: AWS::Route53::RecordSet
     Properties:
       Name: '{{ chat_ui_fqdn }}'
-      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-nannos'
       Type: 'A'
       AliasTarget:
         DNSName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
@@ -452,7 +452,7 @@ Resources:
     Type: 'AWS::Route53::RecordSet'
     Properties:
       Name: '{{ chat_ui_fqdn }}'
-      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-alloy'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-nannos'
       Type: 'AAAA'
       AliasTarget:
         DNSName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
