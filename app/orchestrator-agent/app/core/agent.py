@@ -260,7 +260,14 @@ class OrchestratorDeepAgent:
             logger.info(f"Resume input data: Command(resume={resume})")
         else:
             # Normal input format for LangChain v1.0.0 with memory
-            input_data = {"messages": [HumanMessage(content=query)]}
+            # Multi-user attribution: Use name= for OpenAI (native support) AND prefix content
+            # for Bedrock/Claude (Converse API doesn't support name field).
+            # Format: "[UserName]: message" or "[UserName <@SlackHandle>]: message" for Slack
+            user_prefix = runtime_context.name
+            if runtime_context.slack_user_handle:
+                user_prefix = f"{runtime_context.name} {runtime_context.slack_user_handle}"
+            attributed_content = f"[{user_prefix}]: {query}"
+            input_data = {"messages": [HumanMessage(content=attributed_content, name=runtime_context.name)]}
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0

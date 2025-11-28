@@ -130,6 +130,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 name=user_name,
                 email=user_email,
                 model=model_choice,
+                message_formatting=(
+                    context.message.metadata.get("message_formatting", "markdown")
+                    if context.message and context.message.metadata
+                    else "markdown"
+                ),
+                slack_user_handle=context.message.metadata.get("slack_user_handle")
+                if context.message and context.message.metadata
+                else None,
             )
 
             # Check if we need to resume from an interrupt

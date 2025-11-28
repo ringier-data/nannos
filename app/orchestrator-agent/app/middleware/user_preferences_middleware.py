@@ -137,7 +137,34 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
                 f"However, technical terms, code, tool names, and API calls should remain in their original form."
             )
 
-        # Add more preferences here as needed (e.g., timezone, formatting preferences, etc.)
+        # Message formatting preference (conversation-level)
+        formatting = getattr(user_context, "message_formatting", "markdown")
+        if formatting == "slack":
+            preferences_parts.append(
+                "- **Message Formatting**: Format your responses using Slack mrkdwn syntax. "
+                "Use *bold* for emphasis, _italic_ for secondary emphasis, `code` for inline code, "
+                "```code blocks``` for multi-line code, and <@U123456> format for user mentions. "
+                "Avoid markdown syntax that Slack doesn't support (e.g., # headers, **bold**)."
+            )
+        elif formatting == "plain":
+            preferences_parts.append(
+                "- **Message Formatting**: Use plain text only. Do not use any formatting syntax "
+                "(no markdown, no bold, no code blocks). Keep responses simple and readable as plain text."
+            )
+        # Default 'markdown' needs no special instruction - standard behavior
+
+        # Multi-user conversation context
+        # Check if we have a slack_user_handle, indicating multi-user Slack context
+        slack_handle = getattr(user_context, "slack_user_handle", None)
+        if slack_handle:
+            preferences_parts.append(
+                "- **Multi-User Conversation**: This is a multi-user conversation. Each user message is prefixed "
+                "with the speaker's identity in the format `[Name <@SlackHandle>]: message`. You should:\n"
+                "  - Track who said what and refer to users naturally (e.g., 'as Bob mentioned')\n"
+                "  - When you need input from a specific user, mention them using their Slack handle from the prefix\n"
+                f"  - The current speaker is: {user_context.name} {slack_handle}\n"
+                "  - Address responses appropriately when multiple users are involved"
+            )
 
         if not preferences_parts:
             return ""

@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+# Message formatting literal for type safety
+MessageFormatting = Literal["markdown", "slack", "plain"]
+
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
 
@@ -46,6 +49,23 @@ class GraphRuntimeContext:
 
     language: str = "en"
     """User's preferred language for responses (ISO 639-1 code)."""
+
+    message_formatting: str = "markdown"
+    """Message formatting style for responses.
+    
+    Values:
+    - 'markdown': Standard markdown formatting (default)
+    - 'slack': Slack mrkdwn formatting (*bold*, _italic_, `code`, <@U123> mentions)
+    - 'plain': Plain text with no formatting
+    """
+
+    slack_user_handle: Optional[str] = None
+    """Slack user handle for the current speaker (e.g., '<@U123456>').
+    
+    Used for @-mention generation in Slack conversations. Only set when
+    the client is a Slack app. The LLM can use this to tag the current user
+    in responses when needed (e.g., for input_required states).
+    """
 
     tool_registry: dict[str, Any] = field(default_factory=dict)
     """Registry of tool name -> BaseTool instance for this user.
@@ -94,6 +114,14 @@ class UserConfig(BaseModel):
     email: str = Field(..., description="User's email address")
     language: str = Field(default="en", description="User's preferred language")
     model: Optional[ModelType] = Field(default=None, description="LLM model to use (gpt4o or claude-sonnet-4.5)")
+    message_formatting: Literal["markdown", "slack", "plain"] = Field(
+        default="markdown",
+        description="Message formatting style: 'markdown' (default), 'slack', or 'plain'",
+    )
+    slack_user_handle: Optional[str] = Field(
+        default=None,
+        description="Slack user handle for @-mentions (e.g., '<@U123456>')",
+    )
     sub_agents: Optional[list] = Field(default=None, description="Discovered sub-agents")
     tools: Optional[list] = Field(default=None, description="Discovered tools")
 
@@ -127,6 +155,8 @@ class UserConfig(BaseModel):
             name=self.name,
             email=self.email,
             language=self.language,
+            message_formatting=self.message_formatting,
+            slack_user_handle=self.slack_user_handle,
             tool_registry=tool_registry,
             subagent_registry=subagent_registry,
         )

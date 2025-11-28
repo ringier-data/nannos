@@ -21,7 +21,7 @@ Usage:
     )
 """
 
-from .config import AgentSettings, GraphRuntimeContext, ResponseFormat, UserConfig
+from .config import AgentSettings, GraphRuntimeContext, MessageFormatting, ResponseFormat, UserConfig
 from .exceptions import A2AClientError, AgentFrameworkAuthError
 from .responses import AgentStreamResponse
 from .schemas import FinalResponseSchema
@@ -32,6 +32,7 @@ __all__ = [
     "GraphRuntimeContext",
     "AgentSettings",
     "ResponseFormat",
+    "MessageFormatting",
     # Responses
     "AgentStreamResponse",
     # Schemas
