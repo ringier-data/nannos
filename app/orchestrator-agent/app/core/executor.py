@@ -93,12 +93,18 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         logger.info(f"[ZERO-TRUST] Using verified user_id for graph retrieval: {user_id}")
 
-        # Extract model preference from message metadata (client-specified, optional)
-        model_choice = None
-        if context.message and hasattr(context.message, "metadata") and context.message.metadata:
-            model_choice = context.message.metadata.get("model")
-            if model_choice:
-                logger.info(f"Model preference from client metadata: {model_choice}")
+        # Extract metadata from both message-level and params-level (message takes priority)
+        logger.info(f"[EXECUTOR] Params-level metadata: {context.metadata}")
+        logger.info(f"[EXECUTOR] Message-level metadata: {context.message.metadata if context.message else None}")
+        message_metadata = context.message.metadata if context.message and context.message.metadata else {}
+        params_metadata = context.metadata or {}
+
+        # Merge metadata with message-level taking priority
+        request_metadata = {**params_metadata, **message_metadata}
+
+        model_choice = request_metadata.get("model")
+        if model_choice:
+            logger.info(f"Model preference from client metadata: {model_choice}")
 
         # Check budget guard before processing request
         budget_guard = get_budget_guard()
@@ -124,20 +130,29 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         try:
             # Create config for graph execution with interrupt support
             config = {"configurable": {"thread_id": task.context_id}}
+
+            # Extract slack user handle - support both naming conventions
+            # Client may send 'slackUserId' (camelCase) or 'slack_user_id' (snake_case)
+            slack_user_id = request_metadata.get("slackUserId")
+            # If we have a user ID, construct the mention format
+            if slack_user_id:
+                slack_user_handle = f"<@{slack_user_id}>"
+            else:
+                slack_user_handle = None
+
+            # Extract message formatting - support both naming conventions
+            message_formatting = (
+                request_metadata.get("messageFormatting") or request_metadata.get("message_formatting") or "markdown"
+            )
+
             user_config = UserConfig(
                 user_id=user_id,
                 access_token=user_token,
                 name=user_name,
                 email=user_email,
                 model=model_choice,
-                message_formatting=(
-                    context.message.metadata.get("message_formatting", "markdown")
-                    if context.message and context.message.metadata
-                    else "markdown"
-                ),
-                slack_user_handle=context.message.metadata.get("slack_user_handle")
-                if context.message and context.message.metadata
-                else None,
+                message_formatting=message_formatting,
+                slack_user_handle=slack_user_handle,
             )
 
             # Check if we need to resume from an interrupt
