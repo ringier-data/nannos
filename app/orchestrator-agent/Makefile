@@ -1,8 +1,8 @@
 .env:  ## Generate .env file
 	@cp .env.template $@
 	aws ssm get-parameter --name /alloy/data-sharing/openai-api-key-chatgpt-4o --output json --with-decryption | jq -r .Parameter.Value -c | awk '{print "AZURE_OPENAI_API_KEY="$$0}' >> .env
-	aws ssm get-parameter --name /alloy/chat-editing-text-model/langsmith-api-key --output json --with-decryption | jq -r .Parameter.Value -c | awk '{print "LANGSMITH_API_KEY="$$0}' >> .env
-	aws ssm get-parameter --name /alloy/orchestrator/oidc-orchestrator-client-secret --output json --with-decryption | jq -r .Parameter.Value -c | awk '{print "OIDC_CLIENT_SECRET="$$0}' >> .env
+	aws ssm get-parameter --name /alloy/infrastructure-agents/langsmith-api-key --output json --with-decryption | jq -r .Parameter.Value -c | awk '{print "LANGSMITH_API_KEY="$$0}' >> .env
+	aws ssm get-parameter --name /alloy/infrastructure-agents/oidc-orchestrator-client-secret --output json --with-decryption | jq -r .Parameter.Value -c | awk '{print "OIDC_CLIENT_SECRET="$$0}' >> .env
 .env.tmp: .env
 	# Generate .env.tmp file from .env: replace $ with $$
 	@sed 's/\$$/$$$$/g' .env > .env.tmp
