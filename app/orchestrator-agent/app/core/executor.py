@@ -174,6 +174,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 resume_value = None
                 logger.info("Normal execution (not resuming from interrupt)")
 
+            # emit a started status update
+            await updater.update_status(
+                TaskState.working,
+                new_agent_text_message(
+                    "Agent execution started.",
+                    task.context_id,
+                    task.id,
+                ),
+                final=False,
+            )
+
             async for item in self.agent.stream(message_parts, user_config, task.context_id, resume=resume_value):
                 current_state = graph.get_state(config)  # type: ignore
                 if hasattr(current_state, "interrupts") and current_state.interrupts:
