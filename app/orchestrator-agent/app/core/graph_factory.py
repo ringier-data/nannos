@@ -38,6 +38,7 @@ from ..middleware import (
 from ..models import AgentSettings, FinalResponseSchema
 from ..models.config import GraphRuntimeContext, ModelType
 from ..subagents import A2ATaskTrackingMiddleware
+from .file_tools import create_presigned_url_tool
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +207,13 @@ class GraphFactory:
         Returns:
             Complete middleware stack with DynamicToolDispatchMiddleware first
         """
-        # Static tools for Bedrock (FinalResponseSchema)
-        static_tools = []
+        # Static tools available to all models
+        static_tools: list[BaseTool] = []
+
+        # Add presigned URL tool for dispatching files to sub-agents
+        static_tools.append(create_presigned_url_tool())
+
+        # Add FinalResponseSchema for Bedrock models
         if is_bedrock:
             static_tools.append(_create_final_response_tool())
 
@@ -241,12 +247,16 @@ class GraphFactory:
         is_bedrock = isinstance(model, ChatBedrockConverse)
         middleware = self._create_middleware_stack(is_bedrock)
 
+        # Note: Sub-agents (both local and remote A2A) are now registered dynamically
+        # via GraphRuntimeContext.subagent_registry at request time, not at graph creation.
+        # This enables per-user sub-agent discovery and unified handling.
+
         if is_bedrock:
             logger.info(f"Creating Bedrock graph for model: {model_type}")
             compiled_graph = create_deep_agent(
                 model=model,
                 tools=[],  # Tools come from GraphRuntimeContext via middleware
-                subagents=[],
+                subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
                 system_prompt=self.config.SYSTEM_INSTRUCTION,
                 checkpointer=self._checkpointer,
                 middleware=middleware,  # type: ignore
@@ -257,7 +267,7 @@ class GraphFactory:
             compiled_graph = create_deep_agent(
                 model=model,
                 tools=[],  # Tools come from GraphRuntimeContext via middleware
-                subagents=[],
+                subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
                 system_prompt=self.config.SYSTEM_INSTRUCTION,
                 checkpointer=self._checkpointer,
                 middleware=middleware,  # type: ignore

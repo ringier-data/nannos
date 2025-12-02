@@ -5,7 +5,9 @@ This module provides all the necessary components for interacting with A2A subag
 including configuration, factory methods, models, middleware, and authentication.
 
 Key Components:
-- A2AClientRunnable: Core runnable for A2A communication
+- BaseA2ARunnable: Abstract base class for all A2A runnables
+- A2AClientRunnable: Remote A2A agent client (extends BaseA2ARunnable)
+- LocalA2ARunnable: Base class for in-process sub-agents
 - A2AClientConfig: Configuration for A2A clients
 - A2ATaskTrackingMiddleware: Middleware for tracking A2A task state
 - Authentication: OAuth2 and token exchange capabilities
@@ -29,22 +31,33 @@ from ..authentication import (
     ServiceAuthRequirement,
     SmartTokenInterceptor,
 )
+from .base import BaseA2ARunnable, LocalA2ARunnable, SubAgentInput
 from .config import A2AClientConfig
 from .factory import make_a2a_async_runnable
+from .file_analyzer import (
+    FileAnalyzerRunnable,
+    create_file_analyzer_subagent,
+)
 from .middleware import A2ATaskTrackingMiddleware, A2ATrackingState
 from .models import A2AMessageResponse, A2ATaskResponse
-from .runnable import A2AClientRunnable, SubAgentInput
+from .runnable import A2AClientRunnable
 
 __all__ = [
+    # Base classes
+    "BaseA2ARunnable",
+    "LocalA2ARunnable",
+    "SubAgentInput",
     # Core components
     "A2AClientConfig",
     "make_a2a_async_runnable",
     "A2ATaskResponse",
     "A2AMessageResponse",
     "A2AClientRunnable",
-    "SubAgentInput",
     "A2ATaskTrackingMiddleware",
     "A2ATrackingState",
+    # File analyzer sub-agent
+    "FileAnalyzerRunnable",
+    "create_file_analyzer_subagent",
     # Authentication
     "SmartTokenInterceptor",
     "AuthenticationMethod",

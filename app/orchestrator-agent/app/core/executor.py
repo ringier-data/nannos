@@ -155,6 +155,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 slack_user_handle=slack_user_handle,
             )
 
+            # Extract message parts for multimodal support (text + files)
+            message_parts = context.message.parts if context.message else []
+
             # Check if we need to resume from an interrupt
             # Get or create graph for this user's configuration
             # ZERO-TRUST: Pass verified user_id and user_token from call_context
@@ -171,7 +174,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 resume_value = None
                 logger.info("Normal execution (not resuming from interrupt)")
 
-            async for item in self.agent.stream(query, user_config, task.context_id, resume=resume_value):
+            async for item in self.agent.stream(message_parts, user_config, task.context_id, resume=resume_value):
                 current_state = graph.get_state(config)  # type: ignore
                 if hasattr(current_state, "interrupts") and current_state.interrupts:
                     is_final = False

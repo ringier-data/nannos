@@ -101,53 +101,47 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
     def _enhance_task_tool_schema(
         self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
     ) -> dict[str, Any]:
-        """Enhance the task tool's description and subagent_type enum to include A2A subagents.
+        """Enhance the task tool's description and subagent_type enum.
 
-        The task tool from SubAgentMiddleware already includes general-purpose.
-        We add A2A agent descriptions and extend the subagent_type enum with A2A agent names.
+        All sub-agents (both local and remote A2A) are now in subagent_registry,
+        so we simply build the enum from that unified registry.
 
         Args:
             task_tool_dict: The task tool in OpenAI dict format
             user_context: User context with subagent_registry
 
         Returns:
-            Enhanced task tool dict with A2A agents in description and enum
+            Enhanced task tool dict with all subagents in enum
         """
         if not user_context.subagent_registry:
             return task_tool_dict
 
-        # Build A2A agent descriptions and names
-        a2a_descriptions = []
-        a2a_agent_names = []
+        # Build agent descriptions and names from unified registry
+        agent_descriptions = []
+        agent_names = []
         for name, subagent in user_context.subagent_registry.items():
-            description = subagent.get("description", f"A2A agent: {name}")
-            a2a_descriptions.append(f"- {name}: {description}")
-            a2a_agent_names.append(name)
+            description = subagent.get("description", f"Agent: {name}")
+            agent_descriptions.append(f"- {name}: {description}")
+            agent_names.append(name)
 
-        if not a2a_descriptions:
+        if not agent_names:
             return task_tool_dict
-
-        # Enhance the description
-        a2a_section = "\n\nAdditional A2A agents:\n" + "\n".join(a2a_descriptions)
-        original_description = task_tool_dict.get("function", {}).get("description", "")
-        enhanced_description = original_description + a2a_section
 
         # Get the current parameters schema
         function_dict = task_tool_dict.get("function", {})
         parameters = function_dict.get("parameters", {})
         properties = parameters.get("properties", {})
         subagent_type_prop = properties.get("subagent_type", {})
+        original_description = function_dict.get("description", "")
 
-        # Get existing enum values (e.g., ["general-purpose"]) or create empty list
-        existing_enum = subagent_type_prop.get("enum", [])
-
-        # Combine existing enum with A2A agent names (avoid duplicates)
-        combined_enum = list(existing_enum) + [name for name in a2a_agent_names if name not in existing_enum]
+        # Enhance the description with agent info
+        agent_section = "\n\nAvailable agents:\n" + "\n".join(agent_descriptions)
+        enhanced_description = original_description + agent_section
 
         # Create enhanced subagent_type property with enum
         enhanced_subagent_type = {
             **subagent_type_prop,
-            "enum": combined_enum,
+            "enum": agent_names,
         }
 
         # Build enhanced properties

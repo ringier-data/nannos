@@ -1,8 +1,16 @@
 """
-A2A Runnable implementation.
+A2A Runnable implementation for remote A2A agents.
 
 Provides streaming and non-streaming interfaces for Agent-to-Agent (A2A) communication,
 making it compatible with LangChain/DeepAgents while enabling real-time status updates.
+
+This module contains:
+- A2AClientRunnable: Remote A2A agent client (extends BaseA2ARunnable)
+- SubAgentInput: Re-exported from base for backwards compatibility
+
+For local sub-agents, see LocalA2ARunnable in base.py.
+
+TODO: this module could be better aligned with A2A SDK types and patterns.
 """
 
 import asyncio
@@ -10,7 +18,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterable, Sequence
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from a2a.client import Client, ClientConfig, ClientFactory
@@ -28,14 +36,14 @@ from a2a.types import (
 from a2a.types import (
     Role as A2ARole,
 )
-from langchain.messages import AIMessage, HumanMessage
-from pydantic import BaseModel, Field
+from langchain_core.messages import AIMessage
 
 from ..authentication import (
     AuthenticationMethod,
     AuthPayload,
     ServiceAuthRequirement,
 )
+from .base import BaseA2ARunnable, SubAgentInput
 from .config import A2AClientConfig
 
 logger = logging.getLogger(__name__)
@@ -49,15 +57,7 @@ TERMINAL_TASK_STATES = [
 ]
 
 
-class SubAgentInput(BaseModel):
-    """Input data structure for sub-agent execution."""
-
-    a2a_tracking: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    messages: List[HumanMessage]
-    files: Optional[Any] = None  # TODO: Define proper type for files
-
-
-class A2AClientRunnable:
+class A2AClientRunnable(BaseA2ARunnable):
     """A2A Runnable with streaming and non-streaming interfaces.
 
     Provides both streaming (astream) and non-streaming (ainvoke) interfaces,
@@ -84,6 +84,11 @@ class A2AClientRunnable:
         self._close_http_client = http_client is None
         self._client: Optional[Client] = None
 
+    @property
+    def name(self) -> str:
+        """Return the agent name (used for tracking)."""
+        return self.agent_card.name
+
     async def _get_client(self) -> Client:
         """Lazy initialization of A2A client."""
         if self._client is None:
@@ -109,25 +114,25 @@ class A2AClientRunnable:
 
     def _extract_text_from_parts(self, parts: Sequence[A2APart]) -> str:
         """Extract text content from A2A parts."""
+        # TODO: what to do with files?
+        texts = []
         for part in parts:
             inner_part = part.root
             if inner_part.kind == "text":
-                return inner_part.text
+                texts.append(inner_part.text)
             elif inner_part.kind == "data":
-                return json.dumps(inner_part.data)
-        return ""
+                texts.append(json.dumps(inner_part.data))
+        return "\n".join(texts) if texts else ""
 
     def _parse_auth_payload(self, task_status) -> Dict[str, Any]:
         """Parse authentication payload from task status following CIBA patterns."""
-        auth_message = "Authentication required for downstream service"
+        message_text = "Authentication required for downstream service"
         service_name = "unknown_service"  # TODO: the application should provide this
         auth_methods = []
-        message_text = ""
 
         # Extract information from task status message
         if task_status.message and task_status.message.parts:
             message_text = self._extract_text_from_parts(task_status.message.parts)
-            auth_message = message_text
 
             # Try to parse structured auth info from message metadata
             try:
@@ -165,7 +170,7 @@ class A2AClientRunnable:
             auth_methods=[AuthenticationMethod(**method) for method in auth_methods]
             if auth_methods
             else [
-                AuthenticationMethod(method="oauth2", description="Authentication required", instructions=auth_message)
+                AuthenticationMethod(method="oauth2", description="Authentication required", instructions=message_text)
             ],
             required_scopes=default_scopes,
         )
@@ -181,8 +186,7 @@ class A2AClientRunnable:
             "auth_methods": [method.model_dump() for method in service_auth_requirement.auth_methods],
             "required_scopes": service_auth_requirement.required_scopes,
             "service": service_name,
-            "instructions": auth_message,
-            # CIBA-specific fields for enterprise scenarios
+            "instructions": message_text,
             "ciba_supported": any(method.method == "ciba" for method in service_auth_requirement.auth_methods),
             "device_code_supported": any(
                 method.method == "device_code" for method in service_auth_requirement.auth_methods
@@ -480,13 +484,6 @@ class A2AClientRunnable:
                 "messages": [AIMessage(content=user_friendly_msg)],
             }
 
-    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Synchronous invoke wrapper.
-
-        Runs ainvoke in a new event loop. Use ainvoke() directly if already in async context.
-        """
-        return asyncio.run(self.ainvoke(input_data))
-
     def stream(self, input_data: Dict[str, Any]):
         """Synchronous streaming is not supported - use astream instead.
 
@@ -494,63 +491,6 @@ class A2AClientRunnable:
             NotImplementedError: Always, as sync streaming is not supported
         """
         raise NotImplementedError("Synchronous streaming not supported for A2A. Use astream() instead.")
-
-    def _extract_message_content(self, input_data: SubAgentInput) -> str:
-        """Extract and prepare message content from input data.
-
-        Args:
-            input_data: Input data containing messages
-
-        Returns:
-            Extracted content as string
-
-        Raises:
-            ValueError: If no content is provided
-        """
-        if not input_data.messages:
-            raise ValueError(f"No messages provided. Input data: {input_data}")
-
-        raw_content = input_data.messages[-1].content
-        if not raw_content:
-            raise ValueError(f"No input content provided. Input data: {input_data}")
-
-        # Convert to string if needed
-        if isinstance(raw_content, str):
-            return raw_content
-
-        logger.debug("Converting non-string content to JSON")
-        return json.dumps(raw_content[-1])
-
-    def _extract_tracking_ids(self, input_data: SubAgentInput) -> tuple[Optional[str], Optional[str]]:
-        """Extract context_id and task_id from a2a_tracking state.
-
-        Args:
-            input_data: Input data containing a2a_tracking
-
-        Returns:
-            Tuple of (context_id, task_id). task_id is only returned if the task
-            is incomplete or requires user intervention (auth/input).
-        """
-        agent_name = self.agent_card.name.replace(" ", "")
-        agent_tracking = input_data.a2a_tracking.get(agent_name, {})
-
-        if not agent_tracking:
-            logger.warning(
-                f"No tracking found for agent: {agent_name}. Available: {list(input_data.a2a_tracking.keys())}"
-            )
-            return None, None
-
-        context_id = agent_tracking.get("context_id")
-        task_id = agent_tracking.get("task_id")
-        is_complete = agent_tracking.get("is_complete", True)
-
-        # Always return context_id for conversation continuity
-        # Only return task_id if the task is still in progress
-        if task_id and is_complete:
-            logger.info(f"Task {task_id} complete, omitting task_id for new request")
-            task_id = None
-
-        return context_id, task_id
 
     def _create_a2a_message(self, content: str, context_id: Optional[str], task_id: Optional[str]) -> Message:
         """Create an A2A message with proper metadata.
@@ -579,54 +519,7 @@ class A2AClientRunnable:
             metadata=message_metadata,
         )
 
-    def _wrap_message_with_metadata(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Wrap the result message with A2A metadata embedded in content.
-
-        The deepagents library strips additional_kwargs when creating ToolMessage,
-        so we embed metadata directly in the content as JSON.
-
-        Args:
-            result: Result dictionary containing messages and metadata
-
-        Returns:
-            Updated result with wrapped message
-        """
-        if not result.get("messages"):
-            # Create synthetic message if none exists
-            content = "Task processed"
-            if "input_prompt" in result:
-                content = result["input_prompt"]
-            elif "error_message" in result:
-                content = f"Error: {result['error_message']}"
-            elif "responses" in result and result["responses"]:
-                content = result["responses"][-1] if result["responses"] else "Processing complete"
-
-            result["messages"] = [AIMessage(content=content)]
-            logger.debug(f"Created synthetic message: {content}")
-
-        # Wrap last message with metadata
-        last_message = result["messages"][-1]
-        if isinstance(last_message, AIMessage):
-            a2a_metadata = {
-                k: v
-                for k, v in {
-                    "task_id": result.get("task_id"),
-                    "context_id": result.get("context_id"),
-                    "is_complete": result.get("is_complete"),
-                    "requires_auth": result.get("requires_auth"),
-                    "requires_input": result.get("requires_input"),
-                    "state": str(result.get("state")) if result.get("state") else None,
-                    "artifacts": result.get("artifacts"),
-                }.items()
-                if v is not None
-            }
-
-            wrapped_content = {"content": last_message.content, "a2a": a2a_metadata}
-
-            result["messages"][-1] = AIMessage(content=json.dumps(wrapped_content))
-            logger.debug(f"Wrapped message with metadata: task_id={a2a_metadata.get('task_id')}")
-
-        return result
+    # NOTE: _wrap_message_with_metadata is inherited from BaseA2ARunnable
 
     async def astream(self, input_data: Dict[str, Any]) -> AsyncIterable[Dict[str, Any]]:
         """Stream A2A status updates in real-time.

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from app.subagents.file_analyzer import create_file_analyzer_subagent
+
 # Message formatting literal for type safety
 MessageFormatting = Literal["markdown", "slack", "plain"]
 
@@ -131,7 +133,8 @@ class UserConfig(BaseModel):
         """Convert to GraphRuntimeContext for LangGraph execution.
 
         Transforms discovered tools and subagents lists into registries
-        for dynamic tool dispatch at runtime.
+        for dynamic tool dispatch at runtime. Also includes built-in local
+        sub-agents (like file-analyzer) alongside remote A2A agents.
 
         Returns:
             GraphRuntimeContext for graph invocation
@@ -144,8 +147,12 @@ class UserConfig(BaseModel):
             elif isinstance(tool, dict):
                 tool_registry[tool.get("name", str(tool))] = tool
 
-        # Convert subagents list to subagent_registry (name -> CompiledSubAgent mapping)
+        # Start with built-in local sub-agents (like file-analyzer)
+        # These run in-process but use the same registry as remote A2A agents
         subagent_registry: dict[str, Any] = {}
+        subagent_registry["file-analyzer"] = create_file_analyzer_subagent()
+
+        # Add remote A2A sub-agents from discovery
         for subagent in self.sub_agents or []:
             if isinstance(subagent, dict) and "name" in subagent:
                 subagent_registry[subagent["name"]] = subagent
@@ -251,6 +258,13 @@ class AgentSettings:
         "Otherwise, communicate clearly to the user and wait for the user to provide the necessary input or complete authentication.\n"
         "\n"
         "ALWAYS delegate tasks to sub-agents rather than trying to do everything yourself.\n"
+        "\n"
+        "**FILE HANDLING:**\n"
+        "When the user's message contains URLs or file references, use file-analyzer to understand their content:\n"
+        "- **HTTPS URLs (https://...)**: Pass DIRECTLY to file-analyzer - these work as-is, no conversion needed!\n"
+        "- **S3 URIs (s3://...)**: First use generate_presigned_url, then pass the result to file-analyzer.\n"
+        "- **DO NOT ask the user for a presigned URL if they already provided an HTTPS URL!**\n"
+        "- **DO NOT use generate_presigned_url on HTTPS URLs - only on S3 URIs (s3://...)!**\n"
         "\n"
         "**CRITICAL CONSTRAINT - Tool-Based Planning Only:**\n"
         "YOU ARE NOT THE SMARTEST IN THE ROOM. You MUST NOT attempt to solve tasks directly using your own knowledge or reasoning. "

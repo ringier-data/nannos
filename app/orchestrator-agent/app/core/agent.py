@@ -16,7 +16,7 @@ import logging
 from collections.abc import AsyncIterable
 from typing import Any
 
-from a2a.types import TaskState
+from a2a.types import Part, TaskState
 from langchain.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
@@ -25,6 +25,7 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ..handlers import StreamHandler
 from ..models import AgentFrameworkAuthError, AgentSettings, AgentStreamResponse, UserConfig
 from ..models.config import ModelType
+from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 from .graph_factory import DEFAULT_MODEL, GraphFactory
 from .registry import RegistryService, User
@@ -190,7 +191,11 @@ class OrchestratorDeepAgent:
         return self._get_graph(model_type)
 
     async def stream(
-        self, query: str, user_config: UserConfig, context_id: str, resume: Any = None
+        self,
+        message_parts: list[Part],
+        user_config: UserConfig,
+        context_id: str,
+        resume: Any = None,
     ) -> AsyncIterable[AgentStreamResponse]:
         """
         Stream agent responses with runtime user context injection.
@@ -205,8 +210,16 @@ class OrchestratorDeepAgent:
         - context_id: Conversation identifier (used for thread isolation in checkpointer)
         - No credentials in checkpoints (GraphRuntimeContext passed at runtime, not persisted)
 
+        FILE HANDLING:
+        - message_parts: A2A message parts containing text and optionally files
+        - Text is extracted from TextParts
+        - Files (FileParts with S3 URIs) are converted to text descriptions
+        - The orchestrator decides via tools whether to:
+          1. Read file content (to understand and decide next steps)
+          2. Generate presigned URL and dispatch to sub-agents
+
         Args:
-            query: User query to process
+            message_parts: List of A2A message parts (text, files, etc.)
             user_config: Verified user configuration with tokens
             context_id: Context identifier for conversation continuity (for thread isolation)
             resume: Optional resume value for continuing from an interrupt.
@@ -216,15 +229,21 @@ class OrchestratorDeepAgent:
             AgentStreamResponse: Structured response with state and content
 
         Examples:
-            # Normal execution with runtime context injection
-            async for response in agent.stream("Hello", user_config, "conv-456"):
+            # Normal execution with text parts
+            async for response in agent.stream(message.parts, user_config, "conv-456"):
                 print(response.content)
 
             # Resume from interrupt
-            async for response in agent.stream("I've authorized", user_config, "conv-456", resume="auth token"):
+            async for response in agent.stream(message.parts, user_config, "conv-456", resume="auth token"):
+                print(response.content)
+
+            # Execution with file parts (files are described as text references)
+            async for response in agent.stream(parts_with_files, user_config, "conv-456"):
                 print(response.content)
         """
-        logger.debug(f"Query: {query}, User ID: {user_config.user_id}, Context ID: {context_id}")
+        logger.debug(
+            f"Processing {len(message_parts)} message parts, User ID: {user_config.user_id}, Context ID: {context_id}"
+        )
 
         try:
             # Get or create graph for this model type
@@ -260,15 +279,22 @@ class OrchestratorDeepAgent:
             input_data = Command(resume=resume)
             logger.info(f"Resume input data: Command(resume={resume})")
         else:
-            if runtime_context.slack_user_handle:  # meaning we need to handle multiple actors in the conversation
-                # Multi-user attribution: Prefix content with user identity for all models
-                # Format: "[UserName]: message" or "[UserName <@SlackHandle>]: message" for Slack
-                user_prefix = runtime_context.name
+            # Build text content from parts
+            # Files are described as references - orchestrator decides via tools whether to:
+            # 1. Read file content (to understand and decide next steps)
+            # 2. Generate presigned URL and dispatch to sub-agents
+
+            # Build user prefix for Slack multi-user attribution
+            user_prefix = None
+            if runtime_context.slack_user_handle:
                 user_prefix = f"{runtime_context.name} {runtime_context.slack_user_handle}"
-                content = f"[{user_prefix}]: {query}"
-            else:
-                content = query
-            input_data = {"messages": [HumanMessage(content=content)]}
+
+            text_content = build_text_content(
+                parts=message_parts,
+                user_prefix=user_prefix,
+            )
+
+            input_data = {"messages": [HumanMessage(content=text_content)]}
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0
