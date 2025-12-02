@@ -4,13 +4,19 @@ This module contains all configuration-related models and settings,
 separated from the core agent logic for better maintainability.
 """
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
+from deepagents import CompiledSubAgent
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from app.subagents.file_analyzer import create_file_analyzer_subagent
+from ..subagents.dynamic_agent import create_dynamic_local_subagent
+from ..subagents.file_analyzer import create_file_analyzer_subagent
+from ..subagents.models import LocalSubAgentConfig
+
+logger = logging.getLogger(__name__)
 
 # Message formatting literal for type safety
 MessageFormatting = Literal["markdown", "slack", "plain"]
@@ -37,7 +43,7 @@ class GraphRuntimeContext:
 
     This enables a SINGLE graph to serve ALL users with different tool configurations.
 
-    Note: Created from UserConfig via UserConfig.to_runtime_context()
+    Note: Created via build_runtime_context(user_config, runtime_deps)
     """
 
     user_id: str
@@ -78,10 +84,16 @@ class GraphRuntimeContext:
     2. Execute tool calls without ToolNode registration
     """
 
-    subagent_registry: dict[str, Any] = field(default_factory=dict)
-    """Registry of subagent name -> callable for this user.
+    subagent_registry: dict[str, CompiledSubAgent] = field(default_factory=dict)
+    """Registry of subagent name -> CompiledSubAgent for this user.
 
-    Subagents are discovered per-user and stored here for dynamic invocation.
+    CompiledSubAgent is a TypedDict with:
+    - name: str - The subagent's unique identifier
+    - description: str - What the subagent does (shown to LLM)
+    - runnable: Runnable - The executable that handles task invocations
+
+    Both remote A2A agents and local sub-agents (file-analyzer, dynamic local agents)
+    are stored in this unified registry for dispatch by DynamicToolDispatchMiddleware.
     """
 
     @property
@@ -107,7 +119,7 @@ class UserConfig(BaseModel):
     """User-specific configuration for personalized agent behavior.
 
     Contains user credentials, preferences, and discovered tools/sub-agents.
-    Use to_runtime_context() to convert to GraphRuntimeContext for graph invocation.
+    Use build_runtime_context(user_config, runtime_deps) to create GraphRuntimeContext.
     """
 
     user_id: str = Field(..., description="User identifier")
@@ -124,51 +136,104 @@ class UserConfig(BaseModel):
         default=None,
         description="Slack user handle for @-mentions (e.g., '<@U123456>')",
     )
-    sub_agents: Optional[list] = Field(default=None, description="Discovered sub-agents")
-    tools: Optional[list] = Field(default=None, description="Discovered tools")
+    sub_agents: Optional[list[CompiledSubAgent]] = Field(
+        default=None,
+        description="Discovered remote A2A sub-agents (CompiledSubAgent TypedDicts with name, description, runnable)",
+    )
+    tools: Optional[list] = Field(default=None, description="Discovered MCP tools")
+    local_subagents: Optional[list[LocalSubAgentConfig]] = Field(
+        default=None,
+        description="User-configured local sub-agents",
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def to_runtime_context(self) -> "GraphRuntimeContext":
-        """Convert to GraphRuntimeContext for LangGraph execution.
 
-        Transforms discovered tools and subagents lists into registries
-        for dynamic tool dispatch at runtime. Also includes built-in local
-        sub-agents (like file-analyzer) alongside remote A2A agents.
+def build_runtime_context(
+    user_config: UserConfig,
+    llm_model: Any = None,
+    oauth2_client: Any = None,
+    checkpointer: Any = None,
+) -> GraphRuntimeContext:
+    """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
-        Returns:
-            GraphRuntimeContext for graph invocation
-        """
-        # Convert tools list to tool_registry (name -> tool mapping)
-        tool_registry: dict[str, Any] = {}
-        for tool in self.tools or []:
-            if hasattr(tool, "name"):
-                tool_registry[tool.name] = tool
-            elif isinstance(tool, dict):
-                tool_registry[tool.get("name", str(tool))] = tool
+    Transforms discovered tools and subagents lists into registries
+    for dynamic tool dispatch at runtime. Also includes:
+    - Built-in local sub-agents (like file-analyzer)
+    - Remote A2A agents from discovery
+    - Dynamic local sub-agents from user configuration
 
-        # Start with built-in local sub-agents (like file-analyzer)
-        # These run in-process but use the same registry as remote A2A agents
-        subagent_registry: dict[str, Any] = {}
-        subagent_registry["file-analyzer"] = create_file_analyzer_subagent()
+    Dynamic local sub-agents are instantiated with:
+    - Tools inherited from orchestrator if mcp_gateway_url is None
+    - MCP tool discovery (lazy) if mcp_gateway_url is set
+    - Shared checkpointer for multi-turn conversation state
 
-        # Add remote A2A sub-agents from discovery
-        for subagent in self.sub_agents or []:
-            if isinstance(subagent, dict) and "name" in subagent:
-                subagent_registry[subagent["name"]] = subagent
+    Args:
+        user_config: User configuration with tools, sub-agents, and preferences.
+        llm_model: LLM model for dynamic sub-agent creation (required if local_subagents configured).
+        oauth2_client: OAuth2 client for authenticated MCP discovery.
+        checkpointer: Shared checkpointer for dynamic sub-agent multi-turn conversations.
 
-        return GraphRuntimeContext(
-            user_id=self.user_id,
-            name=self.name,
-            email=self.email,
-            language=self.language,
-            message_formatting=self.message_formatting,
-            slack_user_handle=self.slack_user_handle,
-            tool_registry=tool_registry,
-            subagent_registry=subagent_registry,
+    Returns:
+        GraphRuntimeContext for graph invocation
+    """
+    # Convert tools list to tool_registry (name -> tool mapping)
+    tool_registry: dict[str, Any] = {}
+    for tool in user_config.tools or []:
+        if hasattr(tool, "name"):
+            tool_registry[tool.name] = tool
+        elif isinstance(tool, dict):
+            tool_registry[tool.get("name", str(tool))] = tool
+
+    # Start with built-in local sub-agents (like file-analyzer)
+    # These run in-process but use the same registry as remote A2A agents
+    subagent_registry: dict[str, CompiledSubAgent] = {}
+    subagent_registry["file-analyzer"] = create_file_analyzer_subagent()
+
+    # Add remote A2A sub-agents from discovery
+    for subagent in user_config.sub_agents or []:
+        if isinstance(subagent, dict) and "name" in subagent:
+            subagent_registry[subagent["name"]] = subagent
+
+    # Add dynamic local sub-agents from user configuration
+    # Requires llm_model for agent creation
+    if user_config.local_subagents and llm_model:
+        orchestrator_tools = list(tool_registry.values())
+        for config in user_config.local_subagents:
+            try:
+                # Create dynamic sub-agent with orchestrator tools for inheritance
+                # (tools are overridden if config.mcp_gateway_url is set)
+                # Pass oauth2_client and user_token for authenticated MCP discovery
+                # Pass checkpointer for multi-turn conversation state
+                dynamic_subagent = create_dynamic_local_subagent(
+                    config=config,
+                    model=llm_model,
+                    orchestrator_tools=orchestrator_tools,
+                    oauth2_client=oauth2_client,
+                    user_token=user_config.access_token.get_secret_value() if user_config.access_token else None,
+                    checkpointer=checkpointer,
+                )
+                subagent_registry[config.name] = dynamic_subagent
+                logger.info(f"Registered dynamic local sub-agent: {config.name}")
+            except Exception as e:
+                logger.error(f"Failed to create dynamic sub-agent '{config.name}': {e}")
+                # Continue with other subagents (graceful degradation)
+    elif user_config.local_subagents and not llm_model:
+        logger.warning(
+            f"local_subagents configured but no llm_model provided. "
+            f"Skipping {len(user_config.local_subagents)} dynamic sub-agents."
         )
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    return GraphRuntimeContext(
+        user_id=user_config.user_id,
+        name=user_config.name,
+        email=user_config.email,
+        language=user_config.language,
+        message_formatting=user_config.message_formatting,
+        slack_user_handle=user_config.slack_user_handle,
+        tool_registry=tool_registry,
+        subagent_registry=subagent_registry,
+    )
 
 
 class DynamoDBConfig(BaseModel):
@@ -195,7 +260,7 @@ class AgentSettings:
 
     # DynamoDB checkpoint configuration
     CHECKPOINT_DYNAMODB_TABLE_NAME = os.getenv(
-        "CHECKPOINT_DYNAMODB_TABLE_NAME", "dev-alloy-infrastructure-agents-orchestrator-checkpoints"
+        "CHECKPOINT_DYNAMODB_TABLE_NAME", "dev-alloy-infrastructure-agents-langgraph-checkpoints"
     )
     CHECKPOINT_TTL_DAYS = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
     CHECKPOINT_AWS_REGION = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")

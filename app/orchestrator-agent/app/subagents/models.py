@@ -3,14 +3,80 @@ A2A Models - Clean implementation using A2A SDK types.
 
 This module provides proper response models that leverage A2A SDK types
 and follow the A2A protocol specification exactly.
+
+Also includes configuration models for dynamic local sub-agents.
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from a2a.types import Message, Task, TaskState
 from langchain.messages import AIMessage
 from pydantic import BaseModel, Field
+
+
+class LocalSubAgentConfig(BaseModel):
+    """Configuration for a dynamically provisioned local sub-agent.
+
+    Local sub-agents are LangGraph agents that run in-process (not remote A2A servers)
+    but follow the A2A protocol for response format. They are configured per-user
+    and instantiated at runtime.
+
+    Attributes:
+        name: Unique identifier for the sub-agent (used in task tool enum).
+        model_name: Optional model name override for this sub-agent (inherits orchestrator model if None).
+        description: Human-readable description shown in task tool description.
+        system_prompt: The system prompt that defines the agent's behavior.
+        mcp_gateway_url: Optional MCP gateway URL for tool discovery.
+            - If None: The sub-agent inherits tools from the orchestrator.
+            - If set: Tools are discovered lazily from this MCP gateway on first
+              invocation and override orchestrator tools entirely.
+
+    Example DynamoDB JSON:
+        {
+            "local_subagents": [
+                {
+                    "name": "data-analyst",
+                    "description": "Analyzes data and generates insights",
+                    "system_prompt": "You are a data analysis expert...",
+                    "mcp_gateway_url": null
+                },
+                {
+                    "name": "code-reviewer",
+                    "description": "Reviews code for best practices",
+                    "system_prompt": "You are a senior code reviewer...",
+                    "mcp_gateway_url": "https://code-tools.example.com/mcp"
+                }
+            ]
+        }
+    """
+
+    model_name: Optional[str] = Field(
+        default=None,
+        description="Optional model name override for this sub-agent (inherits orchestrator model if None)",
+    )
+
+    name: str = Field(
+        ...,
+        description="Unique identifier for the sub-agent (used in task tool enum)",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z][a-zA-Z0-9_-]*$",
+    )
+    description: str = Field(
+        ...,
+        description="Human-readable description shown in task tool description",
+        min_length=1,
+    )
+    system_prompt: str = Field(
+        ...,
+        description="The system prompt that defines the agent's behavior",
+        min_length=1,
+    )
+    mcp_gateway_url: Optional[str] = Field(
+        default=None,
+        description="Optional MCP gateway URL for tool discovery. If None, inherits orchestrator tools.",
+    )
 
 
 class A2ATaskResponse(BaseModel):

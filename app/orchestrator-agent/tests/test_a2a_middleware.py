@@ -3,202 +3,254 @@
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
-from app.subagents.middleware import A2ATaskTrackingMiddleware
+from app.subagents.middleware import A2ATaskTrackingMiddleware, A2ATrackingState
 
 
-class TestA2ATaskTrackingMiddlewareFallback:
-    """Test fallback to general-purpose when subagent_type doesn't exist."""
+class TestA2ATaskTrackingMiddlewareBeforeModel:
+    """Test before_model extraction of A2A metadata from ToolMessages."""
 
     def setup_method(self):
         """Set up test fixtures."""
         self.middleware = A2ATaskTrackingMiddleware()
+        self.mock_runtime = MagicMock()
 
-    def test_wrap_tool_call_fallback_to_general_purpose(self):
-        """Test that wrap_tool_call falls back to general-purpose when subagent_type doesn't exist."""
-        # Create a mock request with a non-existent subagent type
-        request = MagicMock()
-        request.tool_call = {
-            "name": "task",
-            "args": {
-                "subagent_type": "non-existent-agent",
-                "description": "test task",
+    def test_before_model_extracts_metadata_from_tool_message(self):
+        """Test that before_model extracts A2A metadata from ToolMessage additional_kwargs."""
+        # Create state with a ToolMessage containing A2A metadata
+        tool_message = ToolMessage(
+            content="Task completed successfully",
+            tool_call_id="call-123",
+            additional_kwargs={
+                "a2a_metadata": {
+                    "task_id": "task-456",
+                    "context_id": "ctx-789",
+                    "is_complete": False,
+                    "state": "working",
+                }
             },
-        }
-        request.state = {}
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "task", "args": {"subagent_type": "jira-agent"}}],
+        )
+        state: A2ATrackingState = {"messages": [ai_message, tool_message]}
 
-        # Create handler that raises ValueError for non-existent agent, succeeds for general-purpose
-        call_count = 0
+        result = self.middleware.before_model(state, self.mock_runtime)
 
-        def mock_handler(req):
-            nonlocal call_count
-            call_count += 1
-            subagent_type = req.tool_call["args"]["subagent_type"]
-            if subagent_type != "general-purpose":
-                raise ValueError(
-                    f"Error: invoked agent of type {subagent_type}, the only allowed types are [`general-purpose`]"
-                )
-            return ToolMessage(content="success", tool_call_id="test-id")
+        assert result is not None
+        assert "a2a_tracking" in result
+        assert "jira-agent" in result["a2a_tracking"]
+        assert result["a2a_tracking"]["jira-agent"]["task_id"] == "task-456"
+        assert result["a2a_tracking"]["jira-agent"]["context_id"] == "ctx-789"
+        assert result["a2a_tracking"]["jira-agent"]["is_complete"] is False
 
-        # Execute
-        result = self.middleware.wrap_tool_call(request, mock_handler)
-
-        # Verify fallback occurred
-        assert call_count == 2  # First call fails, second succeeds
-        assert request.tool_call["args"]["subagent_type"] == "general-purpose"
-        assert isinstance(result, ToolMessage)
-        assert result.content == "success"
-
-    def test_wrap_tool_call_no_fallback_for_general_purpose(self):
-        """Test that wrap_tool_call doesn't attempt fallback if already using general-purpose."""
-        request = MagicMock()
-        request.tool_call = {
-            "name": "task",
-            "args": {
-                "subagent_type": "general-purpose",
-                "description": "test task",
+    def test_before_model_clears_task_id_when_complete(self):
+        """Test that before_model clears task_id when task is marked complete."""
+        tool_message = ToolMessage(
+            content="Task completed",
+            tool_call_id="call-123",
+            additional_kwargs={
+                "a2a_metadata": {
+                    "task_id": "task-456",
+                    "context_id": "ctx-789",
+                    "is_complete": True,
+                    "state": "completed",
+                }
             },
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "task", "args": {"subagent_type": "jira-agent"}}],
+        )
+        # Start with existing tracking
+        state: A2ATrackingState = {
+            "messages": [ai_message, tool_message],
+            "a2a_tracking": {"jira-agent": {"task_id": "old-task", "context_id": "ctx-789"}},
         }
-        request.state = {}
 
-        def mock_handler(req):
-            raise ValueError("Error: invoked agent of type general-purpose, the only allowed types are []")
+        result = self.middleware.before_model(state, self.mock_runtime)
 
-        # Should raise the error since we can't fall back further
-        with pytest.raises(ValueError):
-            self.middleware.wrap_tool_call(request, mock_handler)
+        assert result is not None
+        # task_id should be cleared, but context_id preserved
+        assert "task_id" not in result["a2a_tracking"]["jira-agent"]
+        assert result["a2a_tracking"]["jira-agent"]["context_id"] == "ctx-789"
 
-    def test_wrap_tool_call_no_fallback_for_other_errors(self):
-        """Test that wrap_tool_call doesn't catch other ValueError types."""
-        request = MagicMock()
-        request.tool_call = {
-            "name": "task",
-            "args": {
-                "subagent_type": "some-agent",
-                "description": "test task",
+    def test_before_model_clears_task_id_when_failed(self):
+        """Test that before_model clears task_id when task state indicates failure."""
+        tool_message = ToolMessage(
+            content="Task failed",
+            tool_call_id="call-123",
+            additional_kwargs={
+                "a2a_metadata": {
+                    "task_id": "task-456",
+                    "context_id": "ctx-789",
+                    "is_complete": False,
+                    "state": "TaskState.failed",
+                }
             },
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "task", "args": {"subagent_type": "jira-agent"}}],
+        )
+        state: A2ATrackingState = {
+            "messages": [ai_message, tool_message],
+            "a2a_tracking": {"jira-agent": {"task_id": "old-task", "context_id": "ctx-789"}},
         }
-        request.state = {}
 
-        def mock_handler(req):
-            raise ValueError("Some other error not related to subagent types")
+        result = self.middleware.before_model(state, self.mock_runtime)
 
-        # Should raise the original error
-        with pytest.raises(ValueError, match="Some other error"):
-            self.middleware.wrap_tool_call(request, mock_handler)
+        assert result is not None
+        assert "task_id" not in result["a2a_tracking"]["jira-agent"]
+        assert result["a2a_tracking"]["jira-agent"]["context_id"] == "ctx-789"
+
+    def test_before_model_returns_none_for_non_tool_message(self):
+        """Test that before_model returns None when last message is not a ToolMessage."""
+        ai_message = AIMessage(content="Hello")
+        state: A2ATrackingState = {"messages": [ai_message]}
+
+        result = self.middleware.before_model(state, self.mock_runtime)
+
+        assert result is None
+
+    def test_before_model_returns_none_for_empty_messages(self):
+        """Test that before_model returns None when messages is empty."""
+        state: A2ATrackingState = {"messages": []}
+
+        result = self.middleware.before_model(state, self.mock_runtime)
+
+        assert result is None
+
+    def test_before_model_returns_none_without_a2a_metadata(self):
+        """Test that before_model returns None when ToolMessage has no a2a_metadata."""
+        tool_message = ToolMessage(
+            content="Some result",
+            tool_call_id="call-123",
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "task", "args": {"subagent_type": "jira-agent"}}],
+        )
+        state: A2ATrackingState = {"messages": [ai_message, tool_message]}
+
+        result = self.middleware.before_model(state, self.mock_runtime)
+
+        assert result is None
+
+    def test_before_model_handles_task_does_not_exist_error(self):
+        """Test that before_model clears stale task_id on 'task does not exist' error."""
+        tool_message = ToolMessage(
+            content="Error: The task 'task-old' does not exist",
+            tool_call_id="call-123",
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "task", "args": {"subagent_type": "jira-agent"}}],
+        )
+        state: A2ATrackingState = {
+            "messages": [ai_message, tool_message],
+            "a2a_tracking": {"jira-agent": {"task_id": "task-old", "context_id": "ctx-789"}},
+        }
+
+        result = self.middleware.before_model(state, self.mock_runtime)
+
+        assert result is not None
+        assert "task_id" not in result["a2a_tracking"]["jira-agent"]
+        assert result["a2a_tracking"]["jira-agent"]["is_complete"] is True
+
+    def test_before_model_preserves_additional_metadata_fields(self):
+        """Test that before_model preserves requires_auth, requires_input, artifacts."""
+        tool_message = ToolMessage(
+            content="Need authentication",
+            tool_call_id="call-123",
+            additional_kwargs={
+                "a2a_metadata": {
+                    "task_id": "task-456",
+                    "context_id": "ctx-789",
+                    "is_complete": False,
+                    "requires_auth": True,
+                    "requires_input": False,
+                    "artifacts": [{"type": "file", "uri": "s3://bucket/file"}],
+                }
+            },
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "task", "args": {"subagent_type": "jira-agent"}}],
+        )
+        state: A2ATrackingState = {"messages": [ai_message, tool_message]}
+
+        result = self.middleware.before_model(state, self.mock_runtime)
+
+        assert result is not None
+        tracking = result["a2a_tracking"]["jira-agent"]
+        assert tracking["requires_auth"] is True
+        assert tracking["requires_input"] is False
+        assert tracking["artifacts"] == [{"type": "file", "uri": "s3://bucket/file"}]
+
+    def test_before_model_ignores_non_task_tools(self):
+        """Test that before_model returns None for non-task tool calls."""
+        tool_message = ToolMessage(
+            content="Some result",
+            tool_call_id="call-123",
+            additional_kwargs={"a2a_metadata": {"task_id": "123"}},
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "write_todos", "args": {}}],
+        )
+        state: A2ATrackingState = {"messages": [ai_message, tool_message]}
+
+        result = self.middleware.before_model(state, self.mock_runtime)
+
+        assert result is None
 
     @pytest.mark.asyncio
-    async def test_awrap_tool_call_fallback_to_general_purpose(self):
-        """Test that awrap_tool_call falls back to general-purpose when subagent_type doesn't exist."""
-        request = MagicMock()
-        request.tool_call = {
-            "name": "task",
-            "args": {
-                "subagent_type": "hallucinated-agent",
-                "description": "test task",
+    async def test_abefore_model_delegates_to_sync(self):
+        """Test that abefore_model delegates to the sync before_model."""
+        tool_message = ToolMessage(
+            content="Task done",
+            tool_call_id="call-123",
+            additional_kwargs={
+                "a2a_metadata": {
+                    "task_id": "task-456",
+                    "context_id": "ctx-789",
+                    "is_complete": False,
+                }
+            },
+        )
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"id": "call-123", "name": "task", "args": {"subagent_type": "jira-agent"}}],
+        )
+        state: A2ATrackingState = {"messages": [ai_message, tool_message]}
+
+        result = await self.middleware.abefore_model(state, self.mock_runtime)
+
+        assert result is not None
+        assert result["a2a_tracking"]["jira-agent"]["task_id"] == "task-456"
+
+
+class TestA2ATrackingState:
+    """Test A2ATrackingState TypedDict."""
+
+    def test_state_accepts_a2a_tracking(self):
+        """Test that A2ATrackingState accepts a2a_tracking field."""
+        state: A2ATrackingState = {
+            "messages": [],
+            "a2a_tracking": {
+                "jira-agent": {
+                    "task_id": "123",
+                    "context_id": "456",
+                    "is_complete": False,
+                }
             },
         }
-        request.state = {}
+        assert state["a2a_tracking"]["jira-agent"]["task_id"] == "123"
 
-        call_count = 0
-
-        async def mock_handler(req):
-            nonlocal call_count
-            call_count += 1
-            subagent_type = req.tool_call["args"]["subagent_type"]
-            if subagent_type != "general-purpose":
-                raise ValueError(
-                    f"Error: invoked agent of type {subagent_type}, the only allowed types are [`general-purpose`]"
-                )
-            return ToolMessage(content="async success", tool_call_id="test-id")
-
-        # Execute
-        result = await self.middleware.awrap_tool_call(request, mock_handler)
-
-        # Verify fallback occurred
-        assert call_count == 2
-        assert request.tool_call["args"]["subagent_type"] == "general-purpose"
-        assert isinstance(result, ToolMessage)
-        assert result.content == "async success"
-
-    @pytest.mark.asyncio
-    async def test_awrap_tool_call_no_fallback_for_general_purpose(self):
-        """Test that awrap_tool_call doesn't attempt fallback if already using general-purpose."""
-        request = MagicMock()
-        request.tool_call = {
-            "name": "task",
-            "args": {
-                "subagent_type": "general-purpose",
-                "description": "test task",
-            },
-        }
-        request.state = {}
-
-        async def mock_handler(req):
-            raise ValueError("Error: invoked agent of type general-purpose, the only allowed types are []")
-
-        with pytest.raises(ValueError):
-            await self.middleware.awrap_tool_call(request, mock_handler)
-
-    @pytest.mark.asyncio
-    async def test_awrap_tool_call_no_fallback_for_other_errors(self):
-        """Test that awrap_tool_call doesn't catch other ValueError types."""
-        request = MagicMock()
-        request.tool_call = {
-            "name": "task",
-            "args": {
-                "subagent_type": "some-agent",
-                "description": "test task",
-            },
-        }
-        request.state = {}
-
-        async def mock_handler(req):
-            raise ValueError("Different error type")
-
-        with pytest.raises(ValueError, match="Different error type"):
-            await self.middleware.awrap_tool_call(request, mock_handler)
-
-    def test_wrap_tool_call_passes_through_non_task_tools(self):
-        """Test that wrap_tool_call doesn't intercept non-task tools."""
-        request = MagicMock()
-        request.tool_call = {
-            "name": "other_tool",
-            "args": {"param": "value"},
-        }
-        request.state = {}
-
-        handler_called = False
-
-        def mock_handler(req):
-            nonlocal handler_called
-            handler_called = True
-            return ToolMessage(content="result", tool_call_id="test-id")
-
-        result = self.middleware.wrap_tool_call(request, mock_handler)
-
-        assert handler_called
-        assert isinstance(result, ToolMessage)
-
-    @pytest.mark.asyncio
-    async def test_awrap_tool_call_passes_through_non_task_tools(self):
-        """Test that awrap_tool_call doesn't intercept non-task tools."""
-        request = MagicMock()
-        request.tool_call = {
-            "name": "other_tool",
-            "args": {"param": "value"},
-        }
-        request.state = {}
-
-        handler_called = False
-
-        async def mock_handler(req):
-            nonlocal handler_called
-            handler_called = True
-            return ToolMessage(content="async result", tool_call_id="test-id")
-
-        result = await self.middleware.awrap_tool_call(request, mock_handler)
-
-        assert handler_called
-        assert isinstance(result, ToolMessage)
+    def test_state_works_without_a2a_tracking(self):
+        """Test that A2ATrackingState works without a2a_tracking (NotRequired)."""
+        state: A2ATrackingState = {"messages": []}
+        assert "a2a_tracking" not in state

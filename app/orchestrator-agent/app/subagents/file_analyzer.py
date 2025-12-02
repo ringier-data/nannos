@@ -187,6 +187,11 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
         """Return the agent name."""
         return FILE_ANALYZER_NAME
 
+    @property
+    def description(self) -> str:
+        """Return the agent description."""
+        return FILE_ANALYZER_DESCRIPTION
+
     async def _process(
         self,
         content: str,
@@ -326,7 +331,7 @@ def create_file_analyzer_subagent() -> CompiledSubAgent:
 
     # Cast to Any for CompiledSubAgent compatibility (duck typing)
     return CompiledSubAgent(
-        name=FILE_ANALYZER_NAME,
-        description=FILE_ANALYZER_DESCRIPTION,
+        name=runnable.name,
+        description=runnable.description,
         runnable=runnable,  # type: ignore[arg-type]
     )

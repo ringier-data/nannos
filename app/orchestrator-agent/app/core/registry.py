@@ -9,9 +9,10 @@ from aiodynamo.client import Client
 from aiodynamo.credentials import Credentials, Key, StaticCredentials
 from aiodynamo.errors import ItemNotFound
 from aiodynamo.http.httpx import HTTPX
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..models.config import DynamoDBConfig
+from ..subagents.models import LocalSubAgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +21,10 @@ class User(BaseModel):
     """User model for DynamoDB storage."""
 
     id: str  # Primary key (sub from OIDC)
-    agent_urls: list[str] = []  # List of registered agent URLs
-    tool_names: list[str] = []  # List of registered tool names
+    agent_urls: list[str] = Field(default_factory=list)  # List of registered agent URLs
+    tool_names: list[str] = Field(default_factory=list)  # List of registered tool names
     language: str = "en"  # User's preferred language
+    local_subagents: list[LocalSubAgentConfig] = Field(default_factory=list)  # Dynamic local sub-agents
 
 
 class RegistryService:
@@ -73,6 +75,7 @@ class RegistryService:
                 agent_urls=item.get("agent_urls", []),
                 tool_names=item.get("tool_names", []),
                 language=item.get("language", "en"),
+                local_subagents=item.get("local_subagents", []),
             )
         except ItemNotFound:
             logger.debug(f"User not found: {user_id}")

@@ -36,7 +36,7 @@ class TestAgentSettings:
     def test_retry_configuration(self):
         """Test retry configuration constants."""
         assert AgentSettings.MAX_RETRIES == 3
-        assert AgentSettings.BACKOFF_FACTOR == 2.0
+        assert AgentSettings.BACKOFF_FACTOR == 3.0
 
     def test_cache_configuration(self):
         """Test cache configuration."""

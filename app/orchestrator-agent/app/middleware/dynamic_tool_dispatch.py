@@ -26,6 +26,7 @@ Key Insight: Dict tools bypass factory.py validation (line 907: `if isinstance(t
 which allows runtime tool injection without graph recreation.
 """
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -252,6 +253,97 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Fall back to static tools
         return self.static_tools.get(tool_name)
 
+    def _extract_subagent_response(self, result: Any, subagent_type: str) -> tuple[str, dict[str, Any] | None]:
+        """Extract content and A2A metadata from subagent result.
+
+        Takes the subagent's final message (last in messages list) and extracts:
+        - The actual response content
+        - A2A metadata if present (context_id, task_id, etc.)
+
+        Args:
+            result: The result dict from subagent invocation
+            subagent_type: Name of the subagent (for logging)
+
+        Returns:
+            Tuple of (content string, a2a_metadata dict or None)
+        """
+        content = ""
+        a2a_metadata = None
+
+        if isinstance(result, dict) and "messages" in result:
+            messages = result["messages"]
+            if messages:
+                # Take only the last message - this is the subagent's final synthesized response.
+                # The subagent may have had multiple internal turns (tool calls, reasoning),
+                # but we only return the final answer to keep the orchestrator's context clean.
+                raw_content = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
+
+                # Try to parse JSON-wrapped A2A metadata from content
+                # Format: {"content": "...", "a2a": {...}}
+                if isinstance(raw_content, str):
+                    try:
+                        content_dict = json.loads(raw_content)
+                        if isinstance(content_dict, dict) and "content" in content_dict and "a2a" in content_dict:
+                            content = content_dict["content"]
+                            a2a_metadata = content_dict["a2a"]
+                            logger.debug(
+                                f"DynamicToolDispatchMiddleware: Extracted A2A metadata for {subagent_type}: "
+                                f"context_id={a2a_metadata.get('context_id')}, task_id={a2a_metadata.get('task_id')}"
+                            )
+                        else:
+                            content = raw_content
+                    except json.JSONDecodeError:
+                        content = raw_content
+                else:
+                    content = str(raw_content)
+            else:
+                content = str(result)
+        else:
+            content = str(result)
+
+        return content, a2a_metadata
+
+    def _build_subagent_command(
+        self,
+        result: Any,
+        content: str,
+        a2a_metadata: dict[str, Any] | None,
+        tool_call_id: str,
+        excluded_keys: tuple[str, ...],
+    ) -> Command:
+        """Build a Command with ToolMessage from subagent result.
+
+        Args:
+            result: The result dict from subagent invocation
+            content: Extracted content string
+            a2a_metadata: A2A metadata dict or None
+            tool_call_id: The tool call ID for the ToolMessage
+            excluded_keys: State keys to exclude from state update
+
+        Returns:
+            Command with state update and ToolMessage
+        """
+        # Build ToolMessage with A2A metadata in additional_kwargs
+        # This allows A2ATaskTrackingMiddleware.before_model to extract and persist tracking IDs
+        additional_kwargs = {}
+        if a2a_metadata:
+            additional_kwargs["a2a_metadata"] = a2a_metadata
+
+        tool_message = ToolMessage(
+            content=content,
+            tool_call_id=tool_call_id,
+            additional_kwargs=additional_kwargs,
+        )
+
+        # Return Command with state update (similar to SubAgentMiddleware)
+        state_update = {k: v for k, v in result.items() if k not in excluded_keys} if isinstance(result, dict) else {}
+        return Command(
+            update={
+                **state_update,
+                "messages": [tool_message],
+            }
+        )
+
     # =========================================================================
     # Model Call Interception - Dynamic Tool Binding
     # =========================================================================
@@ -391,26 +483,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             # Invoke the subagent runnable with tracing
             result = invoke_a2a_agent(subagent_state)
 
-            # Extract the result message content
-            if isinstance(result, dict) and "messages" in result:
-                messages = result["messages"]
-                if messages:
-                    content = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
-                else:
-                    content = str(result)
-            else:
-                content = str(result)
-
-            # Return Command with state update (similar to SubAgentMiddleware)
-            state_update = (
-                {k: v for k, v in result.items() if k not in excluded_keys} if isinstance(result, dict) else {}
-            )
-            return Command(
-                update={
-                    **state_update,
-                    "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)],
-                }
-            )
+            # Extract content and A2A metadata, then build Command
+            content, a2a_metadata = self._extract_subagent_response(result, subagent_type)
+            return self._build_subagent_command(result, content, a2a_metadata, tool_call_id, excluded_keys)
 
         except Exception as e:
             logger.exception(f"Subagent '{subagent_type}' failed: {e}")
@@ -483,26 +558,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             # Invoke the subagent runnable asynchronously with tracing
             result = await ainvoke_a2a_agent(subagent_state)
 
-            # Extract the result message content
-            if isinstance(result, dict) and "messages" in result:
-                messages = result["messages"]
-                if messages:
-                    content = messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
-                else:
-                    content = str(result)
-            else:
-                content = str(result)
-
-            # Return Command with state update (similar to SubAgentMiddleware)
-            state_update = (
-                {k: v for k, v in result.items() if k not in excluded_keys} if isinstance(result, dict) else {}
-            )
-            return Command(
-                update={
-                    **state_update,
-                    "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)],
-                }
-            )
+            # Extract content and A2A metadata, then build Command
+            content, a2a_metadata = self._extract_subagent_response(result, subagent_type)
+            return self._build_subagent_command(result, content, a2a_metadata, tool_call_id, excluded_keys)
 
         except Exception as e:
             logger.exception(f"Subagent '{subagent_type}' failed: {e}")

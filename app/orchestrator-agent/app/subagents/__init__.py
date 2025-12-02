@@ -8,10 +8,11 @@ Key Components:
 - BaseA2ARunnable: Abstract base class for all A2A runnables
 - A2AClientRunnable: Remote A2A agent client (extends BaseA2ARunnable)
 - LocalA2ARunnable: Base class for in-process sub-agents
+- DynamicLocalAgentRunnable: User-configurable local sub-agent with LangGraph
 - A2AClientConfig: Configuration for A2A clients
 - A2ATaskTrackingMiddleware: Middleware for tracking A2A task state
 - Authentication: OAuth2 and token exchange capabilities
-- Models: Response models for A2A protocol compliance
+- Models: Response models and configuration for A2A protocol compliance
 
 Usage:
     from app.subagents import (
@@ -19,6 +20,8 @@ Usage:
         A2AClientConfig,
         make_a2a_async_runnable,
         A2ATaskTrackingMiddleware,
+        LocalSubAgentConfig,
+        create_dynamic_local_subagent,
     )
 """
 
@@ -33,13 +36,18 @@ from ..authentication import (
 )
 from .base import BaseA2ARunnable, LocalA2ARunnable, SubAgentInput
 from .config import A2AClientConfig
+from .dynamic_agent import (
+    DynamicLocalAgentRunnable,
+    SubAgentResponseSchema,
+    create_dynamic_local_subagent,
+)
 from .factory import make_a2a_async_runnable
 from .file_analyzer import (
     FileAnalyzerRunnable,
     create_file_analyzer_subagent,
 )
 from .middleware import A2ATaskTrackingMiddleware, A2ATrackingState
-from .models import A2AMessageResponse, A2ATaskResponse
+from .models import A2AMessageResponse, A2ATaskResponse, LocalSubAgentConfig
 from .runnable import A2AClientRunnable
 
 __all__ = [
@@ -58,6 +66,11 @@ __all__ = [
     # File analyzer sub-agent
     "FileAnalyzerRunnable",
     "create_file_analyzer_subagent",
+    # Dynamic local sub-agents
+    "LocalSubAgentConfig",
+    "DynamicLocalAgentRunnable",
+    "SubAgentResponseSchema",
+    "create_dynamic_local_subagent",
     # Authentication
     "SmartTokenInterceptor",
     "AuthenticationMethod",

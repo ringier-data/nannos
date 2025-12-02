@@ -89,6 +89,11 @@ class A2AClientRunnable(BaseA2ARunnable):
         """Return the agent name (used for tracking)."""
         return self.agent_card.name
 
+    @property
+    def description(self) -> str:
+        """Return the agent description."""
+        return self.agent_card.description or "No description provided."
+
     async def _get_client(self) -> Client:
         """Lazy initialization of A2A client."""
         if self._client is None:

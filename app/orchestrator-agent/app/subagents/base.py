@@ -64,7 +64,13 @@ class BaseA2ARunnable(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Return the agent name (used for tracking)."""
+        """Return the agent name"""
+        ...
+
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        """Return the agent description use for agent selection."""
         ...
 
     @abstractmethod
@@ -364,12 +370,6 @@ class LocalA2ARunnable(BaseA2ARunnable):
                 return self._build_success_response(result, context_id)
     """
 
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Return the agent name (used for tracking)."""
-        ...
-
     @abstractmethod
     async def _process(
         self,
@@ -389,8 +389,6 @@ class LocalA2ARunnable(BaseA2ARunnable):
             Dict with 'messages' and A2A metadata
         """
         ...
-
-    # NOTE: _extract_tracking_ids and _extract_message_content are inherited from BaseA2ARunnable
 
     async def ainvoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """Async invoke the local sub-agent.

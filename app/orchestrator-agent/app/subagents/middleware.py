@@ -1,46 +1,32 @@
-"""A2A Task Tracking Middleware for deterministic context management.
+"""A2A Task Tracking Middleware for state persistence.
 
 This middleware extends the agent state with A2A-specific tracking fields and uses
-middleware hooks to inject/extract task_id and context_id WITHOUT LLM involvement,
+the before_model hook to extract and persist task_id/context_id from tool responses,
 ensuring A2A protocol compliance and conversation continuity.
 
 Architecture:
-- Node-style hooks (before_model): Extract IDs from tool results, update state
-- Wrap-style hooks (awrap_tool_call): Inject IDs, unwrap A2A metadata from responses
+- Uses ONLY before_model hook (passive observer pattern)
+- Tool dispatch and JSON unwrapping handled by DynamicToolDispatchMiddleware
+- This middleware simply observes ToolMessages and persists IDs to state
 
 LangGraph Execution Flow:
-  1. awrap_tool_call → injects stored task_id/context_id into sub-agent calls
-  2. Tool executes → returns ToolMessage with A2A metadata
-  3. awrap_tool_call → unwraps JSON-encoded metadata, stores in additional_kwargs
+  1. DynamicToolDispatchMiddleware dispatches task to subagent
+  2. Subagent returns JSON-wrapped response with A2A metadata
+  3. DynamicToolDispatchMiddleware unwraps JSON, puts metadata in additional_kwargs
   4. ToolMessage gets added to messages
-  5. NEXT ITERATION: before_model sees the ToolMessage ← extracts and persists IDs
+  5. NEXT ITERATION: before_model sees ToolMessage, extracts and persists IDs
 
-Status Handling:
-When A2A sub-agents return requires_input or requires_auth, the metadata is stored
-in the ToolMessage's additional_kwargs. The LLM naturally sees this in the tool result
-and can communicate requirements to the user (e.g., "The JIRA agent needs X").
-
-Unlike interrupt-based approaches, this allows natural conversational flow:
-  1. Tool returns with requirement metadata
-  2. LLM sees requirement in tool result
-  3. LLM communicates requirement to user
-  4. User provides input in next turn
-  5. LLM calls tool again with additional context
-
-Unlike TodoListMiddleware which provides an LLM-controlled tool, this middleware
-works transparently to maintain conversation continuity with A2A sub-agents.
+Note: The general-purpose subagent (from deepagents SubAgentMiddleware) does NOT
+use A2A tracking - it's a stateless agent. Only subagents in subagent_registry
+(local dynamic agents, remote A2A agents, file-analyzer) use multi-turn tracking.
 """
 
-import json
 import logging
-from collections.abc import Awaitable, Callable
 from typing import Any, Dict
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
-from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
-from langgraph.types import Command
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
 
@@ -55,11 +41,6 @@ class A2ATrackingState(AgentState):
 
     Note: These are PER-SUBAGENT tracking IDs, not the conversation-level
     task_id/context_id. The main agent's conversation tracking is separate.
-
-    Status Handling:
-    When A2A sub-agents require input or authentication, the metadata is stored
-    in the tool response and visible to the LLM, which can naturally communicate
-    requirements to the user.
     """
 
     a2a_tracking: NotRequired[Dict[str, Dict[str, Any]]]
@@ -79,34 +60,23 @@ class A2ATrackingState(AgentState):
 
 
 class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
-    """Middleware for deterministic A2A task/context ID tracking.
+    """Middleware for A2A task/context ID state persistence.
 
-    ARCHITECTURE:
-    - Node-style hooks (before_model): Extract IDs and metadata from tool responses
-    - Wrap-style hooks (awrap_tool_call): Inject IDs, unwrap metadata from responses
+    This is a PASSIVE middleware that only uses before_model to extract and persist
+    A2A tracking IDs from ToolMessage responses. It does NOT intercept tool calls.
+
+    Tool dispatch and JSON unwrapping are handled by DynamicToolDispatchMiddleware,
+    which puts A2A metadata in ToolMessage.additional_kwargs["a2a_metadata"].
 
     How it works:
-    1. awrap_tool_call: Injects stored task_id/context_id into sub-agent calls
-    2. Tool executes and returns ToolMessage with A2A metadata
-    3. awrap_tool_call: Unwraps JSON-encoded A2A metadata from response
-    4. ToolMessage with metadata gets added to conversation messages
-    5. NEXT ITERATION: before_model sees ToolMessage with a2a_metadata in additional_kwargs
-    6. before_model: Extracts IDs from ToolMessage, returns state update
-    7. LangGraph merges state update and persists via checkpointer
+    1. DynamicToolDispatchMiddleware dispatches task and unwraps JSON response
+    2. ToolMessage with a2a_metadata in additional_kwargs gets added to messages
+    3. NEXT ITERATION: before_model sees ToolMessage
+    4. before_model extracts IDs from additional_kwargs, returns state update
+    5. LangGraph merges state update and persists via checkpointer
 
-    Status Handling:
-    - A2A metadata (requires_input, requires_auth, state) stored in ToolMessage
-    - LLM sees metadata in tool result and can communicate requirements to user
-    - Natural conversational flow: user provides input → LLM calls tool again
-    - No interrupts needed - input consumed in subsequent tool call
-
-    Subagent Type Fallback:
-    - If the LLM tries to use a subagent_type that doesn't exist (e.g., hallucinated
-      from examples in the task tool description), the middleware automatically falls
-      back to 'general-purpose'
-    - This prevents errors when the LLM hallucinates agent types like 'content-reviewer'
-      or 'research-analyst' from the examples in the task tool prompt
-    - A warning is logged when fallback occurs
+    Note: general-purpose subagent (from deepagents) does NOT use A2A tracking.
+    Only subagents in subagent_registry use multi-turn context tracking.
 
     Integration:
         ```python
@@ -132,11 +102,6 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         This hook runs at the START of each iteration, AFTER tool results have been
         added to messages. We examine ToolMessage results from the previous iteration
         to extract and persist A2A tracking IDs in state for the next call.
-
-        The extraction happens here (not in awrap_tool_call) because:
-        1. awrap_tool_call must return a single result (ToolMessage/Command)
-        2. State updates require reducer merging handled by LangGraph
-        3. before_model is the proper hook for state extraction per LangGraph docs
 
         Returns a dict with "a2a_tracking" key to be merged into state by LangGraph.
         """
@@ -187,7 +152,7 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
                 return {"a2a_tracking": current_tracking}
 
         # Check if ToolMessage has A2A metadata in additional_kwargs
-        # This is placed here by _unwrap_tool_message() after extracting from JSON response
+        # This is placed by DynamicToolDispatchMiddleware after extracting from JSON response
         additional_kwargs = getattr(last_message, "additional_kwargs", {})
         a2a_metadata = additional_kwargs.get("a2a_metadata")
 
@@ -247,283 +212,3 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
         (no I/O or blocking operations).
         """
         return self.before_model(state, runtime)
-
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], ToolMessage | Command],
-    ) -> ToolMessage | Command:
-        """Inject task_id/context_id and unwrap A2A JSON content (sync version).
-
-        This wrap-style hook:
-        1. Injects tracking IDs from state into tool arguments (BEFORE execution)
-        2. Executes the tool via handler
-        3. Unwraps JSON-encoded A2A metadata from response (AFTER execution)
-        4. Stores metadata in additional_kwargs for before_model to extract
-
-        Does NOT mutate state - before_model handles state updates.
-        See awrap_tool_call for async version with interrupt-based status handling.
-        """
-        tool_name = request.tool_call.get("name", "")
-
-        # Only intercept 'task' tool which invokes A2A sub-agents
-        if tool_name != "task":
-            return handler(request)
-
-        # Extract the subagent_type to identify which sub-agent is being called
-        args = request.tool_call.get("args", {})
-        subagent_type = args.get("subagent_type")
-
-        if not subagent_type:
-            return handler(request)
-
-        logger.info(f"[A2A MIDDLEWARE wrap_tool_call] Intercepting task call for: {subagent_type}")
-
-        # STEP 1: Inject stored IDs from state into tool arguments for context continuity
-        state = request.state
-        a2a_tracking = state.get("a2a_tracking", {})
-        agent_tracking = a2a_tracking.get(subagent_type, {})
-
-        if agent_tracking:
-            task_id = agent_tracking.get("task_id")
-            context_id = agent_tracking.get("context_id")
-            is_complete = agent_tracking.get("is_complete", True)
-            requires_input = agent_tracking.get("requires_input", False)
-            requires_auth = agent_tracking.get("requires_auth", False)
-
-            # A2A Protocol: Only reuse task_id if task is incomplete, needs input, or needs auth
-            task_incomplete = not is_complete or requires_input or requires_auth
-
-            # Always inject context_id for conversation continuity
-            if context_id:
-                request.tool_call["args"]["context_id"] = context_id
-                logger.info(f"[A2A MIDDLEWARE wrap_tool_call] Injected context_id: {context_id}")
-
-            # Only inject task_id if the task is still in progress
-            if task_id and task_incomplete:
-                request.tool_call["args"]["task_id"] = task_id
-                logger.info(f"[A2A MIDDLEWARE wrap_tool_call] Injected task_id: {task_id}")
-            elif task_id and is_complete:
-                logger.info(f"[A2A MIDDLEWARE wrap_tool_call] Task {task_id} complete, omitting task_id")
-        else:
-            logger.info(f"[A2A MIDDLEWARE wrap_tool_call] No tracking for {subagent_type} - new conversation")
-
-        # STEP 2: Execute the tool with injected IDs
-        # Fallback to 'general-purpose' if subagent_type doesn't exist
-        # This handles cases where LLM hallucinates a subagent type from examples in the prompt
-        try:
-            result = handler(request)
-        except ValueError as e:
-            error_msg = str(e)
-            if "the only allowed types are" in error_msg and subagent_type != "general-purpose":
-                logger.warning(
-                    f"[A2A MIDDLEWARE wrap_tool_call] Subagent type '{subagent_type}' not found. "
-                    f"Falling back to 'general-purpose'. Original error: {error_msg}"
-                )
-                # Modify the request to use general-purpose instead
-                request.tool_call["args"]["subagent_type"] = "general-purpose"
-                result = handler(request)
-            else:
-                raise
-
-        # STEP 3: Unwrap JSON-encoded A2A metadata from response and store in additional_kwargs
-        if isinstance(result, ToolMessage):
-            return self._unwrap_tool_message(result)
-        elif isinstance(result, Command):
-            return self._unwrap_command(result)
-
-        return result
-
-    def _unwrap_tool_message(self, tool_message: ToolMessage) -> ToolMessage:
-        """Unwrap JSON-encoded A2A metadata from ToolMessage content.
-
-        The A2A runnable wraps metadata in content as JSON:
-        {"content": "actual message", "a2a": {"task_id": ..., "context_id": ...}}
-
-        This extracts the metadata and stores it in additional_kwargs where
-        before_model can find it, then returns a new ToolMessage with just
-        the actual content (clean message for LLM consumption).
-
-        Also detects ToolMessage status='error' and sets state to failed in metadata.
-        """
-        if not isinstance(tool_message.content, str):
-            return tool_message
-
-        # Check if ToolMessage has status='error' - this indicates a tool execution failure
-        tool_status = getattr(tool_message, "status", None)
-        has_error_status = tool_status == "error"
-
-        try:
-            content_dict = json.loads(tool_message.content)
-
-            # Check for A2A enhanced format with embedded metadata
-            if isinstance(content_dict, dict) and "content" in content_dict and "a2a" in content_dict:
-                a2a_metadata = content_dict["a2a"]
-                original_content = content_dict["content"]
-
-                logger.info(f"[A2A MIDDLEWARE unwrap] Found A2A metadata: {list(a2a_metadata.keys())}")
-
-                # If ToolMessage has status='error', override A2A metadata to mark as failed
-                if has_error_status:
-                    logger.warning("[A2A MIDDLEWARE unwrap] ToolMessage has status='error' - marking state as failed")
-                    a2a_metadata["state"] = "TaskState.failed"
-                    a2a_metadata["is_complete"] = True  # Failed tasks are considered complete
-
-                # Create new ToolMessage with unwrapped content and metadata in additional_kwargs
-                # This allows before_model to extract IDs from a consistent, known location
-                return ToolMessage(
-                    content=original_content,
-                    tool_call_id=tool_message.tool_call_id,
-                    name=tool_message.name,
-                    status=tool_message.status,  # Preserve the status field
-                    additional_kwargs={**tool_message.additional_kwargs, "a2a_metadata": a2a_metadata},
-                )
-        except json.JSONDecodeError:
-            pass
-
-        # If no A2A JSON metadata but ToolMessage has status='error', create synthetic failed metadata
-        if has_error_status:
-            logger.warning(
-                "[A2A MIDDLEWARE unwrap] ToolMessage has status='error' without A2A metadata - creating failed state"
-            )
-            synthetic_metadata = {
-                "state": "TaskState.failed",
-                "is_complete": True,
-            }
-            return ToolMessage(
-                content=tool_message.content,
-                tool_call_id=tool_message.tool_call_id,
-                name=tool_message.name,
-                status=tool_message.status,
-                additional_kwargs={**tool_message.additional_kwargs, "a2a_metadata": synthetic_metadata},
-            )
-
-        return tool_message
-
-    def _unwrap_command(self, command: Command) -> Command:
-        """Unwrap A2A metadata from Command's ToolMessage.
-
-        When a Command is returned (containing a ToolMessage), we need to
-        unwrap the ToolMessage inside it. Extracts the message from Command.update,
-        unwraps it via _unwrap_tool_message, and returns updated Command.
-        """
-        if not (hasattr(command, "update") and command.update and "messages" in command.update):
-            return command
-
-        messages = command.update["messages"]
-        if not messages or not isinstance(messages[-1], ToolMessage):
-            return command
-
-        # Unwrap the last message to extract A2A metadata
-        unwrapped = self._unwrap_tool_message(messages[-1])
-
-        # Return Command with unwrapped message and preserved goto/graph
-        updated_messages = messages[:-1] + [unwrapped]
-        return Command(
-            update={**command.update, "messages": updated_messages},
-            goto=command.goto if hasattr(command, "goto") else None,
-            graph=command.graph if hasattr(command, "graph") else None,
-        )
-
-    async def awrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
-    ) -> ToolMessage | Command:
-        """Async version of wrap_tool_call.
-
-        Flow:
-        1. Injects task_id/context_id from state into tool arguments
-        2. Executes tool via handler
-        3. Unwraps A2A JSON metadata from response
-        4. Returns ToolMessage with metadata in additional_kwargs
-
-        The metadata (requires_input, requires_auth, etc.) is visible to the LLM
-        in the tool result, allowing natural communication of requirements to the user.
-
-        Note: Auth requirements (requires_auth) are handled by auth_error_middleware
-        which runs before this middleware in the stack.
-        """
-        tool_name = request.tool_call.get("name", "")
-
-        # Only intercept 'task' tool which invokes A2A sub-agents
-        if tool_name != "task":
-            return await handler(request)
-
-        # Extract the subagent_type to identify which sub-agent is being called
-        args = request.tool_call.get("args", {})
-        subagent_type = args.get("subagent_type")
-
-        if not subagent_type:
-            return await handler(request)
-
-        logger.info(f"[A2A MIDDLEWARE awrap_tool_call] Intercepting async task call for: {subagent_type}")
-
-        # STEP 1: Inject stored IDs from state into tool arguments for context continuity
-        state = request.state
-        a2a_tracking = state.get("a2a_tracking", {})
-        agent_tracking = a2a_tracking.get(subagent_type, {})
-
-        if agent_tracking:
-            task_id = agent_tracking.get("task_id")
-            context_id = agent_tracking.get("context_id")
-            is_complete = agent_tracking.get("is_complete", True)
-            requires_input = agent_tracking.get("requires_input", False)
-            requires_auth = agent_tracking.get("requires_auth", False)
-
-            # A2A Protocol: Only reuse task_id if task is incomplete, needs input, or needs auth
-            task_incomplete = not is_complete or requires_input or requires_auth
-
-            # Always inject context_id for conversation continuity
-            if context_id:
-                request.tool_call["args"]["context_id"] = context_id
-                logger.info(f"[A2A MIDDLEWARE awrap_tool_call] Injected context_id: {context_id}")
-
-            # Only inject task_id if the task is still in progress
-            if task_id and task_incomplete:
-                request.tool_call["args"]["task_id"] = task_id
-                logger.info(f"[A2A MIDDLEWARE awrap_tool_call] Injected task_id: {task_id}")
-            elif task_id and is_complete:
-                logger.info(f"[A2A MIDDLEWARE awrap_tool_call] Task {task_id} complete, omitting task_id")
-        else:
-            logger.info(f"[A2A MIDDLEWARE awrap_tool_call] No tracking for {subagent_type} - new conversation")
-
-        # STEP 2: Execute tool normally
-        # Fallback to 'general-purpose' if subagent_type doesn't exist
-        # This handles cases where LLM hallucinates a subagent type from examples in the prompt
-        try:
-            result = await handler(request)
-        except ValueError as e:
-            error_msg = str(e)
-            if "the only allowed types are" in error_msg and subagent_type != "general-purpose":
-                logger.warning(
-                    f"[A2A MIDDLEWARE awrap_tool_call] Subagent type '{subagent_type}' not found. "
-                    f"Falling back to 'general-purpose'. Original error: {error_msg}"
-                )
-                # Modify the request to use general-purpose instead
-                request.tool_call["args"]["subagent_type"] = "general-purpose"
-                result = await handler(request)
-            else:
-                raise
-
-        # STEP 3: Unwrap JSON-encoded A2A metadata from response
-        # Error detection (e.g., "task does not exist") is handled in before_model
-        # where we can actually update state properly
-        if isinstance(result, ToolMessage):
-            result = self._unwrap_tool_message(result)
-        elif isinstance(result, Command):
-            result = self._unwrap_command(result)
-
-        # STEP 4: Return result with A2A metadata in additional_kwargs
-        # The ToolMessage already contains requires_input/requires_auth in additional_kwargs
-        # which the LLM can see and respond to naturally (e.g., "The agent needs X").
-        #
-        # Note: We don't interrupt() here because:
-        # 1. The tool has already executed - interrupt would re-run the entire node
-        # 2. Any input provided via Command.resume() can't be consumed by the past execution
-        # 3. The LLM can naturally surface requirements to the user in the next turn
-        # 4. User provides input → LLM calls tool again with additional context
-        #
-        # Auth requirements are still handled by auth_error_middleware (runs before this).
-
-        return result

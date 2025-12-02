@@ -24,7 +24,7 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
 from ..handlers import StreamHandler
 from ..models import AgentFrameworkAuthError, AgentSettings, AgentStreamResponse, UserConfig
-from ..models.config import ModelType
+from ..models.config import GraphRuntimeContext, ModelType, build_runtime_context
 from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 from .graph_factory import DEFAULT_MODEL, GraphFactory
@@ -132,16 +132,28 @@ class OrchestratorDeepAgent:
             raise ValueError(f"User with sub {sub} not found in registry")
         return user
 
-    async def update_config(self, user_config: UserConfig) -> UserConfig:
-        """Get configuration for the orchestrator deep agent.
+    async def discover_capabilities(self, user_config: UserConfig) -> UserConfig:
+        """Discover tools and sub-agents for a user based on their permissions.
+
+        Fetches user permissions from registry and discovers available capabilities:
+        - Remote A2A sub-agents (with token exchange)
+        - MCP tools (with token exchange)
+        - Local sub-agent configurations (from DynamoDB user record)
+
+        This method is idempotent - if capabilities are already discovered, returns immediately.
 
         Args:
             user_config: Base user configuration with user_id and tokens
 
         Returns:
-            UserConfig: Updated user configuration with discovered sub-agents and tools
+            UserConfig: Enriched with discovered tools, sub_agents, and local_subagents
         """
-        logger.debug(f"Getting config for user_id: {user_config.user_id}")
+        # Skip discovery if already done (tools and sub_agents are always set together)
+        # Note: local_subagents is optional and may remain None if user has none configured
+        if user_config.tools is not None and user_config.sub_agents is not None:
+            return user_config
+
+        logger.debug(f"Discovering capabilities for user_id: {user_config.user_id}")
 
         user = await self._get_user_from_registry(user_config.user_id)
 
@@ -166,12 +178,43 @@ class OrchestratorDeepAgent:
         )
         logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
 
+        # Update user_config with discovered data
         user_config.tools = tools
         user_config.sub_agents = sub_agents
         user_config.language = user.language
-        logger.debug(f"Created config with {len(user_config.sub_agents) if user_config.sub_agents else 0} sub_agents")
+
+        # Pass local sub-agent configurations from DynamoDB
+        if user.local_subagents:
+            user_config.local_subagents = user.local_subagents
+            logger.info(
+                f"Found {len(user.local_subagents)} local sub-agent configs: {[sa.name for sa in user.local_subagents]}"
+            )
+
+        logger.debug(f"Discovered {len(user_config.sub_agents) if user_config.sub_agents else 0} sub-agents")
         logger.debug(f"User preferred language: {user.language}")
+
         return user_config
+
+    def build_runtime_context(self, user_config: UserConfig) -> GraphRuntimeContext:
+        """Build GraphRuntimeContext from enriched user config.
+
+        Transforms discovered tools and subagents into registries for dynamic
+        tool dispatch at runtime. Call discover_capabilities() first to populate
+        tools and sub_agents.
+
+        Args:
+            user_config: User configuration enriched with discovered tools/agents
+
+        Returns:
+            GraphRuntimeContext: Ready for graph invocation with all registries populated
+        """
+        model_type = user_config.model or self._default_model_type
+        return build_runtime_context(
+            user_config,
+            llm_model=self._graph_factory._get_or_create_model(model_type),
+            oauth2_client=self.oauth2_client,
+            checkpointer=self._graph_factory.checkpointer,
+        )
 
     async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:
         """Get or create a graph for the given user configuration.
@@ -259,10 +302,10 @@ class OrchestratorDeepAgent:
             )
             return
 
-        # Create GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
-        if user_config.tools is None or user_config.sub_agents is None:
-            user_config = await self.update_config(user_config)
-        runtime_context = user_config.to_runtime_context()
+        # Build GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
+        # Discovers tools/agents if not already done, then builds context with all registries
+        user_config = await self.discover_capabilities(user_config)
+        runtime_context = self.build_runtime_context(user_config)
 
         # Create config with thread_id for conversation isolation
         # GraphRuntimeContext is passed via `context` parameter, NOT stored in config or checkpointed
