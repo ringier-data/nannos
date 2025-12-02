@@ -65,24 +65,6 @@ Resources:
             Action: 'sts:AssumeRole'
       ManagedPolicyArns:
         - !ImportValue '{{ project_id }}-common-for-task-role-arn'
-      Policies:
-        - PolicyName: 'FoundryJiraAgentTaskPolicy'
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: 'DynamoDBCheckpointsAccess'
-                Effect: 'Allow'
-                Action:
-                  - 'dynamodb:Query'
-                  - 'dynamodb:GetItem'
-                  - 'dynamodb:PutItem'
-                  - 'dynamodb:UpdateItem'
-                  - 'dynamodb:DeleteItem'
-                  - 'dynamodb:BatchGetItem'
-                  - 'dynamodb:BatchWriteItem'
-                  - 'dynamodb:DescribeTable'
-                Resource:
-                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
 
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-task-role' }
