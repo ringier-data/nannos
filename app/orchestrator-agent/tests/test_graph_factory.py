@@ -21,7 +21,7 @@ class TestGraphFactoryInitialization:
     def test_initialization_creates_checkpointer(self, mock_dynamodb_saver):
         """Test GraphFactory creates a shared DynamoDB checkpointer."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -37,7 +37,7 @@ class TestGraphFactoryInitialization:
     def test_initialization_creates_middleware_instances(self, mock_dynamodb_saver):
         """Test GraphFactory creates middleware instances."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -55,7 +55,7 @@ class TestGraphFactoryInitialization:
     def test_a2a_middleware_property(self, mock_dynamodb_saver):
         """Test a2a_middleware property returns the middleware instance."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -76,7 +76,7 @@ class TestGraphCreation:
     def test_get_graph_creates_openai_graph(self, mock_azure, mock_create, mock_dynamodb):
         """Test that get_graph creates an OpenAI graph."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -107,7 +107,7 @@ class TestGraphCreation:
     def test_get_graph_creates_bedrock_graph(self, mock_isinstance, mock_bedrock, mock_create, mock_dynamodb):
         """Test that get_graph creates a Bedrock graph."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -134,7 +134,7 @@ class TestGraphCreation:
     def test_get_graph_caches_result(self, mock_azure, mock_create, mock_dynamodb):
         """Test that get_graph caches and returns cached graph."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -161,7 +161,7 @@ class TestGraphCreation:
     def test_get_graph_uses_default_model(self, mock_azure, mock_create, mock_dynamodb):
         """Test that get_graph uses default model when none specified."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -190,7 +190,7 @@ class TestMiddlewareStack:
     def test_middleware_stack_includes_dynamic_tool_dispatch(self, mock_dynamodb):
         """Test that middleware stack includes DynamicToolDispatchMiddleware first."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -210,7 +210,7 @@ class TestMiddlewareStack:
     def test_bedrock_middleware_has_static_tool(self, mock_dynamodb):
         """Test that Bedrock middleware includes FinalResponseSchema as static tool."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -229,7 +229,7 @@ class TestMiddlewareStack:
     def test_openai_middleware_has_file_tools(self, mock_dynamodb):
         """Test that OpenAI middleware has file handling tools."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3
@@ -256,7 +256,7 @@ class TestGraphCreationParameters:
     def test_graph_created_with_empty_tools_and_subagents(self, mock_azure, mock_create, mock_dynamodb):
         """Test that graph is created with empty tools and subagents (injected at runtime)."""
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_TABLE_NAME = "test-table"
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
         config.CHECKPOINT_TTL_DAYS = 14
         config.CHECKPOINT_AWS_REGION = "eu-west-1"
         config.CHECKPOINT_MAX_RETRIES = 3

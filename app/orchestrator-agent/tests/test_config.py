@@ -44,7 +44,7 @@ class TestAgentSettings:
 
     def test_dynamodb_configuration(self):
         """Test DynamoDB checkpoint configuration."""
-        assert AgentSettings.CHECKPOINT_TABLE_NAME == "dev-alloy-infrastructure-agents-langgraph-checkpoints"
+        assert AgentSettings.CHECKPOINT_DYNAMODB_TABLE_NAME == "dev-alloy-infrastructure-agents-langgraph-checkpoints"
         assert AgentSettings.CHECKPOINT_TTL_DAYS == 14
         assert AgentSettings.CHECKPOINT_AWS_REGION == "eu-central-1"
         assert AgentSettings.CHECKPOINT_MAX_RETRIES == 5

@@ -194,10 +194,16 @@ class AgentSettings:
     AGENT_DISCOVERY_CACHE_TTL = 30  # seconds
 
     # DynamoDB checkpoint configuration
-    CHECKPOINT_TABLE_NAME = "dev-alloy-infrastructure-agents-langgraph-checkpoints"
-    CHECKPOINT_TTL_DAYS = 14
-    CHECKPOINT_AWS_REGION = "eu-central-1"
-    CHECKPOINT_MAX_RETRIES = 5
+    CHECKPOINT_DYNAMODB_TABLE_NAME = os.getenv(
+        "CHECKPOINT_DYNAMODB_TABLE_NAME", "dev-alloy-infrastructure-agents-orchestrator-checkpoints"
+    )
+    CHECKPOINT_TTL_DAYS = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
+    CHECKPOINT_AWS_REGION = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
+    CHECKPOINT_MAX_RETRIES = int(os.getenv("CHECKPOINT_MAX_RETRIES", "5"))
+
+    # S3 offloading for large checkpoints (>350KB) - prevents DynamoDB 400KB limit errors
+    CHECKPOINT_S3_BUCKET_NAME: str | None = os.getenv("CHECKPOINT_S3_BUCKET_NAME", None)
+    CHECKPOINT_COMPRESSION_ENABLED = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
 
     # System prompt
     SYSTEM_INSTRUCTION = (

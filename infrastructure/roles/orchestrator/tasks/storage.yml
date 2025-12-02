@@ -1,0 +1,11 @@
+---
+- name: 'set cloudformation template'
+  set_fact:
+    cloudformation_template: '{{ role_path }}/files/cf-storage.yml'
+
+- name: 'deploy shared storage resources'
+  include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-storage'
+    template: '{{ cloudformation_template }}'

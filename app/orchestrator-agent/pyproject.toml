@@ -20,13 +20,14 @@ dependencies = [
     "deepagents>=0.1.4",
     "rcplus-alloy-common>=8.6.1",
     "langchain-mcp-adapters>=0.1.11",
-    "langgraph-checkpoint-amazon-dynamodb>=0.1.2",
     "pytest>=8.4.2",
     "authlib>=1.3.0",
     "aiodynamo>=24.7",
     "langsmith>=0.4.37",
     "ringier-a2a-sdk>=0.1.0",
     "langchain-aws>=1.1.0",
+    "langgraph-checkpoint-aws>=1.0.1",
+    "aiobotocore>=2.26.0",
 ]
 
 [dependency-groups]

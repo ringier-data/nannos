@@ -1,2 +1,4 @@
 ---
 bedrock_model_id: 'global.anthropic.claude-sonnet-4-5-20250929-v1:0'
+checkpoint_dynamodb_table_name: '{{ env }}-{{ project_id }}-{{ software_component }}-langgraph-checkpoints'
+checkpoint_s3_bucket_name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-checkpoints'

@@ -7,7 +7,7 @@ Resources:
   LangGraphCheckpointsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: '{{ env }}-{{ project_id }}-{{ software_component }}-langgraph-checkpoints'
+      TableName: '{{ checkpoint_dynamodb_table_name }}'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: PK

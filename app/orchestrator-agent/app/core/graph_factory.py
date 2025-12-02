@@ -26,7 +26,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import AzureChatOpenAI
 from langgraph.graph.state import CompiledStateGraph
-from langgraph_checkpoint_dynamodb import DynamoDBConfig, DynamoDBSaver, DynamoDBTableConfig
+from langgraph_checkpoint_aws import DynamoDBSaver
 
 from ..handlers import handle_auth_error, should_retry
 from ..middleware import (
@@ -113,18 +113,20 @@ class GraphFactory:
 
         # Create shared checkpointer for all graphs
         # This enables conversation continuity when users switch models
+        # Uses langgraph-checkpoint-aws with S3 offloading for large checkpoints (>350KB)
+        s3_config: dict[str, str] | None = None
+        if config.CHECKPOINT_S3_BUCKET_NAME:
+            s3_config = {"bucket_name": config.CHECKPOINT_S3_BUCKET_NAME}
+            logger.info(f"S3 offloading enabled for large checkpoints: {config.CHECKPOINT_S3_BUCKET_NAME}")
+
         self._checkpointer = DynamoDBSaver(
-            DynamoDBConfig(
-                table_config=DynamoDBTableConfig(
-                    table_name=config.CHECKPOINT_TABLE_NAME,
-                    ttl_days=config.CHECKPOINT_TTL_DAYS,
-                ),
-                region_name=config.CHECKPOINT_AWS_REGION,
-                max_retries=config.CHECKPOINT_MAX_RETRIES,
-            ),
-            deploy=False,
+            table_name=config.CHECKPOINT_DYNAMODB_TABLE_NAME,
+            region_name=config.CHECKPOINT_AWS_REGION,
+            ttl_seconds=config.CHECKPOINT_TTL_DAYS * 24 * 60 * 60,  # Convert days to seconds
+            enable_checkpoint_compression=config.CHECKPOINT_COMPRESSION_ENABLED,
+            s3_offload_config=s3_config,  # type: ignore[arg-type]
         )
-        logger.info("Initialized shared DynamoDB checkpointer")
+        logger.info("Initialized shared DynamoDB checkpointer with S3 offloading support")
 
         # Create middleware instances (shared across all graphs)
         self._a2a_middleware = a2a_middleware or A2ATaskTrackingMiddleware()
