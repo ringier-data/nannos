@@ -188,7 +188,7 @@ class AgentSettings:
 
     # Retry configuration
     MAX_RETRIES = 3
-    BACKOFF_FACTOR = 2.0
+    BACKOFF_FACTOR = 3.0
 
     # Cache configuration
     AGENT_DISCOVERY_CACHE_TTL = 30  # seconds
