@@ -1,0 +1,48 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - LangGraph checkpoints (v{{ project_version }})'
+
+Resources:
+
+  LangGraphCheckpointsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: '{{ checkpoint_dynamodb_table_name }}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expireAt
+        Enabled: true
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-langgraph-checkpoints' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+Outputs:
+
+  LangGraphCheckpointsTableName:
+    Description: 'LangGraph checkpoints DynamoDB table name'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-name'
+    Value: !Ref LangGraphCheckpointsTable
+
+  LangGraphCheckpointsTableArn:
+    Description: 'LangGraph checkpoints DynamoDB table ARN'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+    Value: !GetAtt LangGraphCheckpointsTable.Arn

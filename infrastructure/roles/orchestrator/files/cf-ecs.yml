@@ -1,0 +1,486 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Orchestrator Infrastructure - ECS task and service (v{{ project_version }})'
+
+
+Conditions:
+  IsProd:
+    !Equals ['{{ env }}', 'prod']
+
+
+Resources:
+
+  OrchestratorEcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role'
+      Description: 'Alloy Orchestrator Infrastructure ECS task execution role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-execution-role-arn'
+      Policies:
+        - PolicyName: 'OrchestratorTaskExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'ECRGetImageOrchestratorAgent'
+                Effect: 'Allow'
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/{{ orchestrator_agent_ecr_repository_name }}'
+              - Sid: 'GetOrchestratorSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_openai_api_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_langsmith_api_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_jwt_secret_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_oidc_client_secret }}'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  OrchestratorEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role'
+      Description: 'Alloy Orchestrator Infrastructure ECS task role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-task-role-arn'
+      Policies:
+        - PolicyName: 'OrchestratorTaskPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+              - Sid: 's3CheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:PutObjectTagging'
+                  - 's3:GetBucketLifecycleConfiguration'
+                  - 's3:PutBucketLifecycleConfiguration'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+
+              - Sid: 'DynamoDBUserTableReadAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
+              - Sid: 'S3FilesReadAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+              - Sid: 'BedrockInvokeModel'
+                Effect: 'Allow'
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  # Task Definition for Orchestrator Agent (single container + logs router)
+  OrchestratorAgentTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+      TaskRoleArn: !GetAtt OrchestratorEcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt OrchestratorEcsExecutionRole.Arn
+      Cpu: '{{ orchestrator_agent_task_cpu }}'
+      Memory: '{{ orchestrator_agent_task_memory }}'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities: [ 'FARGATE' ]
+      RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
+      ContainerDefinitions:
+        - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+          DependsOn:
+            - ContainerName: '{{ project_id }}-logs-router'
+              Condition: 'START'
+          Image: '{{ orchestrator_agent_docker_image }}'
+          Essential: true
+          Interactive: true
+          PortMappings:
+            - { ContainerPort: '{{ orchestrator_agent_public_api_port }}', Protocol: 'tcp' }
+          LogConfiguration:
+            LogDriver: 'awsfirelens'
+          Environment:
+            - { Name: 'LOG_MODE', Value: 'JSON' }
+            - { Name: 'LOG_LEVEL', Value: '{{ log_level }}' }
+            - { Name: 'LOG_SET_EXCEPTHOOK', Value: '1' }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'AWS_REGION', Value: !Ref 'AWS::Region' }
+            - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
+            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
+            - { Name: 'OIDC_CLIENT_ID', Value: '{{ orchestrator_oidc_client_id }}' }
+            - { Name: 'OPENAI_API_VERSION', Value: '{{ openai_api_version }}' }
+            - { Name: 'AZURE_OPENAI_CHAT_MODEL_NAME', Value: '{{ azure_openai_chat_model_name }}' }
+            - { Name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', Value: '{{ azure_openai_chat_deployment }}' }
+            - { Name: 'AZURE_OPENAI_ENDPOINT', Value: '{{ azure_openai_endpoint }}' }
+            - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing | string | lower }}' }
+            - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
+            - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
+            - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
+            - { Name: 'JWT_SESSION_EXPIRY_MINUTES', Value: '{{ orchestrator_jwt_session_expiry_minutes }}' }
+            - { Name: 'BUDGET_ENABLED', Value: 'true' }
+            - { Name: 'BUDGET_MONTHLY_TOKEN_LIMIT', Value: '{{ budget_monthly_token_limit }}' }
+            - { Name: 'BUDGET_CHECK_INTERVAL_SECONDS', Value: '300' }
+            - { Name: 'BUDGET_WARNING_THRESHOLDS', Value: '0.80,0.90,0.95' }
+            - { Name: "BEDROCK_MODEL_ID", Value: '{{ bedrock_model_id }}' }
+            - { Name: "CHECKPOINT_DYNAMODB_TABLE_NAME", Value: '{{ checkpoint_dynamodb_table_name }}' }
+            - { Name: "CHECKPOINT_S3_BUCKET_NAME", Value: '{{ checkpoint_s3_bucket_name }}' }
+          Secrets:
+            - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
+            - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
+            - { Name: 'JWT_SECRET_KEY', ValueFrom: '{{ ssmkey_orchestrator_jwt_secret_key }}' }
+            - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_oidc_client_secret }}' }
+          HealthCheck:
+            Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ orchestrator_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
+            Interval: 60
+            Retries: 3
+            StartPeriod: 60
+            Timeout: 5
+        # Container 2: Logs Router (FluentBit sidecar)
+        - Name: '{{ project_id }}-logs-router'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
+          Essential: true
+          Environment:
+            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
+            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
+            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
+            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}.ecs.{{ software_component }}.{{ env }}-orchestrator' }
+          FirelensConfiguration:
+            Type: 'fluentbit'
+            Options:
+              enable-ecs-log-metadata: false
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
+              awslogs-region: !Sub '${AWS::Region}'
+              awslogs-stream-prefix: '{{ software_component }}-orchestrator'
+          HealthCheck:
+            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
+            Interval: 30
+            Retries: 2
+            StartPeriod: 30
+            Timeout: 5
+
+  OrchestratorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      GroupDescription: 'Alloy Orchestrator Infrastructure security group'
+      SecurityGroupIngress:
+        # Orchestrator Agent
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpc-cidr4', Description: 'Orchestrator Agent - Local VPC (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpc-cidr6', Description: 'Orchestrator Agent - Local VPC (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpn-cidr4', Description: 'Orchestrator Agent - VPN (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpn-cidr6', Description: 'Orchestrator Agent - VPN (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ orchestrator_agent_public_api_port }}', ToPort: '{{ orchestrator_agent_public_api_port }}', SourceSecurityGroupId: !ImportValue '{{ project_id }}-public-alb-v2-security-group-id', Description: 'Orchestrator Agent - LoadBalancer'}
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-sg' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  OrchestratorAgentTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/.well-known/agent-card.json'
+      HealthCheckPort: '{{ orchestrator_agent_public_api_port }}'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Port: '{{ orchestrator_agent_public_api_port }}'
+      Protocol: 'HTTP'
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: !If [IsProd, '30', '0']
+        - Key: 'stickiness.enabled'
+          Value: false
+      TargetType: 'ip'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  OrchestratorAgentAlbListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref OrchestratorAgentTargetGroup
+      Conditions:
+        - Field: 'host-header'
+          HostHeaderConfig:
+            Values:
+              - '{{ orchestrator_agent_fqdn }}'
+      ListenerArn: !ImportValue '{{ project_id }}-public-alb-v2-https-listener'
+      # NOTE: The Priority is global and must have unique value across all services we have
+      Priority: 601
+
+  # ECS Service for Orchestrator Agent
+  OrchestratorAgentService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+      Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+      LaunchType: 'FARGATE'
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      # Do not change DesiredCount. This will cause a re-deployment of the below specified TaskDefinition
+      # which we do not want. If you want to update the number of tasks running, edit instead
+      # the resource OrchestratorAgentScalableTarget below.
+      DesiredCount: 1 # ! __WARNING__ : See comment above
+      TaskDefinition: !Ref OrchestratorAgentTaskDefinition
+      EnableECSManagedTags: true
+      EnableExecuteCommand: true
+      PropagateTags: 'TASK_DEFINITION'
+      HealthCheckGracePeriodSeconds: 300
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref OrchestratorSecurityGroup
+            - !ImportValue '{{ project_id }}-public-alb-v2-security-group-id'
+          Subnets:
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1a'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1b'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1c'
+      LoadBalancers:
+        - TargetGroupArn: !Ref OrchestratorAgentTargetGroup
+          ContainerPort: '{{ orchestrator_agent_public_api_port }}'
+          ContainerName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
+
+  OrchestratorAgentScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !If [IsProd, 2, 1]
+      MinCapacity: !If [IsProd, 1, 1]
+      RoleARN: !GetAtt OrchestratorEcsAutoScalingRole.Arn
+      ServiceNamespace: 'ecs'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId:
+        !Sub
+          - 'service/${Cluster}/${Name}'
+          - Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+            Name: !GetAtt OrchestratorAgentService.Name
+
+  OrchestratorAgentEcsAutoScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent-target-tracking-cpu50'
+      PolicyType: 'TargetTrackingScaling'
+      ScalingTargetId: !Ref OrchestratorAgentScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: 'ECSServiceAverageCPUUtilization'
+
+  OrchestratorEcsAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-autoscaling'
+      Description: 'Alloy Orchestrator Infrastructure ECS auto-scaling role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs.application-autoscaling.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'AllowCloudwatchAlarms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action: 'ecs:UpdateService'
+                Resource:
+                  - !Ref OrchestratorAgentService
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-autoscaling-role' }
+        - { Key: 'Project', Value: '{{ project_id }}'}
+        - { Key: 'Environment', Value: '{{ env }}'}
+        - { Key: 'Version', Value: 'v{{ project_version }}'}
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  # CloudWatch Alarms for Orchestrator Agent Service
+  OrchestratorAgentCpuUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentCpuUtilizationHigh'
+      AlarmDescription: 'Alloy Orchestrator Agent - CPUUtilization is higher than 90% for 20 minutes'
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt OrchestratorAgentService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  OrchestratorAgentMemoryUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentMemoryUtilizationHigh'
+      AlarmDescription: 'Alloy Orchestrator Agent - MemoryUtilization is higher than 90% for 20 minutes'
+      MetricName: 'MemoryUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt OrchestratorAgentService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  OrchestratorAgentHealthyHostCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentHealthyHostCount'
+      AlarmDescription: 'Alloy Orchestrator Agent - HealthyHostCount is lower than 1 for 1 minute'
+      MetricName: 'HealthyHostCount'
+      ComparisonOperator: 'LessThanThreshold'
+      Namespace: 'AWS/ApplicationELB'
+      Dimensions:
+        - Name: 'LoadBalancer'
+          Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+        - Name: 'TargetGroup'
+          Value: !GetAtt OrchestratorAgentTargetGroup.TargetGroupFullName
+      Statistic: 'Maximum'
+      Threshold: 1
+      Period: 60
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  OrchestratorAgentResponsesStatus2xxRatioAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'OrchestratorAgentResponsesStatus2xxRatio'
+      AlarmDescription: 'Orchestrator Agent responses status 2xx ratio'
+      ComparisonOperator: 'LessThanThreshold'
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: {{ response_2xx_ratio_threshold }}
+      TreatMissingData: '{{ response_2xx_treat_missing_data }}'
+      Metrics:
+        - Id: ratio
+          Label: 'Status 2xx ratio'
+          Expression: 'status_2xx_count / requests_count'
+          ReturnData: true
+        - Id: requests_count
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: 'Sum'
+            Unit: 'Count'
+            Metric:
+              Namespace: 'AWS/ApplicationELB'
+              MetricName: 'RequestCount'
+              Dimensions:
+                - Name: 'LoadBalancer'
+                  Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+                - Name: 'TargetGroup'
+                  Value: !GetAtt OrchestratorAgentTargetGroup.TargetGroupFullName
+        - Id: status_2xx_count
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: 'Sum'
+            Unit: 'Count'
+            Metric:
+              Namespace: 'AWS/ApplicationELB'
+              MetricName: 'HTTPCode_Target_2XX_Count'
+              Dimensions:
+                - Name: 'LoadBalancer'
+                  Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+                - Name: 'TargetGroup'
+                  Value: !GetAtt OrchestratorAgentTargetGroup.TargetGroupFullName

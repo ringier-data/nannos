@@ -1,0 +1,42 @@
+[project]
+name = "foundry-jira-ticket-a2a-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "a2a-sdk[http-server]>=0.3.9",
+    "langsmith>=0.4.38",
+    "uvicorn>=0.38.0",
+    "rcplus-alloy-common",
+    "ringier-a2a-sdk",
+    #
+    # the deps are necessary for "jira_ticket_app_sdk",
+    "aioitertools==0.13.0",
+    "foundry-platform-sdk==1.63.0",
+    "json-stream>=2.4.1",
+    "six>=1.17.0",
+    "python-dateutil==2.9.0.post0",
+    "types-python-dateutil==2.9.0.20251008",
+    "rpds-py==0.28.0",
+    #
+    "pyyaml>=6.0.3",
+    "aiohttp>=3.13.2",
+    "authlib>=1.6.5",
+]
+
+[tool.uv.sources]
+ringier-a2a-sdk = { path = "../ringier-a2a-sdk" }
+
+# [tool.uv.sources]
+# jira_ticket_app_sdk = { path = "jira_ticket_app_sdk" }
+
+# NOTE: uv sync has a known bug with private index authentication (https://github.com/astral-sh/uv/issues/16402)
+# Workaround: Use `uv pip install` instead of `uv sync` for initial setup and copy the packages to the environment.
+# The configuration below is correct - only jira_ticket_app_sdk uses the foundry index (explicit=true)
+# [tool.uv.sources]
+# jira_ticket_app_sdk = { index = "foundry" }
+# [[tool.uv.index]]
+# name = "foundry"
+# url = "https://user:$FOUNDRY_TOKEN@blumen.palantirfoundry.de/artifacts/api/repositories/ri.artifacts.main.repository.372eab25-9ce7-4385-8e02-755295a42656/contents/release/pypi/simple"
+# explicit = true

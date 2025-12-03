@@ -1,0 +1,42 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Sessions and Users tables (v{{ project_version }})'
+
+Resources:
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: '{{ env }}-{{ project_id }}-{{ software_component }}-users'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      SSESpecification:
+        SSEEnabled: true
+        # TODO: shall we use the sensitive data KMS Key?
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-users' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+Outputs:
+
+  UsersTableName:
+    Description: 'Users DynamoDB table name'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-users-table-name'
+    Value: !Ref UsersTable
+
+  UsersTableArn:
+    Description: 'Users DynamoDB table ARN'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-users-table-arn'
+    Value: !GetAtt UsersTable.Arn

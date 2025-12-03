@@ -13,13 +13,27 @@ on:
 
 jobs:
   alloy-standard:
+    env:
+      GITHUB_TOKEN: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
     runs-on: ubuntu-latest
     #
     # repo `alloy-ch/ops-ci-basics` is the golden standard for all other repositories
     #
+    # NOTE-zw: GitHub made a change on dependabot, that the dependabot PRs are build with a folk of the repository,
+    # which means that this GitHub Action will not have access to the secrets of the original repository when
+    # it is triggered by dependabot. Instead of making our org-level secret ALLOY_CICD_STANDARD_REPO accessible to
+    # a much broader scope, we skip this check if the initiator has no access to the secret.
+    # However, it is not trivial to achieve conditionally skipping a job based on the existence of a secret,
+    # as either the secret or the env is not available in the jobs.<job>.if context.
+    # We have to add the `env.GITHUB_TOKEN != ''` condition to EACH step!
     if: github.repository != 'alloy-ch/ops-ci-basics'
     steps:
+      - name: Succeed directly if the secret is not available
+        if: env.GITHUB_TOKEN == ''
+        run: exit 0
+
       - name: Checkout current repository
+        if: env.GITHUB_TOKEN != ''
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
@@ -28,6 +42,7 @@ jobs:
           submodules: 'recursive'
 
       - name: Check ops-ci-shared
+        if: env.GITHUB_TOKEN != ''
         # fail earlier. the submodule conflicts with the copy operation below
         run: |
           if grep -q 'submodule "ops-ci-shared"' ".gitmodules"; then
@@ -36,6 +51,7 @@ jobs:
           fi
 
       - name: Check .bumpsemver.cfg
+        if: env.GITHUB_TOKEN != ''
         # fail earlier. if the file does not exist, we don't waste time on the next heavy steps
         run: |
           if [ ! -f .bumpsemver.cfg ]; then
@@ -44,8 +60,7 @@ jobs:
           fi
 
       - name: Check and update sources (if any)
-        env:
-          GITHUB_TOKEN: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
+        if: env.GITHUB_TOKEN != ''
         run: |
           git config --global user.name "Alloy CI/CD Bot"
           git config --global user.email "github@rcplus.io"
@@ -84,8 +99,7 @@ jobs:
           git push
 
       - name: Add labels to the PR
-        env:
-          GITHUB_TOKEN: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
+        if: env.GITHUB_TOKEN != ''  && github.event.pull_request.number != ''
         # fail earlier. if the file does not exist, we don't waste time on the next heavy steps
         run: |
           commits=$(gh pr view ${{ github.event.pull_request.number }} --json commits --jq '.commits[]')
@@ -99,6 +113,7 @@ jobs:
           has_perf_commit=$(echo "$commit_headlines" | grep -ic '^perf' || true)
           has_test_commit=$(echo "$commit_headlines" | grep -ic '^test' || true)
           has_chore_commit=$(echo "$commit_headlines" | grep -ic '^chore' || true)
+          has_security_commit=$(echo "$commit_headlines" | grep -ic '^sec' || true)
           has_ci_commit=$(echo "$commit_headlines" | grep -ic '^ci' || true)
           has_breaking_commit_in_message=$(echo "$commit_headlines" | grep -Eic '^[a-z]+\(?[^ ]*\)?\!:' || true)
           has_breaking_commit_in_body=$(echo "$commit_bodies" | grep -c 'BREAKING CHANGE' || true)
@@ -132,8 +147,12 @@ jobs:
           if [ $has_ci_commit -gt 0 ]; then
             gh pr edit ${{ github.event.pull_request.number }} --add-label chore
           fi
+          if [ $has_security_commit -gt 0 ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --add-label security
+          fi
 
       - name: Checkout the template repository
+        if: env.GITHUB_TOKEN != ''
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ALLOY_CICD_STANDARD_REPO }}
@@ -143,6 +162,7 @@ jobs:
           submodules: 'recursive'
 
       - name: Cache pip dependencies
+        if: env.GITHUB_TOKEN != ''
         uses: actions/cache@v4
         id: cache-pip
         with:
@@ -150,11 +170,13 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('alloy_standard/requirements.txt') }}
 
       - name: Install dependencies if cache missed
+        if: env.GITHUB_TOKEN != ''
         run: |
           pip --quiet --disable-pip-version-check --no-color install -r alloy_standard/requirements.txt 
           
 
       - name: Sync files from the template repository
+        if: env.GITHUB_TOKEN != ''
         run: |
           mkdir -p .github/workflows
           cp -fp alloy_standard/.github/pull_request_template.md .github
@@ -170,6 +192,7 @@ jobs:
           rm -rf alloy_standard
 
       - name: Commit changes if any
+        if: env.GITHUB_TOKEN != ''
         run: |
           git config --global user.name "Alloy CI/CD Bot"
           git config --global user.email "github@rcplus.io"
@@ -178,5 +201,6 @@ jobs:
           git push
 
       - name: Check the version bumping management with bumpsemver
+        if: env.GITHUB_TOKEN != ''
         run: |
           bumpsemver patch --dry-run --allow-dirty --no-commit --no-tag

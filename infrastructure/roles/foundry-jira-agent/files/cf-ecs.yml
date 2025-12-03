@@ -1,0 +1,406 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Foundry Jira Agent Infrastructure - ECS task and service (v{{ project_version }})'
+
+
+Conditions:
+  IsProd:
+    !Equals ['{{ env }}', 'prod']
+
+
+Resources:
+
+  FoundryJiraAgentEcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-ecs-er'
+      Description: 'Alloy Foundry Jira Agent Infrastructure ECS task execution role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-execution-role-arn'
+      Policies:
+        - PolicyName: 'FoundryJiraAgentTaskExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'ECRGetImageFoundryJiraAgent'
+                Effect: 'Allow'
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/{{ foundry_jira_agent_ecr_repository_name }}'
+              - Sid: 'GetFoundryJiraAgentSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_foundry_jira_agent_oidc_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_foundry_jira_agent_foundry_client_secret }}'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-ecs-execution-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  FoundryJiraAgentEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-task-role'
+      Description: 'Alloy Foundry Jira Agent Infrastructure ECS task role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-task-role-arn'
+
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-task-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  FoundryJiraAgentTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent'
+      TaskRoleArn: !GetAtt FoundryJiraAgentEcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt FoundryJiraAgentEcsExecutionRole.Arn
+      Cpu: '{{ foundry_jira_agent_task_cpu }}'
+      Memory: '{{ foundry_jira_agent_task_memory }}'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities: [ 'FARGATE' ]
+      RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
+      ContainerDefinitions:
+        - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent'
+          DependsOn:
+            - ContainerName: '{{ project_id }}-logs-router'
+              Condition: 'START'
+          Image: '{{ foundry_jira_agent_docker_image }}'
+          Essential: true
+          Interactive: true
+          PortMappings:
+            - { ContainerPort: '{{ foundry_jira_agent_public_api_port }}', Protocol: 'tcp' }
+          LogConfiguration:
+            LogDriver: 'awsfirelens'
+          Environment:
+            - { Name: 'LOG_MODE', Value: 'JSON' }
+            - { Name: 'LOG_LEVEL', Value: '{{ log_level }}' }
+            - { Name: 'LOG_SET_EXCEPTHOOK', Value: '1' }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'AWS_REGION', Value: !Ref 'AWS::Region' }
+            - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
+            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
+            - { Name: 'ORCHESTRATOR_CLIENT_ID', Value: '{{ orchestrator_oidc_client_id }}' }
+            - { Name: 'AGENT_CLIENT_ID', Value: '{{ foundry_jira_agent_client_id }}' }
+            - { Name: 'AGENT_BASE_URL', Value: 'https://{{ foundry_jira_agent_fqdn }}' }
+            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
+            - { Name: 'OIDC_CLIENT_ID', Value: '{{ foundry_jira_agent_client_id }}' }
+          Secrets:
+            - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_foundry_jira_agent_oidc_client_secret }}' }
+            - { Name: 'FOUNDRY_CLIENT_SECRET', ValueFrom: '{{ ssmkey_foundry_jira_agent_foundry_client_secret }}' }
+          HealthCheck:
+            Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ foundry_jira_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
+            Interval: 60
+            Retries: 3
+            StartPeriod: 60
+            Timeout: 5
+        # Container 2: Logs Router (FluentBit sidecar)
+        - Name: '{{ project_id }}-logs-router'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
+          Essential: true
+          Environment:
+            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
+            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
+            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
+            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}.ecs.{{ software_component }}.{{ env }}-foundry-jira-agent' }
+          FirelensConfiguration:
+            Type: 'fluentbit'
+            Options:
+              enable-ecs-log-metadata: false
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
+              awslogs-region: !Sub '${AWS::Region}'
+              awslogs-stream-prefix: '{{ software_component }}-foundry-jira-agent'
+          HealthCheck:
+            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
+            Interval: 30
+            Retries: 2
+            StartPeriod: 30
+            Timeout: 5
+
+  FoundryJiraAgentSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      GroupDescription: 'Alloy Foundry Jira Agent Infrastructure security group'
+      SecurityGroupIngress:
+        - {IpProtocol: 'tcp', FromPort: '{{ foundry_jira_agent_public_api_port }}', ToPort: '{{ foundry_jira_agent_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpc-cidr4', Description: 'Foundry Jira Agent - Local VPC (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ foundry_jira_agent_public_api_port }}', ToPort: '{{ foundry_jira_agent_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpc-cidr6', Description: 'Foundry Jira Agent - Local VPC (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ foundry_jira_agent_public_api_port }}', ToPort: '{{ foundry_jira_agent_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpn-cidr4', Description: 'Foundry Jira Agent - VPN (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ foundry_jira_agent_public_api_port }}', ToPort: '{{ foundry_jira_agent_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpn-cidr6', Description: 'Foundry Jira Agent - VPN (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ foundry_jira_agent_public_api_port }}', ToPort: '{{ foundry_jira_agent_public_api_port }}', SourceSecurityGroupId: !ImportValue '{{ project_id }}-public-alb-v2-security-group-id', Description: 'Foundry Jira Agent - LoadBalancer'}
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-sg' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  FoundryJiraAgentTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/.well-known/agent-card.json'
+      HealthCheckPort: '{{ foundry_jira_agent_public_api_port }}'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Port: '{{ foundry_jira_agent_public_api_port }}'
+      Protocol: 'HTTP'
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: !If [IsProd, '30', '0']
+        - Key: 'stickiness.enabled'
+          Value: false
+      TargetType: 'ip'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  FoundryJiraAgentAlbListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref FoundryJiraAgentTargetGroup
+      Conditions:
+        - Field: 'host-header'
+          HostHeaderConfig:
+            Values:
+              - '{{ foundry_jira_agent_fqdn }}'
+      ListenerArn: !ImportValue '{{ project_id }}-public-alb-v2-https-listener'
+      # NOTE: The Priority is global and must have unique value across all services we have
+      Priority: 603
+  
+  FoundryJiraAgentService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent'
+      Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+      LaunchType: 'FARGATE'
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      # Do not change DesiredCount. This will cause a re-deployment of the below specified TaskDefinition
+      # which we do not want. If you want to update the number of tasks running, edit instead
+      # the resource FoundryJiraAgentScalableTarget below.
+      DesiredCount: 1 # ! __WARNING__ : See comment above
+      TaskDefinition: !Ref FoundryJiraAgentTaskDefinition
+      EnableECSManagedTags: true
+      EnableExecuteCommand: true
+      PropagateTags: 'TASK_DEFINITION'
+      HealthCheckGracePeriodSeconds: 300
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref FoundryJiraAgentSecurityGroup
+            - !ImportValue '{{ project_id }}-public-alb-v2-security-group-id'
+          Subnets:
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1a'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1b'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1c'
+      LoadBalancers:
+        - TargetGroupArn: !Ref FoundryJiraAgentTargetGroup
+          ContainerPort: '{{ foundry_jira_agent_public_api_port }}'
+          ContainerName: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent'
+
+  FoundryJiraAgentScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !If [IsProd, 2, 1]
+      MinCapacity: !If [IsProd, 1, 1]
+      RoleARN: !GetAtt FoundryJiraAgentEcsAutoScalingRole.Arn
+      ServiceNamespace: 'ecs'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId:
+        !Sub
+          - 'service/${Cluster}/${Name}'
+          - Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+            Name: !GetAtt FoundryJiraAgentService.Name
+
+  FoundryJiraAgentEcsAutoScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-target-tracking-cpu50'
+      PolicyType: 'TargetTrackingScaling'
+      ScalingTargetId: !Ref FoundryJiraAgentScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: 'ECSServiceAverageCPUUtilization'
+
+  FoundryJiraAgentEcsAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-ecs-as'
+      Description: 'Alloy Foundry Jira Agent Infrastructure ECS auto-scaling role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs.application-autoscaling.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'AllowCloudwatchAlarms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action: 'ecs:UpdateService'
+                Resource:
+                  - !Ref FoundryJiraAgentService
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-foundry-jira-agent-ecs-as-role' }
+        - { Key: 'Project', Value: '{{ project_id }}'}
+        - { Key: 'Environment', Value: '{{ env }}'}
+        - { Key: 'Version', Value: 'v{{ project_version }}'}
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+  
+  FoundryJiraAgentCpuUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'FoundryJiraAgentCpuUtilizationHigh'
+      AlarmDescription: 'Alloy Foundry Jira Agent - CPUUtilization is higher than 90% for 20 minutes'
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt FoundryJiraAgentService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  FoundryJiraAgentMemoryUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'FoundryJiraAgentMemoryUtilizationHigh'
+      AlarmDescription: 'Alloy Foundry Jira Agent - MemoryUtilization is higher than 90% for 20 minutes'
+      MetricName: 'MemoryUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt FoundryJiraAgentService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  FoundryJiraAgentHealthyHostCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'FoundryJiraAgentHealthyHostCount'
+      AlarmDescription: 'Alloy Foundry Jira Agent - HealthyHostCount is lower than 1 for 1 minute'
+      MetricName: 'HealthyHostCount'
+      ComparisonOperator: 'LessThanThreshold'
+      Namespace: 'AWS/ApplicationELB'
+      Dimensions:
+        - Name: 'LoadBalancer'
+          Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+        - Name: 'TargetGroup'
+          Value: !GetAtt FoundryJiraAgentTargetGroup.TargetGroupFullName
+      Statistic: 'Maximum'
+      Threshold: 1
+      Period: 60
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  FoundryJiraAgentResponsesStatus2xxRatioAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'FoundryJiraAgentResponsesStatus2xxRatio'
+      AlarmDescription: 'Foundry Jira Agent responses status 2xx ratio'
+      ComparisonOperator: 'LessThanThreshold'
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: {{ response_2xx_ratio_threshold }}
+      TreatMissingData: '{{ response_2xx_treat_missing_data }}'
+      Metrics:
+        - Id: ratio
+          Label: 'Status 2xx ratio'
+          Expression: 'status_2xx_count / requests_count'
+          ReturnData: true
+        - Id: requests_count
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: 'Sum'
+            Unit: 'Count'
+            Metric:
+              Namespace: 'AWS/ApplicationELB'
+              MetricName: 'RequestCount'
+              Dimensions:
+                - Name: 'LoadBalancer'
+                  Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+                - Name: 'TargetGroup'
+                  Value: !GetAtt FoundryJiraAgentTargetGroup.TargetGroupFullName
+        - Id: status_2xx_count
+          ReturnData: false
+          MetricStat:
+            Period: 60
+            Stat: 'Sum'
+            Unit: 'Count'
+            Metric:
+              Namespace: 'AWS/ApplicationELB'
+              MetricName: 'HTTPCode_Target_2XX_Count'
+              Dimensions:
+                - Name: 'LoadBalancer'
+                  Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+                - Name: 'TargetGroup'
+                  Value: !GetAtt FoundryJiraAgentTargetGroup.TargetGroupFullName
