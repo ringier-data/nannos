@@ -1,3 +1,0 @@
-[submodule "app/a2a-inspector"]
-	path = app/a2a-inspector
-	url = git@github.com:alloy-ch/a2a-inspector.git

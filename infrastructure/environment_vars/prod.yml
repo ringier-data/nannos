@@ -1,5 +1,5 @@
 ---
-domain_prefix: ''
+domain_prefix: 'p.'
 langsmith_tracing: true
 log_level: 'INFO'
 langsmith_project: prod-alloy-agent-framework
