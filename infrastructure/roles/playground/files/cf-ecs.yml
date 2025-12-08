@@ -198,7 +198,7 @@ Resources:
             - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
             - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
             - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
-            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}.ecs.{{ software_component }}.{{ env }}-chat-ui' }
+            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}-agents.ecs.{{ software_component }}.{{ env }}-chat-ui' }
           FirelensConfiguration:
             Type: 'fluentbit'
             Options:
