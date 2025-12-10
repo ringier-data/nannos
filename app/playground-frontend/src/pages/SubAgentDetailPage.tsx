@@ -148,7 +148,6 @@ export function SubAgentDetailPage() {
   // Foundry configuration state
   const [editFoundryHostname, setEditFoundryHostname] = useState('');
   const [editFoundryClientId, setEditFoundryClientId] = useState('');
-  const [editFoundryClientSecret, setEditFoundryClientSecret] = useState('');
   const [editFoundryClientSecretRef, setEditFoundryClientSecretRef] = useState<number | null>(null);
   const [editFoundryOntologyRid, setEditFoundryOntologyRid] = useState('');
   const [editFoundryQueryApiName, setEditFoundryQueryApiName] = useState('');
@@ -170,7 +169,6 @@ export function SubAgentDetailPage() {
   });
 
   // Determine if this is a local agent type
-  const isLocalAgentType = subAgent?.type === 'local';
   const isFoundryAgentType = subAgent?.type === 'foundry';
 
   // Fetch available secrets for Foundry configuration
@@ -287,7 +285,6 @@ export function SubAgentDetailPage() {
 
   const currentUserId = user?.id ?? '';
   const isOwner = subAgent?.owner_user_id === currentUserId;
-  const isLocalAgent = isLocalAgentType;
   const canApprove = adminMode;
   
   // Sub-agent overall status (from config_version)
@@ -422,7 +419,6 @@ export function SubAgentDetailPage() {
     } else if (sa.type === 'foundry') {
       setEditFoundryHostname(String(sa.config_version?.foundry_hostname ?? ''));
       setEditFoundryClientId(String(sa.config_version?.foundry_client_id ?? ''));
-      setEditFoundryClientSecret(''); // Always empty for security
       setEditFoundryClientSecretRef(sa.config_version?.foundry_client_secret_ref ?? null);
       setEditFoundryOntologyRid(String(sa.config_version?.foundry_ontology_rid ?? ''));
       setEditFoundryQueryApiName(String(sa.config_version?.foundry_query_api_name ?? ''));

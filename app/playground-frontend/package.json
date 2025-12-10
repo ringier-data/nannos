@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "rm -r dist && tsc -b && vite build",
+    "build": "rm -rf dist && tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "gen-sdk": "rm -rf ./src/api/generated && openapi-ts"
