@@ -4,3 +4,5 @@ langsmith_tracing: true
 langsmith_project: dev-alloy-agent-framework
 log_level: 'DEBUG'
 budget_monthly_token_limit: 100000000
+rds_backup_retention_in_days: 0
+rds_instance_class: "db.t4g.micro"

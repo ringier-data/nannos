@@ -9,25 +9,23 @@ Key Components:
 - AgentExecutor: A2A executor wrapper for task execution
 - AgentDiscoveryService: Dynamic sub-agent and tool discovery
 - GraphFactory: Centralized graph creation and management
+- create_model: Utility function for creating LangChain models
 
 Usage:
-    from app.core import (
-        OrchestratorDeepAgent,
-        AgentExecutor,
-        AgentDiscoveryService,
-        GraphFactory,
-    )
+    from app.core.agent import OrchestratorDeepAgent
+    from app.core.executor import AgentExecutor
+    from app.core.discovery import AgentDiscoveryService
+    from app.core.graph_factory import GraphFactory
+    from app.core.model_factory import create_model
 """
 
-from .agent import OrchestratorDeepAgent
+# DO NOT import OrchestratorDeepAgent, AgentExecutor, or GraphFactory here
+# They create circular imports. Import them directly from their modules where needed.
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
-from .executor import AgentExecutor
-from .graph_factory import GraphFactory
+from .model_factory import create_model
 
 __all__ = [
-    "OrchestratorDeepAgent",
-    "AgentExecutor",
     "AgentDiscoveryService",
     "ToolDiscoveryService",
-    "GraphFactory",
+    "create_model",
 ]

@@ -25,57 +25,9 @@ from langchain.agents.middleware.types import (
 )
 
 from ..models.config import GraphRuntimeContext
+from ..utils import get_language_display_name
 
 logger = logging.getLogger(__name__)
-
-# Language code to display name mapping
-LANGUAGE_NAMES: dict[str, str] = {
-    "en": "English",
-    "de": "German",
-    "fr": "French",
-    "it": "Italian",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "cs": "Czech",
-    "sk": "Slovak",
-    "hu": "Hungarian",
-    "ro": "Romanian",
-    "bg": "Bulgarian",
-    "hr": "Croatian",
-    "sl": "Slovenian",
-    "sr": "Serbian",
-    "uk": "Ukrainian",
-    "ru": "Russian",
-    "zh": "Chinese",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "ar": "Arabic",
-    "he": "Hebrew",
-    "tr": "Turkish",
-    "vi": "Vietnamese",
-    "th": "Thai",
-    "id": "Indonesian",
-    "ms": "Malay",
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "ta": "Tamil",
-    "te": "Telugu",
-    "sw": "Swahili",
-}
-
-
-def get_language_display_name(language_code: str) -> str:
-    """Get the display name for a language code.
-
-    Args:
-        language_code: ISO 639-1 language code (e.g., 'en', 'de', 'fr')
-
-    Returns:
-        Human-readable language name, or the code itself if not found
-    """
-    return LANGUAGE_NAMES.get(language_code.lower(), language_code)
 
 
 class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]):
@@ -137,6 +89,13 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
                 f"However, technical terms, code, tool names, and API calls should remain in their original form."
             )
 
+        # Timezone preference
+        if user_context.timezone:
+            preferences_parts.append(
+                f"- **User Timezone**: The user's timezone is {user_context.timezone}. "
+                f"When using the get_current_time tool, pass timezone='{user_context.timezone}' to get times in their local timezone."
+            )
+
         # Message formatting preference (conversation-level)
         formatting = getattr(user_context, "message_formatting", "markdown")
         if formatting == "slack":
@@ -166,6 +125,11 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
                 "  - Address responses appropriately when multiple users are involved"
             )
 
+        # Custom prompt addendum from user settings
+        custom_prompt = getattr(user_context, "custom_prompt", None)
+        if custom_prompt:
+            preferences_parts.append(f"- **Custom Instructions**: {custom_prompt}")
+
         if not preferences_parts:
             return ""
 
@@ -173,7 +137,7 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
 
         logger.debug(
             f"UserPreferencesMiddleware: Built preferences addendum for user {user_context.user_id}: "
-            f"language={user_context.language}"
+            f"language={user_context.language}, custom_prompt={'set' if custom_prompt else 'none'}"
         )
 
         return addendum

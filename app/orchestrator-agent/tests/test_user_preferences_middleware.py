@@ -103,6 +103,42 @@ class TestUserPreferencesMiddleware:
         addendum = middleware._build_preferences_addendum(user_context_no_language)
         assert addendum == ""
 
+    def test_build_preferences_addendum_with_custom_prompt(self, middleware):
+        """Should include custom_prompt in addendum when set."""
+        user_context = GraphRuntimeContext(
+            user_id="user123",
+            name="Test User",
+            email="test@example.com",
+            language="en",
+            custom_prompt="Always be concise and use bullet points.",
+        )
+        addendum = middleware._build_preferences_addendum(user_context)
+
+        assert "**User Preferences:**" in addendum
+        assert "**Custom Instructions**" in addendum
+        assert "Always be concise and use bullet points." in addendum
+
+    def test_build_preferences_addendum_without_custom_prompt(self, middleware, user_context_en):
+        """Should not include custom_prompt section when not set."""
+        addendum = middleware._build_preferences_addendum(user_context_en)
+
+        assert "**User Preferences:**" in addendum
+        assert "Custom Instructions" not in addendum
+
+    def test_build_preferences_addendum_with_empty_custom_prompt(self, middleware):
+        """Should not include custom_prompt section when set to empty string."""
+        user_context = GraphRuntimeContext(
+            user_id="user123",
+            name="Test User",
+            email="test@example.com",
+            language="en",
+            custom_prompt="",
+        )
+        addendum = middleware._build_preferences_addendum(user_context)
+
+        assert "**User Preferences:**" in addendum
+        assert "Custom Instructions" not in addendum
+
     def test_wrap_model_call_appends_to_existing_prompt(self, middleware, user_context_de):
         """Should append preferences to existing system prompt."""
         original_prompt = "You are a helpful assistant."

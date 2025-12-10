@@ -14,6 +14,20 @@
 - Use the `@/` alias for imports from `src/`
 - Prefer named exports over default exports
 
+## Components
+- Do not always use cards for everything. Use them judiciously based on context.
+- Follow the existing design patterns and component structures in the codebase.
+
+# Backend Integration
+- The backend API is defined using OpenAPI specifications.
+- The SDK for API calls is auto-generated using the OpenAPI Generator.
+- To regenerate the SDK after backend API changes, run the following command in the terminal:
+```
+npm run gen-sdk
+```
+- Regenerate the SDK every time there are changes to the backend API.
+
+
 ## API Calls
 
 - Use the generated SDK under `src/api/` for all backend API calls

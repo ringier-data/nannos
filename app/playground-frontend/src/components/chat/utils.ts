@@ -151,11 +151,13 @@ export function formatTaskStatusLabel(status: string | { label?: string; state?:
 }
 
 /**
- * Apply basic inline markdown (bold, italic) to text
+ * Apply basic inline markdown (bold, italic, code) to text
  */
 export function applyInlineMarkdown(text: string): string {
   if (!text) return '';
   let escaped = escapeHtml(text);
+  // Inline code (must be before bold/italic to avoid conflicts)
+  escaped = escaped.replace(/`([^`]+)`/g, '<code class="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">$1</code>');
   // Bold
   escaped = escaped.replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>');
   // Italic (single * or _)
@@ -164,14 +166,26 @@ export function applyInlineMarkdown(text: string): string {
 }
 
 /**
- * Convert markdown to HTML (basic support)
+ * Convert markdown to HTML (with code block support)
  */
 export function convertMarkdownToHtml(markdown: string): string {
   if (!markdown || typeof markdown !== 'string') {
     return `<p>${escapeHtml(markdown)}</p>`;
   }
 
-  const lines = markdown.split('\n');
+  // First, handle code blocks (``` ... ```)
+  const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+  const codeBlocks: string[] = [];
+  let processedMarkdown = markdown.replace(codeBlockRegex, (_, lang, code) => {
+    const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
+    const languageLabel = lang ? `<div class="text-xs text-muted-foreground px-3 py-1 border-b border-border">${escapeHtml(lang)}</div>` : '';
+    codeBlocks.push(
+      `<div class="rounded-md border border-border bg-muted/50 overflow-hidden my-2">${languageLabel}<pre class="p-3 overflow-x-auto"><code class="text-sm font-mono">${escapeHtml(code.trim())}</code></pre></div>`
+    );
+    return placeholder;
+  });
+
+  const lines = processedMarkdown.split('\n');
   const parts: string[] = [];
   let orderedBuffer: string[] = [];
   let unorderedBuffer: string[] = [];
@@ -179,7 +193,7 @@ export function convertMarkdownToHtml(markdown: string): string {
   const flushOrdered = () => {
     if (orderedBuffer.length) {
       const items = orderedBuffer.map((item) => `<li>${item}</li>`).join('');
-      parts.push(`<ol>${items}</ol>`);
+      parts.push(`<ol class="list-decimal list-inside space-y-1 my-2">${items}</ol>`);
       orderedBuffer = [];
     }
   };
@@ -187,16 +201,34 @@ export function convertMarkdownToHtml(markdown: string): string {
   const flushUnordered = () => {
     if (unorderedBuffer.length) {
       const items = unorderedBuffer.map((item) => `<li>${item}</li>`).join('');
-      parts.push(`<ul>${items}</ul>`);
+      parts.push(`<ul class="list-disc list-inside space-y-1 my-2">${items}</ul>`);
       unorderedBuffer = [];
     }
   };
 
   lines.forEach((rawLine) => {
     const line = rawLine.trim();
+    
+    // Check for code block placeholder
+    const placeholderMatch = line.match(/^__CODE_BLOCK_(\d+)__$/);
+    if (placeholderMatch) {
+      flushOrdered();
+      flushUnordered();
+      parts.push(codeBlocks[parseInt(placeholderMatch[1], 10)]);
+      return;
+    }
+    
     if (!line) {
       flushOrdered();
       flushUnordered();
+      return;
+    }
+
+    // Horizontal rule (---, ***, ___)
+    if (/^[-*_]{3,}$/.test(line)) {
+      flushOrdered();
+      flushUnordered();
+      parts.push('<hr class="my-3 border-border" />');
       return;
     }
 
@@ -206,7 +238,8 @@ export function convertMarkdownToHtml(markdown: string): string {
       flushUnordered();
       const level = headingMatch[1].length;
       const headingText = applyInlineMarkdown(headingMatch[2]);
-      parts.push(`<h${level}>${headingText}</h${level}>`);
+      const headingClasses = level === 1 ? 'text-lg font-bold' : level === 2 ? 'text-base font-semibold' : 'text-sm font-medium';
+      parts.push(`<h${level} class="${headingClasses}">${headingText}</h${level}>`);
       return;
     }
 

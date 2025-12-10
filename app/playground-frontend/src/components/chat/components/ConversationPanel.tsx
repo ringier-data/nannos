@@ -1,4 +1,4 @@
-import { Plus } from 'lucide-react';
+import { Plus, MessageSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -15,62 +15,67 @@ interface ConversationItemProps {
 
 function ConversationItem({ conversation, isActive, onClick }: ConversationItemProps) {
   const titleText = conversation.title?.trim() || 'Untitled';
-  const previewText = conversation.lastMessage?.trim() || '';
   const timestampLabel = formatTimestamp(conversation.timestamp);
-  const hasPreview = previewText.length > 0 && previewText !== titleText;
 
   return (
     <button
       className={cn(
-        'w-full text-left px-3 py-3 rounded-lg border border-transparent',
-        'bg-white/[0.01] text-foreground cursor-pointer',
-        'transition-all duration-200',
-        'hover:bg-white/[0.035] hover:border-white/5',
-        'active:bg-white/5 active:border-white/[0.08]',
-        'flex flex-col gap-1.5',
-        isActive && 'bg-white/[0.07] border-primary/35 shadow-lg'
+        'w-full text-left px-3 py-2.5 rounded-md',
+        'transition-colors duration-150',
+        'hover:bg-accent/50',
+        'flex items-start gap-3',
+        isActive 
+          ? 'bg-accent text-accent-foreground' 
+          : 'text-foreground/80 hover:text-foreground'
       )}
       onClick={onClick}
       data-testid={`conversation-${conversation.id}`}
     >
-      <div className="flex items-center gap-3 min-w-0">
-        <span className="font-semibold text-sm whitespace-nowrap overflow-hidden text-ellipsis flex-1 min-w-0">
-          {titleText}
-        </span>
-        {conversation.hasActiveTasks && (
-          <div
-            className="w-3 h-3 border-2 border-green-400 border-t-transparent rounded-full animate-spin flex-shrink-0"
-            role="status"
-            aria-label="Task running"
-          />
-        )}
-      </div>
-
-      {timestampLabel && (
-        <div className="flex items-center gap-2 flex-shrink-0">
+      <MessageSquare className={cn(
+        'w-4 h-4 mt-0.5 shrink-0',
+        isActive ? 'text-primary' : 'text-muted-foreground'
+      )} />
+      
+      <div className="flex-1 min-w-0 space-y-0.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className={cn(
+            'text-sm truncate',
+            isActive ? 'font-medium' : 'font-normal'
+          )}>
+            {titleText}
+          </span>
+          {conversation.hasActiveTasks && (
+            <div
+              className="w-2 h-2 bg-green-500 rounded-full animate-pulse shrink-0"
+              role="status"
+              aria-label="Task running"
+            />
+          )}
+        </div>
+        
+        {timestampLabel && (
           <time
-            className="text-xs text-muted-foreground whitespace-nowrap"
+            className="text-xs text-muted-foreground block"
             dateTime={conversation.timestamp.toISOString()}
           >
             {timestampLabel}
           </time>
-        </div>
-      )}
-
-      {hasPreview && (
-        <div className="text-xs text-foreground/70 whitespace-nowrap overflow-hidden text-ellipsis">{previewText}</div>
-      )}
+        )}
+      </div>
     </button>
   );
 }
 
 function LoadingState() {
   return (
-    <div className="space-y-2 p-2">
+    <div className="space-y-1 p-2">
       {[1, 2, 3].map((i) => (
-        <div key={i} className="p-3 space-y-2">
-          <Skeleton className="h-4 w-3/4" />
-          <Skeleton className="h-3 w-1/2" />
+        <div key={i} className="flex items-start gap-3 px-3 py-2.5">
+          <Skeleton className="h-4 w-4 rounded" />
+          <div className="flex-1 space-y-1.5">
+            <Skeleton className="h-4 w-4/5" />
+            <Skeleton className="h-3 w-1/3" />
+          </div>
         </div>
       ))}
     </div>
@@ -79,9 +84,14 @@ function LoadingState() {
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center gap-2 py-8 px-4 text-center">
-      <p className="text-sm font-medium text-foreground">No conversations yet</p>
-      <p className="text-xs text-muted-foreground">Use the + button to create your first conversation.</p>
+    <div className="flex flex-col items-center justify-center gap-3 py-12 px-4 text-center">
+      <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
+        <MessageSquare className="w-6 h-6 text-muted-foreground" />
+      </div>
+      <div className="space-y-1">
+        <p className="text-sm font-medium text-foreground">No conversations</p>
+        <p className="text-xs text-muted-foreground">Click + to start a new chat</p>
+      </div>
     </div>
   );
 }
@@ -91,13 +101,14 @@ export function ConversationPanel() {
     useChat();
 
   return (
-    <div className="w-70 min-w-50 max-w-100 flex flex-col bg-sidebar border-r border-border flex-shrink-0">
+    <div className="w-64 h-full flex flex-col bg-muted/30 border-r border-border flex-shrink-0 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-border">
-        <h2 className="text-lg font-semibold">Conversations</h2>
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <h2 className="text-sm font-semibold text-foreground">Conversations</h2>
         <Button
           variant="ghost"
           size="icon"
+          className="h-7 w-7"
           onClick={createConversation}
           data-testid="button-new-chat"
           aria-label="New conversation"
@@ -107,8 +118,8 @@ export function ConversationPanel() {
       </div>
 
       {/* Conversation List */}
-      <ScrollArea className="flex-1">
-        <div className="p-2 flex flex-col gap-1">
+      <ScrollArea className="flex-1 min-h-0">
+        <div className="p-2 space-y-0.5">
           {isLoadingConversations ? (
             <LoadingState />
           ) : conversations.length === 0 ? (

@@ -74,6 +74,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
             call_context.state["user_name"] = user_context.get("name")
             call_context.state["user_token"] = user_context.get("token")
             call_context.state["user_scopes"] = user_context.get("scopes", [])
+            call_context.state["sub_agent_config_hash"] = user_context.get("sub_agent_config_hash")
 
             logger.info(f"[ZERO-TRUST] Building RequestContext for verified user_id: {user_context['user_id']}")
         else:

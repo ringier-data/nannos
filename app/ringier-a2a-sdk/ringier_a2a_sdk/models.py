@@ -44,6 +44,7 @@ class UserConfig(BaseModel):
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
     language: str = Field(default="en", description="User's preferred language")
+    timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
     sub_agents: Optional[list] = Field(default=None, description="Discovered sub-agents")
     tools: Optional[list] = Field(default=None, description="Discovered tools")
 

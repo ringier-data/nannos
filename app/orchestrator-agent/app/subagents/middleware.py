@@ -198,7 +198,8 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
             current_tracking[subagent_type]["context_id"] = context_id
 
         # Store additional A2A protocol fields (completion status, auth requirements, etc.)
-        for key in ["is_complete", "requires_auth", "requires_input", "state", "artifacts"]:
+        # Including foundry_session_rid for Foundry agents' session continuity
+        for key in ["is_complete", "requires_auth", "requires_input", "state", "artifacts", "foundry_session_rid"]:
             if key in a2a_metadata:
                 current_tracking[subagent_type][key] = a2a_metadata[key]
 

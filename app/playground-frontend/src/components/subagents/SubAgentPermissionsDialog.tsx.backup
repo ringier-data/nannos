@@ -1,0 +1,218 @@
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Users, Check, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions,
+  updateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutMutation,
+  listMyGroupsApiV1GroupsGetOptions,
+  listGroupsApiV1AdminGroupsGetOptions,
+} from '@/api/generated/@tanstack/react-query.gen';
+import { getErrorMessage } from '@/lib/utils';
+import type { UserGroupWithMembers } from '@/api/generated/types.gen';
+import { toast } from 'sonner';
+import { useAuth } from '@/contexts/AuthContext';
+
+interface SubAgentPermissionsDialogProps {
+  subAgentId: number;
+  subAgentName: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+export function SubAgentPermissionsDialog({
+  subAgentId,
+  subAgentName,
+  open,
+  onOpenChange,
+}: SubAgentPermissionsDialogProps) {
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const isAdmin = user?.is_administrator ?? false;
+  const [selectedGroupIds, setSelectedGroupIds] = useState<number[]>([]);
+  const [hasChanges, setHasChanges] = useState(false);
+
+  // Fetch current permissions
+  const { data: currentPermissions, isLoading: isLoadingPermissions, error: permissionsError } = useQuery({
+    ...getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions({
+      path: { sub_agent_id: subAgentId },
+    }),
+    enabled: open,
+    retry: false,
+  });
+
+  // Fetch available groups - admins see all groups, owners see only their groups
+  const { data: myGroupsData, isLoading: isLoadingMyGroups, error: myGroupsError } = useQuery({
+    ...listMyGroupsApiV1GroupsGetOptions(),
+    enabled: open && !isAdmin,
+    retry: false,
+  });
+
+  const { data: allGroupsData, isLoading: isLoadingAllGroups, error: allGroupsError } = useQuery({
+    ...listGroupsApiV1AdminGroupsGetOptions(),
+    enabled: open && isAdmin ? true : false,
+    retry: false,
+  });
+
+  const availableGroups: UserGroupWithMembers[] = isAdmin
+    ? allGroupsData?.data ?? []
+    : myGroupsData ?? [];
+
+  const isLoadingGroups = isAdmin ? isLoadingAllGroups : isLoadingMyGroups;
+
+  // Sync state when permissions load
+  useEffect(() => {
+    if (currentPermissions) {
+      setSelectedGroupIds(currentPermissions);
+      setHasChanges(false);
+    }
+  }, [currentPermissions]);
+
+  // Reset state when dialog closes
+  useEffect(() => {
+    if (!open) {
+      setHasChanges(false);
+    }
+  }, [open]);
+
+  // Update mutation
+  const updateMutation = useMutation({
+    ...updateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutMutation(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ['getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGet'],
+      });
+      setHasChanges(false);
+      toast.success('Permissions updated successfully');
+      onOpenChange(false);
+    },
+    onError: (err) => {
+      toast.error('Failed to update permissions', { description: getErrorMessage(err) });
+    },
+  });
+
+  const handleToggleGroup = (groupId: number) => {
+    setSelectedGroupIds((prev) => {
+      const newSelection = prev.includes(groupId)
+        ? prev.filter((id) => id !== groupId)
+        : [...prev, groupId];
+      setHasChanges(true);
+      return newSelection;
+    });
+  };
+
+  const handleSave = () => {
+    updateMutation.mutate({
+      path: { sub_agent_id: subAgentId },
+      body: { user_group_ids: selectedGroupIds },
+    });
+  };
+
+  const isLoading = isLoadingPermissions || isLoadingGroups;
+  const hasError = permissionsError || (isAdmin ? allGroupsError : myGroupsError);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Users className="h-5 w-5" />
+            Manage Group Access
+          </DialogTitle>
+          <DialogDescription>
+            Select which groups can access "{subAgentName}".
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="py-4">
+          {isLoading && (
+            <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading groups...
+            </div>
+          )}
+
+          {hasError && (
+            <div className="py-8 text-center">
+              <p className="text-sm text-destructive mb-2">
+                {getErrorMessage(hasError)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {permissionsError 
+                  ? "You don't have permission to manage access for this sub-agent."
+                  : "Failed to load available groups."}
+              </p>
+            </div>
+          )}
+
+          {!isLoading && !hasError && availableGroups.length === 0 && (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              No groups available.
+              {!isAdmin && ' You must be a member of a group to share access.'}
+            </div>
+          )}
+
+          {!isLoading && !hasError && availableGroups.length > 0 && (
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {availableGroups.map((group) => (
+                <div
+                  key={group.id}
+                  className="flex items-center space-x-3 rounded-md border p-3 hover:bg-muted/50 transition-colors"
+                >
+                  <Checkbox
+                    id={`dialog-group-${group.id}`}
+                    checked={selectedGroupIds.includes(group.id)}
+                    onCheckedChange={() => handleToggleGroup(group.id)}
+                  />
+                  <Label
+                    htmlFor={`dialog-group-${group.id}`}
+                    className="flex-1 cursor-pointer"
+                  >
+                    <span className="font-medium">{group.name}</span>
+                    {group.description && (
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {group.description}
+                      </p>
+                    )}
+                  </Label>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleSave}
+            disabled={!hasChanges || updateMutation.isPending || hasError}
+          >
+            {updateMutation.isPending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              <>
+                <Check className="mr-2 h-4 w-4" />
+                Save Changes
+              </>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

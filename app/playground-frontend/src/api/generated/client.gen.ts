@@ -14,4 +14,4 @@ import { createClientConfig } from '../apiInstanceConfig';
  */
 export type CreateClientConfig<T extends ClientOptions = ClientOptions2> = (override?: Config<ClientOptions & T>) => Config<Required<ClientOptions> & T>;
 
-export const client = createClient(createClientConfig(createConfig<ClientOptions2>({ baseUrl: 'https://chat.d.nannos.rcplus.io' })));
+export const client = createClient(createClientConfig(createConfig<ClientOptions2>({ baseUrl: 'http://localhost:5001' })));

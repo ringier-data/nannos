@@ -1,10 +1,19 @@
 import { Routes, Route, Navigate } from 'react-router';
 import { useAuth } from './contexts/AuthContext';
-import { WelcomePage } from './pages/WelcomePage';
 import { LoginRequiredPage } from './pages/LoginRequiredPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { DashboardLayout } from './layouts/DashboardLayout';
 import { ChatPage } from './pages/ChatPage';
+import { SubAgentsPage } from './pages/SubAgentsPage';
+import { SubAgentCreatePage } from './pages/SubAgentCreatePage';
+import { SubAgentDetailPage } from './pages/SubAgentDetailPage';
+import { AdminRoute } from './components/AdminRoute';
+import { GroupManagerRoute } from './components/GroupManagerRoute';
+import { UsersPage } from './pages/admin/UsersPage';
+import { UserDetailPage } from './pages/admin/UserDetailPage';
+import { GroupsPage } from './pages/admin/GroupsPage';
+import { GroupDetailPage } from './pages/admin/GroupDetailPage';
+import { AuditPage } from './pages/admin/AuditPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -38,9 +47,18 @@ function App() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<WelcomePage />} />
-        <Route path="settings" element={<SettingsPage />} />
+        <Route index element={<SettingsPage />} />
         <Route path="chat" element={<ChatPage />} />
+        <Route path="subagents" element={<SubAgentsPage />} />
+        <Route path="subagents/new" element={<SubAgentCreatePage />} />
+        <Route path="subagents/:id" element={<SubAgentDetailPage />} />
+        <Route path="groups" element={<GroupManagerRoute><GroupsPage /></GroupManagerRoute>} />
+        <Route path="groups/:id" element={<GroupManagerRoute><GroupDetailPage /></GroupManagerRoute>} />
+        <Route path="admin/users" element={<AdminRoute><UsersPage /></AdminRoute>} />
+        <Route path="admin/users/:id" element={<AdminRoute><UserDetailPage /></AdminRoute>} />
+        <Route path="admin/groups" element={<AdminRoute><GroupsPage /></AdminRoute>} />
+        <Route path="admin/groups/:id" element={<AdminRoute><GroupDetailPage /></AdminRoute>} />
+        <Route path="admin/audit" element={<AdminRoute><AuditPage /></AdminRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/app" replace />} />
     </Routes>

@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useChat } from '../contexts';
 import { useSessionId } from '../hooks/useLocalStorage';
@@ -40,7 +40,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   );
   const [model, setModel] = useState(settings?.model || 'gpt4o');
   const [isSaving, setIsSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // Reset form when modal opens
   useEffect(() => {
@@ -54,7 +53,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         setCustomUrl(settings.agentUrl || '');
       }
       setModel(settings.model || 'gpt4o');
-      setError(null);
     }
   }, [isOpen, settings]);
 
@@ -62,30 +60,30 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     const agentUrl = agentUrlSelect === 'custom' ? customUrl.trim() : agentUrlSelect;
 
     if (!agentUrl) {
-      setError('Agent URL is required');
+      toast.error('Validation Error', { description: 'Agent URL is required' });
       return;
     }
 
     try {
       new URL(agentUrl);
     } catch {
-      setError('Invalid URL format. Please enter a valid URL (e.g., https://example.com)');
+      toast.error('Validation Error', { description: 'Invalid URL format. Please enter a valid URL (e.g., https://example.com)' });
       return;
     }
 
     setIsSaving(true);
-    setError(null);
 
     try {
       const newSettings: Settings = { agentUrl, model };
       const success = await updateSettings(newSettings);
       if (success) {
+        toast.success('Settings saved successfully');
         onClose();
       } else {
-        setError('Failed to connect to agent. Please check the URL and try again.');
+        toast.error('Connection Error', { description: 'Failed to connect to agent. Please check the URL and try again.' });
       }
     } catch (e) {
-      setError(`Failed to save settings: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      toast.error('Error', { description: `Failed to save settings: ${e instanceof Error ? e.message : 'Unknown error'}` });
     } finally {
       setIsSaving(false);
     }
@@ -99,13 +97,6 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {/* Error Message */}
-          {error && (
-            <Alert variant="destructive">
-              <AlertDescription>⚠️ {error}</AlertDescription>
-            </Alert>
-          )}
-
           {/* Agent URL */}
           <div className="space-y-2">
             <Label htmlFor="agentUrl">

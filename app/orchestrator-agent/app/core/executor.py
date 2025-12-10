@@ -84,6 +84,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 user_token = context.call_context.state["user_token"]
                 user_name = context.call_context.state["user_name"]
                 user_email = context.call_context.state["user_email"]
+                # Optional: playground mode sub-agent config hash for isolated testing
+                sub_agent_config_hash = context.call_context.state.get("sub_agent_config_hash")
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
                 raise ServerError(error=InvalidParamsError()) from e
@@ -92,6 +94,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             raise ServerError(error=InvalidParamsError())
 
         logger.info(f"[ZERO-TRUST] Using verified user_id for graph retrieval: {user_id}")
+        if sub_agent_config_hash:
+            logger.info(f"[PLAYGROUND] Playground mode enabled for sub-agent config hash: {sub_agent_config_hash}")
 
         # Extract metadata from both message-level and params-level (message takes priority)
         logger.info(f"[EXECUTOR] Params-level metadata: {context.metadata}")
@@ -153,6 +157,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 model=model_choice,
                 message_formatting=message_formatting,
                 slack_user_handle=slack_user_handle,
+                sub_agent_config_hash=sub_agent_config_hash,
             )
 
             # Extract message parts for multimodal support (text + files)

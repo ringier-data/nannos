@@ -15,8 +15,8 @@
       - include_vars: 'environment_vars/{{ env }}.yml'
     roles:
       - 'ringier.aws_cicd.init_workspace'
-      # - 'basis'
-      # - 'orchestrator'
+      - 'basis'
+      - 'orchestrator'
       - 'playground'
-      # - 'foundry-jira-agent'
+      - 'foundry-jira-agent'
       - 'ringier.aws_cicd.del_workspace'

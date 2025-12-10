@@ -10,12 +10,12 @@ class TestIndexRoute:
     async def test_index_redirects_when_no_user_in_request_state(self, app, client):
         """Test that index redirects to login when request.state.user is None."""
         # Make request without authenticated user
-        response = client.get('/', follow_redirects=False)
+        response = client.get("/", follow_redirects=False)
 
         # Should redirect to login
         assert response.status_code == 302
-        assert '/api/v1/auth/login' in response.headers['location']
-        assert 'redirectTo=' in response.headers['location']
+        assert "/api/v1/auth/login" in response.headers["location"]
+        assert "redirectTo=" in response.headers["location"]
 
     async def test_index_with_authenticated_user(self, app, client):
         """Test that index serves page when user is authenticated via request.state."""

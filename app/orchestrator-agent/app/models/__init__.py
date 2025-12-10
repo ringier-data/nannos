@@ -24,6 +24,7 @@ Usage:
 from .config import AgentSettings, GraphRuntimeContext, MessageFormatting, ResponseFormat, UserConfig
 from .exceptions import A2AClientError, AgentFrameworkAuthError
 from .responses import AgentStreamResponse
+from .runtime import build_runtime_context
 from .schemas import FinalResponseSchema
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "AgentSettings",
     "ResponseFormat",
     "MessageFormatting",
+    "build_runtime_context",
     # Responses
     "AgentStreamResponse",
     # Schemas

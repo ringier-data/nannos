@@ -23,8 +23,8 @@ from langgraph.types import Command
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
 from ..handlers import StreamHandler
-from ..models import AgentFrameworkAuthError, AgentSettings, AgentStreamResponse, UserConfig
-from ..models.config import GraphRuntimeContext, ModelType, build_runtime_context
+from ..models import AgentFrameworkAuthError, AgentSettings, AgentStreamResponse, UserConfig, build_runtime_context
+from ..models.config import GraphRuntimeContext, ModelType
 from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 from .graph_factory import DEFAULT_MODEL, GraphFactory
@@ -125,9 +125,25 @@ class OrchestratorDeepAgent:
         """
         return self._graph_factory.get_graph(model_type)
 
-    async def _get_user_from_registry(self, sub: str) -> User:
-        """Fetch agents from a service registry using the provided sub."""
-        user = await self.registry_service.get_user(sub)
+    async def _get_user_from_registry(
+        self, sub: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
+    ) -> User:
+        """Fetch agents from a service registry using the provided sub.
+
+        Args:
+            sub: The user's sub (OIDC subject identifier)
+            access_token: The user's access token for authenticated API calls
+            sub_agent_config_hash: Optional config hash for playground testing mode
+
+        Returns:
+            User object with sub-agents
+
+        Raises:
+            ValueError: If user is not found in registry
+        """
+        user = await self.registry_service.get_user(
+            sub, access_token=access_token, sub_agent_config_hash=sub_agent_config_hash
+        )
         if not user:
             raise ValueError(f"User with sub {sub} not found in registry")
         return user
@@ -138,7 +154,7 @@ class OrchestratorDeepAgent:
         Fetches user permissions from registry and discovers available capabilities:
         - Remote A2A sub-agents (with token exchange)
         - MCP tools (with token exchange)
-        - Local sub-agent configurations (from DynamoDB user record)
+        - Local sub-agent configurations (from playground backend)
 
         This method is idempotent - if capabilities are already discovered, returns immediately.
 
@@ -155,7 +171,13 @@ class OrchestratorDeepAgent:
 
         logger.debug(f"Discovering capabilities for user_id: {user_config.user_id}")
 
-        user = await self._get_user_from_registry(user_config.user_id)
+        # Pass access token to authenticate with playground backend
+        # In playground mode, only the specified sub-agent is fetched
+        user = await self._get_user_from_registry(
+            user_config.user_id,
+            access_token=user_config.access_token.get_secret_value(),
+            sub_agent_config_hash=user_config.sub_agent_config_hash,
+        )
 
         # Discover sub-agents with token exchange and client credentials support
         user_context = {
@@ -182,8 +204,9 @@ class OrchestratorDeepAgent:
         user_config.tools = tools
         user_config.sub_agents = sub_agents
         user_config.language = user.language
+        user_config.custom_prompt = user.custom_prompt
 
-        # Pass local sub-agent configurations from DynamoDB
+        # Pass local sub-agent configurations
         if user.local_subagents:
             user_config.local_subagents = user.local_subagents
             logger.info(
@@ -208,12 +231,17 @@ class OrchestratorDeepAgent:
         Returns:
             GraphRuntimeContext: Ready for graph invocation with all registries populated
         """
-        model_type = user_config.model or self._default_model_type
+        # Determine if we need Bedrock-specific static tools
+        # (FinalResponseSchema is only for Bedrock models)
+        is_bedrock = user_config.model == "claude-sonnet-4.5"
+        static_tools = self._graph_factory.get_static_tools(is_bedrock)
+
         return build_runtime_context(
             user_config,
-            llm_model=self._graph_factory._get_or_create_model(model_type),
+            agent_settings=self.config,
             oauth2_client=self.oauth2_client,
             checkpointer=self._graph_factory.checkpointer,
+            static_tools=static_tools,
         )
 
     async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:

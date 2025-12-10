@@ -228,9 +228,8 @@ class ToolDiscoveryService:
 
             tools = await client.get_tools()
             logger.debug(f"Discovered {len(tools)} MCP tools")
-            if white_list:
-                tools = [tool for tool in tools if tool.name in white_list]
-                logger.debug(f"Filtered tools based on white list: {len(tools)} tools remain")
+            tools = [tool for tool in tools if tool.name in (white_list or [])]
+            logger.debug(f"Filtered tools based on white list: {len(tools)} tools remain")
             return tools
 
         except Exception as e:

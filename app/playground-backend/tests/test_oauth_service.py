@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from services.oauth_service import (
+from playground_backend.services.oauth_service import (
     OAuthService,
     TokenExchangeError,
     TokenRefreshError,
@@ -34,11 +34,11 @@ class TestOAuthService:
 
         # Exchange token
         exchanged_token = await oauth_service.exchange_token(
-            subject_token='user_access_token',
-            target_client_id='target_client_id',
+            subject_token="user_access_token",
+            target_client_id="target_client_id",
         )
 
-        assert exchanged_token == oidc_token_exchange_response['access_token']
+        assert exchanged_token == oidc_token_exchange_response["access_token"]
 
     async def test_exchange_token_with_scopes(self, oauth_service, oidc_token_exchange_response):
         """Test token exchange with requested scopes."""
@@ -59,18 +59,18 @@ class TestOAuthService:
         oauth_service._get_oauth_client = get_mock_client
 
         await oauth_service.exchange_token(
-            subject_token='user_token',
-            target_client_id='target_client',
-            requested_scopes=['scope1', 'scope2'],
+            subject_token="user_token",
+            target_client_id="target_client",
+            requested_scopes=["scope1", "scope2"],
         )
 
-        assert called_params['scope'] == 'scope1 scope2'
+        assert called_params["scope"] == "scope1 scope2"
 
     async def test_exchange_token_failure_non_200(self, oauth_service):
         """Test token exchange failure with non-200 response."""
 
         async def mock_fetch(**kwargs):
-            raise Exception('Invalid token')
+            raise Exception("Invalid token")
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.fetch_token = mock_fetch
@@ -83,17 +83,17 @@ class TestOAuthService:
 
         with pytest.raises(TokenExchangeError) as exc_info:
             await oauth_service.exchange_token(
-                subject_token='invalid_token',
-                target_client_id='target_client',
+                subject_token="invalid_token",
+                target_client_id="target_client",
             )
 
-        assert 'Token exchange failed' in str(exc_info.value)
+        assert "Token exchange failed" in str(exc_info.value)
 
     async def test_exchange_token_http_error(self, oauth_service):
         """Test token exchange with HTTP error."""
 
         async def mock_fetch(**kwargs):
-            raise httpx.HTTPError('Network error')
+            raise httpx.HTTPError("Network error")
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.fetch_token = mock_fetch
@@ -106,33 +106,33 @@ class TestOAuthService:
 
         with pytest.raises(TokenExchangeError) as exc_info:
             await oauth_service.exchange_token(
-                subject_token='user_token',
-                target_client_id='target_client',
+                subject_token="user_token",
+                target_client_id="target_client",
             )
 
-        assert 'Network error' in str(exc_info.value)
+        assert "Network error" in str(exc_info.value)
 
     async def test_oauth_service_initialization(self, mock_config):
         """Test OAuthService initialization."""
         service = OAuthService(
-            client_id='test_client',
-            client_secret='test_secret',
-            issuer='https://test.oidc.com/oauth2/default',
+            client_id="test_client",
+            client_secret="test_secret",
+            issuer="https://test.oidc.com/oauth2/default",
         )
 
-        assert service.client_id == 'test_client'
-        assert service.client_secret == 'test_secret'
-        assert service.issuer == 'https://test.oidc.com/oauth2/default'
+        assert service.client_id == "test_client"
+        assert service.client_secret == "test_secret"
+        assert service.issuer == "https://test.oidc.com/oauth2/default"
 
     async def test_oauth_service_custom_issuer(self):
         """Test OAuthService with custom issuer."""
         service = OAuthService(
-            client_id='test_client',
-            client_secret='test_secret',
-            issuer='https://custom.oidc.com/oauth2/custom',
+            client_id="test_client",
+            client_secret="test_secret",
+            issuer="https://custom.oidc.com/oauth2/custom",
         )
 
-        assert service.issuer == 'https://custom.oidc.com/oauth2/custom'
+        assert service.issuer == "https://custom.oidc.com/oauth2/custom"
 
     async def test_close_cleanup(self, oauth_service):
         """Test cleanup on close."""
@@ -145,9 +145,9 @@ class TestOAuthService:
     async def test_close_cleanup_owned_client(self, mock_config):
         """Test cleanup of owned oauth client."""
         service = OAuthService(
-            client_id='test_client',
-            client_secret='test_secret',
-            issuer='https://test.oidc.com/oauth2/default',
+            client_id="test_client",
+            client_secret="test_secret",
+            issuer="https://test.oidc.com/oauth2/default",
         )
 
         # Create a mock client manually
@@ -165,10 +165,10 @@ class TestOAuthService:
         # Mock the OAuth client's fetch_token method to return dict
         async def mock_fetch(**kwargs):
             return {
-                'access_token': 'new_access_token',
-                'refresh_token': 'new_refresh_token',
-                'id_token': 'new_id_token',
-                'expires_in': 3600,
+                "access_token": "new_access_token",
+                "refresh_token": "new_refresh_token",
+                "id_token": "new_id_token",
+                "expires_in": 3600,
             }
 
         mock_oauth_client = AsyncMock()
@@ -181,12 +181,12 @@ class TestOAuthService:
         oauth_service._get_oauth_client = get_mock_client
 
         # Refresh token
-        result = await oauth_service.refresh_token('old_refresh_token')
+        result = await oauth_service.refresh_token("old_refresh_token")
 
         # Verify the result
-        assert result['access_token'] == 'new_access_token'
-        assert result['refresh_token'] == 'new_refresh_token'
-        assert result['id_token'] == 'new_id_token'
+        assert result["access_token"] == "new_access_token"
+        assert result["refresh_token"] == "new_refresh_token"
+        assert result["id_token"] == "new_id_token"
 
     async def test_refresh_access_token_without_new_refresh_token(self, oauth_service):
         """Test token refresh when server doesn't return a new refresh token."""
@@ -194,8 +194,8 @@ class TestOAuthService:
         # Mock the OAuth client's fetch_token method (no new refresh_token in response)
         async def mock_fetch(**kwargs):
             return {
-                'access_token': 'new_access_token',
-                'expires_in': 3600,
+                "access_token": "new_access_token",
+                "expires_in": 3600,
             }
 
         mock_oauth_client = AsyncMock()
@@ -208,18 +208,18 @@ class TestOAuthService:
         oauth_service._get_oauth_client = get_mock_client
 
         # Refresh token
-        result = await oauth_service.refresh_token('old_refresh_token')
+        result = await oauth_service.refresh_token("old_refresh_token")
 
         # Verify the result - should use old refresh token if not rotated
-        assert result['access_token'] == 'new_access_token'
-        assert result['refresh_token'] == 'old_refresh_token'
+        assert result["access_token"] == "new_access_token"
+        assert result["refresh_token"] == "old_refresh_token"
 
     async def test_refresh_access_token_failure(self, oauth_service):
         """Test token refresh failure."""
 
         # Mock the OAuth client's fetch_token method to raise an exception
         async def mock_fetch(**kwargs):
-            raise Exception('Invalid refresh token')
+            raise Exception("Invalid refresh token")
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.fetch_token = mock_fetch
@@ -232,6 +232,6 @@ class TestOAuthService:
 
         # Test that refresh raises TokenRefreshError
         with pytest.raises(TokenRefreshError) as exc_info:
-            await oauth_service.refresh_token('invalid_refresh_token')
+            await oauth_service.refresh_token("invalid_refresh_token")
 
-        assert 'Token refresh failed' in str(exc_info.value)
+        assert "Token refresh failed" in str(exc_info.value)

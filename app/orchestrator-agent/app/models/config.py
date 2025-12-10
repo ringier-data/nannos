@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from deepagents import CompiledSubAgent
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from ..subagents.dynamic_agent import create_dynamic_local_subagent
-from ..subagents.file_analyzer import create_file_analyzer_subagent
 from ..subagents.models import LocalSubAgentConfig
 
 logger = logging.getLogger(__name__)
@@ -58,6 +56,9 @@ class GraphRuntimeContext:
     language: str = "en"
     """User's preferred language for responses (ISO 639-1 code)."""
 
+    timezone: str = "Europe/Zurich"
+    """User's preferred timezone (IANA timezone name like 'America/New_York', 'Europe/Berlin')."""
+
     message_formatting: str = "markdown"
     """Message formatting style for responses.
     
@@ -73,6 +74,13 @@ class GraphRuntimeContext:
     Used for @-mention generation in Slack conversations. Only set when
     the client is a Slack app. The LLM can use this to tag the current user
     in responses when needed (e.g., for input_required states).
+    """
+
+    custom_prompt: Optional[str] = None
+    """User's custom prompt addendum.
+    
+    If set, this text is appended to the system prompt as additional instructions.
+    Allows users to customize agent behavior with personal preferences or guidelines.
     """
 
     tool_registry: dict[str, Any] = field(default_factory=dict)
@@ -127,6 +135,7 @@ class UserConfig(BaseModel):
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
     language: str = Field(default="en", description="User's preferred language")
+    timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
     model: Optional[ModelType] = Field(default=None, description="LLM model to use (gpt4o or claude-sonnet-4.5)")
     message_formatting: Literal["markdown", "slack", "plain"] = Field(
         default="markdown",
@@ -135,6 +144,14 @@ class UserConfig(BaseModel):
     slack_user_handle: Optional[str] = Field(
         default=None,
         description="Slack user handle for @-mentions (e.g., '<@U123456>')",
+    )
+    custom_prompt: Optional[str] = Field(
+        default=None,
+        description="User's custom prompt addendum to append to system prompt",
+    )
+    sub_agent_config_hash: Optional[str] = Field(
+        default=None,
+        description="Sub-agent config hash for playground testing mode (single sub-agent isolation)",
     )
     sub_agents: Optional[list[CompiledSubAgent]] = Field(
         default=None,
@@ -147,93 +164,6 @@ class UserConfig(BaseModel):
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-def build_runtime_context(
-    user_config: UserConfig,
-    llm_model: Any = None,
-    oauth2_client: Any = None,
-    checkpointer: Any = None,
-) -> GraphRuntimeContext:
-    """Build GraphRuntimeContext from user config and orchestrator dependencies.
-
-    Transforms discovered tools and subagents lists into registries
-    for dynamic tool dispatch at runtime. Also includes:
-    - Built-in local sub-agents (like file-analyzer)
-    - Remote A2A agents from discovery
-    - Dynamic local sub-agents from user configuration
-
-    Dynamic local sub-agents are instantiated with:
-    - Tools inherited from orchestrator if mcp_gateway_url is None
-    - MCP tool discovery (lazy) if mcp_gateway_url is set
-    - Shared checkpointer for multi-turn conversation state
-
-    Args:
-        user_config: User configuration with tools, sub-agents, and preferences.
-        llm_model: LLM model for dynamic sub-agent creation (required if local_subagents configured).
-        oauth2_client: OAuth2 client for authenticated MCP discovery.
-        checkpointer: Shared checkpointer for dynamic sub-agent multi-turn conversations.
-
-    Returns:
-        GraphRuntimeContext for graph invocation
-    """
-    # Convert tools list to tool_registry (name -> tool mapping)
-    tool_registry: dict[str, Any] = {}
-    for tool in user_config.tools or []:
-        if hasattr(tool, "name"):
-            tool_registry[tool.name] = tool
-        elif isinstance(tool, dict):
-            tool_registry[tool.get("name", str(tool))] = tool
-
-    # Start with built-in local sub-agents (like file-analyzer)
-    # These run in-process but use the same registry as remote A2A agents
-    subagent_registry: dict[str, CompiledSubAgent] = {}
-    subagent_registry["file-analyzer"] = create_file_analyzer_subagent()
-
-    # Add remote A2A sub-agents from discovery
-    for subagent in user_config.sub_agents or []:
-        if isinstance(subagent, dict) and "name" in subagent:
-            subagent_registry[subagent["name"]] = subagent
-
-    # Add dynamic local sub-agents from user configuration
-    # Requires llm_model for agent creation
-    if user_config.local_subagents and llm_model:
-        orchestrator_tools = list(tool_registry.values())
-        for config in user_config.local_subagents:
-            try:
-                # Create dynamic sub-agent with orchestrator tools for inheritance
-                # (tools are overridden if config.mcp_gateway_url is set)
-                # Pass oauth2_client and user_token for authenticated MCP discovery
-                # Pass checkpointer for multi-turn conversation state
-                dynamic_subagent = create_dynamic_local_subagent(
-                    config=config,
-                    model=llm_model,
-                    orchestrator_tools=orchestrator_tools,
-                    oauth2_client=oauth2_client,
-                    user_token=user_config.access_token.get_secret_value() if user_config.access_token else None,
-                    checkpointer=checkpointer,
-                )
-                subagent_registry[config.name] = dynamic_subagent
-                logger.info(f"Registered dynamic local sub-agent: {config.name}")
-            except Exception as e:
-                logger.error(f"Failed to create dynamic sub-agent '{config.name}': {e}")
-                # Continue with other subagents (graceful degradation)
-    elif user_config.local_subagents and not llm_model:
-        logger.warning(
-            f"local_subagents configured but no llm_model provided. "
-            f"Skipping {len(user_config.local_subagents)} dynamic sub-agents."
-        )
-
-    return GraphRuntimeContext(
-        user_id=user_config.user_id,
-        name=user_config.name,
-        email=user_config.email,
-        language=user_config.language,
-        message_formatting=user_config.message_formatting,
-        slack_user_handle=user_config.slack_user_handle,
-        tool_registry=tool_registry,
-        subagent_registry=subagent_registry,
-    )
 
 
 class DynamoDBConfig(BaseModel):
@@ -254,6 +184,9 @@ class AgentSettings:
     # Retry configuration
     MAX_RETRIES = 3
     BACKOFF_FACTOR = 3.0
+
+    # Recursion limit configuration (overrides deepagents default of 1000)
+    MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
 
     # Cache configuration
     AGENT_DISCOVERY_CACHE_TTL = 30  # seconds
@@ -328,7 +261,23 @@ class AgentSettings:
         "you could have provided different information, you have available in the conversation history, to the sub-agent. "
         "Otherwise, communicate clearly to the user and wait for the user to provide the necessary input or complete authentication.\n"
         "\n"
+        "**IMPORTANT - Avoid Unproductive Tool Repetition:**\n"
+        "- If a tool returns empty results (e.g., `[]` from filesystem listing), analyze WHY before calling it again\n"
+        "- Empty filesystem tools mean no files exist yet - CREATE files instead of repeatedly checking\n"
+        "- Do NOT call the same tool multiple times with identical arguments expecting different results\n"
+        "- If a tool consistently returns the same unhelpful result, try a DIFFERENT approach or ask the user for guidance\n"
+        "- Loop detection will interrupt if the same tool is called repeatedly without progress\n"
+        "\n"
         "ALWAYS delegate tasks to sub-agents rather than trying to do everything yourself.\n"
+        "\n"
+        "**TIME AND DATE QUERIES:**\n"
+        "For ANY time-related queries, you MUST use the get_current_time tool with structured parameters:\n"
+        "- **DO NOT** rely on your training data for current time - it is outdated\n"
+        "- **ALWAYS** use get_current_time tool to get actual current time\n"
+        "- Use structured enum parameters: base ('now', 'today', etc.), delta_value (integer), delta_unit ('days', 'weeks', etc.)\n"
+        "- Examples: tomorrow = get_current_time(base='today', delta_value=1, delta_unit='days')\n"
+        "- Examples: next week = get_current_time(base='start_of_week', delta_value=1, delta_unit='weeks')\n"
+        "- The tool uses the user's configured timezone automatically\n"
         "\n"
         "**FILE HANDLING:**\n"
         "When the user's message contains URLs or file references, use file-analyzer to understand their content:\n"

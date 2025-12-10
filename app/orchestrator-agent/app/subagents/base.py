@@ -142,6 +142,7 @@ class BaseA2ARunnable(ABC):
                     "requires_input": result.get("requires_input"),
                     "state": str(result.get("state")) if result.get("state") else None,
                     "artifacts": result.get("artifacts"),
+                    "foundry_session_rid": result.get("foundry_session_rid"),
                 }.items()
                 if v is not None
             }
@@ -189,22 +190,10 @@ class BaseA2ARunnable(ABC):
         if context_id is None:
             context_id = str(uuid.uuid4())
 
-        # Build JSON content with embedded metadata
-        wrapped_content = {
-            "content": content,
-            "a2a": {
-                "task_id": task_id,
-                "context_id": context_id,
-                "state": state,
-                "is_complete": state == "completed",
-                "requires_input": requires_input,
-                "requires_auth": requires_auth,
-            },
-        }
-
-        # Build response dict
+        # Build response dict (plain, no JSON wrapping)
+        # Wrapping will be done by _wrap_message_with_metadata() in ainvoke()
         response = {
-            "messages": [AIMessage(content=json.dumps(wrapped_content))],
+            "messages": [AIMessage(content=content)],
             "task_id": task_id,
             "context_id": context_id,
             "state": state,
@@ -216,7 +205,6 @@ class BaseA2ARunnable(ABC):
 
         if artifacts:
             response["artifacts"] = artifacts
-            wrapped_content["a2a"]["artifacts"] = artifacts
 
         return response
 
@@ -224,12 +212,16 @@ class BaseA2ARunnable(ABC):
         self,
         message: str,
         context_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        **extra_metadata: Any,
     ) -> Dict[str, Any]:
         """Build an error/failed response.
 
         Args:
             message: Error description
             context_id: Optional context ID for conversation continuity
+            task_id: Optional task ID
+            **extra_metadata: Additional metadata to include at top level
 
         Returns:
             Dict with messages and A2A metadata indicating failure
@@ -237,20 +229,26 @@ class BaseA2ARunnable(ABC):
         return self._build_response(
             message,
             context_id=context_id,
+            task_id=task_id,
             state="failed",
             requires_input=False,
+            **extra_metadata,
         )
 
     def _build_input_required_response(
         self,
         message: str,
         context_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        **extra_metadata: Any,
     ) -> Dict[str, Any]:
         """Build an input_required response for the orchestrator to handle.
 
         Args:
             message: Explanation of what input is needed
             context_id: Optional context ID for conversation continuity
+            task_id: Optional task ID
+            **extra_metadata: Additional metadata to include at top level
 
         Returns:
             Dict with messages and A2A metadata indicating input is required
@@ -258,22 +256,28 @@ class BaseA2ARunnable(ABC):
         return self._build_response(
             message,
             context_id=context_id,
+            task_id=task_id,
             state="input_required",
             requires_input=True,
+            **extra_metadata,
         )
 
     def _build_success_response(
         self,
         content: str,
         context_id: Optional[str] = None,
+        task_id: Optional[str] = None,
         artifacts: Optional[List[Dict[str, Any]]] = None,
+        **extra_metadata: Any,
     ) -> Dict[str, Any]:
         """Build a successful completion response.
 
         Args:
             content: The result content
             context_id: Optional context ID for conversation continuity
+            task_id: Optional task ID
             artifacts: Optional list of artifacts
+            **extra_metadata: Additional metadata to include at top level
 
         Returns:
             Dict with messages and A2A metadata indicating completion
@@ -281,9 +285,11 @@ class BaseA2ARunnable(ABC):
         return self._build_response(
             content,
             context_id=context_id,
+            task_id=task_id,
             state="completed",
             requires_input=False,
             artifacts=artifacts,
+            **extra_metadata,
         )
 
     def _extract_message_content(self, input_data: SubAgentInput) -> str:
@@ -322,6 +328,8 @@ class BaseA2ARunnable(ABC):
             Tuple of (context_id, task_id). task_id is only returned if the task
             is incomplete or requires user intervention (auth/input).
         """
+        logger.debug(f"Extracting tracking IDs for agent: {self.name}")
+        logger.debug(f"Full a2a_tracking state: {input_data.a2a_tracking}")
         agent_name = self.name.replace(" ", "")
         agent_tracking = input_data.a2a_tracking.get(agent_name, {})
 
@@ -371,52 +379,58 @@ class LocalA2ARunnable(BaseA2ARunnable):
     """
 
     @abstractmethod
-    async def _process(
-        self,
-        content: str,
-        context_id: Optional[str],
-    ) -> Dict[str, Any]:
+    async def _process(self, input_data: SubAgentInput) -> Dict[str, Any]:
         """Process the input and return a response.
 
         Subclasses implement this method with their specific logic.
         Use `_build_*_response` helpers to format the response.
 
         Args:
-            content: The message content to process
-            context_id: Optional context ID for conversation continuity
+            input_data: Validated input with messages, a2a_tracking, and files
 
         Returns:
-            Dict with 'messages' and A2A metadata
+            Dict with 'messages' and A2A metadata (plain, will be wrapped by ainvoke)
+
+        Example:
+            async def _process(self, input_data: SubAgentInput) -> Dict[str, Any]:
+                content = self._extract_message_content(input_data)
+                context_id, task_id = self._extract_tracking_ids(input_data)
+
+                # Access a2a_tracking for custom state
+                custom_state = input_data.a2a_tracking.get(self.name, {})
+
+                result = await do_something(content)
+                return self._build_success_response(result, context_id=context_id)
         """
         ...
 
     async def ainvoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """Async invoke the local sub-agent.
 
-        Extracts message content and tracking IDs, then delegates to _process.
+        Validates input, delegates to _process with full SubAgentInput,
+        then wraps the response with A2A metadata.
 
         Args:
             input_data: Input data matching SubAgentInput schema
 
         Returns:
-            Dict with 'messages', 'task_id', 'context_id', 'state', etc.
+            Dict with 'messages' containing JSON-wrapped content and A2A metadata
         """
         try:
-            # Validate and extract input
+            # Validate input
             validated = SubAgentInput.model_validate(input_data)
 
-            # Use inherited helper to extract content
-            content = self._extract_message_content(validated)
+            # Delegate to subclass implementation with full input data
+            result = await self._process(validated)
 
-            # Use inherited helper to extract tracking IDs
-            context_id, _ = self._extract_tracking_ids(validated)
-
-            # Delegate to subclass implementation
-            return await self._process(content, context_id)
+            # Wrap message with A2A metadata (same as A2AClientRunnable)
+            return self._wrap_message_with_metadata(result)
 
         except ValueError as e:
             # Content extraction errors
-            return self._build_error_response(str(e))
+            result = self._build_error_response(str(e))
+            return self._wrap_message_with_metadata(result)
         except Exception as e:
             logger.exception(f"Error in {self.name}: {e}")
-            return self._build_error_response(f"Internal error: {str(e)}")
+            result = self._build_error_response(f"Internal error: {str(e)}")
+            return self._wrap_message_with_metadata(result)

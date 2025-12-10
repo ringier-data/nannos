@@ -1,10 +1,10 @@
-import { AlertTriangle, Bot, Settings as SettingsIcon, User } from 'lucide-react';
+import { AlertTriangle, Bot, User } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Card, CardContent } from '@/components/ui/card';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Markdown } from '@/components/ui/markdown';
 import { useChat } from '../contexts';
-import { convertMarkdownToHtml, formatTime } from '../utils';
+import { formatTime } from '../utils';
 import type { Message } from '../types';
 
 interface MessageCardProps {
@@ -13,61 +13,62 @@ interface MessageCardProps {
 
 function MessageCard({ message }: MessageCardProps) {
   const isUser = message.type === 'user';
-  const isTask = message.type === 'task';
   const isError = message.content.startsWith('Error:');
   const formattedTime = formatTime(message.timestamp);
 
-  const getIcon = () => {
-    if (isError) return <AlertTriangle className="w-5 h-5" />;
-    if (isTask) return <SettingsIcon className="w-5 h-5" />;
-    if (isUser) return <User className="w-5 h-5" />;
-    return <Bot className="w-5 h-5" />;
-  };
-
   return (
-    <Card
+    <div
       className={cn(
-        'transition-all duration-200 hover:shadow-md',
-        isError && 'border-destructive/30 bg-destructive/10',
-        isTask && 'border-accent bg-accent/50',
-        isUser && 'border-primary/20 bg-primary/10',
-        !isError && !isTask && !isUser && 'bg-card'
+        'flex gap-3 py-4',
+        isUser && 'flex-row-reverse'
       )}
       data-testid={`message-${message.id}`}
       data-message-id={message.id}
     >
-      <CardContent className="px-4">
-        <div className="flex gap-3">
-          <Avatar
-            className={cn(
-              'flex-shrink-0 h-10 w-10',
-              isError && 'bg-destructive/20 text-destructive',
-              isTask && 'bg-accent text-accent-foreground',
-              isUser && 'bg-primary/20 text-primary',
-              !isError && !isTask && !isUser && 'bg-secondary text-secondary-foreground'
-            )}
-          >
-            <AvatarFallback
-              className={cn(
-                isError && 'bg-destructive/20 text-destructive',
-                isTask && 'bg-accent text-accent-foreground',
-                isUser && 'bg-primary/20 text-primary',
-                !isError && !isTask && !isUser && 'bg-secondary text-secondary-foreground'
-              )}
-            >
-              {getIcon()}
-            </AvatarFallback>
-          </Avatar>
-          <div className="flex-1 min-w-0">
-            <div
-              className="prose prose-sm dark:prose-invert max-w-none break-words"
-              dangerouslySetInnerHTML={{ __html: convertMarkdownToHtml(message.content) }}
-            />
-            <div className="mt-2 text-xs text-muted-foreground">{formattedTime}</div>
-          </div>
+      <Avatar
+        className={cn(
+          'shrink-0 h-8 w-8',
+          isError && 'bg-destructive/20 text-destructive',
+          isUser && 'bg-primary text-primary-foreground',
+          !isError && !isUser && 'bg-muted text-muted-foreground'
+        )}
+      >
+        <AvatarFallback
+          className={cn(
+            isError && 'bg-destructive/20 text-destructive',
+            isUser && 'bg-primary text-primary-foreground',
+            !isError && !isUser && 'bg-muted text-muted-foreground'
+          )}
+        >
+          {isError ? (
+            <AlertTriangle className="w-4 h-4" />
+          ) : isUser ? (
+            <User className="w-4 h-4" />
+          ) : (
+            <Bot className="w-4 h-4" />
+          )}
+        </AvatarFallback>
+      </Avatar>
+      
+      <div className={cn(
+        'flex-1 min-w-0 w-0 space-y-1',
+        isUser && 'flex flex-col items-end'
+      )}>
+        <div
+          className={cn(
+            'rounded-lg px-4 py-2 max-w-[85%] overflow-hidden',
+            isError && 'bg-destructive/10 text-destructive border border-destructive/20',
+            isUser && 'bg-primary text-primary-foreground',
+            !isError && !isUser && 'bg-muted'
+          )}
+        >
+          <Markdown inverted={isUser} className="text-sm">
+            {message.content}
+          </Markdown>
         </div>
-      </CardContent>
-    </Card>
+        <span className="text-xs text-muted-foreground px-1">{formattedTime}</span>
+      </div>
+    </div>
   );
 }
 
@@ -75,18 +76,13 @@ function LoadingState() {
   return (
     <div className="space-y-4 p-4">
       {[1, 2, 3].map((i) => (
-        <Card key={i}>
-          <CardContent className="p-4">
-            <div className="flex gap-3">
-              <Skeleton className="h-10 w-10 rounded-full" />
-              <div className="flex-1 space-y-2">
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-3/4" />
-                <Skeleton className="h-3 w-20" />
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        <div key={i} className="flex gap-3">
+          <Skeleton className="h-8 w-8 rounded-full shrink-0" />
+          <div className="flex-1 space-y-2">
+            <Skeleton className="h-16 w-3/4 rounded-lg" />
+            <Skeleton className="h-3 w-16" />
+          </div>
+        </div>
       ))}
     </div>
   );
@@ -94,9 +90,14 @@ function LoadingState() {
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center gap-2 py-12 px-4 text-center">
-      <p className="text-sm font-medium text-foreground">Start a conversation</p>
-      <p className="text-xs text-muted-foreground">Send a message below to begin chatting with the agent.</p>
+    <div className="flex flex-col items-center justify-center gap-3 py-16 px-4 text-center">
+      <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
+        <Bot className="w-6 h-6 text-muted-foreground" />
+      </div>
+      <div className="space-y-1">
+        <p className="text-sm font-medium text-foreground">Start a conversation</p>
+        <p className="text-xs text-muted-foreground">Send a message to begin chatting with the agent.</p>
+      </div>
     </div>
   );
 }
@@ -113,7 +114,7 @@ export function MessageList() {
   }
 
   return (
-    <div className="flex flex-col gap-4 p-4">
+    <div className="flex flex-col px-4 divide-y divide-border/50">
       {messages.map((msg) => (
         <MessageCard key={msg.id} message={msg} />
       ))}

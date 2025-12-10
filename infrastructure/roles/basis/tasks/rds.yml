@@ -1,0 +1,133 @@
+---
+# ====================== SSM: Postgres Master Username ===================
+
+- name: Upload Playground RDS master username
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: "changed"
+    name: "{{ ssmkey_rds_master_username }}"
+    description: "The username for the RDS master user"
+    string_type: "String"
+    value: "{{ rds_master_username }}"
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{software_component}}-rds-master-username-ssmparam'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
+
+# ====================== SSM: Postgres Master Password ===================
+
+- name: Check if Playground RDS master password exists in SSM
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    master_password: "{{ lookup('amazon.aws.aws_ssm', ssmkey_rds_master_password, decrypt=true, region=aws_region, on_missing='skip') }}"
+
+- set_fact:
+    generate_new: "{{ master_password == '' }}"
+
+- name: Generate random password
+  when: generate_new
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    master_password: "{{ lookup('password', '/dev/null length=60 chars=ascii_letters') }}"
+
+- name: Upload Playground RDS password to SSM
+  when: generate_new
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: "never"
+    name: "{{ ssmkey_rds_master_password }}"
+    description: "The password for the Playground RDS master user"
+    string_type: "SecureString"
+    key_id: "alias/gov-rcplus-devops-secrets"
+    value: "{{ master_password }}"
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{software_component}}-rds-master-password-ssmparam'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
+
+# ====================== Deploy Cloudformation ===================
+
+- set_fact:
+    template_filename: '{{ role_path }}/files/cf-rds.yml'
+    rds_stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-rds'
+
+- include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ rds_stack_name }}'
+    template: '{{ template_filename }}'
+    skip_version_tag: false
+
+# ======================  Prepare DDL  ===================
+
+- name: Build postgresql-client Docker image
+  shell: 'docker build -t psql -f {{ playbook_dir }}/../ops-ci-shared/misc/docker/Dockerfile.psql-client .'
+
+- name: 'gather RDS stack outputs'
+  ringier.aws_cicd.gather_stack_outputs:
+    stack_name: '{{ rds_stack_name }}'
+  register: rds_stack
+
+- name: Get facts
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    rds_endpoint: "{{ rds_stack['outputs']['RdsInstanceEndpointAddress'] }}"
+    rds_username: "{{ lookup('aws_ssm', ssmkey_rds_master_username) }}"
+    rds_password: "{{ lookup('aws_ssm', ssmkey_rds_master_password, decrypt=True) }}"
+
+# ====================== Drop 'public' schema ===================
+
+- name: Drop public schema
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      DROP SCHEMA IF EXISTS public
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
+# ====================== Create schema ===================
+
+- name: Create schema
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      CREATE SCHEMA IF NOT EXISTS {{ rds_schema }} AUTHORIZATION {{ rds_username }}
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
+# ============== Create service user =======
+
+- include_role:
+    name: 'ringier.aws_cicd.create_db_user'
+  vars:
+    app_db_username: '{{ rds_service_username }}'
+    ssmkey_rds_master_username_key: '{{ ssmkey_rds_master_username }}'
+    ssmkey_rds_master_password_key: '{{ ssmkey_rds_master_password }}'
+    ssmkey_rds_app_user_username_key: '{{ ssmkey_rds_service_username }}'
+    ssmkey_rds_app_user_password_key: '{{ ssmkey_rds_service_password }}'
+    database_privileges: 'CONNECT'
+    schema_privileges: 'USAGE'
+    sequence_privileges: 'USAGE'
+    table_privileges: 'SELECT,UPDATE,DELETE,INSERT'
+    function_privileges: 'EXECUTE'
+
+# ====================== Run DDL migrations ===================
+
+- name: Migrate Database Schemas
+  shell: docker run -v "{{ role_path }}/files/ddl/scripts:/scripts:ro" -e RAMBLER_DRIVER -e RAMBLER_PROTOCOL -e RAMBLER_HOST -e RAMBLER_PORT -e RAMBLER_USER -e RAMBLER_PASSWORD -e RAMBLER_DATABASE -e RAMBLER_DIRECTORY -e RAMBLER_TABLE -e RAMBLER_SCHEMA -e RAMBLER_SSLMODE --rm docker.rcplus.io/zhaowde/rambler:latest
+  environment:
+    RAMBLER_DRIVER: postgresql
+    RAMBLER_PROTOCOL: 'tcp'
+    RAMBLER_HOST: '{{ rds_endpoint }}'
+    RAMBLER_PORT: '{{ rds_port }}'
+    RAMBLER_USER: '{{ rds_username }}'
+    RAMBLER_PASSWORD: '{{ rds_password }}'
+    RAMBLER_DATABASE: '{{ rds_db_name }}'
+    RAMBLER_DIRECTORY: '/scripts'
+    RAMBLER_TABLE: 'migrations'
+    RAMBLER_SCHEMA: '{{ rds_schema }}'
+    RAMBLER_SSLMODE: 'require'

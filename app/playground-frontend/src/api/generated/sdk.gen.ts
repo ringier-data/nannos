@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { DebugSessionApiV1ConversationsDebugSessionGetData, DebugSessionApiV1ConversationsDebugSessionGetResponses, GetAgentCardApiV1AgentCardPostData, GetAgentCardApiV1AgentCardPostResponses, GetConversationsByUserApiV1ConversationsGetData, GetConversationsByUserApiV1ConversationsGetErrors, GetConversationsByUserApiV1ConversationsGetResponses, GetCurrentUserApiV1AuthMeGetData, GetCurrentUserApiV1AuthMeGetResponses, GetMessagesByConversationApiV1MessagesConversationIdGetData, GetMessagesByConversationApiV1MessagesConversationIdGetErrors, GetMessagesByConversationApiV1MessagesConversationIdGetResponses, HealthCheckApiV1HealthGetData, HealthCheckApiV1HealthGetResponses, IndexApiV1GetData, IndexApiV1GetResponses, LoginApiV1AuthLoginGetData, LoginApiV1AuthLoginGetResponses, LoginCallbackApiV1AuthLoginCallbackGetData, LoginCallbackApiV1AuthLoginCallbackGetResponses, LogoutApiV1AuthLogoutGetData, LogoutApiV1AuthLogoutGetResponses, LogoutCallbackApiV1AuthLogoutCallbackGetData, LogoutCallbackApiV1AuthLogoutCallbackGetResponses } from './types.gen';
+import type { ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostErrors, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostResponses, AddMembersApiV1GroupsGroupIdMembersPostData, AddMembersApiV1GroupsGroupIdMembersPostErrors, AddMembersApiV1GroupsGroupIdMembersPostResponses, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostData, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostErrors, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostResponses, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteData, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteErrors, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponses, BulkUpdateUsersApiV1AdminUsersBulkPostData, BulkUpdateUsersApiV1AdminUsersBulkPostErrors, BulkUpdateUsersApiV1AdminUsersBulkPostResponses, CreateGroupApiV1AdminGroupsPostData, CreateGroupApiV1AdminGroupsPostErrors, CreateGroupApiV1AdminGroupsPostResponses, CreateSecretApiV1SecretsPostData, CreateSecretApiV1SecretsPostErrors, CreateSecretApiV1SecretsPostResponses, CreateSubAgentApiV1SubAgentsPostData, CreateSubAgentApiV1SubAgentsPostErrors, CreateSubAgentApiV1SubAgentsPostResponses, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostData, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostErrors, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostResponses, DebugSessionApiV1ConversationsDebugSessionGetData, DebugSessionApiV1ConversationsDebugSessionGetResponses, DeleteGroupApiV1AdminGroupsGroupIdDeleteData, DeleteGroupApiV1AdminGroupsGroupIdDeleteErrors, DeleteGroupApiV1AdminGroupsGroupIdDeleteResponses, DeleteSecretApiV1SecretsSecretIdDeleteData, DeleteSecretApiV1SecretsSecretIdDeleteErrors, DeleteSecretApiV1SecretsSecretIdDeleteResponses, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteData, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteErrors, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteResponses, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteData, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteErrors, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteResponses, GetAgentCardApiV1AgentCardPostData, GetAgentCardApiV1AgentCardPostResponses, GetConversationsByUserApiV1ConversationsGetData, GetConversationsByUserApiV1ConversationsGetErrors, GetConversationsByUserApiV1ConversationsGetResponses, GetCurrentUserApiV1AuthMeGetData, GetCurrentUserApiV1AuthMeGetResponses, GetCurrentUserSettingsApiV1AuthMeSettingsGetData, GetCurrentUserSettingsApiV1AuthMeSettingsGetResponses, GetGroupApiV1AdminGroupsGroupIdGetData, GetGroupApiV1AdminGroupsGroupIdGetErrors, GetGroupApiV1AdminGroupsGroupIdGetResponses, GetGroupApiV1GroupsGroupIdGetData, GetGroupApiV1GroupsGroupIdGetErrors, GetGroupApiV1GroupsGroupIdGetResponses, GetMessagesByConversationApiV1MessagesConversationIdGetData, GetMessagesByConversationApiV1MessagesConversationIdGetErrors, GetMessagesByConversationApiV1MessagesConversationIdGetResponses, GetSecretApiV1SecretsSecretIdGetData, GetSecretApiV1SecretsSecretIdGetErrors, GetSecretApiV1SecretsSecretIdGetResponses, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetData, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetErrors, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetResponses, GetSubAgentApiV1SubAgentsSubAgentIdGetData, GetSubAgentApiV1SubAgentsSubAgentIdGetErrors, GetSubAgentApiV1SubAgentsSubAgentIdGetResponses, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetData, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetErrors, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetResponses, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetData, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetErrors, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponses, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetData, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetErrors, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetResponses, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetData, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetErrors, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetResponses, GetUserApiV1AdminUsersUserIdGetData, GetUserApiV1AdminUsersUserIdGetErrors, GetUserApiV1AdminUsersUserIdGetResponses, HealthCheckApiV1HealthGetData, HealthCheckApiV1HealthGetResponses, IndexApiV1GetData, IndexApiV1GetResponses, ListAuditLogsApiV1AdminAuditLogsGetData, ListAuditLogsApiV1AdminAuditLogsGetErrors, ListAuditLogsApiV1AdminAuditLogsGetResponses, ListGroupsApiV1AdminGroupsGetData, ListGroupsApiV1AdminGroupsGetErrors, ListGroupsApiV1AdminGroupsGetResponses, ListMcpToolsApiV1McpToolsGetData, ListMcpToolsApiV1McpToolsGetResponses, ListMembersApiV1GroupsGroupIdMembersGetData, ListMembersApiV1GroupsGroupIdMembersGetErrors, ListMembersApiV1GroupsGroupIdMembersGetResponses, ListMyGroupsApiV1GroupsGetData, ListMyGroupsApiV1GroupsGetResponses, ListPendingApprovalsApiV1SubAgentsPendingGetData, ListPendingApprovalsApiV1SubAgentsPendingGetResponses, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetData, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponses, ListSecretsApiV1SecretsGetData, ListSecretsApiV1SecretsGetResponses, ListSubAgentsApiV1SubAgentsGetData, ListSubAgentsApiV1SubAgentsGetErrors, ListSubAgentsApiV1SubAgentsGetResponses, ListUsersApiV1AdminUsersGetData, ListUsersApiV1AdminUsersGetErrors, ListUsersApiV1AdminUsersGetResponses, LoginApiV1AuthLoginGetData, LoginApiV1AuthLoginGetResponses, LoginCallbackApiV1AuthLoginCallbackGetData, LoginCallbackApiV1AuthLoginCallbackGetResponses, LogoutApiV1AuthLogoutGetData, LogoutApiV1AuthLogoutGetResponses, LogoutCallbackApiV1AuthLogoutCallbackGetData, LogoutCallbackApiV1AuthLogoutCallbackGetResponses, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteData, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostData, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostErrors, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostResponses, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostData, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostErrors, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostResponses, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutData, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutErrors, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutResponses, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostData, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostErrors, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostResponses, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostData, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostErrors, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostResponses, ToggleAdminModeApiV1AuthAdminModePostData, ToggleAdminModeApiV1AuthAdminModePostErrors, ToggleAdminModeApiV1AuthAdminModePostResponses, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchData, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchErrors, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses, UpdateGroupApiV1AdminGroupsGroupIdPutData, UpdateGroupApiV1AdminGroupsGroupIdPutErrors, UpdateGroupApiV1AdminGroupsGroupIdPutResponses, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutErrors, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutData, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutErrors, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses, UpdateSubAgentApiV1SubAgentsSubAgentIdPatchData, UpdateSubAgentApiV1SubAgentsSubAgentIdPatchErrors, UpdateSubAgentApiV1SubAgentsSubAgentIdPatchResponses, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutData, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutErrors, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutResponses, UpdateUserApiV1AdminUsersUserIdPatchData, UpdateUserApiV1AdminUsersUserIdPatchErrors, UpdateUserApiV1AdminUsersUserIdPatchResponses, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutData, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutErrors, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses, UpdateUserRoleApiV1AdminUsersUserIdRolePutData, UpdateUserRoleApiV1AdminUsersUserIdRolePutErrors, UpdateUserRoleApiV1AdminUsersUserIdRolePutResponses, UpdateUserStatusApiV1AdminUsersUserIdStatusPutData, UpdateUserStatusApiV1AdminUsersUserIdStatusPutErrors, UpdateUserStatusApiV1AdminUsersUserIdStatusPutResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -77,12 +77,78 @@ export const logoutCallbackApiV1AuthLogoutCallbackGet = <ThrowOnError extends bo
  * Get the current authenticated user's information.
  *
  * Returns:
- * User information including id, email, name, and settings.
+ * User information including id, email, name, role, and group memberships.
  *
  * Raises:
  * 401 Unauthorized: If the user is not authenticated.
  */
 export const getCurrentUserApiV1AuthMeGet = <ThrowOnError extends boolean = false>(options?: Options<GetCurrentUserApiV1AuthMeGetData, ThrowOnError>) => (options?.client ?? client).get<GetCurrentUserApiV1AuthMeGetResponses, unknown, ThrowOnError>({ url: '/api/v1/auth/me', ...options });
+
+/**
+ * Get Current User Settings
+ *
+ * Get the current authenticated user's settings.
+ *
+ * Supports both session-based authentication and Bearer token authentication.
+ * The orchestrator can call this endpoint on behalf of a user.
+ *
+ * Returns:
+ * User settings including language and custom_prompt.
+ *
+ * Raises:
+ * 401 Unauthorized: If the user is not authenticated.
+ */
+export const getCurrentUserSettingsApiV1AuthMeSettingsGet = <ThrowOnError extends boolean = false>(options?: Options<GetCurrentUserSettingsApiV1AuthMeSettingsGetData, ThrowOnError>) => (options?.client ?? client).get<GetCurrentUserSettingsApiV1AuthMeSettingsGetResponses, unknown, ThrowOnError>({ url: '/api/v1/auth/me/settings', ...options });
+
+/**
+ * Update Current User Settings
+ *
+ * Update the current authenticated user's settings.
+ *
+ * Args:
+ * request: Fields to update (language, timezone, custom_prompt)
+ *
+ * Returns:
+ * Updated user settings.
+ *
+ * Raises:
+ * 401 Unauthorized: If the user is not authenticated.
+ */
+export const updateCurrentUserSettingsApiV1AuthMeSettingsPatch = <ThrowOnError extends boolean = false>(options: Options<UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchData, ThrowOnError>) => (options.client ?? client).patch<UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchErrors, ThrowOnError>({
+    url: '/api/v1/auth/me/settings',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Toggle Admin Mode
+ *
+ * Log admin mode toggle for audit trail.
+ *
+ * This endpoint is called when a user toggles admin mode on or off.
+ * It logs the action for audit purposes.
+ *
+ * Args:
+ * request: Admin mode toggle request with enabled state
+ *
+ * Returns:
+ * Success response with the new admin mode state.
+ *
+ * Raises:
+ * 401 Unauthorized: If the user is not authenticated.
+ * 403 Forbidden: If the user is not an administrator.
+ */
+export const toggleAdminModeApiV1AuthAdminModePost = <ThrowOnError extends boolean = false>(options: Options<ToggleAdminModeApiV1AuthAdminModePostData, ThrowOnError>) => (options.client ?? client).post<ToggleAdminModeApiV1AuthAdminModePostResponses, ToggleAdminModeApiV1AuthAdminModePostErrors, ThrowOnError>({
+    url: '/api/v1/auth/admin-mode',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
 
 /**
  * Get Conversations By User
@@ -91,6 +157,8 @@ export const getCurrentUserApiV1AuthMeGet = <ThrowOnError extends boolean = fals
  *
  * Args:
  * limit: Maximum number of conversations to return (default: 20, max: 50)
+ * sub_agent_config_hash: Optional filter by sub-agent config version hash
+ * exclude_playground: If True, exclude conversations with sub_agent_config_hash set
  *
  * Returns:
  * Dictionary containing:
@@ -126,6 +194,623 @@ export const debugSessionApiV1ConversationsDebugSessionGet = <ThrowOnError exten
  * - count: Number of messages returned
  */
 export const getMessagesByConversationApiV1MessagesConversationIdGet = <ThrowOnError extends boolean = false>(options: Options<GetMessagesByConversationApiV1MessagesConversationIdGetData, ThrowOnError>) => (options.client ?? client).get<GetMessagesByConversationApiV1MessagesConversationIdGetResponses, GetMessagesByConversationApiV1MessagesConversationIdGetErrors, ThrowOnError>({ url: '/api/v1/messages/{conversation_id}', ...options });
+
+/**
+ * List Mcp Tools
+ *
+ * List available MCP tools from Gatana gateway.
+ *
+ * Uses MCP JSON-RPC standard to fetch tools list.
+ * Performs token exchange to obtain a token for the mcp-gateway client.
+ *
+ * Returns:
+ * List of available MCP tools with names and descriptions.
+ *
+ * Raises:
+ * 401 Unauthorized: If token exchange fails
+ * 503 Service Unavailable: If MCP gateway is unreachable
+ */
+export const listMcpToolsApiV1McpToolsGet = <ThrowOnError extends boolean = false>(options?: Options<ListMcpToolsApiV1McpToolsGetData, ThrowOnError>) => (options?.client ?? client).get<ListMcpToolsApiV1McpToolsGetResponses, unknown, ThrowOnError>({ url: '/api/v1/mcp/tools', ...options });
+
+/**
+ * List Secrets
+ *
+ * List all secrets accessible to the current user.
+ *
+ * Returns secrets owned by the user.
+ *
+ * Requires 'secrets:read' capability.
+ */
+export const listSecretsApiV1SecretsGet = <ThrowOnError extends boolean = false>(options?: Options<ListSecretsApiV1SecretsGetData, ThrowOnError>) => (options?.client ?? client).get<ListSecretsApiV1SecretsGetResponses, unknown, ThrowOnError>({ url: '/api/v1/secrets', ...options });
+
+/**
+ * Create Secret
+ *
+ * Create a new secret.
+ *
+ * Requires 'secrets:write' capability.
+ *
+ * The secret value will be stored securely in AWS SSM Parameter Store.
+ * Only metadata is stored in the database.
+ */
+export const createSecretApiV1SecretsPost = <ThrowOnError extends boolean = false>(options: Options<CreateSecretApiV1SecretsPostData, ThrowOnError>) => (options.client ?? client).post<CreateSecretApiV1SecretsPostResponses, CreateSecretApiV1SecretsPostErrors, ThrowOnError>({
+    url: '/api/v1/secrets',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Delete Secret
+ *
+ * Delete a secret (soft delete).
+ *
+ * Requires 'secrets:write' capability and ownership of the secret.
+ *
+ * The secret is soft-deleted in the database and the SSM parameter is deleted.
+ */
+export const deleteSecretApiV1SecretsSecretIdDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteSecretApiV1SecretsSecretIdDeleteData, ThrowOnError>) => (options.client ?? client).delete<DeleteSecretApiV1SecretsSecretIdDeleteResponses, DeleteSecretApiV1SecretsSecretIdDeleteErrors, ThrowOnError>({ url: '/api/v1/secrets/{secret_id}', ...options });
+
+/**
+ * Get Secret
+ *
+ * Get a secret by ID (metadata only, not the actual secret value).
+ *
+ * Requires 'secrets:read' capability and ownership/access to the secret.
+ */
+export const getSecretApiV1SecretsSecretIdGet = <ThrowOnError extends boolean = false>(options: Options<GetSecretApiV1SecretsSecretIdGetData, ThrowOnError>) => (options.client ?? client).get<GetSecretApiV1SecretsSecretIdGetResponses, GetSecretApiV1SecretsSecretIdGetErrors, ThrowOnError>({ url: '/api/v1/secrets/{secret_id}', ...options });
+
+/**
+ * Get Secret Permissions
+ *
+ * Get group permissions for a secret.
+ *
+ * Owner can view permissions.
+ * Requires 'secrets:read' capability and ownership of the secret.
+ */
+export const getSecretPermissionsApiV1SecretsSecretIdPermissionsGet = <ThrowOnError extends boolean = false>(options: Options<GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetData, ThrowOnError>) => (options.client ?? client).get<GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetResponses, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetErrors, ThrowOnError>({ url: '/api/v1/secrets/{secret_id}/permissions', ...options });
+
+/**
+ * Update Secret Permissions
+ *
+ * Update group permissions for a secret.
+ *
+ * Only the owner can update permissions.
+ * Requires 'secrets:write' capability and ownership of the secret.
+ */
+export const updateSecretPermissionsApiV1SecretsSecretIdPermissionsPut = <ThrowOnError extends boolean = false>(options: Options<UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutData, ThrowOnError>) => (options.client ?? client).put<UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutErrors, ThrowOnError>({
+    url: '/api/v1/secrets/{secret_id}/permissions',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List Sub Agents
+ *
+ * List sub-agents accessible to the current user.
+ *
+ * Supports both user session authentication and Bearer token authentication.
+ * The orchestrator can call this endpoint on behalf of a user by passing
+ * the user's access token as a Bearer token.
+ *
+ * - Regular users see their own sub-agents + public sub-agents + those assigned to their groups
+ * - Admins (with admin mode enabled) see all sub-agents
+ * - Use `status` to filter by status (e.g., pending_approval for admin queue)
+ * - Use `owned_only=true` to see only owned sub-agents
+ * - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
+ */
+export const listSubAgentsApiV1SubAgentsGet = <ThrowOnError extends boolean = false>(options?: Options<ListSubAgentsApiV1SubAgentsGetData, ThrowOnError>) => (options?.client ?? client).get<ListSubAgentsApiV1SubAgentsGetResponses, ListSubAgentsApiV1SubAgentsGetErrors, ThrowOnError>({ url: '/api/v1/sub-agents', ...options });
+
+/**
+ * Create Sub Agent
+ *
+ * Create a new sub-agent.
+ *
+ * The sub-agent will be created in 'draft' status.
+ * Use POST /{id}/submit to submit for approval.
+ */
+export const createSubAgentApiV1SubAgentsPost = <ThrowOnError extends boolean = false>(options: Options<CreateSubAgentApiV1SubAgentsPostData, ThrowOnError>) => (options.client ?? client).post<CreateSubAgentApiV1SubAgentsPostResponses, CreateSubAgentApiV1SubAgentsPostErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List Pending Approvals
+ *
+ * List sub-agents pending approval (admin only).
+ */
+export const listPendingApprovalsApiV1SubAgentsPendingGet = <ThrowOnError extends boolean = false>(options?: Options<ListPendingApprovalsApiV1SubAgentsPendingGetData, ThrowOnError>) => (options?.client ?? client).get<ListPendingApprovalsApiV1SubAgentsPendingGetResponses, unknown, ThrowOnError>({ url: '/api/v1/sub-agents/pending', ...options });
+
+/**
+ * Get Sub Agent By Config Hash
+ *
+ * Get a sub-agent by config version hash.
+ *
+ * Used by the orchestrator to fetch a specific version for playground testing.
+ * Returns the sub-agent with the specified version's data embedded in config_version.
+ *
+ * User must be owner or have group access to the sub-agent.
+ */
+export const getSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGet = <ThrowOnError extends boolean = false>(options: Options<GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetData, ThrowOnError>) => (options.client ?? client).get<GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetResponses, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetErrors, ThrowOnError>({ url: '/api/v1/sub-agents/configs/by-hash/{version_hash}', ...options });
+
+/**
+ * Get Sub Agent By Config Version
+ *
+ * Get a sub-agent by config version ID.
+ *
+ * Used by the orchestrator to fetch a specific version for playground testing.
+ * Returns the sub-agent with the specified version's data embedded in config_version.
+ *
+ * User must be owner or have group access to the sub-agent.
+ */
+export const getSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGet = <ThrowOnError extends boolean = false>(options: Options<GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetData, ThrowOnError>) => (options.client ?? client).get<GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponses, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetErrors, ThrowOnError>({ url: '/api/v1/sub-agents/configs/{config_version_id}', ...options });
+
+/**
+ * Delete Sub Agent
+ *
+ * Delete a sub-agent.
+ *
+ * Only the owner or an admin (with admin mode enabled) can delete.
+ */
+export const deleteSubAgentApiV1SubAgentsSubAgentIdDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteData, ThrowOnError>) => (options.client ?? client).delete<DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteResponses, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}', ...options });
+
+/**
+ * Get Sub Agent
+ *
+ * Get a sub-agent by ID.
+ *
+ * Returns the sub-agent with owner info and the specified version's config.
+ * If no version is specified, returns the current version.
+ * User must be owner, have group access, or be admin (with admin mode enabled).
+ */
+export const getSubAgentApiV1SubAgentsSubAgentIdGet = <ThrowOnError extends boolean = false>(options: Options<GetSubAgentApiV1SubAgentsSubAgentIdGetData, ThrowOnError>) => (options.client ?? client).get<GetSubAgentApiV1SubAgentsSubAgentIdGetResponses, GetSubAgentApiV1SubAgentsSubAgentIdGetErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}', ...options });
+
+/**
+ * Update Sub Agent
+ *
+ * Update a sub-agent.
+ *
+ * Only the owner can update. For local sub-agents, configuration changes
+ * automatically create a new version in the history.
+ */
+export const updateSubAgentApiV1SubAgentsSubAgentIdPatch = <ThrowOnError extends boolean = false>(options: Options<UpdateSubAgentApiV1SubAgentsSubAgentIdPatchData, ThrowOnError>) => (options.client ?? client).patch<UpdateSubAgentApiV1SubAgentsSubAgentIdPatchResponses, UpdateSubAgentApiV1SubAgentsSubAgentIdPatchErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents/{sub_agent_id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Activate Sub Agent
+ *
+ * Activate a sub-agent for the current user.
+ *
+ * User must have access to the sub-agent (owner, public, or group member).
+ * Sub-agent must be approved (have a default_version).
+ */
+export const activateSubAgentApiV1SubAgentsSubAgentIdActivatePost = <ThrowOnError extends boolean = false>(options: Options<ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData, ThrowOnError>) => (options.client ?? client).post<ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostResponses, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}/activate', ...options });
+
+/**
+ * Deactivate Sub Agent
+ *
+ * Deactivate a sub-agent for the current user.
+ */
+export const deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePost = <ThrowOnError extends boolean = false>(options: Options<DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostData, ThrowOnError>) => (options.client ?? client).post<DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostResponses, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}/deactivate', ...options });
+
+/**
+ * Submit For Approval
+ *
+ * Submit a draft sub-agent for admin approval.
+ *
+ * Only the owner can submit. Sub-agent must be in 'draft' or 'rejected' status.
+ * Requires a change_summary describing what changed in this version.
+ */
+export const submitForApprovalApiV1SubAgentsSubAgentIdSubmitPost = <ThrowOnError extends boolean = false>(options: Options<SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostData, ThrowOnError>) => (options.client ?? client).post<SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostResponses, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents/{sub_agent_id}/submit',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Approve Sub Agent
+ *
+ * Approve or reject a sub-agent (approver/admin only).
+ *
+ * - action: 'approve' or 'reject'
+ * - rejection_reason: Required when action is 'reject'
+ */
+export const approveSubAgentApiV1SubAgentsSubAgentIdApprovePost = <ThrowOnError extends boolean = false>(options: Options<ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostData, ThrowOnError>) => (options.client ?? client).post<ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostResponses, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents/{sub_agent_id}/approve',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Get Sub Agent Permissions
+ *
+ * Get group permissions (read/write) for this sub-agent.
+ *
+ * Owner, admin (with admin mode enabled), or users with write permission can view permissions.
+ */
+export const getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGet = <ThrowOnError extends boolean = false>(options: Options<GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetData, ThrowOnError>) => (options.client ?? client).get<GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetResponses, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}/permissions', ...options });
+
+/**
+ * Update Sub Agent Permissions
+ *
+ * Update group permissions (read/write) for this sub-agent.
+ *
+ * Owner, admin (with admin mode enabled), or users with write permission can update permissions.
+ */
+export const updateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPut = <ThrowOnError extends boolean = false>(options: Options<UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutData, ThrowOnError>) => (options.client ?? client).put<UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutResponses, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents/{sub_agent_id}/permissions',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Get Sub Agent Versions
+ *
+ * Get all configuration versions for a sub-agent.
+ *
+ * Returns version history with all configuration data.
+ * User must be owner, have group access, or be admin.
+ */
+export const getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGet = <ThrowOnError extends boolean = false>(options: Options<GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetData, ThrowOnError>) => (options.client ?? client).get<GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetResponses, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}/versions', ...options });
+
+/**
+ * Revert To Version
+ *
+ * Revert a local sub-agent to a previous configuration version.
+ *
+ * Creates a new version with the reverted configuration.
+ * Only owner can revert. Only works for local sub-agents.
+ */
+export const revertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPost = <ThrowOnError extends boolean = false>(options: Options<RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostData, ThrowOnError>) => (options.client ?? client).post<RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostResponses, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}/versions/{version}/revert', ...options });
+
+/**
+ * Submit Version For Approval
+ *
+ * Submit a specific version for admin approval.
+ *
+ * Only the owner can submit. Version must be in 'draft' or 'rejected' status.
+ * Requires a change_summary describing what changed in this version.
+ */
+export const submitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPost = <ThrowOnError extends boolean = false>(options: Options<SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostData, ThrowOnError>) => (options.client ?? client).post<SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostResponses, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents/{sub_agent_id}/versions/{version}/submit',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Delete Version
+ *
+ * Delete a specific version (soft-delete).
+ *
+ * Only the owner can delete versions.
+ * Only draft, pending_approval, or rejected versions can be deleted.
+ * Approved versions cannot be deleted to preserve release history.
+ */
+export const deleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteData, ThrowOnError>) => (options.client ?? client).delete<DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteResponses, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteErrors, ThrowOnError>({ url: '/api/v1/sub-agents/{sub_agent_id}/versions/{version}', ...options });
+
+/**
+ * Review Version
+ *
+ * Approve or reject a specific version (approver/admin only).
+ *
+ * - action: 'approve' or 'reject'
+ * - rejection_reason: Required when action is 'reject'
+ *
+ * When approved, the version automatically becomes the default version.
+ */
+export const reviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPost = <ThrowOnError extends boolean = false>(options: Options<ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostData, ThrowOnError>) => (options.client ?? client).post<ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostResponses, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents/{sub_agent_id}/versions/{version}/review',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Set Default Version
+ *
+ * Set an approved version as the default version.
+ *
+ * Only the owner can set the default version.
+ * The version must be in 'approved' status.
+ */
+export const setDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPut = <ThrowOnError extends boolean = false>(options: Options<SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutData, ThrowOnError>) => (options.client ?? client).put<SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutResponses, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutErrors, ThrowOnError>({
+    url: '/api/v1/sub-agents/{sub_agent_id}/default-version',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List Pending Version Approvals
+ *
+ * List all versions pending approval across all sub-agents (admin only).
+ *
+ * Returns version info with sub-agent context for approval queue.
+ */
+export const listPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGet = <ThrowOnError extends boolean = false>(options?: Options<ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetData, ThrowOnError>) => (options?.client ?? client).get<ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponses, unknown, ThrowOnError>({ url: '/api/v1/sub-agents/admin/pending-versions', ...options });
+
+/**
+ * List Users
+ *
+ * List all users with pagination and filtering.
+ *
+ * Admin only endpoint.
+ */
+export const listUsersApiV1AdminUsersGet = <ThrowOnError extends boolean = false>(options?: Options<ListUsersApiV1AdminUsersGetData, ThrowOnError>) => (options?.client ?? client).get<ListUsersApiV1AdminUsersGetResponses, ListUsersApiV1AdminUsersGetErrors, ThrowOnError>({ url: '/api/v1/admin/users', ...options });
+
+/**
+ * Get User
+ *
+ * Get a user's details with group memberships.
+ *
+ * Admin only endpoint.
+ */
+export const getUserApiV1AdminUsersUserIdGet = <ThrowOnError extends boolean = false>(options: Options<GetUserApiV1AdminUsersUserIdGetData, ThrowOnError>) => (options.client ?? client).get<GetUserApiV1AdminUsersUserIdGetResponses, GetUserApiV1AdminUsersUserIdGetErrors, ThrowOnError>({ url: '/api/v1/admin/users/{user_id}', ...options });
+
+/**
+ * Update User
+ *
+ * Update admin-controlled user fields.
+ *
+ * Admin only endpoint. Allows updating is_administrator flag.
+ */
+export const updateUserApiV1AdminUsersUserIdPatch = <ThrowOnError extends boolean = false>(options: Options<UpdateUserApiV1AdminUsersUserIdPatchData, ThrowOnError>) => (options.client ?? client).patch<UpdateUserApiV1AdminUsersUserIdPatchResponses, UpdateUserApiV1AdminUsersUserIdPatchErrors, ThrowOnError>({
+    url: '/api/v1/admin/users/{user_id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Update User Groups
+ *
+ * Update a user's group memberships.
+ *
+ * Admin only endpoint.
+ */
+export const updateUserGroupsApiV1AdminUsersUserIdGroupsPut = <ThrowOnError extends boolean = false>(options: Options<UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutData, ThrowOnError>) => (options.client ?? client).put<UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutErrors, ThrowOnError>({
+    url: '/api/v1/admin/users/{user_id}/groups',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Update User Role
+ *
+ * Update a user's role.
+ *
+ * Admin only endpoint. Defines system-wide capabilities.
+ */
+export const updateUserRoleApiV1AdminUsersUserIdRolePut = <ThrowOnError extends boolean = false>(options: Options<UpdateUserRoleApiV1AdminUsersUserIdRolePutData, ThrowOnError>) => (options.client ?? client).put<UpdateUserRoleApiV1AdminUsersUserIdRolePutResponses, UpdateUserRoleApiV1AdminUsersUserIdRolePutErrors, ThrowOnError>({
+    url: '/api/v1/admin/users/{user_id}/role',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Update User Status
+ *
+ * Update a user's status.
+ *
+ * Admin only endpoint.
+ */
+export const updateUserStatusApiV1AdminUsersUserIdStatusPut = <ThrowOnError extends boolean = false>(options: Options<UpdateUserStatusApiV1AdminUsersUserIdStatusPutData, ThrowOnError>) => (options.client ?? client).put<UpdateUserStatusApiV1AdminUsersUserIdStatusPutResponses, UpdateUserStatusApiV1AdminUsersUserIdStatusPutErrors, ThrowOnError>({
+    url: '/api/v1/admin/users/{user_id}/status',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Bulk Update Users
+ *
+ * Perform bulk user operations.
+ *
+ * Admin only endpoint.
+ */
+export const bulkUpdateUsersApiV1AdminUsersBulkPost = <ThrowOnError extends boolean = false>(options: Options<BulkUpdateUsersApiV1AdminUsersBulkPostData, ThrowOnError>) => (options.client ?? client).post<BulkUpdateUsersApiV1AdminUsersBulkPostResponses, BulkUpdateUsersApiV1AdminUsersBulkPostErrors, ThrowOnError>({
+    url: '/api/v1/admin/users/bulk',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List Groups
+ *
+ * List all groups with pagination.
+ *
+ * Admin only endpoint.
+ */
+export const listGroupsApiV1AdminGroupsGet = <ThrowOnError extends boolean = false>(options?: Options<ListGroupsApiV1AdminGroupsGetData, ThrowOnError>) => (options?.client ?? client).get<ListGroupsApiV1AdminGroupsGetResponses, ListGroupsApiV1AdminGroupsGetErrors, ThrowOnError>({ url: '/api/v1/admin/groups', ...options });
+
+/**
+ * Create Group
+ *
+ * Create a new group.
+ *
+ * Admin only endpoint.
+ */
+export const createGroupApiV1AdminGroupsPost = <ThrowOnError extends boolean = false>(options: Options<CreateGroupApiV1AdminGroupsPostData, ThrowOnError>) => (options.client ?? client).post<CreateGroupApiV1AdminGroupsPostResponses, CreateGroupApiV1AdminGroupsPostErrors, ThrowOnError>({
+    url: '/api/v1/admin/groups',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Delete Group
+ *
+ * Delete a group (soft delete).
+ *
+ * Admin only endpoint.
+ */
+export const deleteGroupApiV1AdminGroupsGroupIdDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteGroupApiV1AdminGroupsGroupIdDeleteData, ThrowOnError>) => (options.client ?? client).delete<DeleteGroupApiV1AdminGroupsGroupIdDeleteResponses, DeleteGroupApiV1AdminGroupsGroupIdDeleteErrors, ThrowOnError>({ url: '/api/v1/admin/groups/{group_id}', ...options });
+
+/**
+ * Get Group
+ *
+ * Get a group's details with members.
+ *
+ * Admin only endpoint.
+ */
+export const getGroupApiV1AdminGroupsGroupIdGet = <ThrowOnError extends boolean = false>(options: Options<GetGroupApiV1AdminGroupsGroupIdGetData, ThrowOnError>) => (options.client ?? client).get<GetGroupApiV1AdminGroupsGroupIdGetResponses, GetGroupApiV1AdminGroupsGroupIdGetErrors, ThrowOnError>({ url: '/api/v1/admin/groups/{group_id}', ...options });
+
+/**
+ * Update Group
+ *
+ * Update a group.
+ *
+ * Admin only endpoint.
+ */
+export const updateGroupApiV1AdminGroupsGroupIdPut = <ThrowOnError extends boolean = false>(options: Options<UpdateGroupApiV1AdminGroupsGroupIdPutData, ThrowOnError>) => (options.client ?? client).put<UpdateGroupApiV1AdminGroupsGroupIdPutResponses, UpdateGroupApiV1AdminGroupsGroupIdPutErrors, ThrowOnError>({
+    url: '/api/v1/admin/groups/{group_id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Bulk Delete Groups
+ *
+ * Bulk delete groups.
+ *
+ * Admin only endpoint.
+ */
+export const bulkDeleteGroupsApiV1AdminGroupsBulkDelete = <ThrowOnError extends boolean = false>(options: Options<BulkDeleteGroupsApiV1AdminGroupsBulkDeleteData, ThrowOnError>) => (options.client ?? client).delete<BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponses, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteErrors, ThrowOnError>({
+    url: '/api/v1/admin/groups/bulk',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List Audit Logs
+ *
+ * List audit logs with filtering.
+ *
+ * Admin only endpoint.
+ */
+export const listAuditLogsApiV1AdminAuditLogsGet = <ThrowOnError extends boolean = false>(options?: Options<ListAuditLogsApiV1AdminAuditLogsGetData, ThrowOnError>) => (options?.client ?? client).get<ListAuditLogsApiV1AdminAuditLogsGetResponses, ListAuditLogsApiV1AdminAuditLogsGetErrors, ThrowOnError>({ url: '/api/v1/admin/audit-logs', ...options });
+
+/**
+ * List My Groups
+ *
+ * List groups where the current user is a member.
+ *
+ * Requires groups.read permission.
+ */
+export const listMyGroupsApiV1GroupsGet = <ThrowOnError extends boolean = false>(options?: Options<ListMyGroupsApiV1GroupsGetData, ThrowOnError>) => (options?.client ?? client).get<ListMyGroupsApiV1GroupsGetResponses, unknown, ThrowOnError>({ url: '/api/v1/groups', ...options });
+
+/**
+ * Get Group
+ *
+ * Get group details.
+ *
+ * Members can see basic group info.
+ * Group admins can also see member list.
+ */
+export const getGroupApiV1GroupsGroupIdGet = <ThrowOnError extends boolean = false>(options: Options<GetGroupApiV1GroupsGroupIdGetData, ThrowOnError>) => (options.client ?? client).get<GetGroupApiV1GroupsGroupIdGetResponses, GetGroupApiV1GroupsGroupIdGetErrors, ThrowOnError>({ url: '/api/v1/groups/{group_id}', ...options });
+
+/**
+ * List Members
+ *
+ * List members of a group.
+ *
+ * Requires group admin role or system admin.
+ */
+export const listMembersApiV1GroupsGroupIdMembersGet = <ThrowOnError extends boolean = false>(options: Options<ListMembersApiV1GroupsGroupIdMembersGetData, ThrowOnError>) => (options.client ?? client).get<ListMembersApiV1GroupsGroupIdMembersGetResponses, ListMembersApiV1GroupsGroupIdMembersGetErrors, ThrowOnError>({ url: '/api/v1/groups/{group_id}/members', ...options });
+
+/**
+ * Add Members
+ *
+ * Add members to a group.
+ *
+ * Requires group manager role or system admin.
+ */
+export const addMembersApiV1GroupsGroupIdMembersPost = <ThrowOnError extends boolean = false>(options: Options<AddMembersApiV1GroupsGroupIdMembersPostData, ThrowOnError>) => (options.client ?? client).post<AddMembersApiV1GroupsGroupIdMembersPostResponses, AddMembersApiV1GroupsGroupIdMembersPostErrors, ThrowOnError>({
+    url: '/api/v1/groups/{group_id}/members',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Remove Member
+ *
+ * Remove a member from a group.
+ *
+ * Requires group manager role or system admin.
+ * Cannot remove the last manager.
+ */
+export const removeMemberApiV1GroupsGroupIdMembersUserIdDelete = <ThrowOnError extends boolean = false>(options: Options<RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteData, ThrowOnError>) => (options.client ?? client).delete<RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors, ThrowOnError>({ url: '/api/v1/groups/{group_id}/members/{user_id}', ...options });
+
+/**
+ * Update Member Role
+ *
+ * Update a member's role.
+ *
+ * Requires group manager role or system admin.
+ */
+export const updateMemberRoleApiV1GroupsGroupIdMembersUserIdPut = <ThrowOnError extends boolean = false>(options: Options<UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData, ThrowOnError>) => (options.client ?? client).put<UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutErrors, ThrowOnError>({
+    url: '/api/v1/groups/{group_id}/members/{user_id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
 
 /**
  * Health Check

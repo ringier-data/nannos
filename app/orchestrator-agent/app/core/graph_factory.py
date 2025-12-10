@@ -24,7 +24,6 @@ from langchain.agents.structured_output import AutoStrategy
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
-from langchain_openai import AzureChatOpenAI
 from langgraph.graph.state import CompiledStateGraph
 from langgraph_checkpoint_aws import DynamoDBSaver
 
@@ -32,6 +31,7 @@ from ..handlers import handle_auth_error, should_retry
 from ..middleware import (
     AuthErrorDetectionMiddleware,
     DynamicToolDispatchMiddleware,
+    RepeatedToolCallMiddleware,
     TodoStatusMiddleware,
     UserPreferencesMiddleware,
 )
@@ -39,6 +39,8 @@ from ..models import AgentSettings, FinalResponseSchema
 from ..models.config import GraphRuntimeContext, ModelType
 from ..subagents import A2ATaskTrackingMiddleware
 from .file_tools import create_presigned_url_tool
+from .model_factory import create_model
+from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,9 @@ class GraphFactory:
         self._models: dict[str, BaseChatModel] = {}
         self._graphs: dict[str, CompiledStateGraph] = {}
 
+        # Static tools cache (created once per model type, reused)
+        self._static_tools_cache: dict[bool, list[BaseTool]] = {}
+
         # Create shared checkpointer for all graphs
         # This enables conversation continuity when users switch models
         # Uses langgraph-checkpoint-aws with S3 offloading for large checkpoints (>350KB)
@@ -132,6 +137,7 @@ class GraphFactory:
         self._a2a_middleware = a2a_middleware or A2ATaskTrackingMiddleware()
         self._auth_middleware = AuthErrorDetectionMiddleware()
         self._todo_middleware = TodoStatusMiddleware()
+        self._loop_detection_middleware = RepeatedToolCallMiddleware(max_repeats=3, window_size=10)
         self._retry_middleware = ToolRetryMiddleware(
             max_retries=config.MAX_RETRIES,
             backoff_factor=config.BACKOFF_FACTOR,
@@ -159,32 +165,7 @@ class GraphFactory:
         Returns:
             BaseChatModel: The created model instance
         """
-        if model_type == "claude-sonnet-4.5":
-            if self.thinking:
-                thinking_params = {"type": "enabled", "budget_tokens": 1024}
-                temperature = 1.0
-            else:
-                thinking_params = {"type": "disabled", "budget_tokens": 0}
-                temperature = 0.0
-
-            return ChatBedrockConverse(
-                model=self.config.get_bedrock_model_id(),
-                temperature=temperature,
-                region_name=self.config.get_bedrock_region(),
-                additional_model_request_fields={"thinking": thinking_params}
-                if thinking_params["type"] == "enabled"
-                else {},
-            )
-        else:
-            # Default to gpt4o (Azure OpenAI)
-            if self.thinking:
-                logger.warning("Thinking mode is only supported for Claude Sonnet 4.5 model.")
-
-            return AzureChatOpenAI(
-                azure_deployment=self.config.get_azure_deployment(),
-                temperature=0.7,
-                model=self.config.get_azure_model_name(),
-            )
+        return create_model(model_type, self.config, self.thinking)
 
     def _get_or_create_model(self, model_type: ModelType) -> BaseChatModel:
         """Get or create a model instance (cached).
@@ -209,15 +190,23 @@ class GraphFactory:
         Returns:
             Complete middleware stack with DynamicToolDispatchMiddleware first
         """
-        # Static tools available to all models
-        static_tools: list[BaseTool] = []
+        # Static tools available to all models (cached to avoid recreation)
+        if is_bedrock not in self._static_tools_cache:
+            static_tools: list[BaseTool] = []
 
-        # Add presigned URL tool for dispatching files to sub-agents
-        static_tools.append(create_presigned_url_tool())
+            # Add time tool for current time and relative date calculations
+            static_tools.append(create_time_tool())
 
-        # Add FinalResponseSchema for Bedrock models
-        if is_bedrock:
-            static_tools.append(_create_final_response_tool())
+            # Add presigned URL tool for dispatching files to sub-agents
+            static_tools.append(create_presigned_url_tool())
+
+            # Add FinalResponseSchema for Bedrock models
+            if is_bedrock:
+                static_tools.append(_create_final_response_tool())
+
+            self._static_tools_cache[is_bedrock] = static_tools
+        else:
+            static_tools = self._static_tools_cache[is_bedrock]
 
         # DynamicToolDispatchMiddleware must be first to intercept model calls
         dynamic_tool_middleware = DynamicToolDispatchMiddleware(static_tools=static_tools)
@@ -225,16 +214,32 @@ class GraphFactory:
         # UserPreferencesMiddleware injects user preferences (language, etc.) into system prompt
         user_preferences_middleware = UserPreferencesMiddleware()
 
-        # Order: DynamicToolDispatch → UserPreferences → Auth → Retry → A2A → Todo
+        # Order: DynamicToolDispatch → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo
         # UserPreferences comes early to modify system prompt before other middleware
+        # LoopDetection comes before Auth/Retry to catch loops early
         return [
             dynamic_tool_middleware,
             user_preferences_middleware,
+            self._loop_detection_middleware,
             self._auth_middleware,
             self._retry_middleware,
             self._a2a_middleware,
             self._todo_middleware,
         ]
+
+    def get_static_tools(self, is_bedrock: bool = False) -> list[BaseTool]:
+        """Get static tools for the given model type.
+
+        Args:
+            is_bedrock: Whether to get tools for Bedrock models (includes FinalResponseSchema)
+
+        Returns:
+            List of static tools (cached)
+        """
+        if is_bedrock not in self._static_tools_cache:
+            # Trigger middleware creation to populate cache
+            self._create_middleware_stack(is_bedrock)
+        return self._static_tools_cache[is_bedrock]
 
     def _create_graph(self, model_type: ModelType) -> CompiledStateGraph:
         """Create a graph for the given model type.
@@ -277,7 +282,11 @@ class GraphFactory:
                 context_schema=GraphRuntimeContext,
             )
 
-        logger.info(f"Graph created for model: {model_type}")
+        # Override deepagents default recursion_limit (1000) with configured value
+        # This prevents infinite loops from reaching the high default limit
+        compiled_graph = compiled_graph.with_config({"recursion_limit": self.config.MAX_RECURSION_LIMIT})
+        logger.info(f"Graph created for model: {model_type} with recursion_limit={self.config.MAX_RECURSION_LIMIT}")
+
         return compiled_graph
 
     def get_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:

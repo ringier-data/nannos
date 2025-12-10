@@ -6,20 +6,22 @@ sub-agents that run in-process but communicate via the A2A protocol.
 Unlike the file-analyzer (simple local agent) or remote A2A agents (network calls),
 DynamicLocalAgentRunnable wraps a full LangGraph agent with:
 - Custom system prompts (user-configurable)
-- Optional MCP tool discovery (lazy-loaded on first invocation)
+- MCP tool discovery from Gatana gateway (lazy-loaded on first invocation)
+- Optional tool whitelist filtering (mcp_tools from config)
 - Standard A2A state responses (completed, input_required, failed)
 - Structured output for explicit task state determination (no guessing)
 
 Architecture:
 - Inherits from LocalA2ARunnable for A2A protocol compliance
 - Lazily creates a LangGraph agent on first invocation
-- If mcp_gateway_url is set, discovers tools from that gateway (overriding orchestrator tools)
-- If mcp_gateway_url is None, inherits tools from orchestrator's tool_registry
+- Always uses Gatana MCP gateway for tool discovery
+- If config.mcp_tools is set, filters discovered tools by that whitelist
+- If config.mcp_tools is None/empty, inherits tools from orchestrator's tool_registry
 - Uses structured output (SubAgentResponseSchema) for explicit task state
 
 Use Case:
-Users can configure personal sub-agents via DynamoDB with custom prompts and optional
-dedicated MCP servers, enabling specialized assistants without deploying separate A2A services.
+Users can configure personal sub-agents via playground backend with custom prompts and optional
+tool whitelists, enabling specialized assistants without deploying separate A2A services.
 """
 
 import logging
@@ -31,16 +33,66 @@ from langchain.agents.structured_output import AutoStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from .base import LocalA2ARunnable
-from .models import LocalSubAgentConfig
+from ..utils import get_language_display_name
+from .base import LocalA2ARunnable, SubAgentInput
+from .models import LocalLangGraphSubAgentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_tool_schema(tool: BaseTool) -> BaseTool:
+    """Validate and fix MCP tool schema for OpenAI API compatibility.
+
+    OpenAI requires that if a 'parameters' field is present, it must be a valid
+    JSON Schema object with a 'properties' field (even if empty). MCP tools
+    sometimes have missing or invalid parameters schemas.
+
+    This validation is critical for streaming SSE responses. If a tool schema
+    is invalid, OpenAI returns a 400 error before streaming begins, causing
+    the A2A server to return JSON instead of SSE, which breaks A2A clients
+    expecting text/event-stream responses.
+
+    This function modifies the tool's args_schema to ensure it has a valid
+    parameters structure. Tools without args_schema or with invalid schemas
+    are fixed by creating a minimal valid schema.
+
+    Args:
+        tool: BaseTool instance from MCP discovery
+
+    Returns:
+        Same tool instance (modified in place to fix schema)
+    """
+    # Import create_model for schema creation
+    from pydantic import create_model
+
+    # Check if tool has args_schema
+    if not hasattr(tool, "args_schema") or tool.args_schema is None:
+        # Create an empty args_schema
+        tool.args_schema = create_model(f"{tool.name}Args")
+        logger.debug(f"Tool '{tool.name}' had no args_schema, created empty schema")
+        return tool
+
+    # Verify the schema by converting to OpenAI format
+    tool_dict = convert_to_openai_tool(tool)
+    function_dict = tool_dict.get("function", {})
+    parameters = function_dict.get("parameters")
+
+    # If parameters is missing, not a dict, or missing properties field, fix it
+    if parameters is None or not isinstance(parameters, dict) or "properties" not in parameters:
+        # Create an empty args_schema to fix the tool
+        tool.args_schema = create_model(f"{tool.name}Args")
+        logger.warning(
+            f"Tool '{tool.name}' had invalid parameters schema (missing properties field). Fixed with empty schema."
+        )
+
+    return tool
 
 
 class SubAgentResponseSchema(BaseModel):
@@ -115,8 +167,9 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
     This runnable wraps a LangGraph agent that is lazily created on first invocation.
     It supports:
     - Custom system prompts from user configuration
-    - Optional MCP gateway for tool discovery (lazy-loaded)
-    - Inheritance of orchestrator tools when no MCP gateway is specified
+    - MCP tool discovery from Gatana gateway (lazy-loaded)
+    - Optional tool whitelist filtering (config.mcp_tools)
+    - Inheritance of orchestrator tools when no whitelist is specified
     - Standard A2A protocol responses (completed, input_required, failed)
 
     The agent is created lazily to:
@@ -125,31 +178,39 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
     3. Avoid resource consumption for agents that may never be called
 
     Attributes:
-        config: LocalSubAgentConfig with name, description, system_prompt, mcp_gateway_url
+        config: LocalLangGraphSubAgentConfig with name, description, system_prompt, mcp_tools
         model: The LangGraph model to use for the agent
-        orchestrator_tools: Tools inherited from orchestrator (used if mcp_gateway_url is None)
+        orchestrator_tools: Tools inherited from orchestrator (used if mcp_tools is None/empty)
         _agent: Lazily-created LangGraph agent (cached after first creation)
-        _discovered_tools: Tools discovered from MCP gateway (cached after discovery)
+        _discovered_tools: Tools discovered from Gatana MCP gateway (cached after discovery)
     """
 
     def __init__(
         self,
-        config: LocalSubAgentConfig,
+        config: LocalLangGraphSubAgentConfig,
         model: BaseChatModel,
         orchestrator_tools: Optional[List[BaseTool]] = None,
         oauth2_client: Optional[OidcOAuth2Client] = None,
         user_token: Optional[str] = None,
         checkpointer: Optional[BaseCheckpointSaver] = None,
+        user_name: Optional[str] = None,
+        user_language: Optional[str] = None,
+        user_timezone: Optional[str] = None,
+        custom_prompt: Optional[str] = None,
     ):
         """Initialize the dynamic local agent runnable.
 
         Args:
-            config: Configuration with name, description, system_prompt, mcp_gateway_url
+            config: Configuration with name, description, system_prompt, mcp_tools
             model: The LangGraph model to use for the agent
-            orchestrator_tools: Tools inherited from orchestrator (used if config.mcp_gateway_url is None)
-            oauth2_client: OAuth2 client for token exchange (required if mcp_gateway_url is set)
-            user_token: User's access token for token exchange (required if mcp_gateway_url is set)
+            orchestrator_tools: Tools inherited from orchestrator (used if config.mcp_tools is None/empty)
+            oauth2_client: OAuth2 client for token exchange (required for MCP tool discovery)
+            user_token: User's access token for token exchange (required for MCP tool discovery)
             checkpointer: Shared checkpointer for multi-turn conversation state (e.g., DynamoDBSaver)
+            user_name: User's display name for personalization
+            user_language: User's preferred language (ISO 639-1 code)
+            user_timezone: User's timezone (IANA timezone name)
+            custom_prompt: User's custom prompt addendum
         """
         self.config = config
         self.model = model
@@ -157,6 +218,10 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         self.oauth2_client = oauth2_client
         self.user_token = user_token
         self.checkpointer = checkpointer
+        self.user_name = user_name
+        self.user_language = user_language
+        self.user_timezone = user_timezone
+        self.custom_prompt = custom_prompt
         self._agent = None
         self._discovered_tools: Optional[List[BaseTool]] = None
 
@@ -170,25 +235,72 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         """Return the agent description from configuration."""
         return self.config.description
 
-    async def _discover_mcp_tools(self) -> List[BaseTool]:
-        """Discover tools from the configured MCP gateway with authentication.
+    def _build_preferences_addendum(self) -> str:
+        """Build the user preferences addendum for the system prompt.
 
-        This is called lazily on first invocation if mcp_gateway_url is set.
+        TODO: this could also be configured per sub-agent in the future.
+
+        Uses the same logic as UserPreferencesMiddleware to ensure consistency
+        between orchestrator and sub-agent behavior.
+
+        Returns:
+            Formatted string to append to the system prompt
+        """
+        preferences_parts: List[str] = []
+
+        # Language preference
+        if self.user_language:
+            language_name = get_language_display_name(self.user_language)
+            preferences_parts.append(
+                f"- **Response Language**: You MUST respond in {language_name} ({self.user_language}). "
+                f"All your responses, explanations, and communications with the user should be in {language_name}. "
+                f"However, technical terms, code, tool names, and API calls should remain in their original form."
+            )
+
+        # Timezone preference
+        if self.user_timezone:
+            preferences_parts.append(
+                f"- **User Timezone**: The user's timezone is {self.user_timezone}. "
+                f"When using the get_current_time tool, pass timezone='{self.user_timezone}' to get times in their local timezone."
+            )
+
+        # Custom prompt addendum from user settings
+        if self.custom_prompt:
+            preferences_parts.append(f"- **Custom Instructions**: {self.custom_prompt}")
+
+        if not preferences_parts:
+            return ""
+
+        addendum = "\n\n**User Preferences:**\n" + "\n".join(preferences_parts)
+
+        logger.debug(
+            f"DynamicLocalAgentRunnable: Built preferences addendum for {self.name}: "
+            f"language={self.user_language}, timezone={self.user_timezone}, "
+            f"custom_prompt={'set' if self.custom_prompt else 'none'}"
+        )
+
+        return addendum
+
+    async def _discover_mcp_tools(self) -> List[BaseTool]:
+        """Discover tools from Gatana MCP gateway with authentication.
+
+        This is called lazily on first invocation if config.mcp_tools is set.
         Uses the same token exchange flow as the orchestrator's ToolDiscoveryService
         to authenticate with the MCP gateway.
 
-        The discovered tools override orchestrator tools entirely.
+        If config.mcp_tools is set, only those tools are returned (whitelist filtering).
+        The discovered tools override orchestrator tools entirely when whitelist is specified.
 
         Returns:
-            List of discovered BaseTool instances
+            List of discovered BaseTool instances (filtered by whitelist if specified)
 
         Raises:
             Exception: If MCP discovery fails (will result in failed state)
         """
-        if not self.config.mcp_gateway_url:
-            return []
+        # Gatana MCP gateway URL (hardcoded - no longer configurable per sub-agent)
+        mcp_gateway_url = "https://alloych.gatana.ai/mcp"
 
-        logger.info(f"Discovering MCP tools for {self.name} from {self.config.mcp_gateway_url}")
+        logger.info(f"Discovering MCP tools for {self.name} from Gatana gateway")
 
         try:
             # Build connection headers - use token exchange if oauth2_client is available
@@ -212,9 +324,9 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
             client = MultiServerMCPClient(
                 connections={
-                    "dynamic": StreamableHttpConnection(
+                    "gatana": StreamableHttpConnection(
                         transport="streamable_http",
-                        url=self.config.mcp_gateway_url,
+                        url=mcp_gateway_url,
                         headers=headers if headers else None,
                     )
                 }
@@ -222,7 +334,13 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
             tools = await client.get_tools()
             logger.info(f"Discovered {len(tools)} MCP tools for {self.name}")
-            return tools
+
+            tools = [tool for tool in tools if tool.name in (self.config.mcp_tools or [])]
+            logger.info(f"Filtered to {len(tools)} tools based on whitelist for {self.name}")
+
+            # Validate tool schemas to prevent OpenAI API errors
+            validated_tools = [_validate_tool_schema(tool) for tool in tools]
+            return validated_tools
 
         except Exception as e:
             logger.error(f"Failed to discover MCP tools for {self.name}: {e}")
@@ -234,19 +352,36 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         If MCP tools were discovered, use those (override).
         Otherwise, use orchestrator tools (inheritance).
 
+        All tools are validated to ensure they have proper OpenAI schema format.
+
         Returns:
             List of tools to use for the agent
         """
         if self._discovered_tools is not None:
-            return self._discovered_tools
-        return self.orchestrator_tools
+            logger.info(f"orchestrator tools: {self.orchestrator_tools}")
+            # TODO: we could add more fine grained control from the sub-agent config
+            basic_tools = [tool for tool in self.orchestrator_tools if tool.name in ["get_current_time"]]
+            basic_tool_names = [tool.name for tool in basic_tools]
+            logger.info(
+                f"Using MCP tools + basic tools for '{self.name}': "
+                f"{len(self._discovered_tools)} MCP tools + {len(basic_tools)} basic tools {basic_tool_names}"
+            )
+            return self._discovered_tools + basic_tools
+        # Validate orchestrator tools before returning them
+        # This ensures tools inherited from orchestrator also have valid schemas
+        orchestrator_tool_names = [tool.name for tool in self.orchestrator_tools]
+        logger.info(
+            f"Using orchestrator tools for '{self.name}': "
+            f"{len(self.orchestrator_tools)} tools {orchestrator_tool_names}"
+        )
+        return [_validate_tool_schema(tool) for tool in self.orchestrator_tools]
 
     async def _ensure_agent(self) -> Any:
         """Ensure the LangGraph agent is created (lazy initialization).
 
         On first call:
-        1. If mcp_gateway_url is set, discover tools from that gateway
-        2. Otherwise, use orchestrator tools
+        1. If mcp_tools is set, discover tools from Gatana gateway with whitelist filtering
+        2. Otherwise, use orchestrator tools (inheritance)
         3. Create the LangGraph agent with structured output for task state
 
         The agent uses SubAgentResponseSchema to explicitly determine task state,
@@ -261,15 +396,19 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         if self._agent is not None:
             return self._agent
 
-        # Discover MCP tools if configured (lazy, first invocation only)
-        if self.config.mcp_gateway_url and self._discovered_tools is None:
+        # Discover MCP tools if whitelist is configured (lazy, first invocation only)
+        if self.config.mcp_tools and self._discovered_tools is None:
             self._discovered_tools = await self._discover_mcp_tools()
 
         tools = self._get_effective_tools()
         logger.info(f"Creating LangGraph agent '{self.name}' with {len(tools)} tools")
 
-        # Build system prompt with A2A protocol addendum
+        # Build system prompt with A2A protocol addendum and user preferences
         system_prompt = self.config.system_prompt + A2A_PROTOCOL_ADDENDUM
+        preferences_addendum = self._build_preferences_addendum()
+        if preferences_addendum:
+            system_prompt += preferences_addendum
+            logger.debug(f"Added user preferences addendum to {self.name} system prompt")
 
         # Check if this is a Bedrock model (needs tool-based structured output)
         is_bedrock = hasattr(self.model, "_client") and "bedrock" in str(type(self.model)).lower()
@@ -297,8 +436,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
     async def _process(
         self,
-        content: str,
-        context_id: Optional[str],
+        input_data: SubAgentInput,
     ) -> Dict[str, Any]:
         """Process the input using the LangGraph agent.
 
@@ -306,8 +444,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         Translates the agent's response into A2A protocol format.
 
         Args:
-            content: The message content to process
-            context_id: Optional context ID for conversation continuity
+            input_data: The complete sub-agent input with content, IDs, and tracking
 
         Returns:
             Dict with 'messages' and A2A metadata (state, is_complete, etc.)
@@ -324,6 +461,10 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
         TODO: shall we handle streaming responses here?
         """
+        # Extract content and IDs from input_data
+        content = self._extract_message_content(input_data)
+        context_id, task_id = self._extract_tracking_ids(input_data)
+
         try:
             # Ensure agent is created (lazy initialization)
             agent = await self._ensure_agent()
@@ -338,7 +479,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             result = await agent.ainvoke(agent_input, config=config)
 
             # Extract response from agent result
-            return self._translate_agent_result(result, context_id)
+            return self._translate_agent_result(result, context_id, task_id)
 
         except Exception as e:
             logger.exception(f"Error in dynamic agent '{self.name}': {e}")
@@ -348,17 +489,20 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
                 return self._build_error_response(
                     f"Failed to initialize agent tools: {e}",
                     context_id=context_id,
+                    task_id=task_id,
                 )
 
             return self._build_error_response(
                 f"Agent execution error: {e}",
                 context_id=context_id,
+                task_id=task_id,
             )
 
     def _translate_agent_result(
         self,
         result: Dict[str, Any],
         context_id: Optional[str],
+        task_id: Optional[str],
     ) -> Dict[str, Any]:
         """Translate LangGraph agent result to A2A protocol format.
 
@@ -371,6 +515,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         Args:
             result: The LangGraph agent's result dict
             context_id: Optional context ID for conversation continuity
+            task_id: Optional task ID for this invocation
 
         Returns:
             Dict with 'messages' and A2A metadata
@@ -378,7 +523,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         # Check for structured_response (AutoStrategy for OpenAI)
         structured_response = result.get("structured_response")
         if structured_response and isinstance(structured_response, SubAgentResponseSchema):
-            return self._build_response_from_schema(structured_response, context_id)
+            return self._build_response_from_schema(structured_response, context_id, task_id)
 
         # Check messages for tool call with SubAgentResponseSchema (Bedrock)
         messages = result.get("messages", [])
@@ -388,7 +533,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
                 try:
                     # The tool returns a SubAgentResponseSchema instance
                     if isinstance(msg.content, SubAgentResponseSchema):
-                        return self._build_response_from_schema(msg.content, context_id)
+                        return self._build_response_from_schema(msg.content, context_id, task_id)
                 except Exception as e:
                     logger.warning(f"Failed to parse SubAgentResponseSchema from tool message: {e}")
 
@@ -398,7 +543,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
                     if tool_call.get("name") == "SubAgentResponseSchema":
                         try:
                             schema = SubAgentResponseSchema(**tool_call.get("args", {}))
-                            return self._build_response_from_schema(schema, context_id)
+                            return self._build_response_from_schema(schema, context_id, task_id)
                         except Exception as e:
                             logger.warning(f"Failed to parse SubAgentResponseSchema from tool_call: {e}")
 
@@ -408,42 +553,49 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             last_message = messages[-1]
             content = last_message.content if hasattr(last_message, "content") else str(last_message)
             logger.warning(f"No structured response found for '{self.name}', falling back to completed state")
-            return self._build_success_response(content, context_id=context_id)
+            return self._build_success_response(content, context_id=context_id, task_id=task_id)
 
         return self._build_error_response(
             "Agent returned no response",
             context_id=context_id,
+            task_id=task_id,
         )
 
     def _build_response_from_schema(
         self,
         schema: SubAgentResponseSchema,
         context_id: Optional[str],
+        task_id: Optional[str],
     ) -> Dict[str, Any]:
         """Build A2A response from SubAgentResponseSchema.
 
         Args:
             schema: The structured response from the agent
             context_id: Optional context ID for conversation continuity
+            task_id: Optional task ID for this invocation
 
         Returns:
             Dict with 'messages' and A2A metadata
         """
         if schema.task_state == "completed":
-            return self._build_success_response(schema.message, context_id=context_id)
+            return self._build_success_response(schema.message, context_id=context_id, task_id=task_id)
         elif schema.task_state == "input_required":
-            return self._build_input_required_response(schema.message, context_id=context_id)
+            return self._build_input_required_response(schema.message, context_id=context_id, task_id=task_id)
         else:  # failed
-            return self._build_error_response(schema.message, context_id=context_id)
+            return self._build_error_response(schema.message, context_id=context_id, task_id=task_id)
 
 
 def create_dynamic_local_subagent(
-    config: LocalSubAgentConfig,
+    config: LocalLangGraphSubAgentConfig,
     model: BaseChatModel,
     orchestrator_tools: Optional[List[BaseTool]] = None,
     oauth2_client: Optional[OidcOAuth2Client] = None,
     user_token: Optional[str] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
+    user_name: Optional[str] = None,
+    user_language: Optional[str] = None,
+    user_timezone: Optional[str] = None,
+    custom_prompt: Optional[str] = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
@@ -451,22 +603,26 @@ def create_dynamic_local_subagent(
     This can be registered in the orchestrator's subagent_registry for use with the task tool.
 
     Args:
-        config: LocalSubAgentConfig with name, description, system_prompt, mcp_gateway_url
+        config: LocalLangGraphSubAgentConfig with name, description, system_prompt, mcp_tools
         model: The LangGraph model to use for the agent
-        orchestrator_tools: Tools inherited from orchestrator (used if config.mcp_gateway_url is None)
-        oauth2_client: OAuth2 client for token exchange (required if mcp_gateway_url is set)
-        user_token: User's access token for token exchange (required if mcp_gateway_url is set)
+        orchestrator_tools: Tools inherited from orchestrator (used if config.mcp_tools is None/empty)
+        oauth2_client: OAuth2 client for token exchange (required for MCP tool discovery)
+        user_token: User's access token for token exchange (required for MCP tool discovery)
         checkpointer: Shared checkpointer for multi-turn conversation state (e.g., DynamoDBSaver)
+        user_name: User's display name for personalization
+        user_language: User's preferred language (ISO 639-1 code)
+        user_timezone: User's timezone (IANA timezone name)
+        custom_prompt: User's custom prompt addendum
 
     Returns:
         CompiledSubAgent that can be registered with the orchestrator
 
     Example:
-        config = LocalSubAgentConfig(
+        config = LocalLangGraphSubAgentConfig(
             name="data-analyst",
             description="Analyzes data and generates insights",
             system_prompt="You are a data analysis expert...",
-            mcp_gateway_url=None,  # Inherit orchestrator tools
+            mcp_tools=["query_database", "generate_chart"],  # Whitelist specific tools
         )
         subagent = create_dynamic_local_subagent(config, model, orchestrator_tools)
         subagent_registry["data-analyst"] = subagent
@@ -478,6 +634,10 @@ def create_dynamic_local_subagent(
         oauth2_client=oauth2_client,
         user_token=user_token,
         checkpointer=checkpointer,
+        user_name=user_name,
+        user_language=user_language,
+        user_timezone=user_timezone,
+        custom_prompt=custom_prompt,
     )
 
     return CompiledSubAgent(

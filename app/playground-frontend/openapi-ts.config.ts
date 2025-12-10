@@ -1,16 +1,12 @@
 import { defineConfig } from '@hey-api/openapi-ts';
 
-const url = process.env.OVERRIDE_URL || `https://chat.d.nannos.rcplus.io/api/v1/openapi.json`;
+const url = process.env.OVERRIDE_URL || `http://localhost:5001/api/v1/openapi.json`;
 module.exports = defineConfig({
   input: url,
   output: './src/api/generated',
   plugins: [
     {
-      enums: {
-        enabled: true,
-        mode: 'typescript',
-        case: 'preserve',
-      },
+      enums: false,  // Use union types instead of TypeScript enums for erasableSyntaxOnly compatibility
       name: '@hey-api/typescript',
     },
     {

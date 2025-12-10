@@ -44,6 +44,16 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_secret_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_service_password }}'
+              - Sid: "GetProjectSsmParams"
+                Effect: "Allow"
+                Action:
+                  - "ssm:DescribeParameters"
+                  - "ssm:GetParameter"
+                  - "ssm:GetParameters"
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/{{ software_component }}/*"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca"
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-ecs-execution-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }
@@ -83,19 +93,6 @@ Resources:
                   - 'dynamodb:DescribeTable'
                 Resource:
                   - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-arn'
-              - Sid: 'DynamoDBUsersTableAccess'
-                Effect: 'Allow'
-                Action:
-                  - 'dynamodb:Query'
-                  - 'dynamodb:GetItem'
-                  - 'dynamodb:PutItem'
-                  - 'dynamodb:UpdateItem'
-                  - 'dynamodb:DeleteItem'
-                  - 'dynamodb:BatchGetItem'
-                  - 'dynamodb:BatchWriteItem'
-                  - 'dynamodb:DescribeTable'
-                Resource:
-                  - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
               - Sid: 'DynamoDBConversationsTableAccess'
                 Effect: 'Allow'
                 Action:
@@ -134,6 +131,22 @@ Resources:
                     - '${BucketArn}/*'
                     - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
                   - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+              - Sid: 'ReadWriteVaultSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                  - 'ssm:PutParameter'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_vault_prefix }}*'
+              - Sid: 'DecryptionEncryptionUsingKmsKey'
+                Effect: 'Allow'
+                Action:
+                  - 'kms:DescribeKey'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:Decrypt'
+                  - 'kms:Encrypt'
+                Resource: !ImportValue '{{ project_id }}-sensitive-data-kms-key-arn'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-task-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }
@@ -170,7 +183,6 @@ Resources:
             - { Name: "SOFTWARE_COMPONENT", Value: "{{ software_component }}" }
             - { Name: "PROJECT_ID", Value: "{{ project_id }}" }
             - { Name: "REPOSITORY", Value: "{{ git_info.repo_name }}" }
-            - { Name: "DYNAMODB_USERS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-users-table-name' }
             - { Name: "DYNAMODB_SESSIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-name' }
             - { Name: "DYNAMODB_CONVERSATIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-conversations-table-name' }
             - { Name: "DYNAMODB_MESSAGES_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-messages-table-name' }
@@ -179,10 +191,28 @@ Resources:
             - { Name: "OIDC_ISSUER", Value: '{{ oidc_issuer }}' }
             - { Name: "BASE_DOMAIN", Value: '{{ chat_ui_fqdn }}' }
             - { Name: "ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
+            - { Name: "VITE_ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
             - { Name: "ORCHESTRATOR_CLIENT_ID", Value: '{{ orchestrator_oidc_client_id }}' }
+            - {
+                Name: POSTGRES_HOST,
+                Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",
+              }
+            - { Name: POSTGRES_PORT, Value: "{{ rds_port }}" }
+            - { Name: POSTGRES_DB, Value: "{{ rds_db_name }}" }
+            - { Name: POSTGRES_USER, Value: "{{ rds_service_username }}" }
+            - { Name: POSTGRES_SCHEMA, Value: "{{ rds_schema }}" }
+            - { Name: POSTGRES_USE_SSL, Value: "true" }
+            - { Name: POSTGRES_VERIFY_SSL, Value: "true" }
+            - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
+            - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
           Secrets:
             - { Name: "OIDC_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_oidc_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
+            - { Name: "POSTGRES_PASSWORD", ValueFrom: '{{ ssmkey_rds_service_password }}' }
+            - {
+                Name: "POSTGRES_SSL_CA",
+                ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",
+              }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8080/api/v1/health\").read()" || exit 1']
             Interval: 60

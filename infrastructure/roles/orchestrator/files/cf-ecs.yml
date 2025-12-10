@@ -101,15 +101,6 @@ Resources:
                     - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
                   - !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
 
-              - Sid: 'DynamoDBUserTableReadAccess'
-                Effect: 'Allow'
-                Action:
-                  - 'dynamodb:Query'
-                  - 'dynamodb:GetItem'
-                  - 'dynamodb:BatchGetItem'
-                  - 'dynamodb:DescribeTable'
-                Resource:
-                  - !ImportValue '{{ project_id }}-{{ software_component }}-users-table-arn'
               - Sid: 'S3FilesReadAccess'
                 Effect: 'Allow'
                 Action:
@@ -128,6 +119,21 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
                   - 'arn:aws:bedrock:*::foundation-model/*'
+              - Sid: 'DecryptionUsingKmsKey'
+                Effect: 'Allow'
+                Action:
+                  - 'kms:DescribeKey'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:Decrypt'
+                Resource:
+                  - !ImportValue '{{ project_id }}-sensitive-data-kms-key-arn'
+              - Sid: 'GetVaultSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_vault_prefix }}*'
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-task-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }
@@ -176,6 +182,7 @@ Resources:
             - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
+            - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
             - { Name: 'JWT_SESSION_EXPIRY_MINUTES', Value: '{{ orchestrator_jwt_session_expiry_minutes }}' }
             - { Name: 'BUDGET_ENABLED', Value: 'true' }
             - { Name: 'BUDGET_MONTHLY_TOKEN_LIMIT', Value: '{{ budget_monthly_token_limit }}' }
@@ -184,6 +191,8 @@ Resources:
             - { Name: "BEDROCK_MODEL_ID", Value: '{{ bedrock_model_id }}' }
             - { Name: "CHECKPOINT_DYNAMODB_TABLE_NAME", Value: '{{ checkpoint_dynamodb_table_name }}' }
             - { Name: "CHECKPOINT_S3_BUCKET_NAME", Value: '{{ checkpoint_s3_bucket_name }}' }
+            - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
+            - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }

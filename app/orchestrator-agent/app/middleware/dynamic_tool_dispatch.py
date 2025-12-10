@@ -171,6 +171,41 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         }
         return enhanced_tool
 
+    def _validate_tool_schema(self, tool_dict: dict[str, Any]) -> dict[str, Any]:
+        """Validate and fix tool schema for OpenAI API compatibility.
+
+        OpenAI requires that if a 'parameters' field is present, it must be a valid
+        JSON Schema object with a 'properties' field (even if empty). MCP tools
+        sometimes have missing or invalid parameters schemas.
+
+        This validation is critical for streaming SSE responses. If a tool schema
+        is invalid, OpenAI returns a 400 error before streaming begins, causing
+        the A2A server to return JSON instead of SSE, which breaks A2A clients
+        expecting text/event-stream responses.
+
+        Args:
+            tool_dict: Tool in OpenAI dict format
+
+        Returns:
+            Tool dict with validated parameters schema
+        """
+        function_dict = tool_dict.get("function", {})
+        parameters = function_dict.get("parameters")
+
+        # If parameters is missing or not a dict, set it to an empty object schema
+        if parameters is None or not isinstance(parameters, dict):
+            function_dict["parameters"] = {
+                "type": "object",
+                "properties": {},
+            }
+        # If parameters exists but missing 'properties', add it
+        elif "properties" not in parameters:
+            parameters["properties"] = {}
+
+        # Ensure the updated function dict is in the tool dict
+        tool_dict["function"] = function_dict
+        return tool_dict
+
     def _get_tools_as_dicts(
         self, user_context: GraphRuntimeContext, original_tools: list[Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -201,6 +236,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             if isinstance(tool, BaseTool):
                 if tool.name not in seen_names:
                     tool_dict = convert_to_openai_tool(tool)
+                    # Validate schema for OpenAI API compatibility
+                    tool_dict = self._validate_tool_schema(tool_dict)
                     # Enhance task tool with A2A agents (description + enum)
                     if tool.name == "task":
                         tool_dict = self._enhance_task_tool_schema(tool_dict, user_context)
@@ -209,6 +246,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             elif isinstance(tool, dict):
                 name = tool.get("function", {}).get("name") or tool.get("name")
                 if name and name not in seen_names:
+                    # Validate schema for OpenAI API compatibility
+                    tool = self._validate_tool_schema(tool)
                     # Enhance task tool with A2A agents (description + enum)
                     if name == "task":
                         tool = self._enhance_task_tool_schema(tool, user_context)
@@ -218,7 +257,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # 2. Add static tools from middleware (e.g., FinalResponseSchema)
         for tool in self.static_tools.values():
             if tool.name not in seen_names:
-                tool_dicts.append(convert_to_openai_tool(tool))
+                tool_dict = convert_to_openai_tool(tool)
+                # Validate schema for OpenAI API compatibility
+                tool_dict = self._validate_tool_schema(tool_dict)
+                tool_dicts.append(tool_dict)
                 seen_names.add(tool.name)
 
         # 3. Add user's dynamic tools (may override previous tools by name)
@@ -227,10 +269,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 # User tool overrides existing tool - remove old and add user's
                 tool_dicts = [t for t in tool_dicts if t.get("function", {}).get("name") != name]
             if isinstance(tool, BaseTool):
-                tool_dicts.append(convert_to_openai_tool(tool))
+                tool_dict = convert_to_openai_tool(tool)
+                # Ensure parameters schema is valid for OpenAI API
+                tool_dict = self._validate_tool_schema(tool_dict)
+                tool_dicts.append(tool_dict)
             elif isinstance(tool, dict):
-                # Already in dict format
-                tool_dicts.append(tool)
+                # Already in dict format, but still validate
+                tool_dict = self._validate_tool_schema(tool)
+                tool_dicts.append(tool_dict)
             seen_names.add(name)
 
         return tool_dicts

@@ -5,6 +5,7 @@ import type { AgentInfo, AgentResponseData, ClientInitializedData, SendMessagePa
 interface SocketContextType {
   socket: Socket | null;
   isConnected: boolean;
+  isSocketReady: boolean;
   agentInfo: AgentInfo | null;
   initializeClient: (settings: Settings, sessionId: string) => Promise<boolean>;
   sendMessage: (payload: SendMessagePayload) => void;
@@ -16,14 +17,17 @@ const SocketContext = createContext<SocketContextType | undefined>(undefined);
 interface SocketProviderProps {
   children: ReactNode;
   socketPath?: string;
+  customHeaders?: Record<string, string>;
 }
 
-export function SocketProvider({ children, socketPath = '/api/v1/socket.io' }: SocketProviderProps) {
+export function SocketProvider({ children, socketPath = '/api/v1/socket.io', customHeaders = {} }: SocketProviderProps) {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [isSocketReady, setIsSocketReady] = useState(false);
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const responseCallbacksRef = useRef<Set<(data: AgentResponseData) => void>>(new Set());
   const initResolveRef = useRef<((value: boolean) => void) | null>(null);
+  const customHeadersRef = useRef(customHeaders);
 
   // Initialize socket connection
   useEffect(() => {
@@ -31,11 +35,13 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io' }: S
 
     newSocket.on('connect', () => {
       console.log('Socket connected');
+      setIsSocketReady(true);
     });
 
     newSocket.on('disconnect', () => {
       console.log('Socket disconnected');
       setIsConnected(false);
+      setIsSocketReady(false);
       setAgentInfo(null);
     });
 
@@ -91,7 +97,7 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io' }: S
 
         socket.emit('initialize_client', {
           url: settings.agentUrl,
-          customHeaders: {},
+          customHeaders: customHeadersRef.current,
           sessionId,
         });
       });
@@ -122,6 +128,7 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io' }: S
       value={{
         socket,
         isConnected,
+        isSocketReady,
         agentInfo,
         initializeClient,
         sendMessage,

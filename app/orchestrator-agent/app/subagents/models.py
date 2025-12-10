@@ -8,53 +8,15 @@ Also includes configuration models for dynamic local sub-agents.
 """
 
 import json
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Literal, Optional
 
 from a2a.types import Message, Task, TaskState
 from langchain.messages import AIMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field
 
 
-class LocalSubAgentConfig(BaseModel):
-    """Configuration for a dynamically provisioned local sub-agent.
-
-    Local sub-agents are LangGraph agents that run in-process (not remote A2A servers)
-    but follow the A2A protocol for response format. They are configured per-user
-    and instantiated at runtime.
-
-    Attributes:
-        name: Unique identifier for the sub-agent (used in task tool enum).
-        model_name: Optional model name override for this sub-agent (inherits orchestrator model if None).
-        description: Human-readable description shown in task tool description.
-        system_prompt: The system prompt that defines the agent's behavior.
-        mcp_gateway_url: Optional MCP gateway URL for tool discovery.
-            - If None: The sub-agent inherits tools from the orchestrator.
-            - If set: Tools are discovered lazily from this MCP gateway on first
-              invocation and override orchestrator tools entirely.
-
-    Example DynamoDB JSON:
-        {
-            "local_subagents": [
-                {
-                    "name": "data-analyst",
-                    "description": "Analyzes data and generates insights",
-                    "system_prompt": "You are a data analysis expert...",
-                    "mcp_gateway_url": null
-                },
-                {
-                    "name": "code-reviewer",
-                    "description": "Reviews code for best practices",
-                    "system_prompt": "You are a senior code reviewer...",
-                    "mcp_gateway_url": "https://code-tools.example.com/mcp"
-                }
-            ]
-        }
-    """
-
-    model_name: Optional[str] = Field(
-        default=None,
-        description="Optional model name override for this sub-agent (inherits orchestrator model if None)",
-    )
+class BaseLocalSubAgentConfig(BaseModel):
+    """Base configuration for local sub-agents."""
 
     name: str = Field(
         ...,
@@ -68,15 +30,92 @@ class LocalSubAgentConfig(BaseModel):
         description="Human-readable description shown in task tool description",
         min_length=1,
     )
+
+
+class LocalFoundrySubAgentConfig(BaseLocalSubAgentConfig):
+    """Configuration for a dynamically provisioned Foundry sub-agent.
+
+    Foundry sub-agents are LangGraph agents that run in-process (not remote A2A servers)
+    but follow the A2A protocol for response format. They are configured per-user
+    and instantiated at runtime.
+
+    Attributes:
+        name: Unique identifier for the sub-agent (used in task tool enum).
+        description: Human-readable description shown in task tool description.
+        foundry_hostname: Foundry hostname (e.g., https://blumen.palantirfoundry.de).
+        foundry_client_id: OAuth2 client ID for Foundry authentication.
+        foundry_client_secret_ref: SSM Parameter Store name for Foundry client secret.
+        foundry_ontology_rid: Ontology RID to use for this agent.
+        foundry_query_api_name: Query API name to invoke for this agent.
+        foundry_scopes: List of OAuth2 scopes required for this agent.
+        foundry_version: Optional version of the Foundry agent configuration.
+    """
+
+    type: Literal["foundry"] = "foundry"
+    hostname: str = Field(
+        default="https://blumen.palantirfoundry.de",
+        description="Foundry instance hostname (e.g., 'https://blumen.palantirfoundry.de')",
+    )
+    client_id: str = Field(..., description="OAuth2 client ID for Foundry authentication")
+    client_secret_ref: str = Field(..., description="SSM Parameter Store name for Foundry client secret")
+    ontology_rid: str = Field(..., description="Ontology RID (required)")
+    query_api_name: str = Field(..., description="Query API name to execute (e.g., 'a2ATicketWriterAgent')")
+    scopes: list[str] = Field(..., description="OAuth2 scopes for Foundry API access")
+    version: Optional[str] = Field(None, description="Optional version of the Foundry agent configuration")
+
+
+class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
+    """Configuration for a dynamically provisioned local sub-agent.
+
+    Local sub-agents are LangGraph agents that run in-process (not remote A2A servers)
+    but follow the A2A protocol for response format. They are configured per-user
+    and instantiated at runtime.
+
+    Attributes:
+        name: Unique identifier for the sub-agent (used in task tool enum).
+        model_name: Optional model name override for this sub-agent (inherits orchestrator model if None).
+        description: Human-readable description shown in task tool description.
+        system_prompt: The system prompt that defines the agent's behavior.
+        mcp_tools: Optional list of MCP tool names to enable for this sub-agent.
+            - If None or empty: The sub-agent inherits tools from the orchestrator.
+            - If set: Only these tools from Gatana MCP gateway are enabled for the sub-agent.
+
+    Example DynamoDB JSON:
+        {
+            "local_subagents": [
+                {
+                    "name": "data-analyst",
+                    "description": "Analyzes data and generates insights",
+                    "system_prompt": "You are a data analysis expert...",
+                    "mcp_tools": ["query_database", "generate_chart"]
+                },
+                {
+                    "name": "code-reviewer",
+                    "description": "Reviews code for best practices",
+                    "system_prompt": "You are a senior code reviewer...",
+                    "mcp_tools": null
+                }
+            ]
+        }
+    """
+
+    type: Literal["langgraph"] = "langgraph"
+    model_name: Optional[str] = Field(
+        default=None,
+        description="Optional model name override for this sub-agent (inherits orchestrator model if None)",
+    )
     system_prompt: str = Field(
         ...,
         description="The system prompt that defines the agent's behavior",
         min_length=1,
     )
-    mcp_gateway_url: Optional[str] = Field(
+    mcp_tools: Optional[list[str]] = Field(
         default=None,
-        description="Optional MCP gateway URL for tool discovery. If None, inherits orchestrator tools.",
+        description="Optional list of MCP tool names enabled for this sub-agent. If None, inherits orchestrator tools.",
     )
+
+
+LocalSubAgentConfig = Annotated[LocalFoundrySubAgentConfig | LocalLangGraphSubAgentConfig, Discriminator("type")]
 
 
 class A2ATaskResponse(BaseModel):

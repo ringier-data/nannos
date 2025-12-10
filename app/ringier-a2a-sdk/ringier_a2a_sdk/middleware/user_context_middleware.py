@@ -110,6 +110,8 @@ class UserContextFromRequestStateMiddleware(BaseHTTPMiddleware):
     Extracts user information and stores it in the shared current_user_context
     ContextVar for use by AuthRequestContextBuilder.
 
+    Also extracts the X-Playground-SubAgentConfig-Hash header for playground mode testing.
+
     ARCHITECTURE:
     OidcUserinfoMiddleware → UserContextFromRequestStateMiddleware → A2A RequestHandler → AgentExecutor
     (validates JWT)         (stores in contextvars)                 (builds RequestContext)  (uses user_id)
@@ -133,6 +135,13 @@ class UserContextFromRequestStateMiddleware(BaseHTTPMiddleware):
             user_data = request.state.user
             user_id = user_data.get("sub")  # 'sub' claim is the user ID
 
+            # Extract playground sub-agent config hash from header if present
+            sub_agent_config_hash = None
+            playground_header = request.headers.get("X-Playground-SubAgentConfig-Hash")
+            if playground_header:
+                sub_agent_config_hash = playground_header
+                logger.info(f"Playground mode: sub-agent config hash {sub_agent_config_hash}")
+
             # Store in context variable (async-safe, request-isolated)
             user_context = {
                 "user_id": user_id,
@@ -140,6 +149,7 @@ class UserContextFromRequestStateMiddleware(BaseHTTPMiddleware):
                 "name": user_data.get("name"),
                 "token": user_data.get("token"),
                 "scopes": user_data.get("scopes", []),
+                "sub_agent_config_hash": sub_agent_config_hash,
             }
             current_user_context.set(user_context)
             logger.debug(f"Extracted user context from request.state: user_id={user_id}")

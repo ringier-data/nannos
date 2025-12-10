@@ -33,7 +33,7 @@ from langchain_core.messages import (
 )
 from langchain_openai import AzureChatOpenAI
 
-from .base import LocalA2ARunnable
+from .base import LocalA2ARunnable, SubAgentInput
 
 logger = logging.getLogger(__name__)
 
@@ -194,16 +194,20 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
 
     async def _process(
         self,
-        content: str,
-        context_id: Optional[str],
+        input_data: SubAgentInput,
     ) -> Dict[str, Any]:
         """Analyze file(s) from URLs in the content."""
         # Check for S3 URIs first
+        # Extract content and IDs from input_data
+        content = self._extract_message_content(input_data)
+        context_id, task_id = self._extract_tracking_ids(input_data)
+
         s3_uris = S3_URI_PATTERN.findall(content)
         if s3_uris:
             return self._build_input_required_response(
                 f"I cannot directly access S3 URIs. Please provide a presigned URL for: {s3_uris[0]}",
                 context_id=context_id,
+                task_id=task_id,
             )
 
         # Extract HTTPS URLs
@@ -213,6 +217,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 "No URL found in the request. Please provide a presigned HTTPS URL to analyze, "
                 "e.g., 'What is shown in https://...?'",
                 context_id=context_id,
+                task_id=task_id,
             )
 
         logger.info(f"Analyzing {len(urls)} file(s) from URLs...")
@@ -270,7 +275,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
 
             analysis_message = HumanMessage(content_blocks=content_blocks)
             response = await model.ainvoke([analysis_message])
-            return self._build_success_response(str(response.content), context_id=context_id)
+            return self._build_success_response(str(response.content), context_id=context_id, task_id=task_id)
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (401, 403):
@@ -278,17 +283,20 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                     f"Access denied (HTTP {e.response.status_code}). "
                     "The URL may have expired or be invalid. Please provide a valid presigned URL.",
                     context_id=context_id,
+                    task_id=task_id,
                 )
             elif e.response.status_code == 404:
                 return self._build_input_required_response(
                     "File not found (HTTP 404). Please check the URL and try again.",
                     context_id=context_id,
+                    task_id=task_id,
                 )
             else:
                 logger.error(f"HTTP error fetching file: {e}")
                 return self._build_error_response(
                     f"HTTP error {e.response.status_code} accessing the file.",
                     context_id=context_id,
+                    task_id=task_id,
                 )
 
         except httpx.TimeoutException:
@@ -296,6 +304,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 "Request timed out. The file may be too large or the URL may be slow. "
                 "Please try again or provide a different URL.",
                 context_id=context_id,
+                task_id=task_id,
             )
 
         except Exception as e:
@@ -305,8 +314,9 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 return self._build_input_required_response(
                     f"Could not access the file: {e}. Please ensure the URL is valid.",
                     context_id=context_id,
+                    task_id=task_id,
                 )
-            return self._build_error_response(f"Error analyzing file: {str(e)}", context_id=context_id)
+            return self._build_error_response(f"Error analyzing file: {str(e)}", context_id=context_id, task_id=task_id)
 
 
 # Singleton instance

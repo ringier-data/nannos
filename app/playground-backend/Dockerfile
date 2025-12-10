@@ -32,5 +32,4 @@ COPY --from=backend-builder ${WORKDIR} .
 EXPOSE ${API_PORT}
 # The command to run the server.
 # Note: We must use asgi_app (not app) to include the Socket.IO ASGI wrapper
-WORKDIR ${WORKDIR}/src
-CMD ["/bin/sh", "-c", "../.venv/bin/uvicorn app:asgi_app --host 0.0.0.0 --port ${API_PORT} --log-config ../log_conf.yml --no-access-log --no-use-colors"]
+CMD ["/bin/sh", "-c", "./.venv/bin/uvicorn app:asgi_app --host 0.0.0.0 --port ${API_PORT} --log-config log_conf.yml --no-access-log --no-use-colors"]

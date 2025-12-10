@@ -24,6 +24,7 @@ chat_ui_oidc_client_secret: !vault |
   3034373034376638380a613961653135376437333866376633366564323835366635353061356164
   63346333373935656337346637393033363434316135303231343530653532303234303436656666
   6132363933616134343565373265366531393435663963653330
+ssmkey_vault_prefix: '/{{ project_id }}/{{ software_component }}/vault'
 ssmkey_chat_ui_oidc_client_secret: '/{{ project_id }}/{{ software_component }}/oidc-chat-ui-client-secret'
 ## Orchestrator
 orchestrator_oidc_client_id: 'orchestrator'
@@ -60,3 +61,35 @@ orchestrator_agent_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_
 chat_ui_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
 response_2xx_ratio_threshold: 0.95
 response_2xx_treat_missing_data: 'notBreaching'
+
+# == RDS ==
+preferred_maintenance_window: "mon:04:00-mon:06:00"
+rds_schema: "{{ project_id }}"
+rds_db_name: "{{ project_id }}"
+rds_storage_size: 30 # gb
+rds_port: 5432
+
+ssmkey_rds_master_password: "/{{ project_id }}/{{ software_component }}/rds-master-password"
+ssmkey_rds_master_username: "/{{ project_id }}/{{ software_component }}/rds-master-username"
+rds_master_username: "postgres"
+
+ssmkey_rds_service_password: "/{{ project_id }}/{{ software_component }}/rds-service-password"
+ssmkey_rds_service_username: "/{{ project_id }}/{{ software_component }}/rds-service-username"
+rds_service_username: "playground_app"
+
+rds_alarm_thresholds:
+  db.t4g.micro:
+    read_latency: 0.05
+    write_latency: 0.3
+    freeable_memory_in_mb: 110
+  db.t4g.small:
+    read_latency: 0.05
+    write_latency: 0.2
+    freeable_memory_in_mb: 110
+  db.t4g.medium:
+    read_latency: 0.05
+    write_latency: 0.2
+    freeable_memory_in_mb: 110
+rds_alarm_read_latency: "{{ rds_alarm_thresholds[rds_instance_class].read_latency}}"
+rds_alarm_write_latency: "{{ rds_alarm_thresholds[rds_instance_class].write_latency }}"
+rds_alarm_freeable_memory_in_mb: "{{ rds_alarm_thresholds[rds_instance_class].freeable_memory_in_mb }}"

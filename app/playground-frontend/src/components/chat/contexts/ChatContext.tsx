@@ -25,13 +25,25 @@ interface ChatContextType {
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
-interface ChatProviderProps {
-  children: ReactNode;
+/**
+ * Playground mode configuration for testing specific sub-agent versions.
+ */
+export interface PlaygroundMode {
+  /** The version hash of the sub-agent config being tested */
+  subAgentConfigHash: string;
+  /** Human-readable name for display */
+  subAgentName: string;
 }
 
-export function ChatProvider({ children }: ChatProviderProps) {
+interface ChatProviderProps {
+  children: ReactNode;
+  /** When set, filters conversations by this config hash and tags new ones */
+  playgroundMode?: PlaygroundMode;
+}
+
+export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const sessionId = useSessionId();
-  const { isConnected, initializeClient, sendMessage: socketSendMessage, onAgentResponse } = useSocket();
+  const { isConnected, isSocketReady, initializeClient, sendMessage: socketSendMessage, onAgentResponse } = useSocket();
 
   // State
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -45,6 +57,7 @@ export function ChatProvider({ children }: ChatProviderProps) {
 
   const messageCounterRef = useRef(0);
   const taskCounterRef = useRef(0);
+  const playgroundModeRef = useRef(playgroundMode);
 
   // Derived state
   const messages = activeConversationId ? messagesMap.get(activeConversationId) || [] : [];
@@ -289,6 +302,13 @@ export function ChatProvider({ children }: ChatProviderProps) {
       const url = new URL('/api/v1/conversations/', window.location.origin);
       url.searchParams.set('limit', '50');
       if (effectiveAgentUrl) url.searchParams.set('agent_url', effectiveAgentUrl);
+      // In playground mode, filter by sub_agent_config_hash
+      if (playgroundModeRef.current?.subAgentConfigHash) {
+        url.searchParams.set('sub_agent_config_hash', playgroundModeRef.current.subAgentConfigHash);
+      } else {
+        // In main chat, exclude playground conversations
+        url.searchParams.set('exclude_playground', 'true');
+      }
 
       const resp = await fetch(url.toString(), { credentials: 'include' });
       if (!resp.ok) {
@@ -529,16 +549,39 @@ export function ChatProvider({ children }: ChatProviderProps) {
     [initializeClient, sessionId, setSettings, loadConversations]
   );
 
-  // Initialize on mount if settings exist
+  // Default settings for auto-initialization
+  const DEFAULT_SETTINGS: Settings = {
+    agentUrl: 'https://orchestrator.d.nannos.rcplus.io',
+    model: 'gpt4o',
+  };
+
+  // Initialize on mount - use existing settings or defaults
+  // We need to wait for both sessionId and socket to be ready
   useEffect(() => {
-    if (settings && sessionId) {
-      initializeClient(settings, sessionId).then((success) => {
-        if (success) {
-          loadConversations();
-        }
-      });
+    // Skip if no sessionId yet (it may be generated async)
+    if (!sessionId) return;
+    
+    // Skip if socket is not ready yet
+    if (!isSocketReady) return;
+    
+    // Skip if already connected to agent
+    if (isConnected) return;
+
+    const effectiveSettings = settings || DEFAULT_SETTINGS;
+    
+    // If no settings exist, save the defaults
+    if (!settings) {
+      setSettings(DEFAULT_SETTINGS);
     }
-  }, []); // Only run once on mount
+    
+    console.log('Auto-initializing chat with settings:', effectiveSettings);
+    initializeClient(effectiveSettings, sessionId).then((success) => {
+      console.log('Auto-initialization result:', success);
+      if (success) {
+        loadConversations();
+      }
+    });
+  }, [sessionId, isSocketReady, isConnected]); // Re-run when dependencies change
 
   return (
     <ChatContext.Provider
