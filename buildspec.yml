@@ -12,6 +12,10 @@ phases:
       - ./ops-ci-shared/scripts/ci-init.sh
   build:
     commands:
+      - |
+        NEXUS_USERNAME=$(aws --region eu-central-1 ssm get-parameter --name /ops-ci/nexus-username --output text --query 'Parameter.Value')
+        NEXUS_PASSWORD=$(aws --region eu-central-1 ssm get-parameter --name /ops-ci/nexus-password --output text --query 'Parameter.Value' --with-decrypt)
+        echo "${NEXUS_PASSWORD}" | docker login --username ${NEXUS_USERNAME} --password-stdin https://docker.rcplus.io/
       - ./ops-ci-shared/scripts/ci-test.sh app/ringier-a2a-sdk
       - ./ops-ci-shared/scripts/ci-test.sh app/orchestrator-agent
       # - ./ops-ci-shared/scripts/ci-test.sh app/a2a-inspector  # should be tested in its own repo
