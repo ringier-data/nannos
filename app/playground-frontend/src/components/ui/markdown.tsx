@@ -38,10 +38,11 @@ export function Markdown({ children, className, inverted = false }: MarkdownProp
         '[&_pre_code]:!text-zinc-100 [&_pre_code]:text-xs [&_pre_code]:font-mono [&_pre_code]:bg-transparent [&_pre_code]:p-0',
         // Horizontal rule
         'prose-hr:my-2',
-        // Links
+        // Links - make them stand out with color, underline, and hover effects
         inverted
-          ? 'prose-a:text-inherit prose-a:underline'
-          : 'prose-a:text-primary prose-a:underline',
+          ? '[&_a]:!text-blue-300 [&_a]:!underline hover:[&_a]:!text-blue-200'
+          : '[&_a]:!text-blue-600 dark:[&_a]:!text-blue-400 [&_a]:!underline hover:[&_a]:!text-blue-700 dark:hover:[&_a]:!text-blue-300',
+        '[&_a]:!font-medium [&_a]:cursor-pointer [&_a]:transition-colors',
         className
       )}
     >

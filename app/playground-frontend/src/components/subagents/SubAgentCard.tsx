@@ -21,7 +21,7 @@ interface SubAgentCardProps {
 }
 
 export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAccess = false }: SubAgentCardProps) {
-  const { user } = useAuth();
+  const { user, adminMode } = useAuth();
   const [showPermissionsDialog, setShowPermissionsDialog] = useState(false);
   
   // Get status from embedded config_version
@@ -30,7 +30,8 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
   const TypeIcon = subAgent.type === 'remote' ? Globe : subAgent.type === 'foundry' ? Database : Terminal;
   
   const isOwner = subAgent.owner_user_id === user?.id;
-  const canManageAccess = showManageAccess && isOwner;
+  const isAdministrator = user?.is_administrator ?? false;
+  const canManageAccess = showManageAccess && (isOwner || (isAdministrator && adminMode));
 
   // Version info
   const defaultVersion = subAgent.default_version;

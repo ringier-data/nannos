@@ -15,12 +15,16 @@ from ..models.user import (
     UserStatus,
     UserWithGroups,
 )
+from ..repositories.user_repository import user_repository
 
 logger = logging.getLogger(__name__)
 
 
 class UserService:
     """Manages users in PostgreSQL."""
+
+    def __init__(self):
+        self.repo = user_repository
 
     async def get_user(self, db: AsyncSession, user_id: str) -> User | None:
         """Retrieve a user by ID.
@@ -209,61 +213,37 @@ class UserService:
             logger.error(f"Failed to list users: {e}")
             raise
 
-    async def update_user_status(self, db: AsyncSession, user_id: str, status: UserStatus) -> User | None:
-        """Update a user's status.
+    async def update_user_status(
+        self, db: AsyncSession, user_id: str, actor_sub: str, status: UserStatus
+    ) -> User | None:
+        """Update a user's status and optionally soft delete.
 
         Args:
             db: Database session
             user_id: The user's ID
+            actor_sub: ID of user performing the action
             status: New status
 
         Returns:
             Updated user or None if not found
         """
-        now = datetime.now(tz=timezone.utc)
-        deleted_at = now if status == UserStatus.DELETED else None
-
-        query = text("""
-            UPDATE users
-            SET status = :status,
-                deleted_at = :deleted_at,
-                updated_at = :now
-            WHERE id = :user_id
-            RETURNING id, sub, email, first_name, last_name, company_name,
-                      is_administrator, role, status, deleted_at, created_at, updated_at
-        """)
-
         try:
-            result = await db.execute(
-                query,
-                {
-                    "user_id": user_id,
-                    "status": status.value,
-                    "deleted_at": deleted_at,
-                    "now": now,
-                },
-            )
-            row = result.mappings().first()
+            # Update status via repository (with audit)
+            await self.repo.update_status(db, user_id, actor_sub, status.value)
 
-            if row is None:
-                logger.warning(f"User not found for status update: {user_id}")
-                return None
+            # Handle soft delete if needed
+            if status == UserStatus.DELETED:
+                now = datetime.now(tz=timezone.utc)
+                await db.execute(
+                    text("UPDATE users SET deleted_at = :deleted_at WHERE id = :user_id"),
+                    {"user_id": user_id, "deleted_at": now},
+                )
 
             logger.info(f"Updated user {user_id} status to {status.value}")
-            return User(
-                id=row["id"],
-                sub=row["sub"],
-                email=row["email"],
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                company_name=row["company_name"],
-                is_administrator=row["is_administrator"],
-                role=row["role"],
-                status=UserStatus(row["status"]),
-                deleted_at=row["deleted_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
+            return await self.get_user(db, user_id)
+        except ValueError:
+            logger.warning(f"User not found for status update: {user_id}")
+            return None
         except Exception as e:
             logger.error(f"Failed to update user status: {e}")
             raise
@@ -272,6 +252,7 @@ class UserService:
         self,
         db: AsyncSession,
         user_id: str,
+        actor_sub: str,
         group_ids: list[int],
         operation: Literal["set", "add", "remove"],
     ) -> UserWithGroups | None:
@@ -280,6 +261,7 @@ class UserService:
         Args:
             db: Database session
             user_id: The user's ID
+            actor_sub: ID of user performing the action
             group_ids: List of group IDs
             operation: 'set' replaces all, 'add' adds to existing, 'remove' removes
 
@@ -293,21 +275,8 @@ class UserService:
 
         try:
             if operation == "set":
-                # Remove all existing memberships
-                await db.execute(
-                    text("DELETE FROM user_group_members WHERE user_id = :user_id"),
-                    {"user_id": user_id},
-                )
-                # Add new memberships
-                for group_id in group_ids:
-                    await db.execute(
-                        text("""
-                            INSERT INTO user_group_members (user_id, user_group_id, group_role)
-                            VALUES (:user_id, :group_id, 'read')
-                            ON CONFLICT (user_id, user_group_id) DO NOTHING
-                        """),
-                        {"user_id": user_id, "group_id": group_id},
-                    )
+                # Use repository for full replacement (with audit)
+                await self.repo.update_groups(db, user_id, actor_sub, group_ids)
             elif operation == "add":
                 for group_id in group_ids:
                     await db.execute(
@@ -335,12 +304,13 @@ class UserService:
             raise
 
     async def bulk_update_users(
-        self, db: AsyncSession, operations: list[BulkUserOperation]
+        self, db: AsyncSession, actor_sub: str, operations: list[BulkUserOperation]
     ) -> list[BulkOperationResult]:
         """Perform bulk user status updates.
 
         Args:
             db: Database session
+            actor_sub: ID of user performing the action
             operations: List of operations to perform
 
         Returns:
@@ -367,8 +337,10 @@ class UserService:
                     )
                     continue
 
-                user = await self.update_user_status(db, op.user_id, new_status)
-                if user is None:
+                # Use repository for status update (with automatic audit per user)
+                success = await self.repo.bulk_update_status(db, op.user_id, actor_sub, new_status.value)
+
+                if not success:
                     results.append(
                         BulkOperationResult(
                             user_id=op.user_id,
@@ -439,6 +411,11 @@ class UserService:
         """)
 
         try:
+            # Check if user exists before upsert
+            check_query = text("SELECT id FROM users WHERE id = :id")
+            check_result = await db.execute(check_query, {"id": sub})
+            user_exists = check_result.scalar_one_or_none() is not None
+
             result = await db.execute(
                 query,
                 {
@@ -452,10 +429,33 @@ class UserService:
                 },
             )
             row = result.mappings().first()
-            logger.info(f"Upserted user: {sub}")
 
             if row is None:
                 raise RuntimeError(f"upsert returned None for user {sub}")
+
+            # Audit only if this was a new user creation (not an update)
+            if not user_exists:
+                from ..models.audit import AuditAction, AuditEntityType
+                from ..services.audit_service import audit_service
+
+                await audit_service.log_action(
+                    db=db,
+                    actor_sub=sub,  # User creates themselves via OIDC
+                    entity_type=AuditEntityType.USER,
+                    entity_id=sub,
+                    action=AuditAction.CREATE,
+                    changes={
+                        "after": {
+                            "email": email,
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "company_name": company_name,
+                        }
+                    },
+                )
+                logger.info(f"Created new user (audited): {sub}")
+            else:
+                logger.info(f"Updated existing user: {sub}")
 
             return User(
                 id=row["id"],
@@ -479,6 +479,7 @@ class UserService:
         self,
         db: AsyncSession,
         user_id: str,
+        actor_sub: str,
         is_administrator: bool | None = None,
     ) -> User | None:
         """Update admin-controlled user fields.
@@ -486,57 +487,24 @@ class UserService:
         Args:
             db: Database session
             user_id: The user's ID
-            is_administrator: New admin status (if provided)
+            actor_sub: ID of user performing the action
+            is_administrator: New administrator status
 
         Returns:
             Updated user or None if not found
         """
-        # Build SET clause dynamically based on provided fields
-        set_clauses = ["updated_at = :now"]
-        params: dict[str, Any] = {
-            "user_id": user_id,
-            "now": datetime.now(tz=timezone.utc),
-        }
-
-        if is_administrator is not None:
-            set_clauses.append("is_administrator = :is_administrator")
-            params["is_administrator"] = is_administrator
-
-        if len(set_clauses) == 1:
+        if is_administrator is None:
             # No fields to update, just return current user
             return await self.get_user(db, user_id)
 
-        query = text(f"""
-            UPDATE users
-            SET {", ".join(set_clauses)}
-            WHERE id = :user_id
-            RETURNING id, sub, email, first_name, last_name, company_name,
-                      is_administrator, role, status, deleted_at, created_at, updated_at
-        """)
-
         try:
-            result = await db.execute(query, params)
-            row = result.mappings().first()
-
-            if row is None:
-                logger.warning(f"User not found for admin field update: {user_id}")
-                return None
-
+            # Update via repository (with audit)
+            await self.repo.update_admin_fields(db, user_id, actor_sub, is_administrator)
             logger.info(f"Updated admin fields for user {user_id}")
-            return User(
-                id=row["id"],
-                sub=row["sub"],
-                email=row["email"],
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                company_name=row["company_name"],
-                is_administrator=row["is_administrator"],
-                role=row["role"],
-                status=UserStatus(row["status"]),
-                deleted_at=row["deleted_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
+            return await self.get_user(db, user_id)
+        except ValueError:
+            logger.warning(f"User not found for admin field update: {user_id}")
+            return None
         except Exception as e:
             logger.error(f"Failed to update user admin fields: {e}")
             raise
@@ -545,6 +513,7 @@ class UserService:
         self,
         db: AsyncSession,
         user_id: str,
+        actor_sub: str,
         role: str,
     ) -> User | None:
         """Update a user's role.
@@ -552,49 +521,20 @@ class UserService:
         Args:
             db: Database session
             user_id: The user's ID
+            actor_sub: ID of user performing the action
             role: New role (viewer, developer, approver, admin)
 
         Returns:
             Updated user or None if not found
         """
-        query = text("""
-            UPDATE users
-            SET role = :role, updated_at = :now
-            WHERE id = :user_id
-            RETURNING id, sub, email, first_name, last_name, company_name,
-                      is_administrator, role, status, deleted_at, created_at, updated_at
-        """)
-
         try:
-            result = await db.execute(
-                query,
-                {
-                    "user_id": user_id,
-                    "role": role,
-                    "now": datetime.now(tz=timezone.utc),
-                },
-            )
-            row = result.mappings().first()
-
-            if row is None:
-                logger.warning(f"User not found for role update: {user_id}")
-                return None
-
+            # Update via repository (with audit)
+            await self.repo.update_role(db, user_id, actor_sub, role)
             logger.info(f"Updated role for user {user_id} to {role}")
-            return User(
-                id=row["id"],
-                sub=row["sub"],
-                email=row["email"],
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                company_name=row["company_name"],
-                is_administrator=row["is_administrator"],
-                role=row["role"],
-                status=UserStatus(row["status"]),
-                deleted_at=row["deleted_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
+            return await self.get_user(db, user_id)
+        except ValueError:
+            logger.warning(f"User not found for role update: {user_id}")
+            return None
         except Exception as e:
             logger.error(f"Failed to update user role: {e}")
             raise

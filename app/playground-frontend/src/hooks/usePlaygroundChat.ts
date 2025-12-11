@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
+import { v7 as uuidv7 } from 'uuid';
 import type { AgentResponseData, SendMessagePayload } from '@/components/chat/types';
 import { config } from '@/config';
 
@@ -54,7 +55,7 @@ function generateConversationTitle(messages: PlaygroundMessage[]): string {
 }
 
 function generateUUID(): string {
-  return crypto.randomUUID();
+  return uuidv7();
 }
 
 function extractPartTexts(parts: Array<{ text?: string; kind?: string }>): string[] {
@@ -85,6 +86,7 @@ export function usePlaygroundChat({
   const contextIdMapRef = useRef<Map<string, string>>(new Map());
   const lastLoadedHashRef = useRef<string>('');
   const timeoutIdRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadedConversationsRef = useRef<Set<string>>(new Set());
 
   // Get current conversation's messages
   const currentMessages = activeConversationId
@@ -168,11 +170,32 @@ export function usePlaygroundChat({
     }, 300000); // 5 minutes = 300,000ms
   }, []);
 
+  // Helper to add message to conversation
+  const addMessageToConversation = useCallback((conversationId: string, message: PlaygroundMessage) => {
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === conversationId
+          ? {
+              ...c,
+              // Prevent duplicate messages by checking if message ID already exists
+              messages: c.messages.some(m => m.id === message.id) 
+                ? c.messages 
+                : [...c.messages, message],
+              title: c.messages.length === 0 && message.role === 'user' 
+                ? generateConversationTitle([message]) 
+                : c.title,
+              updatedAt: new Date(),
+            }
+          : c
+      )
+    );
+  }, []);
+
   // Handle agent responses
   const handleAgentResponse = useCallback((data: AgentResponseData) => {
     const conversationId = pendingMessageRef.current?.conversationId;
     if (!conversationId) {
-      console.warn('[Playground] Received response but no pending conversation');
+      console.warn('[Playground] Received response but no pending conversation - this may be a late-arriving response after conversation was already completed');
       return;
     }
     
@@ -217,38 +240,14 @@ export function usePlaygroundChat({
       return;
     }
 
-    // Handle direct agent message response (role='agent' with parts) - always clears loading
-    if (data.role === 'agent' && Array.isArray(data.parts)) {
-      if (shouldDisplayMessageParts(data.parts)) {
-        const text = extractPartTexts(data.parts).join('\n');
-        const agentMessage: PlaygroundMessage = {
-          id: generateUUID(),
-          role: 'assistant',
-          content: text,
-          timestamp: new Date(),
-        };
-        addMessageToConversation(conversationId, agentMessage);
-        console.log('[Playground] Added agent message from parts, clearing loading state');
-      }
-      // Always clear loading when we get a direct agent message
-      // Clear timeout
-      if (timeoutIdRef.current) {
-        clearTimeout(timeoutIdRef.current);
-        timeoutIdRef.current = null;
-      }
-      setIsLoading(false);
-      pendingMessageRef.current?.resolve();
-      pendingMessageRef.current = null;
-      return;
-    }
-
-    // Handle task status update
+    // Handle task status update FIRST (before checking role='agent')
+    // This ensures we process status updates even if they have role='agent'
     if (data.status) {
       const nestedMsg = data.status.message;
       const state = data.status.state?.toLowerCase();
       
       // Determine state category first
-      const isTerminalState = state === 'completed' || state === 'failed' || state === 'cancelled';
+      const isTerminalState = state === 'completed' || state === 'failed' || state === 'cancelled' || state === 'input-required';
       const isProgressState = state === 'working' || state === 'running' || state === 'in_progress' || state === 'pending' || state === 'submitted';
       
       // Add message if present and displayable
@@ -266,7 +265,7 @@ export function usePlaygroundChat({
         console.log('[Playground] Added agent message from status.message');
       }
       
-      // Clear loading and pendingRef only for terminal states or non-progress states with messages
+      // Clear loading and pendingRef only for terminal states
       if (isTerminalState) {
         console.log('[Playground] Terminal state, clearing loading', { state });
         // Clear timeout
@@ -287,26 +286,39 @@ export function usePlaygroundChat({
         return;
       }
       
-      // Unknown state with message - treat as final
-      if (hasMessage) {
-        console.log('[Playground] Unknown state with message, clearing loading', { state });
-        // Clear timeout
-        if (timeoutIdRef.current) {
-          clearTimeout(timeoutIdRef.current);
-          timeoutIdRef.current = null;
-        }
-        setIsLoading(false);
-        pendingMessageRef.current?.resolve();
-        pendingMessageRef.current = null;
-        return;
-      }
-      
-      // Unknown state without message - log warning but keep waiting
-      console.warn('[Playground] Unknown state without message', { state });
+      // Unknown state - don't clear loading yet, let timeout handle it
+      console.log('[Playground] Unknown state, keeping spinner', { state, hasMessage });
       return;
     }
 
-    // Handle artifact update - clears loading
+    // Handle direct agent message response (role='agent' with parts)
+    // ONLY if it doesn't have a status (status is handled above)
+    if (data.role === 'agent' && Array.isArray(data.parts) && !data.status) {
+      if (shouldDisplayMessageParts(data.parts)) {
+        const text = extractPartTexts(data.parts).join('\n');
+        const agentMessage: PlaygroundMessage = {
+          id: generateUUID(),
+          role: 'assistant',
+          content: text,
+          timestamp: new Date(),
+        };
+        addMessageToConversation(conversationId, agentMessage);
+        console.log('[Playground] Added agent message from parts (no status), clearing loading state');
+      }
+      // Clear loading when we get a direct agent message without status
+      // Clear timeout
+      if (timeoutIdRef.current) {
+        clearTimeout(timeoutIdRef.current);
+        timeoutIdRef.current = null;
+      }
+      setIsLoading(false);
+      pendingMessageRef.current?.resolve();
+      pendingMessageRef.current = null;
+      return;
+    }
+
+    // Handle artifact update - don't automatically clear loading
+    // Let terminal status or timeout handle completion
     if (data.artifact || data.kind === 'artifact-update') {
       const art = data.artifact || 
         (Array.isArray(data.artifacts) ? (data.artifacts as { parts?: { text?: string }[] }[])[0] : null);
@@ -319,41 +331,15 @@ export function usePlaygroundChat({
           timestamp: new Date(),
         };
         addMessageToConversation(conversationId, agentMessage);
-        console.log('[Playground] Added agent message from artifact, clearing loading state');
+        console.log('[Playground] Added agent message from artifact, keeping spinner for final status');
       }
-      // Always clear loading when artifact is received
-      // Clear timeout
-      if (timeoutIdRef.current) {
-        clearTimeout(timeoutIdRef.current);
-        timeoutIdRef.current = null;
-      }
-      setIsLoading(false);
-      pendingMessageRef.current?.resolve();
-      pendingMessageRef.current = null;
+      // Don't clear loading - wait for terminal status or timeout
       return;
     }
 
     // Unknown response type - log but keep spinner for safety (will timeout after 5 minutes)
     console.log('[Playground] Response did not match any handler pattern, keeping spinner');
-  }, [resetTimeout]);
-
-  // Helper to add message to conversation
-  const addMessageToConversation = useCallback((conversationId: string, message: PlaygroundMessage) => {
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.id === conversationId
-          ? {
-              ...c,
-              messages: [...c.messages, message],
-              title: c.messages.length === 0 && message.role === 'user' 
-                ? generateConversationTitle([message]) 
-                : c.title,
-              updatedAt: new Date(),
-            }
-          : c
-      )
-    );
-  }, []);
+  }, [resetTimeout, addMessageToConversation]);
 
   // Load conversations from the backend API
   const loadConversations = useCallback(async () => {
@@ -362,9 +348,9 @@ export function usePlaygroundChat({
       return;
     }
 
-    // Avoid duplicate loads for the same hash
+    // Skip if already loaded for this hash
     if (lastLoadedHashRef.current === subAgentConfigHash) {
-      console.log('[Playground] Already loaded conversations for this hash, skipping');
+      console.log('[Playground] Conversations already loaded for hash:', subAgentConfigHash);
       return;
     }
 
@@ -416,12 +402,22 @@ export function usePlaygroundChat({
 
       // Mark this hash as loaded
       lastLoadedHashRef.current = subAgentConfigHash;
+      
+      // Clear loaded conversations tracking for new hash
+      loadedConversationsRef.current.clear();
 
-      // Auto-select the most recent conversation (first in list)
+      // Auto-select the most recent conversation (first in list) only if no conversation is currently active
       if (mapped.length > 0) {
-        setActiveConversationId(mapped[0].id);
-        // Load messages for the most recent conversation
-        loadMessagesForConversation(mapped[0].id);
+        // Capture current activeConversationId from state
+        setActiveConversationId((currentActiveId) => {
+          // Only auto-select if there's no active conversation or if active conversation no longer exists
+          if (!currentActiveId || !mapped.some(c => c.id === currentActiveId)) {
+            return mapped[0].id;
+          }
+          // Keep existing active conversation
+          return currentActiveId;
+        });
+        // Load messages for the selected conversation will happen via effect
       } else {
         setActiveConversationId(null);
       }
@@ -430,7 +426,7 @@ export function usePlaygroundChat({
     } finally {
       setIsLoadingConversations(false);
     }
-  }, [subAgentConfigHash]);
+  }, [subAgentConfigHash, configVersion]);
 
   // Load messages for a specific conversation
   const loadMessagesForConversation = useCallback(async (conversationId: string) => {
@@ -462,7 +458,9 @@ export function usePlaygroundChat({
             return null;
           }
 
-          const id = (m.id || m.message_id || `msg-${Math.random().toString(36).slice(2, 9)}`) as string;
+          // Generate a stable fallback ID based on message properties
+          const fallbackId = `msg-${m.created_at || m.timestamp || ''}-${m.role || 'unknown'}-${uuidv7()}`;
+          const id = (m.id || m.message_id || fallbackId) as string;
           const role = (m.role || (m.user_id ? 'user' : 'agent')) as 'user' | 'assistant';
           
           let content = '';
@@ -488,18 +486,38 @@ export function usePlaygroundChat({
       // Sort messages chronologically
       mapped.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
+      // Deduplicate messages by ID (in case backend returns duplicates)
+      const uniqueMessages = mapped.reduce((acc, msg) => {
+        if (!acc.some(m => m.id === msg.id)) {
+          acc.push(msg);
+        }
+        return acc;
+      }, [] as PlaygroundMessage[]);
+
       // Update the conversation with loaded messages
       setConversations((prev) =>
         prev.map((c) =>
           c.id === conversationId
-            ? { ...c, messages: mapped }
+            ? { ...c, messages: uniqueMessages }
             : c
         )
       );
+      
+      // Mark as loaded to prevent repeated loading attempts
+      loadedConversationsRef.current.add(conversationId);
     } catch (e) {
       console.error('[Playground] loadMessagesForConversation failed', e);
+      // Mark as loaded even on error to prevent infinite retries
+      loadedConversationsRef.current.add(conversationId);
     }
   }, []);
+
+  // Auto-load messages when active conversation changes
+  useEffect(() => {
+    if (activeConversationId && !loadedConversationsRef.current.has(activeConversationId)) {
+      loadMessagesForConversation(activeConversationId);
+    }
+  }, [activeConversationId, loadMessagesForConversation]);
 
   // Create a new conversation
   const createConversation = useCallback((configVersion: number): PlaygroundConversation => {
@@ -520,12 +538,8 @@ export function usePlaygroundChat({
   // Select a conversation
   const selectConversation = useCallback((id: string) => {
     setActiveConversationId(id);
-    // Load messages if conversation doesn't have any loaded yet
-    const conv = conversations.find((c) => c.id === id);
-    if (conv && conv.messages.length === 0) {
-      loadMessagesForConversation(id);
-    }
-  }, [conversations, loadMessagesForConversation]);
+    // Load messages if not already loaded (will be handled by useEffect)
+  }, []);
 
   // Delete a conversation
   const deleteConversation = useCallback((id: string) => {

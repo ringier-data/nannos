@@ -16,6 +16,7 @@ class AuditEntityType(str, Enum):
     GROUP = "group"
     SUB_AGENT = "sub_agent"
     SESSION = "session"  # For session-related events like admin mode activation
+    SECRET = "secret"  # For secrets management operations
 
 
 class AuditAction(str, Enum):
@@ -29,6 +30,12 @@ class AuditAction(str, Enum):
     ASSIGN = "assign"
     UNASSIGN = "unassign"
     ADMIN_MODE_ACTIVATED = "admin_mode_activated"
+    SUBMIT_FOR_APPROVAL = "submit_for_approval"
+    ACTIVATE = "activate"
+    DEACTIVATE = "deactivate"
+    SET_DEFAULT = "set_default"
+    REVERT = "revert"
+    PERMISSION_UPDATE = "permission_update"
 
 
 class AuditLog(BaseModel):

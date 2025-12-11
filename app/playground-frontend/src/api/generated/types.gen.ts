@@ -37,14 +37,14 @@ export type AdminModeToggleResponse = {
  *
  * Audit action enum.
  */
-export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated';
+export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update';
 
 /**
  * AuditEntityType
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret';
 
 /**
  * AuditLog

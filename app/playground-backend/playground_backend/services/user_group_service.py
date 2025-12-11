@@ -1,7 +1,6 @@
 """User group service for managing groups and memberships."""
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Literal
 
 from sqlalchemy import text
@@ -17,12 +16,16 @@ from ..models.user_group import (
     UserGroup,
     UserGroupWithMembers,
 )
+from ..repositories.user_group_repository import user_group_repository
 
 logger = logging.getLogger(__name__)
 
 
 class UserGroupService:
     """Service for managing user groups and memberships."""
+
+    def __init__(self):
+        self.repo = user_group_repository
 
     async def get_group(self, db: AsyncSession, group_id: int) -> UserGroup | None:
         """Get a group by ID.
@@ -146,7 +149,9 @@ class UserGroupService:
         """)
 
         try:
-            count_result = await db.execute(count_query, params)
+            # Count query only needs search param if present
+            count_params = {"search": params["search"]} if search else {}
+            count_result = await db.execute(count_query, count_params)
             total = count_result.scalar() or 0
 
             result = await db.execute(data_query, params)
@@ -252,6 +257,7 @@ class UserGroupService:
     async def create_group(
         self,
         db: AsyncSession,
+        actor_sub: str,
         name: str,
         description: str | None = None,
     ) -> UserGroup:
@@ -259,40 +265,31 @@ class UserGroupService:
 
         Args:
             db: Database session
+            actor_sub: The sub of the user creating the group
             name: Group name
             description: Group description
 
         Returns:
             Created group
         """
-        query = text("""
-            INSERT INTO user_groups (name, description)
-            VALUES (:name, :description)
-            RETURNING id, name, description, deleted_at, created_at, updated_at
-        """)
-
         try:
-            result = await db.execute(
-                query,
-                {
+            group_id = await self.repo.create(
+                db=db,
+                actor_sub=actor_sub,
+                fields={
                     "name": name,
                     "description": description,
                 },
+                returning="id",
             )
-            row = result.mappings().first()
 
-            if row is None:
-                raise RuntimeError("Failed to create group")
+            # Fetch and return the created group
+            group = await self.get_group(db, group_id)
+            if not group:
+                raise RuntimeError("Failed to retrieve created group")
 
             logger.info(f"Created group: {name}")
-            return UserGroup(
-                id=row["id"],
-                name=row["name"],
-                description=row["description"],
-                deleted_at=row["deleted_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
+            return group
         except Exception as e:
             logger.error(f"Failed to create group: {e}")
             raise
@@ -300,6 +297,7 @@ class UserGroupService:
     async def update_group(
         self,
         db: AsyncSession,
+        actor_sub: str,
         group_id: int,
         name: str | None = None,
         description: str | None = None,
@@ -308,6 +306,7 @@ class UserGroupService:
 
         Args:
             db: Database session
+            actor_sub: The sub of the user updating the group
             group_id: Group ID
             name: New name (optional)
             description: New description (optional)
@@ -315,59 +314,57 @@ class UserGroupService:
         Returns:
             Updated group or None if not found
         """
-        # Build dynamic update
-        updates = ["updated_at = :now"]
-        params: dict[str, Any] = {
-            "group_id": group_id,
-            "now": datetime.now(tz=timezone.utc),
-        }
-
-        if name is not None:
-            updates.append("name = :name")
-            params["name"] = name
-
-        if description is not None:
-            updates.append("description = :description")
-            params["description"] = description
-
-        query = text(f"""
-            UPDATE user_groups
-            SET {", ".join(updates)}
-            WHERE id = :group_id AND deleted_at IS NULL
-            RETURNING id, name, description, deleted_at, created_at, updated_at
-        """)
-
         try:
-            result = await db.execute(query, params)
-            row = result.mappings().first()
-
-            if row is None:
+            # Check if group exists first
+            existing = await self.get_group(db, group_id)
+            if existing is None:
                 return None
 
-            logger.info(f"Updated group: {group_id}")
-            return UserGroup(
-                id=row["id"],
-                name=row["name"],
-                description=row["description"],
-                deleted_at=row["deleted_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
+            # Build update fields
+            fields: dict[str, Any] = {}
+            if name is not None:
+                fields["name"] = name
+            if description is not None:
+                fields["description"] = description
+
+            if not fields:
+                # No fields to update, just return current group
+                return existing
+
+            # Update with automatic audit (returns None)
+            await self.repo.update(
+                db=db,
+                actor_sub=actor_sub,
+                entity_id=group_id,
+                fields=fields,
+                fetch_before=True,
             )
+
+            # Fetch and return updated group
+            group = await self.get_group(db, group_id)
+            logger.info(f"Updated group: {group_id}")
+            return group
         except Exception as e:
             logger.error(f"Failed to update group: {e}")
             raise
 
-    async def delete_group(self, db: AsyncSession, group_id: int, force: bool = False) -> bool:
+    async def delete_group(self, db: AsyncSession, actor_sub: str, group_id: int, force: bool = False) -> bool:
         """Delete a group (soft delete).
 
         Args:
             db: Database session
+            actor_sub: The sub of the user deleting the group
             group_id: Group ID
             force: If True, delete even if sub-agents are assigned
 
         Returns:
             True if deleted, False if not found or blocked
         """
+        # Check if group exists
+        existing = await self.get_group(db, group_id)
+        if existing is None:
+            return False
+
         # Check if sub-agents are assigned
         if not force:
             check_query = text("""
@@ -383,21 +380,14 @@ class UserGroupService:
                     f"Cannot delete group: {count} sub-agents are assigned. Use force=true to delete anyway."
                 )
 
-        # Soft delete the group
-        query = text("""
-            UPDATE user_groups
-            SET deleted_at = :now, updated_at = :now
-            WHERE id = :group_id AND deleted_at IS NULL
-            RETURNING id
-        """)
-
         try:
-            now = datetime.now(tz=timezone.utc)
-            result = await db.execute(query, {"group_id": group_id, "now": now})
-            row = result.mappings().first()
-
-            if row is None:
-                return False
+            # Soft delete with automatic audit (returns None)
+            await self.repo.delete(
+                db=db,
+                actor_sub=actor_sub,
+                entity_id=group_id,
+                soft=True,
+            )
 
             logger.info(f"Deleted group: {group_id}")
             return True
@@ -406,12 +396,13 @@ class UserGroupService:
             raise
 
     async def bulk_delete_groups(
-        self, db: AsyncSession, group_ids: list[int], force: bool = False
+        self, db: AsyncSession, actor_sub: str, group_ids: list[int], force: bool = False
     ) -> list[BulkDeleteResult]:
         """Bulk delete groups.
 
         Args:
             db: Database session
+            actor_sub: The sub of the user performing the deletions
             group_ids: List of group IDs
             force: If True, delete even if sub-agents are assigned
 
@@ -422,7 +413,7 @@ class UserGroupService:
 
         for group_id in group_ids:
             try:
-                success = await self.delete_group(db, group_id, force)
+                success = await self.delete_group(db, actor_sub, group_id, force)
                 if success:
                     results.append(BulkDeleteResult(group_id=group_id, success=True))
                 else:
@@ -506,6 +497,7 @@ class UserGroupService:
     async def add_members(
         self,
         db: AsyncSession,
+        actor_sub: str,
         group_id: int,
         user_ids: list[str],
         role: Literal["read", "write", "manager"] = "read",
@@ -514,6 +506,7 @@ class UserGroupService:
 
         Args:
             db: Database session
+            actor_sub: The sub of the user performing the action
             group_id: Group ID
             user_ids: List of user IDs to add
             role: Role for the new members
@@ -521,18 +514,17 @@ class UserGroupService:
         Returns:
             Updated member list
         """
-        query = text("""
-            INSERT INTO user_group_members (user_id, user_group_id, group_role)
-            VALUES (:user_id, :group_id, :role)
-            ON CONFLICT (user_id, user_group_id) DO UPDATE SET group_role = :role
-        """)
-
         try:
-            for user_id in user_ids:
-                await db.execute(
-                    query,
-                    {"user_id": user_id, "group_id": group_id, "role": role},
-                )
+            # Prepare member additions
+            member_additions = [{"user_id": user_id, "role": role} for user_id in user_ids]
+
+            # Add members with automatic audit
+            await self.repo.add_members(
+                db=db,
+                actor_sub=actor_sub,
+                group_id=group_id,
+                member_additions=member_additions,
+            )
 
             logger.info(f"Added {len(user_ids)} members to group {group_id}")
 
@@ -546,6 +538,7 @@ class UserGroupService:
     async def update_member_role(
         self,
         db: AsyncSession,
+        actor_sub: str,
         group_id: int,
         user_id: str,
         role: Literal["read", "write", "manager"],
@@ -554,6 +547,7 @@ class UserGroupService:
 
         Args:
             db: Database session
+            actor_sub: The sub of the user performing the action
             group_id: Group ID
             user_id: User ID
             role: New role
@@ -561,22 +555,29 @@ class UserGroupService:
         Returns:
             Updated member info or None if not found
         """
-        query = text("""
-            UPDATE user_group_members
-            SET group_role = :role
-            WHERE user_group_id = :group_id AND user_id = :user_id
-            RETURNING id
-        """)
-
         try:
-            result = await db.execute(
-                query,
-                {"group_id": group_id, "user_id": user_id, "role": role},
-            )
-            row = result.mappings().first()
+            # Get current role for audit
+            current_role_query = text("""
+                SELECT group_role FROM user_group_members
+                WHERE user_group_id = :group_id AND user_id = :user_id
+            """)
+            result = await db.execute(current_role_query, {"group_id": group_id, "user_id": user_id})
+            current_row = result.mappings().first()
 
-            if row is None:
+            if current_row is None:
                 return None
+
+            old_role = current_row["group_role"]
+
+            # Update role with automatic audit
+            await self.repo.update_member_role(
+                db=db,
+                actor_sub=actor_sub,
+                group_id=group_id,
+                user_id=user_id,
+                old_role=old_role,
+                new_role=role,
+            )
 
             # Fetch updated member info
             member_query = text("""
@@ -603,13 +604,14 @@ class UserGroupService:
             logger.error(f"Failed to update member role: {e}")
             raise
 
-    async def remove_member(self, db: AsyncSession, group_id: int, user_id: str) -> bool:
+    async def remove_member(self, db: AsyncSession, actor_sub: str, group_id: int, user_id: str) -> bool:
         """Remove a member from a group.
 
         Cannot remove the last admin.
 
         Args:
             db: Database session
+            actor_sub: The sub of the user performing the action
             group_id: Group ID
             user_id: User ID to remove
 
@@ -644,17 +646,13 @@ class UserGroupService:
                 if admin_count <= 1:
                     raise ValueError("Cannot remove the last manager from a group")
 
-            # Remove member
-            delete_query = text("""
-                DELETE FROM user_group_members
-                WHERE user_group_id = :group_id AND user_id = :user_id
-                RETURNING id
-            """)
-            result = await db.execute(delete_query, {"group_id": group_id, "user_id": user_id})
-            row = result.mappings().first()
-
-            if row is None:
-                return False
+            # Remove member with automatic audit
+            await self.repo.remove_member(
+                db=db,
+                actor_sub=actor_sub,
+                group_id=group_id,
+                user_id=user_id,
+            )
 
             logger.info(f"Removed member {user_id} from group {group_id}")
             return True

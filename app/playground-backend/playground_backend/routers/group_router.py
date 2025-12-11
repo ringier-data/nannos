@@ -12,7 +12,6 @@ from ..dependencies import (
     require_group_member,
     require_group_member_management_permission,
 )
-from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import PaginationMeta, User
 from ..models.user_group import (
     GroupMemberAdd,
@@ -22,7 +21,6 @@ from ..models.user_group import (
     UserGroupDetailResponse,
     UserGroupWithMembers,
 )
-from ..services.audit_service import audit_service
 from ..services.user_group_service import user_group_service
 
 router = APIRouter(prefix="/api/v1/groups", tags=["groups"])
@@ -140,23 +138,10 @@ async def add_members(
 
     members = await user_group_service.add_members(
         db,
-        group_id,
-        request_body.user_ids,
-        role=request_body.role,
-    )
-    await db.commit()
-
-    # Log audit
-    await audit_service.log_action(
-        db,
         actor_sub=user.sub,
-        entity_type=AuditEntityType.GROUP,
-        entity_id=str(group_id),
-        action=AuditAction.ASSIGN,
-        changes={
-            "added_users": request_body.user_ids,
-            "role": request_body.role,
-        },
+        group_id=group_id,
+        user_ids=request_body.user_ids,
+        role=request_body.role,
     )
     await db.commit()
 
@@ -190,7 +175,13 @@ async def update_member_role(
             detail="Group not found",
         )
 
-    member = await user_group_service.update_member_role(db, group_id, user_id, request_body.role)
+    member = await user_group_service.update_member_role(
+        db,
+        actor_sub=user.sub,
+        group_id=group_id,
+        user_id=user_id,
+        role=request_body.role,
+    )
 
     if member is None:
         raise HTTPException(
@@ -198,20 +189,6 @@ async def update_member_role(
             detail="Member not found in group",
         )
 
-    await db.commit()
-
-    # Log audit
-    await audit_service.log_action(
-        db,
-        actor_sub=user.sub,
-        entity_type=AuditEntityType.GROUP,
-        entity_id=str(group_id),
-        action=AuditAction.UPDATE,
-        changes={
-            "member_user_id": user_id,
-            "new_role": request_body.role,
-        },
-    )
     await db.commit()
 
     return member
@@ -242,7 +219,12 @@ async def remove_member(
         )
 
     try:
-        success = await user_group_service.remove_member(db, group_id, user_id)
+        success = await user_group_service.remove_member(
+            db,
+            actor_sub=user.sub,
+            group_id=group_id,
+            user_id=user_id,
+        )
 
         if not success:
             raise HTTPException(
@@ -250,17 +232,6 @@ async def remove_member(
                 detail="Member not found in group",
             )
 
-        await db.commit()
-
-        # Log audit
-        await audit_service.log_action(
-            db,
-            actor_sub=user.sub,
-            entity_type=AuditEntityType.GROUP,
-            entity_id=str(group_id),
-            action=AuditAction.UNASSIGN,
-            changes={"removed_user_id": user_id},
-        )
         await db.commit()
     except ValueError as e:
         raise HTTPException(

@@ -137,6 +137,7 @@ Resources:
                   - 'ssm:GetParameter'
                   - 'ssm:GetParameters'
                   - 'ssm:PutParameter'
+                  - 'ssm:AddTagsToResource'
                 Resource:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_vault_prefix }}*'
               - Sid: 'DecryptionEncryptionUsingKmsKey'

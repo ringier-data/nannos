@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Pagination } from '@/components/admin/Pagination';
+import { AuditDiffViewer } from '@/components/admin/AuditDiffViewer';
 
 const actionColors: Record<AuditAction, 'default' | 'secondary' | 'destructive' | 'outline'> = {
   create: 'default',
@@ -31,6 +32,12 @@ const actionColors: Record<AuditAction, 'default' | 'secondary' | 'destructive' 
   assign: 'secondary',
   unassign: 'outline',
   admin_mode_activated: 'default',
+  submit_for_approval: 'secondary',
+  activate: 'default',
+  deactivate: 'outline',
+  set_default: 'secondary',
+  revert: 'outline',
+  permission_update: 'secondary',
 };
 
 const entityTypeLabels: Record<AuditEntityType, string> = {
@@ -38,6 +45,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   group: 'Group',
   sub_agent: 'Sub-Agent',
   session: 'Session',
+  secret: 'Secret',
 };
 
 export function AuditPage() {
@@ -67,14 +75,6 @@ export function AuditPage() {
   const logs = logsData?.data ?? [];
   const meta = logsData?.meta ?? { page: 1, limit: 50, total: 0 };
 
-  const formatChanges = (changes: Record<string, unknown> | undefined) => {
-    if (!changes || Object.keys(changes).length === 0) return '-';
-    return Object.entries(changes)
-      .slice(0, 3)
-      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-      .join(', ');
-  };
-
   return (
     <div className="space-y-6 p-4">
       <div>
@@ -98,6 +98,8 @@ export function AuditPage() {
             <SelectItem value="user">User</SelectItem>
             <SelectItem value="group">Group</SelectItem>
             <SelectItem value="sub_agent">Sub-Agent</SelectItem>
+            <SelectItem value="session">Session</SelectItem>
+            <SelectItem value="secret">Secret</SelectItem>
           </SelectContent>
         </Select>
 
@@ -120,6 +122,13 @@ export function AuditPage() {
             <SelectItem value="reject">Reject</SelectItem>
             <SelectItem value="assign">Assign</SelectItem>
             <SelectItem value="unassign">Unassign</SelectItem>
+            <SelectItem value="submit_for_approval">Submit for Approval</SelectItem>
+            <SelectItem value="activate">Activate</SelectItem>
+            <SelectItem value="deactivate">Deactivate</SelectItem>
+            <SelectItem value="set_default">Set Default</SelectItem>
+            <SelectItem value="revert">Revert</SelectItem>
+            <SelectItem value="permission_update">Permission Update</SelectItem>
+            <SelectItem value="admin_mode_activated">Admin Mode Activated</SelectItem>
           </SelectContent>
         </Select>
 
@@ -212,8 +221,8 @@ export function AuditPage() {
                       {log.action}
                     </Badge>
                   </TableCell>
-                  <TableCell className="max-w-xs truncate text-sm text-muted-foreground">
-                    {formatChanges(log.changes)}
+                  <TableCell className="min-w-[300px]">
+                    <AuditDiffViewer changes={log.changes || {}} />
                   </TableCell>
                 </TableRow>
               ))

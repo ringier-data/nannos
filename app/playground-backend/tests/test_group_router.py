@@ -259,18 +259,17 @@ class TestAddMembersEndpoint:
         with (
             patch("playground_backend.routers.group_router.user_group_service") as mock_service,
             patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-            patch("playground_backend.routers.group_router.audit_service") as mock_audit,
         ):
             mock_require.return_value = AsyncMock()
             mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
             mock_service.add_members = AsyncMock(return_value=mock_members)
-            mock_audit.log_action = AsyncMock()
 
             result = await group_router.add_members(1, request_body, mock_request, mock_db, mock_user)
 
             assert len(result.data) == 2
-            mock_service.add_members.assert_called_once_with(mock_db, 1, ["user-3", "user-4"], role="write")
-            mock_audit.log_action.assert_called_once()
+            mock_service.add_members.assert_called_once_with(
+                mock_db, actor_sub="user-sub-123", group_id=1, user_ids=["user-3", "user-4"], role="write"
+            )
 
     @pytest.mark.asyncio
     async def test_add_members_group_not_found(self, mock_db, mock_user):
@@ -314,17 +313,17 @@ class TestUpdateMemberRoleEndpoint:
         with (
             patch("playground_backend.routers.group_router.user_group_service") as mock_service,
             patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-            patch("playground_backend.routers.group_router.audit_service") as mock_audit,
         ):
             mock_require.return_value = AsyncMock()
             mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
             mock_service.update_member_role = AsyncMock(return_value=updated_member)
-            mock_audit.log_action = AsyncMock()
 
             result = await group_router.update_member_role(1, "user-2", request_body, mock_request, mock_db, mock_user)
 
             assert result.group_role == "manager"
-            mock_service.update_member_role.assert_called_once_with(mock_db, 1, "user-2", "manager")
+            mock_service.update_member_role.assert_called_once_with(
+                mock_db, actor_sub="user-sub-123", group_id=1, user_id="user-2", role="manager"
+            )
 
     @pytest.mark.asyncio
     async def test_update_member_role_member_not_found(self, mock_db, mock_user):
@@ -359,17 +358,17 @@ class TestRemoveMemberEndpoint:
         with (
             patch("playground_backend.routers.group_router.user_group_service") as mock_service,
             patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-            patch("playground_backend.routers.group_router.audit_service") as mock_audit,
         ):
             mock_require.return_value = AsyncMock()
             mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
             mock_service.remove_member = AsyncMock(return_value=True)
-            mock_audit.log_action = AsyncMock()
 
             result = await group_router.remove_member(1, "user-2", mock_request, mock_db, mock_user)
 
             assert result is None  # 204 No Content
-            mock_service.remove_member.assert_called_once_with(mock_db, 1, "user-2")
+            mock_service.remove_member.assert_called_once_with(
+                mock_db, actor_sub="user-sub-123", group_id=1, user_id="user-2"
+            )
 
     @pytest.mark.asyncio
     async def test_remove_member_not_found(self, mock_db, mock_user):

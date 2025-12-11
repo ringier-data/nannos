@@ -80,7 +80,7 @@ async def test_process_a2a_response_receives_context_id():
     """Test that _process_a2a_response correctly receives and uses context_id."""
     from a2a.types import Message, Role, TextPart
 
-    from playground_backend.app import _process_a2a_response
+    from app import _process_a2a_response
 
     # Mock sio and services
     mock_sio = MagicMock()
@@ -95,7 +95,7 @@ async def test_process_a2a_response_receives_context_id():
     mock_sio.app_instance.state.messages_service.save_history_messages = AsyncMock(return_value=0)
     mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
 
-    with patch("playground_backend.app.sio", mock_sio):
+    with patch("app.sio", mock_sio):
         # Create a simple message response
         message = Message(
             role=Role.agent,
@@ -126,7 +126,7 @@ async def test_process_a2a_response_uses_fallback_context_id():
     """Test that _process_a2a_response falls back to contextId from response_data."""
     from a2a.types import Message, Role, TextPart
 
-    from playground_backend.app import _process_a2a_response
+    from app import _process_a2a_response
 
     # Mock sio and services
     mock_sio = MagicMock()
@@ -141,7 +141,7 @@ async def test_process_a2a_response_uses_fallback_context_id():
     mock_sio.app_instance.state.messages_service.save_history_messages = AsyncMock(return_value=0)
     mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
 
-    with patch("playground_backend.app.sio", mock_sio):
+    with patch("app.sio", mock_sio):
         # Create message with contextId in response
         message = Message(
             role=Role.agent,
