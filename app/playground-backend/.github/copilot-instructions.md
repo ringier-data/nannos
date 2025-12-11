@@ -206,11 +206,143 @@ agent = await sub_agent_service.create_sub_agent(...)
 
 ### Authorization Checks
 ```python
-from playground_backend.authorization import check_user_permission, Resource, Action
+from playground_backend.authorization import check_capability, check_action_allowed
 
-# Check if user can perform action
-check_user_permission(user, Resource.SUB_AGENTS, Action.WRITE)
+# Check system-level capability
+if check_capability(user.role, 'sub_agents', 'approve'):
+    # User's system role allows approving sub-agents
+    pass
+
+# Check group role capability
+if check_action_allowed(group_role, 'sub_agents', 'write'):
+    # User's group role allows write actions
+    pass
 ```
+
+## Two-Layer RBAC (Role-Based Access Control)
+
+The system implements a two-layer RBAC model that combines **system roles** with **group roles** to determine effective permissions.
+
+### Layer 1: System Roles
+
+System roles define **what actions a user can perform system-wide**. Defined in `SYSTEM_ROLE_CAPABILITIES`:
+
+- **`member`**: Basic user with read/write access to resources in their groups
+  - Can view groups they're in
+  - Can manage members in their groups (requires group manager role)
+  - Can read/write sub-agents (requires group access)
+  - Can read/write secrets (requires group access)
+
+- **`approver`**: Can approve submissions in accessible groups
+  - All member capabilities
+  - Can approve sub-agents (requires admin-mode + group write/manager role)
+
+- **`admin`**: System administrator with elevated privileges
+  - All approver capabilities
+  - Admin-mode actions (`.admin` suffix) bypass group restrictions:
+    - `read.admin`, `write.admin` - Access all resources system-wide
+    - `approve.admin` - Approve any submission system-wide
+  - Can manage users system-wide
+  - All `.admin` actions require admin-mode to be enabled
+
+### Layer 2: Group Roles
+
+Group roles define **what actions a user can perform on resources within a specific group**. Defined in `GROUP_ROLE_CAPABILITIES`:
+
+- **`read`**: Read-only access
+  - View sub-agents, secrets, and members
+
+- **`write`**: Can modify resources
+  - Read/write sub-agents
+  - View members
+  - Read secrets
+
+- **`manager`**: Full group management
+  - Read/write sub-agents and secrets
+  - Add/remove group members
+  - Change member roles
+
+### Permission Intersection Model
+
+**Effective permissions = Resource permissions ∩ System role ∩ Group role**
+
+#### How Permissions are Checked:
+
+1. **System-level check** (`check_user_permission()`):
+   - Verifies user's system role has the capability
+   - Used for: viewing groups, system-wide operations
+   - Does NOT check specific resource access
+
+2. **Resource-level check** (`check_resource_permission()`):
+   - Combines THREE factors:
+     - System role capabilities (required for special actions like `approve`)
+     - Resource permissions (what actions the group has on the resource)
+     - Group role (what actions the user's role allows)
+   - Special cases:
+     - Owners always have full access
+     - Public resources allow read access to all
+     - `approve` action requires: approver/admin system role + write/manager group role
+
+#### Example Scenarios:
+
+```python
+# Scenario 1: Member with 'read' group role
+# - System role: member (allows read/write)
+# - Group role: read (allows read only)
+# - Resource permissions: ['read', 'write']
+# → Effective: read only (limited by group role)
+
+# Scenario 2: Approver with 'write' group role
+# - System role: approver (allows read/write/approve)
+# - Group role: write (allows read/write)
+# - Resource permissions: ['read', 'write']
+# - Action: approve
+# → Effective: Can approve (has system approve + group write access)
+
+# Scenario 3: Member with 'manager' group role
+# - System role: member (no approve capability)
+# - Group role: manager (allows read/write)
+# - Resource permissions: ['read', 'write']
+# - Action: approve
+# → Effective: CANNOT approve (lacks system approve capability)
+```
+
+### Admin Mode
+
+Actions with `.admin` suffix require admin-mode to be enabled:
+- Admin-mode is a session-level toggle
+- Provides audit trail for elevated operations
+- Bypasses group permission intersection
+- Only available to users with `admin` system role
+
+### Authorization Helpers
+
+```python
+from playground_backend.authorization import check_capability, check_action_allowed
+from playground_backend.services.user_group_service import user_group_service
+
+# Check system role capability
+can_approve = check_capability(user.role, 'sub_agents', 'approve')
+
+# Check group role capability
+can_write = check_action_allowed(group_role, 'sub_agents', 'write')
+
+# Check full resource permission (combines all layers)
+has_access = await user_group_service.check_resource_permission(
+    db=db,
+    user_id=user.id,
+    resource_type='sub_agents',
+    resource_id=sub_agent_id,
+    action='write'
+)
+```
+
+### When to Use Each Check
+
+- **`check_capability()`**: Check if system role has a capability (e.g., can user approve?)
+- **`check_action_allowed()`**: Check if group role allows an action
+- **`check_user_permission()`**: Check system-level permissions (groups, users)
+- **`check_resource_permission()`**: Check access to specific resources (sub-agents, secrets)
 
 ## Important Notes
 
