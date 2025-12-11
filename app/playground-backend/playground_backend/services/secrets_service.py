@@ -2,13 +2,13 @@
 
 import logging
 import os
-import uuid
 from datetime import datetime, timezone
 
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid6 import uuid7
 
 from ..authorization import check_action_allowed, check_capability
 from ..models.secret import Secret, SecretCreate, SecretType
@@ -30,7 +30,7 @@ class SecretsService:
 
     def _generate_ssm_parameter_name(self) -> str:
         """Generate unique SSM parameter name using vault prefix and UUID."""
-        return os.path.join(self.ssm_vault_prefix, str(uuid.uuid4()))
+        return os.path.join(self.ssm_vault_prefix, str(uuid7()))
 
     async def check_user_access(
         self,

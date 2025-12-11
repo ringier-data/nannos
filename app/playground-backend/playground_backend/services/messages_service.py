@@ -5,7 +5,6 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from uuid import uuid4
 
 import boto3
 import httpx
@@ -14,6 +13,7 @@ from aiodynamo.client import Client
 from aiodynamo.credentials import Credentials, Key, StaticCredentials
 from aiodynamo.expressions import F, HashAndRangeKeyCondition, HashKey
 from aiodynamo.http.httpx import HTTPX
+from uuid6 import uuid7
 
 from ..config import config
 from ..models.message import Message
@@ -54,7 +54,7 @@ def _parse_status_update(response_data: dict[str, Any]) -> dict[str, Any]:
     task_id = response_data.get("taskId", response_data.get("id", ""))
     # Always generate a new message ID for status updates to avoid duplicates
     # Only use the response ID if it's explicitly set in nested message
-    message_id = str(uuid4())
+    message_id = str(uuid7())
 
     parts = []
     role = "assistant"
@@ -126,7 +126,7 @@ def _parse_task(response_data: dict[str, Any]) -> dict[str, Any]:
     final = response_data.get("final", False)
     kind = response_data.get("kind", "task")
     task_id = response_data.get("id", response_data.get("taskId", ""))
-    message_id = task_id or str(uuid4())
+    message_id = task_id or str(uuid7())
 
     role = "assistant"
     metadata = response_data.get("metadata", {}) or {}
@@ -347,7 +347,7 @@ class MessagesService:
             The created message
         """
         if message_id is None:
-            message_id = str(uuid4())
+            message_id = str(uuid7())
 
         created_at = datetime.now(tz=timezone.utc)
         created_at_iso = created_at.isoformat()
