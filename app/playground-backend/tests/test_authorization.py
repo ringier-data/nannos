@@ -369,7 +369,7 @@ class TestCheckResourcePermission:
 
     async def _create_group_with_member(self, user_group_service, db_session, user_id: str, group_role: str):
         """Helper to create a group and add user as member."""
-        group = await user_group_service.create_group(db_session, name=f"Test Group {user_id}")
+        group = await user_group_service.create_group(db_session, actor_sub="test-admin", name=f"Test Group {user_id}")
 
         # Add user to group with specific role
         query = text("""

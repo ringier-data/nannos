@@ -52,7 +52,9 @@ def _parse_status_update(response_data: dict[str, Any]) -> dict[str, Any]:
     final = response_data.get("final", False)
     kind = response_data.get("kind", "status-update")
     task_id = response_data.get("taskId", response_data.get("id", ""))
-    message_id = response_data.get("id", str(uuid4()))
+    # Always generate a new message ID for status updates to avoid duplicates
+    # Only use the response ID if it's explicitly set in nested message
+    message_id = str(uuid4())
 
     parts = []
     role = "assistant"
@@ -71,6 +73,7 @@ def _parse_status_update(response_data: dict[str, Any]) -> dict[str, Any]:
         nested = status.get("message")
         if isinstance(nested, dict):
             parts = nested.get("parts", [])
+            # Use nested message ID if explicitly provided, otherwise keep generated UUID
             message_id = nested.get("messageId", message_id)
             role = nested.get("role", "assistant")
             metadata = nested.get("metadata", metadata) or {}
@@ -88,6 +91,7 @@ def _parse_status_update(response_data: dict[str, Any]) -> dict[str, Any]:
     if "artifact" in response_data and isinstance(response_data.get("artifact"), dict):
         art = response_data["artifact"]
         parts = art.get("parts", parts)
+        # Use artifact ID if explicitly provided, otherwise keep generated UUID
         message_id = art.get("artifactId", message_id)
         kind = "artifact-update"
 

@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
 from ..dependencies import require_admin
-from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import PaginationMeta, User
 from ..models.user_group import (
     BulkGroupDelete,
@@ -17,7 +16,6 @@ from ..models.user_group import (
     UserGroupListResponse,
     UserGroupUpdate,
 )
-from ..services.audit_service import audit_service
 from ..services.user_group_service import user_group_service
 
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-groups"])
@@ -84,24 +82,9 @@ async def create_group(
     try:
         group = await user_group_service.create_group(
             db,
+            actor_sub=admin.sub,
             name=request.name,
             description=request.description,
-        )
-        await db.commit()
-
-        # Log audit
-        await audit_service.log_action(
-            db,
-            actor_sub=admin.sub,
-            entity_type=AuditEntityType.GROUP,
-            entity_id=str(group.id),
-            action=AuditAction.CREATE,
-            changes={
-                "after": {
-                    "name": group.name,
-                    "description": group.description,
-                }
-            },
         )
         await db.commit()
 
@@ -138,19 +121,6 @@ async def update_group(
 
     Admin only endpoint.
     """
-    # Get current state for audit
-    current_group = await user_group_service.get_group(db, group_id)
-    if current_group is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Group not found",
-        )
-
-    before = {
-        "name": current_group.name,
-        "description": current_group.description,
-    }
-
     try:
         # Build kwargs with only provided fields
         update_kwargs = {}
@@ -161,7 +131,8 @@ async def update_group(
 
         updated_group = await user_group_service.update_group(
             db,
-            group_id,
+            actor_sub=admin.sub,
+            group_id=group_id,
             **update_kwargs,
         )
 
@@ -171,21 +142,6 @@ async def update_group(
                 detail="Group not found",
             )
 
-        await db.commit()
-
-        # Log audit
-        after = {
-            "name": updated_group.name,
-            "description": updated_group.description,
-        }
-        await audit_service.log_action(
-            db,
-            actor_sub=admin.sub,
-            entity_type=AuditEntityType.GROUP,
-            entity_id=str(group_id),
-            action=AuditAction.UPDATE,
-            changes={"before": before, "after": after},
-        )
         await db.commit()
 
         group_with_members = await user_group_service.get_group_with_members(db, group_id)
@@ -221,16 +177,13 @@ async def delete_group(
 
     Admin only endpoint.
     """
-    # Get current state for audit
-    current_group = await user_group_service.get_group(db, group_id)
-    if current_group is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Group not found",
-        )
-
     try:
-        success = await user_group_service.delete_group(db, group_id, force=force)
+        success = await user_group_service.delete_group(
+            db,
+            actor_sub=admin.sub,
+            group_id=group_id,
+            force=force,
+        )
 
         if not success:
             raise HTTPException(
@@ -238,22 +191,6 @@ async def delete_group(
                 detail="Group not found",
             )
 
-        await db.commit()
-
-        # Log audit
-        await audit_service.log_action(
-            db,
-            actor_sub=admin.sub,
-            entity_type=AuditEntityType.GROUP,
-            entity_id=str(group_id),
-            action=AuditAction.DELETE,
-            changes={
-                "before": {
-                    "name": current_group.name,
-                    "description": current_group.description,
-                }
-            },
-        )
         await db.commit()
     except ValueError as e:
         raise HTTPException(
@@ -272,21 +209,12 @@ async def bulk_delete_groups(
 
     Admin only endpoint.
     """
-    results = await user_group_service.bulk_delete_groups(db, request.group_ids, force=request.force)
-    await db.commit()
-
-    # Log audit for each successful deletion
-    for result in results:
-        if result.success:
-            await audit_service.log_action(
-                db,
-                actor_sub=admin.sub,
-                entity_type=AuditEntityType.GROUP,
-                entity_id=str(result.group_id),
-                action=AuditAction.DELETE,
-                changes={},
-            )
-
+    results = await user_group_service.bulk_delete_groups(
+        db,
+        actor_sub=admin.sub,
+        group_ids=request.group_ids,
+        force=request.force,
+    )
     await db.commit()
 
     return BulkGroupDeleteResponse(data=results)

@@ -13,7 +13,7 @@ SYSTEM_ROLE_CAPABILITIES = {
         "groups": {"read"},  # View groups they're in (intersection applies)
         "members": {"read", "write"},  # View/manage members (intersection applies)
         "sub_agents": {"read", "write"},  # View/manage sub-agents (intersection applies)
-        "secrets": {"read"},  # View secrets (intersection applies)
+        "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
     },
     "approver": {
         "groups": {"read"},  # View groups they're in (intersection applies)
@@ -23,7 +23,7 @@ SYSTEM_ROLE_CAPABILITIES = {
             "write",
             "approve",  # Approve sub-agents in accessible groups (intersection applies, requires admin-mode)
         },
-        "secrets": {"read"},  # View secrets (intersection applies)
+        "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
     },
     "admin": {
         "groups": {
@@ -72,7 +72,7 @@ GROUP_ROLE_CAPABILITIES = {
     "write": {
         "sub_agents": {"read", "write"},  # Full sub-agent access
         "members": {"read"},  # Can view group members
-        "secrets": {"read"},  # Read/write access to secrets
+        "secrets": {"read"},  # Read access to secrets
     },
     "manager": {
         "sub_agents": {"read", "write"},  # Full sub-agent access

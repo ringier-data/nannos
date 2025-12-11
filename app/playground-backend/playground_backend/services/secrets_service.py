@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..authorization import check_action_allowed, check_capability
 from ..models.secret import Secret, SecretCreate, SecretType
+from ..repositories.secrets_repository import secrets_repository
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class SecretsService:
         self.region_name = os.environ.get("AWS_REGION", "eu-central-1")
         self.ssm_vault_prefix = os.environ.get("SSM_VAULT_PREFIX", "/alloy/infrastructure-agents/vault")
         self.kms_key_id = os.environ.get("KMS_VAULT_KEY_ID", "alias/dev-alloy-sensitive-data-kms-key")
+        self.repo = secrets_repository
 
     def _generate_ssm_parameter_name(self) -> str:
         """Generate unique SSM parameter name using vault prefix and UUID."""
@@ -178,44 +180,25 @@ class SecretsService:
             logger.error(f"Failed to create SSM parameter: {e}")
             raise ValueError(f"Failed to store secret in SSM Parameter Store: {e}")
 
-        # Store metadata in database
-        query = text("""
-            INSERT INTO secrets (
-                owner_user_id, name, description, secret_type,
-                ssm_parameter_name, created_at, updated_at
-            )
-            VALUES (:owner_user_id, :name, :description, :secret_type,
-                    :ssm_parameter_name, :now, :now)
-            RETURNING id, owner_user_id, name, description, secret_type,
-                      ssm_parameter_name, created_at, updated_at, deleted_at
-        """)
-        result = await db.execute(
-            query,
-            {
+        # Store metadata in database with automatic audit
+        secret_id = await self.repo.create(
+            db=db,
+            actor_sub=user_id,
+            fields={
                 "owner_user_id": user_id,
                 "name": data.name,
                 "description": data.description,
                 "secret_type": data.secret_type.value,
                 "ssm_parameter_name": ssm_parameter_name,
-                "now": now,
+                "created_at": now,
+                "updated_at": now,
             },
+            returning="id",
         )
         await db.commit()
 
-        row = result.fetchone()
-        if not row:
-            raise ValueError("Failed to create secret in database")
-        return Secret(
-            id=row[0],
-            owner_user_id=row[1],
-            name=row[2],
-            description=row[3],
-            secret_type=SecretType(row[4]),
-            ssm_parameter_name=row[5],
-            created_at=row[6],
-            updated_at=row[7],
-            deleted_at=row[8],
-        )
+        # Fetch and return the created secret
+        return await self.get_secret(db, secret_id, user_id, is_admin=False, admin_mode=False)  # type: ignore
 
     async def get_secret(
         self,
@@ -380,14 +363,8 @@ class SecretsService:
             logger.warning(f"Failed to delete SSM parameter {secret.ssm_parameter_name}: {e}")
             # Continue with soft delete even if SSM deletion fails
 
-        # Soft delete in database
-        now = datetime.now(timezone.utc)
-        query = text("""
-            UPDATE secrets
-            SET deleted_at = :now, updated_at = :now
-            WHERE id = :secret_id
-        """)
-        await db.execute(query, {"secret_id": secret_id, "now": now})
+        # Soft delete in database with automatic audit
+        await self.repo.delete(db=db, actor_sub=user_id, entity_id=secret_id, soft=True)
         await db.commit()
 
         return True
@@ -506,39 +483,13 @@ class SecretsService:
         if not has_access:
             raise PermissionError("You don't have permission to update permissions for this secret")
 
-        # Check if user is owner (only owners can update permissions)
-        query = text("""
-            SELECT owner_user_id FROM secrets
-            WHERE id = :secret_id AND deleted_at IS NULL
-        """)
-        result = await db.execute(query, {"secret_id": secret_id})
-        row = result.fetchone()
-
-        if not row or row[0] != user_id:
-            raise PermissionError("Only the secret owner can update permissions")
-
-        # Delete existing permissions
-        delete_query = text("""
-            DELETE FROM secret_permissions
-            WHERE secret_id = :secret_id
-        """)
-        await db.execute(delete_query, {"secret_id": secret_id})
-
-        # Insert new permissions
-        for perm in group_permissions:
-            insert_query = text("""
-                INSERT INTO secret_permissions (secret_id, user_group_id, permissions)
-                VALUES (:secret_id, :user_group_id, :permissions)
-            """)
-            await db.execute(
-                insert_query,
-                {
-                    "secret_id": secret_id,
-                    "user_group_id": perm["user_group_id"],
-                    "permissions": perm["permissions"],
-                },
-            )
-
+        # Use repository for update with automatic audit logging
+        await self.repo.update_permissions(
+            db=db,
+            actor_sub=user_id,
+            secret_id=secret_id,
+            group_permissions=group_permissions,
+        )
         await db.commit()
         return True
 

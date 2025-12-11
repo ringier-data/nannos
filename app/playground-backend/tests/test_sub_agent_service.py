@@ -156,8 +156,24 @@ class TestSubAgentVersionCreation:
     @pytest.mark.asyncio
     async def test_foundry_agent_creates_secret_in_ssm(self, pg_session: AsyncSession):
         """Test that creating a Foundry agent stores the client_secret in SSM."""
+        from playground_backend.models.secret import SecretCreate, SecretType
+        from playground_backend.services.secrets_service import SecretsService
+
         service = SubAgentService()
+        secrets_service = SecretsService()
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
+
+        # Create the secret first
+        secret = await secrets_service.create_secret(
+            pg_session,
+            user_id,
+            SecretCreate(
+                name="test-foundry-secret",
+                description="Test secret for Foundry agent",
+                secret_type=SecretType.FOUNDRY_CLIENT_SECRET,
+                secret_value="test-secret-value",
+            ),
+        )
 
         data = SubAgentCreate(
             name="Foundry Agent",
@@ -165,7 +181,7 @@ class TestSubAgentVersionCreation:
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
             foundry_client_id="test-client-id",
-            foundry_client_secret_ref=1,
+            foundry_client_secret_ref=secret.id,
             foundry_ontology_rid="ri.ontology.main.ontology.abc123",
             foundry_query_api_name="a2ATicketWriterAgent",
             foundry_scopes=[FoundryScope.ONTOLOGIES_WRITE, FoundryScope.ONTOLOGIES_READ],
@@ -178,7 +194,7 @@ class TestSubAgentVersionCreation:
         assert agent.config_version is not None
         assert agent.config_version.foundry_hostname == "https://blumen.palantirfoundry.de"
         assert agent.config_version.foundry_client_id == "test-client-id"
-        assert agent.config_version.foundry_client_secret_ref is not None  # Secret ID stored
+        assert agent.config_version.foundry_client_secret_ref == secret.id  # Secret ID stored
         assert agent.config_version.foundry_ontology_rid == "ri.ontology.main.ontology.abc123"
         assert agent.config_version.foundry_query_api_name == "a2ATicketWriterAgent"
         assert agent.config_version.foundry_scopes == [
@@ -194,8 +210,24 @@ class TestSubAgentVersionCreation:
     @pytest.mark.asyncio
     async def test_foundry_agent_update_creates_new_secret(self, pg_session: AsyncSession):
         """Test that updating a Foundry agent's client_secret creates a new secret."""
+        from playground_backend.models.secret import SecretCreate, SecretType
+        from playground_backend.services.secrets_service import SecretsService
+
         service = SubAgentService()
+        secrets_service = SecretsService()
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
+
+        # Create initial secret
+        secret1 = await secrets_service.create_secret(
+            pg_session,
+            user_id,
+            SecretCreate(
+                name="original-foundry-secret",
+                description="Original secret",
+                secret_type=SecretType.FOUNDRY_CLIENT_SECRET,
+                secret_value="original-secret",
+            ),
+        )
 
         # Create initial Foundry agent
         data = SubAgentCreate(
@@ -204,7 +236,7 @@ class TestSubAgentVersionCreation:
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
             foundry_client_id="test-client-id",
-            foundry_client_secret="original-secret",
+            foundry_client_secret_ref=secret1.id,
             foundry_ontology_rid="ri.ontology.main.ontology.abc123",
             foundry_query_api_name="a2ATicketWriterAgent",
             foundry_scopes=[FoundryScope.ONTOLOGIES_WRITE],
@@ -214,10 +246,22 @@ class TestSubAgentVersionCreation:
         assert agent.config_version is not None
         original_secret_ref = agent.config_version.foundry_client_secret_ref
 
-        # Update with new client_secret
+        # Create new secret
+        secret2 = await secrets_service.create_secret(
+            pg_session,
+            user_id,
+            SecretCreate(
+                name="new-foundry-secret",
+                description="New secret",
+                secret_type=SecretType.FOUNDRY_CLIENT_SECRET,
+                secret_value="new-secret-value",
+            ),
+        )
+
+        # Update with new client_secret reference
         update_data = SubAgentUpdate(
             description="Updated description",
-            foundry_client_secret="new-secret-value",
+            foundry_client_secret_ref=secret2.id,
             change_summary="Updated client secret",
         )
 
@@ -234,8 +278,24 @@ class TestSubAgentVersionCreation:
     @pytest.mark.asyncio
     async def test_foundry_agent_update_without_secret_keeps_existing(self, pg_session: AsyncSession):
         """Test that updating a Foundry agent without providing client_secret keeps the existing one."""
+        from playground_backend.models.secret import SecretCreate, SecretType
+        from playground_backend.services.secrets_service import SecretsService
+
         service = SubAgentService()
+        secrets_service = SecretsService()
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
+
+        # Create secret
+        secret = await secrets_service.create_secret(
+            pg_session,
+            user_id,
+            SecretCreate(
+                name="foundry-secret",
+                description="Foundry secret",
+                secret_type=SecretType.FOUNDRY_CLIENT_SECRET,
+                secret_value="original-secret",
+            ),
+        )
 
         # Create initial Foundry agent
         data = SubAgentCreate(
@@ -244,7 +304,7 @@ class TestSubAgentVersionCreation:
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
             foundry_client_id="test-client-id",
-            foundry_client_secret="original-secret",
+            foundry_client_secret_ref=secret.id,
             foundry_ontology_rid="ri.ontology.main.ontology.abc123",
             foundry_query_api_name="a2ATicketWriterAgent",
             foundry_scopes=[FoundryScope.ONTOLOGIES_WRITE],
@@ -273,8 +333,24 @@ class TestSubAgentVersionCreation:
     @pytest.mark.asyncio
     async def test_foundry_agent_requires_foundry_fields(self, pg_session: AsyncSession):
         """Test that Foundry agents require all Foundry-specific fields including client_secret."""
+        from playground_backend.models.secret import SecretCreate, SecretType
+        from playground_backend.services.secrets_service import SecretsService
+
         service = SubAgentService()
+        secrets_service = SecretsService()
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
+
+        # Create secret
+        secret = await secrets_service.create_secret(
+            pg_session,
+            user_id,
+            SecretCreate(
+                name="required-foundry-secret",
+                description="Required secret",
+                secret_type=SecretType.FOUNDRY_CLIENT_SECRET,
+                secret_value="required-secret",
+            ),
+        )
 
         # Create Foundry agent WITH client_secret (required by DB constraint)
         data = SubAgentCreate(
@@ -283,7 +359,7 @@ class TestSubAgentVersionCreation:
             type=SubAgentType.FOUNDRY,
             foundry_hostname="https://blumen.palantirfoundry.de",
             foundry_client_id="test-client-id",
-            foundry_client_secret="required-secret",  # Required for Foundry agents
+            foundry_client_secret_ref=secret.id,  # Required for Foundry agents
             foundry_ontology_rid="ri.ontology.main.ontology.abc123",
             foundry_query_api_name="a2ATicketWriterAgent",
             foundry_scopes=[FoundryScope.ONTOLOGIES_WRITE],
@@ -294,7 +370,7 @@ class TestSubAgentVersionCreation:
         assert agent is not None
         assert agent.config_version is not None
         # Foundry agents must have a secret reference (enforced by DB constraint)
-        assert agent.config_version.foundry_client_secret_ref is not None
+        assert agent.config_version.foundry_client_secret_ref == secret.id
         assert agent.config_version.foundry_hostname == "https://blumen.palantirfoundry.de"
         assert agent.config_version.foundry_version == "1.0.0"
 

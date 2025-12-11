@@ -9,9 +9,10 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import Request
 
 from playground_backend.db.session import get_db_session
-from playground_backend.dependencies import require_auth
+from playground_backend.dependencies import require_auth, require_auth_or_bearer_token
 from playground_backend.models.user import User, UserStatus
 from playground_backend.services.user_service import UserService
 from playground_backend.services.user_settings_service import UserSettingsService
@@ -82,8 +83,13 @@ async def app_with_db(db_session, test_user_in_db, test_user_model):
     def override_require_auth():
         return test_user_model
 
+    # Override require_auth_or_bearer_token to return test user
+    async def override_require_auth_or_bearer_token(request: Request):
+        return test_user_model
+
     app.dependency_overrides[get_db_session] = override_get_db
     app.dependency_overrides[require_auth] = override_require_auth
+    app.dependency_overrides[require_auth_or_bearer_token] = override_require_auth_or_bearer_token
 
     app.include_router(auth_router)
     return app

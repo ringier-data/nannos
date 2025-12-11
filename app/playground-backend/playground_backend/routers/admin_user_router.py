@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
 from ..dependencies import require_admin
-from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import (
     BulkUserOperationRequest,
     BulkUserOperationResponse,
@@ -20,7 +19,6 @@ from ..models.user import (
     UserRoleUpdate,
     UserStatusUpdate,
 )
-from ..services.audit_service import audit_service
 from ..services.user_service import user_service
 
 router = APIRouter(prefix="/api/v1/admin/users", tags=["admin-users"])
@@ -95,12 +93,11 @@ async def update_user(
             detail="User not found",
         )
 
-    before_state = {"is_administrator": current_user.is_administrator}
-
     # Update user fields
     updated_user = await user_service.update_user_admin_fields(
         db,
         user_id,
+        admin.sub,  # actor_sub for audit
         is_administrator=request.is_administrator,
     )
 
@@ -111,22 +108,6 @@ async def update_user(
         )
 
     await db.commit()
-
-    # Log audit
-    after_state = {"is_administrator": updated_user.is_administrator}
-    if before_state != after_state:
-        await audit_service.log_action(
-            db,
-            actor_sub=admin.sub,
-            entity_type=AuditEntityType.USER,
-            entity_id=user_id,
-            action=AuditAction.UPDATE,
-            changes={
-                "before": before_state,
-                "after": after_state,
-            },
-        )
-        await db.commit()
 
     # Return user with groups
     user_with_groups = await user_service.get_user_with_groups(db, user_id)
@@ -158,12 +139,11 @@ async def update_user_groups(
             detail="User not found",
         )
 
-    before_groups = [g.group_id for g in current_user.groups]
-
     # Update groups
     updated_user = await user_service.update_user_groups(
         db,
         user_id,
+        admin.sub,  # actor_sub for audit
         request.group_ids,
         request.operation,
     )
@@ -174,22 +154,6 @@ async def update_user_groups(
             detail="User not found",
         )
 
-    await db.commit()
-
-    # Log audit
-    after_groups = [g.group_id for g in updated_user.groups]
-    await audit_service.log_action(
-        db,
-        actor_sub=admin.sub,
-        entity_type=AuditEntityType.USER,
-        entity_id=user_id,
-        action=AuditAction.UPDATE,
-        changes={
-            "before": {"groups": before_groups},
-            "after": {"groups": after_groups},
-            "operation": request.operation,
-        },
-    )
     await db.commit()
 
     return UserDetailResponse(data=updated_user)
@@ -214,10 +178,13 @@ async def update_user_role(
             detail="User not found",
         )
 
-    before_role = current_user.role
-
     # Update role
-    updated_user = await user_service.update_user_role(db, user_id, request.role.value)
+    updated_user = await user_service.update_user_role(
+        db,
+        user_id,
+        admin.sub,
+        request.role.value,  # actor_sub for audit
+    )
 
     if updated_user is None:
         raise HTTPException(
@@ -225,20 +192,6 @@ async def update_user_role(
             detail="User not found",
         )
 
-    await db.commit()
-
-    # Log audit
-    await audit_service.log_action(
-        db,
-        actor_sub=admin.sub,
-        entity_type=AuditEntityType.USER,
-        entity_id=user_id,
-        action=AuditAction.UPDATE,
-        changes={
-            "before": {"role": before_role},
-            "after": {"role": request.role.value},
-        },
-    )
     await db.commit()
 
     # Return user with groups
@@ -271,10 +224,13 @@ async def update_user_status(
             detail="User not found",
         )
 
-    before_status = current_user.status.value
-
     # Update status
-    updated_user = await user_service.update_user_status(db, user_id, request.status)
+    updated_user = await user_service.update_user_status(
+        db,
+        user_id,
+        admin.sub,
+        request.status,  # actor_sub for audit
+    )
 
     if updated_user is None:
         raise HTTPException(
@@ -282,20 +238,6 @@ async def update_user_status(
             detail="User not found",
         )
 
-    await db.commit()
-
-    # Log audit
-    await audit_service.log_action(
-        db,
-        actor_sub=admin.sub,
-        entity_type=AuditEntityType.USER,
-        entity_id=user_id,
-        action=AuditAction.UPDATE,
-        changes={
-            "before": {"status": before_status},
-            "after": {"status": request.status.value},
-        },
-    )
     await db.commit()
 
     # Return user with groups
@@ -319,21 +261,11 @@ async def bulk_update_users(
 
     Admin only endpoint.
     """
-    results = await user_service.bulk_update_users(db, request.operations)
-    await db.commit()
-
-    # Log audit for each successful operation
-    for op, result in zip(request.operations, results):
-        if result.success:
-            await audit_service.log_action(
-                db,
-                actor_sub=admin.sub,
-                entity_type=AuditEntityType.USER,
-                entity_id=op.user_id,
-                action=AuditAction.UPDATE,
-                changes={"action": op.action},
-            )
-
+    results = await user_service.bulk_update_users(
+        db,
+        admin.sub,
+        request.operations,  # actor_sub for audit
+    )
     await db.commit()
 
     return BulkUserOperationResponse(data=results)

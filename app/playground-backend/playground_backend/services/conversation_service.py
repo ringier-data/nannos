@@ -125,10 +125,6 @@ class ConversationService:
                     started_at_raw = item.get("startedAt")
                     last_msg_raw = item.get("lastMessageAt") or item.get("last_message_at") or started_at_raw
 
-                    logger.debug(
-                        f"Item from DynamoDB: conversationId={item.get('conversationId')}, lastMessageAt={last_msg_raw}, type={type(last_msg_raw)}"
-                    )
-
                     started_at = (
                         datetime.fromisoformat(started_at_raw)
                         if started_at_raw
