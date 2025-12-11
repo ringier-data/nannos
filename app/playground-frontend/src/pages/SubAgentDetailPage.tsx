@@ -77,6 +77,7 @@ import {
   submitForApprovalApiV1SubAgentsSubAgentIdSubmitPostMutation,
   reviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostMutation,
   listSecretsApiV1SecretsGetOptions,
+  getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { SubAgentConfigVersion } from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
@@ -180,6 +181,14 @@ export function SubAgentDetailPage() {
   const availableSecrets = secretsData?.items?.filter(
     (secret) => secret.secret_type === 'foundry_client_secret'
   ) ?? [];
+
+  // Fetch group permissions for the sub-agent
+  const { data: groupPermissions } = useQuery({
+    ...getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions({
+      path: { sub_agent_id: parseInt(id || '0', 10) },
+    }),
+    enabled: !!id,
+  });
 
   // Fetch version history for all agent types
   const { data: versionHistoryData } = useQuery({
@@ -285,6 +294,7 @@ export function SubAgentDetailPage() {
 
   const currentUserId = user?.id ?? '';
   const isOwner = subAgent?.owner_user_id === currentUserId;
+  const isAdministrator = user?.is_administrator ?? false;
   const canApprove = adminMode;
   
   // Sub-agent overall status (from config_version)
@@ -297,8 +307,36 @@ export function SubAgentDetailPage() {
   // For header status display, always use current version's status (not the viewed version)
   const status: SubAgentStatus = currentVersionStatus;
   
+  // Check if user has write access through any of their groups
+  const hasGroupWriteAccess = (() => {
+    if (!user?.groups || !groupPermissions) return false;
+    
+    // Get user's group IDs
+    const userGroupIds = new Set(user.groups.map(g => g.id));
+    
+    // Check if any of the sub-agent's group permissions grant write access
+    // to a group the user belongs to
+    return groupPermissions.some(perm => {
+      if (!userGroupIds.has(perm.user_group_id)) return false;
+      
+      // Check if the permission includes 'write'
+      const hasWritePermission = perm.permissions.includes('write');
+      if (!hasWritePermission) return false;
+      
+      // Find the user's role in this group
+      const userGroup = user.groups?.find(g => g.id === perm.user_group_id);
+      if (!userGroup) return false;
+      
+      // User must have 'write' or 'manager' role in the group to actually write
+      // (read-only group members can't write even if the group has write permission)
+      return userGroup.group_role === 'write' || userGroup.group_role === 'manager';
+    });
+  })();
+  
   // Owners can edit at any status - but only when viewing current version
-  const canEdit = isOwner && !isViewingHistoricalVersion;
+  // Administrators with admin mode enabled can also edit
+  // Users with write access through groups can also edit
+  const canEdit = (isOwner || (isAdministrator && adminMode) || hasGroupWriteAccess) && !isViewingHistoricalVersion;
   const canDelete = isOwner || canApprove;
   // Can submit if owner and current version is draft
   const canSubmitForApproval = isOwner && currentVersionStatus === 'draft';
@@ -690,9 +728,9 @@ export function SubAgentDetailPage() {
       <div className="flex-1 flex gap-4 min-h-0">
         {/* Left Column - Configuration & Group Access */}
         <div className={`flex flex-col gap-4 flex-shrink-0 ${
-          configPanelWidth === 'compact' ? 'w-[320px]' :
-          configPanelWidth === 'wide' ? 'w-[560px]' :
-          'w-[400px]'
+          configPanelWidth === 'compact' ? 'w-[400px]' :
+          configPanelWidth === 'wide' ? 'w-[800px]' :
+          'w-[560px]'
         }`}>
           {/* Configuration Panel */}
           <div 
@@ -762,9 +800,9 @@ export function SubAgentDetailPage() {
                     <Maximize2 className="h-4 w-4" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="compact">Compact (320px)</SelectItem>
-                    <SelectItem value="medium">Medium (400px)</SelectItem>
-                    <SelectItem value="wide">Wide (560px)</SelectItem>
+                    <SelectItem value="compact">Compact (400px)</SelectItem>
+                    <SelectItem value="medium">Medium (560px)</SelectItem>
+                    <SelectItem value="wide">Wide (800px)</SelectItem>
                   </SelectContent>
                 </Select>
               )}
@@ -835,9 +873,9 @@ export function SubAgentDetailPage() {
           )}
 
           <ScrollArea className="flex-1 min-h-0">
-            <div className="p-4 space-y-4">
+            <div className="p-4 flex flex-col gap-4 h-full">
               {/* Name */}
-              <div className="space-y-2">
+              <div className="space-y-2 flex-shrink-0">
                 <Label htmlFor="name">Name</Label>
                 {isEditing ? (
                   <Input
@@ -856,7 +894,7 @@ export function SubAgentDetailPage() {
               </div>
 
               {/* Public Access */}
-              <div className="flex items-center justify-between space-x-2">
+              <div className="flex items-center justify-between space-x-2 flex-shrink-0">
                 <div className="space-y-0.5">
                   <Label htmlFor="is_public" className="flex items-center gap-2">
                     <Users className="h-4 w-4" />
@@ -883,7 +921,7 @@ export function SubAgentDetailPage() {
               </div>
 
               {/* Description */}
-              <div className="space-y-2">
+              <div className="space-y-2 flex-shrink-0">
                 <div className="flex items-center gap-2">
                   <Label htmlFor="description">Description</Label>
                   <TooltipProvider>
@@ -917,11 +955,11 @@ export function SubAgentDetailPage() {
                 )}
               </div>
 
-              <Separator />
+              <Separator className="flex-shrink-0" />
 
               {/* Type-specific configuration */}
               {subAgent.type === 'remote' ? (
-                <div className="space-y-2">
+                <div className="space-y-2 flex-shrink-0">
                   <Label htmlFor="agentUrl">Agent URL</Label>
                   {isEditing ? (
                     <Input
@@ -944,7 +982,7 @@ export function SubAgentDetailPage() {
               ) : subAgent.type === 'foundry' ? (
                 <>
                   {/* Foundry Configuration */}
-                  <div className="space-y-4">
+                  <div className="space-y-4 flex-shrink-0">
                     <div className="space-y-2">
                       <Label htmlFor="foundryHostname">Foundry Hostname</Label>
                       {isEditing ? (
@@ -1158,7 +1196,7 @@ export function SubAgentDetailPage() {
               ) : (
                 <>
                   {/* Model - Only for local agents */}
-                  <div className="space-y-2">
+                  <div className="space-y-2 flex-shrink-0">
                     <Label htmlFor="model">Model</Label>
                     {isEditing ? (
                       <Select
@@ -1184,7 +1222,7 @@ export function SubAgentDetailPage() {
                   </div>
 
                   {/* MCP Tools */}
-                  <div className="space-y-2">
+                  <div className="space-y-2 flex-shrink-0">
                     <Label>MCP Tools (Optional)</Label>
                     {isEditing ? (
                       <Button
@@ -1228,10 +1266,10 @@ export function SubAgentDetailPage() {
                   </div>
 
                   {/* System Prompt */}
-                  <div className="space-y-2">
+                  <div className="flex flex-col gap-2 flex-1 min-h-0">
                     <Label htmlFor="systemPrompt">System Prompt</Label>
                     {isEditing ? (
-                      <div className="space-y-2">
+                      <div className="flex flex-col gap-2 flex-1 min-h-0">
                         {/* Edit/Preview Tabs */}
                         <div className="flex gap-1 p-1 bg-muted rounded-md">
                           <button
@@ -1268,12 +1306,11 @@ export function SubAgentDetailPage() {
                             }}
                             onFocus={() => setActiveFocusArea('config')}
                             onBlur={() => setActiveFocusArea(null)}
-                            rows={12}
-                            className="font-mono text-sm min-h-[200px]"
+                            className="font-mono text-sm flex-1 min-h-0 resize-none"
                             placeholder="Enter the system prompt for this sub-agent..."
                           />
                         ) : (
-                          <div className="bg-muted p-3 rounded min-h-[200px] max-h-[400px] overflow-auto border">
+                          <div className="bg-muted p-3 rounded flex-1 min-h-0 overflow-auto border">
                             <Markdown className="text-sm">
                               {editSystemPrompt || '*No content to preview*'}
                             </Markdown>
@@ -1281,7 +1318,7 @@ export function SubAgentDetailPage() {
                         )}
                       </div>
                     ) : (
-                      <div className="bg-muted p-3 rounded max-h-48 overflow-auto">
+                      <div className="bg-muted p-3 rounded flex-1 min-h-0 overflow-auto border">
                         <Markdown className="text-sm">
                           {displayedSystemPrompt}
                         </Markdown>
@@ -1292,7 +1329,7 @@ export function SubAgentDetailPage() {
               )}
 
               {hasUnsavedChanges && (
-                <Alert>
+                <Alert className="flex-shrink-0">
                   <AlertDescription>
                     You have unsaved changes. Save to test with the updated configuration.
                   </AlertDescription>
@@ -1303,7 +1340,7 @@ export function SubAgentDetailPage() {
         </div>
 
         {/* Group Access Panel */}
-        {isOwner && (
+        {(isOwner || (isAdministrator && adminMode)) && (
           <div className="flex flex-col rounded-lg border border-border bg-muted/30 overflow-hidden flex-shrink-0">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-border shrink-0">
               <Users className="h-4 w-4 text-muted-foreground" />
@@ -1584,7 +1621,7 @@ export function SubAgentDetailPage() {
       )}
 
       {/* Permissions Dialog */}
-      {isOwner && (
+      {(isOwner || (isAdministrator && adminMode)) && (
         <SubAgentPermissionsDialog
           subAgentId={subAgent.id}
           subAgentName={subAgent.name}

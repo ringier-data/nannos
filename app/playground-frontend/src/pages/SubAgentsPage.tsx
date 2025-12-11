@@ -137,7 +137,7 @@ export function SubAgentsPage() {
         subAgents={getSubAgentsForTab()}
         onSelect={handleSelectSubAgent}
         emptyMessage={getEmptyMessage()}
-        showManageAccess={activeTab === 'my'}
+        showManageAccess={activeTab === 'my' || adminMode}
       />
     </div>
   );
