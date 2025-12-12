@@ -93,3 +93,12 @@ rds_alarm_thresholds:
 rds_alarm_read_latency: "{{ rds_alarm_thresholds[rds_instance_class].read_latency}}"
 rds_alarm_write_latency: "{{ rds_alarm_thresholds[rds_instance_class].write_latency }}"
 rds_alarm_freeable_memory_in_mb: "{{ rds_alarm_thresholds[rds_instance_class].freeable_memory_in_mb }}"
+
+# == Agents Settings ==
+bedrock_model_id: 'global.anthropic.claude-sonnet-4-5-20250929-v1:0'
+bedrock_read_timeout: 300  # 5 minutes - for long-running Claude responses
+bedrock_connect_timeout: 10  # 10 seconds
+bedrock_max_retry_attempts: 3  # Retry attempts on transient failures
+bedrock_retry_mode: 'adaptive'  # adaptive, standard, or legacy
+checkpoint_dynamodb_table_name: '{{ env }}-{{ project_id }}-{{ software_component }}-langgraph-checkpoints'
+checkpoint_s3_bucket_name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-checkpoints'

@@ -10,7 +10,9 @@ from collections.abc import AsyncIterable, Awaitable, Callable
 from contextvars import ContextVar
 from typing import Optional
 
+import boto3
 from a2a.types import Task, TaskState
+from botocore.config import Config as BotoConfig
 from deepagents import create_deep_agent
 from langchain_aws import ChatBedrockConverse
 from langchain_core.tools import BaseTool, StructuredTool
@@ -103,7 +105,7 @@ AGENT_CREATOR_SYSTEM_PROMPT = """You are an expert AI Agent Creator for the Allo
 
 ## Your Capabilities
 
-You have access to four system tools:
+You have access to four nannos tools:
 1. **playground_list_sub_agents** - View existing sub-agents to avoid duplicates and understand the current agent ecosystem
 2. **playground_create_sub_agent** - Create new sub-agents with specific configurations
 3. **playground_update_sub_agent** - Modify existing sub-agents to improve or fix their configurations
@@ -114,7 +116,7 @@ You have access to four system tools:
 ### 1. Understanding Requirements
 Before creating an agent, thoroughly understand:
 - What specific tasks or domain the agent should handle
-- What tools or capabilities it needs (MCP tools, system tools)
+- What tools or capabilities it needs
 - How specialized vs. general-purpose it should be
 - What model (GPT-4o or Claude Sonnet 4.5) is most appropriate
 
@@ -198,11 +200,6 @@ When configuring MCP tools:
   - Communication: email, messaging, notifications
   - External APIs: JIRA, GitHub, Slack integrations
   - Analysis: data processing, code analysis
-
-When configuring system tools (use sparingly):
-- **list_sub_agents**: Only if the agent needs to see other agents
-- **create_sub_agent**: Only if creating a true "meta-agent" that spawns others
-- **update_sub_agent**: Only if the agent should modify other agents
 
 ### 8. Access Control
 - Set `is_public: false` by default (requires group permissions)
@@ -345,13 +342,12 @@ class AgentCreator(BaseAgent):
         # Configuration from environment
         self.playground_backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
         self.playground_frontend_url = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
-        self.agent_id = os.getenv("AGENT_ID", "1")
-        self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "us-east-1")
+        self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "us-central-1")
         self.bedrock_model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0")
 
         # Checkpointer configuration
         checkpoint_table = os.getenv("CHECKPOINT_DYNAMODB_TABLE_NAME", "agent-creator-checkpoints")
-        checkpoint_region = os.getenv("CHECKPOINT_AWS_REGION", "eu-west-1")
+        checkpoint_region = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
         checkpoint_ttl_days = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
         checkpoint_compression = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
         checkpoint_s3_bucket = os.getenv("CHECKPOINT_S3_BUCKET_NAME")
@@ -380,8 +376,37 @@ class AgentCreator(BaseAgent):
         self._mcp_tools_lock = False  # Simple flag to prevent concurrent discovery
         logger.info("MCP tool discovery will happen on first request")
 
+        # Configure boto3 client with timeouts and retry logic from environment variables
+        # to handle long-running Claude Sonnet 4.5 requests
+        read_timeout = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))  # Default: 5 minutes
+        connect_timeout = int(os.getenv("BEDROCK_CONNECT_TIMEOUT", "10"))  # Default: 10 seconds
+        max_attempts = int(os.getenv("BEDROCK_MAX_RETRY_ATTEMPTS", "3"))  # Default: 3 retries
+        retry_mode = os.getenv("BEDROCK_RETRY_MODE", "adaptive")  # Default: adaptive
+        
+        boto_config = BotoConfig(
+            read_timeout=read_timeout,
+            connect_timeout=connect_timeout,
+            retries={
+                "max_attempts": max_attempts,
+                "mode": retry_mode,
+            },
+        )
+        
+        # Create bedrock-runtime client with custom configuration
+        bedrock_client = boto3.client(
+            "bedrock-runtime",
+            region_name=self.bedrock_region,
+            config=boto_config,
+        )
+        
+        logger.info(
+            f"Created Bedrock client with read_timeout={read_timeout}s, "
+            f"connect_timeout={connect_timeout}s, max_retry_attempts={max_attempts} ({retry_mode} mode)"
+        )
+
         # Create the model
         self._model = ChatBedrockConverse(
+            client=bedrock_client,
             region_name=self.bedrock_region,
             model=self.bedrock_model_id,
             temperature=0,
