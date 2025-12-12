@@ -18,5 +18,5 @@
       - 'basis'
       - 'orchestrator'
       - 'playground'
-      - 'foundry-jira-agent'
+      - 'agent-creator'
       - 'ringier.aws_cicd.del_workspace'
