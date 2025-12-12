@@ -45,7 +45,7 @@ from .time_tools import create_time_tool
 logger = logging.getLogger(__name__)
 
 # Default model when none specified
-DEFAULT_MODEL: ModelType = "gpt4o"
+DEFAULT_MODEL: ModelType = "claude-sonnet-4.5"
 
 
 def _create_final_response_tool() -> BaseTool:
