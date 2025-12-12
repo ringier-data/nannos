@@ -197,6 +197,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         user_language: Optional[str] = None,
         user_timezone: Optional[str] = None,
         custom_prompt: Optional[str] = None,
+        sub_agent_id: Optional[int] = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -211,12 +212,14 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             user_language: User's preferred language (ISO 639-1 code)
             user_timezone: User's timezone (IANA timezone name)
             custom_prompt: User's custom prompt addendum
+            sub_agent_id: Optional playground backend sub_agent ID for tracking agent-created agents
         """
         self.config = config
         self.model = model
         self.orchestrator_tools = orchestrator_tools or []
         self.oauth2_client = oauth2_client
         self.user_token = user_token
+        self.sub_agent_id = sub_agent_id or config.sub_agent_id
         self.checkpointer = checkpointer
         self.user_name = user_name
         self.user_language = user_language
@@ -638,6 +641,7 @@ def create_dynamic_local_subagent(
         user_language=user_language,
         user_timezone=user_timezone,
         custom_prompt=custom_prompt,
+        sub_agent_id=config.sub_agent_id,
     )
 
     return CompiledSubAgent(
