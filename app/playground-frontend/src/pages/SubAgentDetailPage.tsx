@@ -72,7 +72,7 @@ import { getErrorMessage } from '@/lib/utils';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
   getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions,
-  updateSubAgentApiV1SubAgentsSubAgentIdPatchMutation,
+  playgroundUpdateSubAgentMutation,
   deleteSubAgentApiV1SubAgentsSubAgentIdDeleteMutation,
   submitForApprovalApiV1SubAgentsSubAgentIdSubmitPostMutation,
   reviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostMutation,
@@ -246,7 +246,7 @@ export function SubAgentDetailPage() {
 
   // Mutations
   const updateMutation = useMutation({
-    ...updateSubAgentApiV1SubAgentsSubAgentIdPatchMutation(),
+    ...playgroundUpdateSubAgentMutation(),
     onSuccess: () => {
       invalidateSubAgentQuery();
       setIsEditing(false);
@@ -1387,14 +1387,22 @@ export function SubAgentDetailPage() {
               ) : (
                 <div className="p-2 space-y-0.5">
                   {conversations.map((conv) => (
-                    <button
+                    <div
                       key={conv.id}
-                      className={`w-full text-left px-3 py-2.5 rounded-md transition-colors duration-150 hover:bg-accent/50 flex items-start gap-3 ${
+                      className={`group w-full text-left px-3 py-2.5 rounded-md transition-colors duration-150 hover:bg-accent/50 flex items-start gap-3 cursor-pointer ${
                         activeConversationId === conv.id
                           ? 'bg-accent text-accent-foreground'
                           : 'text-foreground/80 hover:text-foreground'
                       }`}
                       onClick={() => handleSelectConversation(conv.id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleSelectConversation(conv.id);
+                        }
+                      }}
                     >
                       <MessageSquare className={`w-4 h-4 mt-0.5 shrink-0 ${
                         activeConversationId === conv.id ? 'text-primary' : 'text-muted-foreground'
@@ -1423,7 +1431,7 @@ export function SubAgentDetailPage() {
                           <span className="text-muted-foreground/60">{getVersionLabel(conv.configVersion)}</span>
                         </div>
                       </div>
-                    </button>
+                    </div>
                   ))}
                 </div>
               )}
