@@ -4,11 +4,11 @@ import { Link } from 'react-router';
 import { Bot, ExternalLink, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import {
-  listSubAgentsApiV1SubAgentsGetOptions,
+  playgroundListSubAgentsOptions,
   activateSubAgentApiV1SubAgentsSubAgentIdActivatePostMutation,
   deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgent } from '@/api/generated/types.gen';
+import type { SubAgent, SubAgentListResponse } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -30,7 +30,7 @@ export function SubAgentActivationList() {
   const [searchQuery, setSearchQuery] = useState('');
 
   const { data: subAgentsData, isLoading } = useQuery({
-    ...listSubAgentsApiV1SubAgentsGetOptions(),
+    ...playgroundListSubAgentsOptions({}),
   });
 
   const activateMutation = useMutation({
@@ -38,7 +38,7 @@ export function SubAgentActivationList() {
     onSuccess: () => {
       toast.success('Sub-agent activated');
       queryClient.invalidateQueries({
-        queryKey: listSubAgentsApiV1SubAgentsGetOptions().queryKey,
+        queryKey: playgroundListSubAgentsOptions({}).queryKey,
       });
     },
     onError: () => {
@@ -51,7 +51,7 @@ export function SubAgentActivationList() {
     onSuccess: () => {
       toast.success('Sub-agent deactivated');
       queryClient.invalidateQueries({
-        queryKey: listSubAgentsApiV1SubAgentsGetOptions().queryKey,
+        queryKey: playgroundListSubAgentsOptions({}).queryKey,
       });
     },
     onError: () => {
@@ -59,7 +59,7 @@ export function SubAgentActivationList() {
     },
   });
 
-  const subAgents = subAgentsData?.items ?? [];
+  const subAgents = (subAgentsData as SubAgentListResponse)?.items ?? [];
 
   // Set default tab to 'enabled' if there are activated sub-agents
   useEffect(() => {

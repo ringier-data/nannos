@@ -1522,21 +1522,21 @@ export type GetMessagesByConversationApiV1MessagesConversationIdGetResponses = {
 
 export type GetMessagesByConversationApiV1MessagesConversationIdGetResponse = GetMessagesByConversationApiV1MessagesConversationIdGetResponses[keyof GetMessagesByConversationApiV1MessagesConversationIdGetResponses];
 
-export type ListMcpToolsApiV1McpToolsGetData = {
+export type PlaygroundListMcpToolsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/mcp/tools';
 };
 
-export type ListMcpToolsApiV1McpToolsGetResponses = {
+export type PlaygroundListMcpToolsResponses = {
     /**
      * Successful Response
      */
     200: McpToolsResponse;
 };
 
-export type ListMcpToolsApiV1McpToolsGetResponse = ListMcpToolsApiV1McpToolsGetResponses[keyof ListMcpToolsApiV1McpToolsGetResponses];
+export type PlaygroundListMcpToolsResponse = PlaygroundListMcpToolsResponses[keyof PlaygroundListMcpToolsResponses];
 
 export type ListSecretsApiV1SecretsGetData = {
     body?: never;
@@ -1701,7 +1701,7 @@ export type UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses =
 
 export type UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponse = UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses[keyof UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses];
 
-export type ListSubAgentsApiV1SubAgentsGetData = {
+export type PlaygroundListSubAgentsData = {
     body?: never;
     path?: never;
     query?: {
@@ -1727,48 +1727,48 @@ export type ListSubAgentsApiV1SubAgentsGetData = {
     url: '/api/v1/sub-agents';
 };
 
-export type ListSubAgentsApiV1SubAgentsGetErrors = {
+export type PlaygroundListSubAgentsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ListSubAgentsApiV1SubAgentsGetError = ListSubAgentsApiV1SubAgentsGetErrors[keyof ListSubAgentsApiV1SubAgentsGetErrors];
+export type PlaygroundListSubAgentsError = PlaygroundListSubAgentsErrors[keyof PlaygroundListSubAgentsErrors];
 
-export type ListSubAgentsApiV1SubAgentsGetResponses = {
+export type PlaygroundListSubAgentsResponses = {
     /**
      * Successful Response
      */
     200: SubAgentListResponse;
 };
 
-export type ListSubAgentsApiV1SubAgentsGetResponse = ListSubAgentsApiV1SubAgentsGetResponses[keyof ListSubAgentsApiV1SubAgentsGetResponses];
+export type PlaygroundListSubAgentsResponse = PlaygroundListSubAgentsResponses[keyof PlaygroundListSubAgentsResponses];
 
-export type CreateSubAgentApiV1SubAgentsPostData = {
+export type PlaygroundCreateSubAgentData = {
     body: SubAgentCreate;
     path?: never;
     query?: never;
     url: '/api/v1/sub-agents';
 };
 
-export type CreateSubAgentApiV1SubAgentsPostErrors = {
+export type PlaygroundCreateSubAgentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type CreateSubAgentApiV1SubAgentsPostError = CreateSubAgentApiV1SubAgentsPostErrors[keyof CreateSubAgentApiV1SubAgentsPostErrors];
+export type PlaygroundCreateSubAgentError = PlaygroundCreateSubAgentErrors[keyof PlaygroundCreateSubAgentErrors];
 
-export type CreateSubAgentApiV1SubAgentsPostResponses = {
+export type PlaygroundCreateSubAgentResponses = {
     /**
      * Successful Response
      */
     201: SubAgent;
 };
 
-export type CreateSubAgentApiV1SubAgentsPostResponse = CreateSubAgentApiV1SubAgentsPostResponses[keyof CreateSubAgentApiV1SubAgentsPostResponses];
+export type PlaygroundCreateSubAgentResponse = PlaygroundCreateSubAgentResponses[keyof PlaygroundCreateSubAgentResponses];
 
 export type ListPendingApprovalsApiV1SubAgentsPendingGetData = {
     body?: never;
@@ -1913,7 +1913,7 @@ export type GetSubAgentApiV1SubAgentsSubAgentIdGetResponses = {
 
 export type GetSubAgentApiV1SubAgentsSubAgentIdGetResponse = GetSubAgentApiV1SubAgentsSubAgentIdGetResponses[keyof GetSubAgentApiV1SubAgentsSubAgentIdGetResponses];
 
-export type UpdateSubAgentApiV1SubAgentsSubAgentIdPatchData = {
+export type PlaygroundUpdateSubAgentData = {
     body: SubAgentUpdate;
     path: {
         /**
@@ -1925,23 +1925,23 @@ export type UpdateSubAgentApiV1SubAgentsSubAgentIdPatchData = {
     url: '/api/v1/sub-agents/{sub_agent_id}';
 };
 
-export type UpdateSubAgentApiV1SubAgentsSubAgentIdPatchErrors = {
+export type PlaygroundUpdateSubAgentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type UpdateSubAgentApiV1SubAgentsSubAgentIdPatchError = UpdateSubAgentApiV1SubAgentsSubAgentIdPatchErrors[keyof UpdateSubAgentApiV1SubAgentsSubAgentIdPatchErrors];
+export type PlaygroundUpdateSubAgentError = PlaygroundUpdateSubAgentErrors[keyof PlaygroundUpdateSubAgentErrors];
 
-export type UpdateSubAgentApiV1SubAgentsSubAgentIdPatchResponses = {
+export type PlaygroundUpdateSubAgentResponses = {
     /**
      * Successful Response
      */
     200: SubAgent;
 };
 
-export type UpdateSubAgentApiV1SubAgentsSubAgentIdPatchResponse = UpdateSubAgentApiV1SubAgentsSubAgentIdPatchResponses[keyof UpdateSubAgentApiV1SubAgentsSubAgentIdPatchResponses];
+export type PlaygroundUpdateSubAgentResponse = PlaygroundUpdateSubAgentResponses[keyof PlaygroundUpdateSubAgentResponses];
 
 export type ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData = {
     body?: never;

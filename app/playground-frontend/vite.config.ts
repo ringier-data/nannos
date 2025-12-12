@@ -13,6 +13,10 @@ export default defineConfig({
         changeOrigin: true,
         ws: true, // Explicitly enable WebSocket proxying
       },
+      '/mcp': {
+        target: 'http://localhost:5001',
+        changeOrigin: true,
+      },
     },
   },
   resolve: {

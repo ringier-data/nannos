@@ -39,6 +39,20 @@ Resources:
               - 'PATCH'
               - 'POST'
               - 'DELETE'
+          - TargetOriginId: 'backend'
+            PathPattern: '/mcp/*'
+            Compress: true
+            CachePolicyId: !ImportValue '{{ project_id }}-common-no-cache-policy-id'
+            OriginRequestPolicyId: !ImportValue  '{{ project_id }}-common-forward-all-origin-request-policy-id'
+            ViewerProtocolPolicy: 'redirect-to-https'
+            AllowedMethods:
+              - 'HEAD'
+              - 'GET'
+              - 'OPTIONS'
+              - 'PUT'
+              - 'PATCH'
+              - 'POST'
+              - 'DELETE'
         DefaultRootObject: index.html
         DefaultCacheBehavior:
           TargetOriginId: 'frontend'

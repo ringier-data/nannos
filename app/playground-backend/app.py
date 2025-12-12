@@ -28,6 +28,7 @@ from a2a.types import (
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi_mcp import FastApiMCP
 from rcplus_alloy_common.logging import (
     configure_existing_logger,
     configure_logger,
@@ -54,6 +55,7 @@ from playground_backend.routers.sub_agent_router import router as sub_agent_rout
 from playground_backend.service_instances import cleanup_services, initialize_services
 from playground_backend.utils.connection_pool import connection_pool
 from playground_backend.utils.cookie_signer import verify_cookie
+from playground_backend.utils.fastapi_mcp_patch import apply_patch
 from playground_backend.utils.socket_errors import (
     SocketError,
     create_error_response,
@@ -62,6 +64,10 @@ from playground_backend.utils.socket_errors import (
 from playground_backend.utils.socket_events import SocketEvents
 from playground_backend.utils.socketio_auth import require_auth as require_socket_auth
 from playground_backend.validators import validate_agent_card, validate_message
+
+# NOTE: Apply fastapi_mcp patch (waiting for https://github.com/tadata-org/fastapi_mcp/pull/156)
+apply_patch()
+
 
 logger = configure_logger("chat-inspector")
 configure_existing_logger(logging.getLogger("playground_backend"))
@@ -215,6 +221,16 @@ else:
     # In production, use the configured base domain
     cors_origins = [f"https://{os.environ['BASE_DOMAIN']}"]
 
+# Create FastAPI-MCP server without auth_config
+# Authentication is handled by individual tool endpoints via require_auth_or_bearer_token
+# The MCP protocol handshake doesn't require authentication - only tool calls do
+mcp = FastApiMCP(
+    app,
+    include_tags=["MCP"],
+)
+
+# Mount the MCP server directly to your FastAPI app using HTTP transport
+mcp.mount_http()
 # Initialize Socket.IO server with optimized settings
 sio = socketio.AsyncServer(
     async_mode="asgi",

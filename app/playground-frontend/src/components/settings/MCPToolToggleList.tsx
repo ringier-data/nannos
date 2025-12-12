@@ -1,8 +1,8 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Search, Wrench, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react';
-import { listMcpToolsApiV1McpToolsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
-import type { McpTool } from '@/api/generated/types.gen';
+import { playgroundListMcpToolsOptions } from '@/api/generated/@tanstack/react-query.gen';
+import type { McpTool, McpToolsResponse } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -72,10 +72,10 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
 
   const { data: mcpToolsData, isLoading, error } = useQuery({
-    ...listMcpToolsApiV1McpToolsGetOptions(),
+    ...playgroundListMcpToolsOptions({}),
   });
 
-  const allTools = mcpToolsData?.tools ?? [];
+  const allTools = ((mcpToolsData as McpToolsResponse)?.tools ?? []) as McpTool[];
   const enabledSet = useMemo(() => new Set(value), [value]);
 
   // Filter and search tools
@@ -85,10 +85,10 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
     // Apply tab filter
     switch (activeTab) {
       case 'enabled':
-        result = result.filter((tool) => enabledSet.has(tool.name));
+        result = result.filter((tool: McpTool) => enabledSet.has(tool.name));
         break;
       case 'available':
-        result = result.filter((tool) => !enabledSet.has(tool.name));
+        result = result.filter((tool: McpTool) => !enabledSet.has(tool.name));
         break;
       default:
         // all - no filter
@@ -99,7 +99,7 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
       result = result.filter(
-        (tool) =>
+        (tool: McpTool) =>
           tool.name.toLowerCase().includes(query) ||
           (tool.description?.toLowerCase() || '').includes(query)
       );
@@ -108,7 +108,7 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
     return result;
   }, [allTools, activeTab, enabledSet, searchQuery]);
 
-  const enabledCount = allTools.filter((tool) => enabledSet.has(tool.name)).length;
+  const enabledCount = allTools.filter((tool: McpTool) => enabledSet.has(tool.name)).length;
   const availableCount = allTools.length - enabledCount;
 
   const handleToggle = (toolName: string) => {
@@ -124,23 +124,23 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
   };
 
   const toggleSelectAll = () => {
-    const allFilteredEnabled = filteredTools.every((tool) => enabledSet.has(tool.name));
+    const allFilteredEnabled = filteredTools.every((tool: McpTool) => enabledSet.has(tool.name));
     
     if (allFilteredEnabled) {
       // Disable all filtered tools
-      const filteredNames = new Set(filteredTools.map((tool) => tool.name));
+      const filteredNames = new Set(filteredTools.map((tool: McpTool) => tool.name));
       const newEnabled = value.filter((name) => !filteredNames.has(name));
       onChange(newEnabled);
     } else {
       // Enable all filtered tools
       const newEnabled = new Set(value);
-      filteredTools.forEach((tool) => newEnabled.add(tool.name));
+      filteredTools.forEach((tool: McpTool) => newEnabled.add(tool.name));
       onChange(Array.from(newEnabled));
     }
   };
 
-  const allSelected = filteredTools.length > 0 && filteredTools.every((tool) => enabledSet.has(tool.name));
-  const someSelected = filteredTools.some((tool) => enabledSet.has(tool.name)) && !allSelected;
+  const allSelected = filteredTools.length > 0 && filteredTools.every((tool: McpTool) => enabledSet.has(tool.name));
+  const someSelected = filteredTools.some((tool: McpTool) => enabledSet.has(tool.name)) && !allSelected;
 
   const toggleExpanded = (toolName: string) => {
     const newExpanded = new Set(expandedTools);
@@ -261,7 +261,7 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredTools.map((tool) => {
+              {filteredTools.map((tool: McpTool) => {
                 const isEnabled = enabledSet.has(tool.name);
                 const isExpanded = expandedTools.has(tool.name);
                 const params = extractParameters(tool);
