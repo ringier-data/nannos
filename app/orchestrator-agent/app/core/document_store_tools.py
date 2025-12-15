@@ -15,8 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from langchain.tools import ToolRuntime
-from langchain_core.tools import BaseTool, StructuredTool, tool
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph.types import interrupt
@@ -269,23 +268,20 @@ async def _search_documents_rag_impl(
 async def _export_file_impl(
     file_path: str,
     user_id: str,
-    runtime: ToolRuntime[None, FilesystemState],
+    store: AsyncPostgresStore,
     s3_service: S3Service,
     s3_bucket: str,
 ) -> str:
     """Export a file from filesystem to S3.
 
-    Reads the raw file from filesystem storage (both ephemeral and persisted files)
-    and exports to S3. Works independently of document indexing.
-
-    Handles two cases:
-    1. Persisted files (/memories/ prefix): Read from store using namespace
-    2. Ephemeral files (no prefix): Read from agent state
+    Reads persisted files from store and exports to S3. Works independently of document indexing.
+    Only handles persisted files (/memories/ prefix) as ephemeral files are not accessible
+    without runtime state.
 
     Args:
-        file_path: Path of the file to export (should start with /)
+        file_path: Path of the file to export (should start with /memories/)
         user_id: User ID for S3 key generation
-        runtime: ToolRuntime with access to state and store
+        store: AsyncPostgresStore instance for reading files
         s3_service: S3 service for uploads
         s3_bucket: S3 bucket name for result storage
 
@@ -294,83 +290,39 @@ async def _export_file_impl(
     """
     logger.info(f"Exporting file '{file_path}' for user {user_id}")
 
-    # Check if this is a persisted file or ephemeral file
-    is_persisted = file_path.startswith("/memories/")
+    # Only support persisted files for now
+    if not file_path.startswith("/memories/"):
+        return (
+            f"Error: Can only export persisted files (starting with /memories/). "
+            f"File '{file_path}' is ephemeral and cannot be exported. "
+            f"Use write_file to persist it first."
+        )
 
-    content_lines = None
+    # Persisted file: read from store in filesystem namespace
+    file_key = file_path[len("/memories/") - 1 :]  # Keep leading slash
 
-    if is_persisted:
-        # Persisted file: read from store in filesystem namespace
-        file_key = file_path[len("/memories/") - 1 :]  # Keep leading slash
+    try:
+        namespace = _get_filesystem_namespace()
+        file_item = await store.aget(namespace, file_key)
 
-        try:
-            namespace = _get_filesystem_namespace()
-            file_item = await runtime.store.aget(namespace, file_key)
+        if not file_item:
+            return (
+                f"Error: File '{file_path}' not found in filesystem storage. Make sure the file exists using ls tool."
+            )
 
-            if file_item:
-                # Extract file content from FileData structure in store
-                value = file_item.value
-                content_lines = value.get("content", [])
+        # Extract file content from FileData structure in store
+        value = file_item.value
+        content_lines = value.get("content", [])
 
-        except Exception as e:
-            logger.error(f"Failed to read persisted file '{file_path}' from filesystem: {e}")
-            return f"Error: Could not read file '{file_path}': {str(e)}"
-    else:
-        # Try ephemeral file first: read from agent state
-        try:
-            files_dict = runtime.state.get("files", {})
-            if file_path in files_dict:
-                file_data = files_dict[file_path]
-                content_lines = file_data.get("content", [])
-
-        except Exception as e:
-            logger.error(f"Failed to read ephemeral file '{file_path}': {e}")
-
-    # If not found in filesystem or state, try to find it via the document index
-    # This handles the case where user found a file via semantic search and wants to export it
-    if content_lines is None:
-        logger.info(f"File '{file_path}' not found in state, checking document index")
-        try:
-            # Look up the file index in the user namespace to find the original location
-            user_namespace = (user_id, "documents")
-            file_index = await runtime.store.aget(user_namespace, file_path)
-
-            if not file_index:
-                return f"Error: File '{file_path}' not found in filesystem storage. Make sure the file exists using ls tool."
-
-            # Get the original filesystem location from the index
-            index_value = file_index.value
-            filesystem_namespace = tuple(index_value.get("filesystem_namespace", ()))
-
-            if not filesystem_namespace:
-                logger.error(f"File index for '{file_path}' missing filesystem_namespace")
-                return f"Error: Could not locate original file '{file_path}'"
-
-            # Security check: Verify the file index belongs to this user
-            # The file index is in (user_id, "documents") so if we got it, it's already user-scoped
-            # This is safe because we fetched from (user_id, "documents", file_path)
-            logger.debug(f"File '{file_path}' verified in user namespace, reading from {filesystem_namespace}")
-
-            # Read the original file from the filesystem namespace
-            file_item = await runtime.store.aget(filesystem_namespace, file_path)
-
-            if not file_item:
-                return f"Error: Original file '{file_path}' not found in filesystem storage."
-
-            # Extract file content from FileData structure
-            value = file_item.value
-            content_lines = value.get("content", [])
-            logger.info(f"Found file '{file_path}' via document index, read from {filesystem_namespace}")
-
-        except Exception as e:
-            logger.error(f"Failed to read file '{file_path}' via document index: {e}")
-            return f"Error: Could not find file '{file_path}': {str(e)}"
-    else:
         if not content_lines:
             return f"Error: File '{file_path}' is empty"
 
         # Join content lines (same format as FilesystemMiddleware)
         file_content = "\n".join(content_lines)
+
+    except Exception as e:
+        logger.error(f"Failed to read persisted file '{file_path}' from filesystem: {e}")
+        return f"Error: Could not read file '{file_path}': {str(e)}"
 
     # Determine content type from file extension
     content_type = "text/plain"
@@ -499,18 +451,8 @@ def create_document_store_tools(
             state=state,
         )
 
-    @tool(
-        description=(
-            "Export a file from the filesystem to S3 for download. "
-            "Works with ANY file visible via ls (both ephemeral and persisted /memories/ files). "
-            "Reads directly from filesystem storage, independent of semantic indexing. "
-            "Use when: user wants to download/share any file from the workspace. "
-            "Returns a presigned S3 URL (24h expiration) to download the file."
-        )
-    )
     async def docstore_export(
         file_path: str,
-        runtime,
     ) -> str:
         """Export a file from the filesystem to S3 for download.
 
@@ -528,7 +470,6 @@ def create_document_store_tools(
 
         Args:
             file_path: Path of the file to export (from ls output, e.g., /myfile.txt or /memories/notes.md)
-            runtime: Tool runtime (automatically injected) with access to state and store
 
         Returns:
             Presigned S3 URL (24h expiration) to download the file
@@ -536,14 +477,14 @@ def create_document_store_tools(
         return await _export_file_impl(
             file_path=file_path,
             user_id=user_id,
-            runtime=runtime,
+            store=store,
             s3_service=s3_service,
             s3_bucket=s3_bucket,
         )
 
     return [
         StructuredTool.from_function(
-            func=search_documents_rag,
+            coroutine=search_documents_rag,
             name="docstore_search",
             description=(
                 "Search files you've written to long-term storage using semantic similarity. "
@@ -556,7 +497,7 @@ def create_document_store_tools(
             ),
         ),
         StructuredTool.from_function(
-            func=read_personal_file,
+            coroutine=read_personal_file,
             name="read_personal_file",
             description=(
                 "Read a file from user's personal workspace (Slack channel context only). "
@@ -567,5 +508,15 @@ def create_document_store_tools(
                 "or user explicitly asks to share personal file content."
             ),
         ),
-        docstore_export,
+        StructuredTool.from_function(
+            coroutine=docstore_export,
+            name="docstore_export",
+            description=(
+                "Export a persisted file from /memories/ to S3 for download. "
+                "Only works with files in long-term storage (files starting with /memories/). "
+                "Ephemeral files must be persisted with write_file first. "
+                "Use when: user wants to download/share a persisted file from the workspace. "
+                "Returns a presigned S3 URL (24h expiration) to download the file."
+            ),
+        ),
     ]
