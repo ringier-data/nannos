@@ -8,6 +8,19 @@
 - Pydantic v2 for data validation
 - pytest with pytest-asyncio for testing
 
+## Local Development Environment
+
+**CRITICAL: Any changes that impact the local development environment MUST be reflected in `/start-dev.sh`**
+
+This includes:
+- New environment variables (add to SSM fetching or default values)
+- New secrets/credentials (add AWS SSM parameter fetching)
+- Configuration changes that affect local setup
+- New service dependencies or startup requirements
+- Changes to `.env` or `.env.template` files
+
+The `start-dev.sh` script is the single source of truth for local environment setup. Always update it when making changes that affect how the application runs locally.
+
 ## Code Style
 
 - Use async/await for all database and I/O operations

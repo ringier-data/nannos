@@ -36,4 +36,6 @@ export const createClientConfig: CreateClientConfig = (configuration) => ({
   ...(config.apiBaseUrl && {
     baseUrl: config.apiBaseUrl,
   }),
+  // Send cookies with cross-origin requests (required for session cookies)
+  credentials: 'include',
 });

@@ -76,84 +76,106 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
     return lifespan
 
 
+def create_app():
+    """Factory function to create the FastAPI app instance."""
+    if os.getenv("model_source", "azure") == "google":
+        if not os.getenv("GOOGLE_API_KEY"):
+            raise MissingAPIKeyError("GOOGLE_API_KEY environment variable not set.")
+
+    capabilities = AgentCapabilities(streaming=True, push_notifications=True)
+    skill = AgentSkill(
+        id="orchestrate_tasks",
+        name="Task Orchestration",
+        description="Plans and coordinates execution of complex tasks by delegating to specialized sub-agents",
+        tags=["orchestration", "planning", "coordination", "task management", "multi-agent"],
+        examples=[
+            "Help me plan a trip to Paris",
+            "Analyze this data and create a report",
+            "Coordinate multiple tasks across different services",
+        ],
+    )
+
+    # Configure OIDC authentication
+    oidc_oidc = OpenIdConnectSecurityScheme(
+        type="openIdConnect",
+        open_id_connect_url=f"{os.getenv('OIDC_ISSUER')}/.well-known/openid-configuration",
+    )
+
+    # Support both local dev and production deployment
+    # In production, AGENT_BASE_URL should be set to the full URL (e.g., https://domain.com/api/orchestrator)
+    # For reload, default to localhost:10001 if not set
+    agent_base_url = os.getenv("AGENT_BASE_URL", "http://localhost:10001")
+
+    agent_card = AgentCard(
+        name="Orchestrator Agent",
+        description="Intelligent orchestrator that plans and coordinates complex tasks by discovering and delegating to specialized sub-agents.",
+        url=agent_base_url,
+        version="1.0.0",
+        default_input_modes=OrchestratorDeepAgent.SUPPORTED_CONTENT_TYPES,
+        default_output_modes=OrchestratorDeepAgent.SUPPORTED_CONTENT_TYPES,
+        capabilities=capabilities,
+        skills=[skill],
+        security_schemes={"orchestrator": SecurityScheme(root=oidc_oidc)},
+        security=[{"orchestrator": ["openid", "profile", "email"]}],
+        supports_authenticated_extended_card=False,
+    )
+
+    # TODO: do we need a task store?
+    # TODO: do we need push notifications?
+    # httpx_client = httpx.AsyncClient()
+    # push_config_store = InMemoryPushNotificationConfigStore()
+    # push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
+    agent_executor = OrchestratorDeepAgentExecutor()
+    request_handler = DefaultRequestHandler(
+        agent_executor=agent_executor,
+        task_store=InMemoryTaskStore(),
+        # push_config_store=push_config_store,
+        # push_sender=push_sender,
+        request_context_builder=AuthRequestContextBuilder(),
+    )
+    server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
+
+    # Add authentication middleware stack (EXECUTION ORDER: bottom to top for requests)
+    app = server.build(lifespan=create_lifespan(agent_executor))
+
+    # UserContextFromRequestStateMiddleware runs AFTER OIDC (transfers user to A2A context)
+    app.add_middleware(UserContextFromRequestStateMiddleware)
+
+    # OidcUserinfoMiddleware runs FIRST (validates JWT, sets request.state.user)
+    app.add_middleware(
+        OidcUserinfoMiddleware,
+        issuer=os.environ["OIDC_ISSUER"],
+        jwt_secret_key=os.environ["JWT_SECRET_KEY"],
+        client_id=os.environ.get("OIDC_CLIENT_ID", "orchestrator"),
+        client_secret=os.environ.get("OIDC_CLIENT_SECRET"),
+    )
+
+    return app
+
+
+# Create app instance for uvicorn to import
+app = create_app()
+
+
 @click.command()
 @click.option("--host", "host", default="0.0.0.0")
 @click.option("--port", "port", default=10001)
-def main(host, port):
+@click.option("--reload", "reload", is_flag=True, default=False, help="Enable auto-reload for development")
+def main(host, port, reload):
     """Starts the Orchestrator Agent server."""
     try:
-        if os.getenv("model_source", "azure") == "google":
-            if not os.getenv("GOOGLE_API_KEY"):
-                raise MissingAPIKeyError("GOOGLE_API_KEY environment variable not set.")
-
-        capabilities = AgentCapabilities(streaming=True, push_notifications=True)
-        skill = AgentSkill(
-            id="orchestrate_tasks",
-            name="Task Orchestration",
-            description="Plans and coordinates execution of complex tasks by delegating to specialized sub-agents",
-            tags=["orchestration", "planning", "coordination", "task management", "multi-agent"],
-            examples=[
-                "Help me plan a trip to Paris",
-                "Analyze this data and create a report",
-                "Coordinate multiple tasks across different services",
-            ],
-        )
-
-        # Configure OIDC authentication
-        oidc_oidc = OpenIdConnectSecurityScheme(
-            type="openIdConnect",
-            open_id_connect_url=f"{os.getenv('OIDC_ISSUER')}/.well-known/openid-configuration",
-        )
-
-        # Support both local dev and production deployment
-        # In production, AGENT_BASE_URL should be set to the full URL (e.g., https://domain.com/api/orchestrator)
-        agent_base_url = os.getenv("AGENT_BASE_URL", f"http://{host}:{port}")
-
-        agent_card = AgentCard(
-            name="Orchestrator Agent",
-            description="Intelligent orchestrator that plans and coordinates complex tasks by discovering and delegating to specialized sub-agents.",
-            url=agent_base_url,
-            version="1.0.0",
-            default_input_modes=OrchestratorDeepAgent.SUPPORTED_CONTENT_TYPES,
-            default_output_modes=OrchestratorDeepAgent.SUPPORTED_CONTENT_TYPES,
-            capabilities=capabilities,
-            skills=[skill],
-            security_schemes={"orchestrator": SecurityScheme(root=oidc_oidc)},
-            security=[{"orchestrator": ["openid", "profile", "email"]}],
-            supports_authenticated_extended_card=False,
-        )
-
-        # TODO: do we need a task store?
-        # TODO: do we need push notifications?
-        # httpx_client = httpx.AsyncClient()
-        # push_config_store = InMemoryPushNotificationConfigStore()
-        # push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
-        agent_executor = OrchestratorDeepAgentExecutor()
-        request_handler = DefaultRequestHandler(
-            agent_executor=agent_executor,
-            task_store=InMemoryTaskStore(),
-            # push_config_store=push_config_store,
-            # push_sender=push_sender,
-            request_context_builder=AuthRequestContextBuilder(),
-        )
-        server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
-
-        # Add authentication middleware stack (EXECUTION ORDER: bottom to top for requests)
-        app = server.build(lifespan=create_lifespan(agent_executor))
-
-        # UserContextFromRequestStateMiddleware runs AFTER OIDC (transfers user to A2A context)
-        app.add_middleware(UserContextFromRequestStateMiddleware)
-
-        # OidcUserinfoMiddleware runs FIRST (validates JWT, sets request.state.user)
-        app.add_middleware(
-            OidcUserinfoMiddleware,
-            issuer=os.environ["OIDC_ISSUER"],
-            jwt_secret_key=os.environ["JWT_SECRET_KEY"],
-            client_id=os.environ.get("OIDC_CLIENT_ID", "orchestrator"),
-            client_secret=os.environ.get("OIDC_CLIENT_SECRET"),
-        )
         log_config = yaml.safe_load("log_conf.yml")
-        uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False, use_colors=False)
+
+        if reload:
+            # Use import string for reload support
+            uvicorn.run(
+                "main:app", host=host, port=port, log_config=log_config, access_log=False, use_colors=False, reload=True
+            )
+        else:
+            # Use app instance directly for production
+            uvicorn.run(
+                app, host=host, port=port, log_config=log_config, access_log=False, use_colors=False, reload=False
+            )
 
     except MissingAPIKeyError as e:
         logger.error(f"Error: {e}")
