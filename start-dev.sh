@@ -338,7 +338,7 @@ if [ "$BACKEND_ENV" = "local" ]; then
     ensure_docker_db
     
     echo -e "${YELLOW}Configuring Backend (local)...${NC}"
-    cd app/playground-backend
+    pushd app/playground-backend > /dev/null
     
     # Generate .env from template
     cp .env.template .env
@@ -351,6 +351,17 @@ if [ "$BACKEND_ENV" = "local" ]; then
     
     # Set frontend URL (frontend always runs locally)
     update_env_var ".env" "FRONTEND_URL" "http://localhost:5173"
+    
+    # Configure orchestrator based on environment
+    if [ "$ORCHESTRATOR_ENV" = "local" ]; then
+        update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
+        update_env_var ".env" "ORCHESTRATOR_BASE_DOMAIN" "localhost:10001"
+        update_env_var ".env" "ORCHESTRATOR_ENVIRONMENT" "local"
+    else
+        update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
+        update_env_var ".env" "ORCHESTRATOR_BASE_DOMAIN" "${ORCHESTRATOR_DOMAINS[$ORCHESTRATOR_ENV]}"
+        update_env_var ".env" "ORCHESTRATOR_ENVIRONMENT" "$ORCHESTRATOR_ENV"
+    fi
     
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-alloy-infrastructure-agents-langgraph-checkpoints"
@@ -379,7 +390,7 @@ if [ "$BACKEND_ENV" = "local" ]; then
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
-    cd ../..
+    popd > /dev/null
     
     start_component "backend" "app/playground-backend" "uv run --env-file .env python app.py"
     
@@ -401,10 +412,20 @@ fi
 # 2. ORCHESTRATOR
 if [ "$ORCHESTRATOR_ENV" = "local" ]; then
     echo -e "${YELLOW}Configuring Orchestrator (local)...${NC}"
-    cd app/orchestrator-agent
+    pushd app/orchestrator-agent > /dev/null
     
     # Generate .env from template
     cp .env.template .env
+    
+    # Generate .env from template
+    cp .env.template .env
+    
+    # Configure playground backend URL based on backend environment
+    if [ "$BACKEND_ENV" = "local" ]; then
+        update_env_var ".env" "PLAYGROUND_BACKEND_URL" "http://localhost:5001"
+    else
+        update_env_var ".env" "PLAYGROUND_BACKEND_URL" "${BACKEND_URLS[$BACKEND_ENV]}"
+    fi
     
     # Add configuration based on backend environment
     if [ "$BACKEND_ENV" = "local" ]; then        
@@ -473,7 +494,7 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
-    cd ../..
+    popd > /dev/null
     
     start_component "orchestrator" "app/orchestrator-agent" "uv run --env-file .env python main.py --host localhost --reload"
     
@@ -495,7 +516,7 @@ fi
 # 3. AGENT CREATOR
 if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     echo -e "${YELLOW}Configuring Agent Creator (local)...${NC}"
-    cd app/agent-creator
+    pushd app/agent-creator > /dev/null
     
     # Generate .env from template
     cp .env.template .env
@@ -508,7 +529,7 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-alloy-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-alloy-infrastructure-agents-orchestrator-checkpoints"
     
-    cd ../..
+    popd > /dev/null
     
     start_component "agent-creator" "app/agent-creator" "uv run --env-file .env python main.py --reload"
     
@@ -529,7 +550,7 @@ fi
 
 # 4. FRONTEND (always local)
 echo -e "${YELLOW}Configuring Frontend (local)...${NC}"
-cd app/playground-frontend
+pushd app/playground-frontend > /dev/null
 
 # Determine environment prefix for SSM paths
 case "$BACKEND_ENV" in
@@ -570,7 +591,7 @@ fi
 # Set OVERRIDE_URL for SDK generation
 export OVERRIDE_URL="${BACKEND_URLS[$BACKEND_ENV]}/api/v1/openapi.json"
 
-cd ../..
+popd > /dev/null
 
 start_component "frontend" "app/playground-frontend" "npm run dev"
 
