@@ -168,14 +168,10 @@ def main(host, port, reload):
 
         if reload:
             # Use import string for reload support
-            uvicorn.run(
-                "main:app", host=host, port=port, log_config=log_config, access_log=False, use_colors=False, reload=True
-            )
+            uvicorn.run("main:app", host=host, port=port, log_config=log_config, access_log=False, reload=True)
         else:
             # Use app instance directly for production
-            uvicorn.run(
-                app, host=host, port=port, log_config=log_config, access_log=False, use_colors=False, reload=False
-            )
+            uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False, reload=False)
 
     except MissingAPIKeyError as e:
         logger.error(f"Error: {e}")

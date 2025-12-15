@@ -19,6 +19,7 @@ from a2a.types import (
     SecurityScheme,
 )
 from dotenv import load_dotenv
+from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
     OidcUserinfoMiddleware,
     UserContextFromRequestStateMiddleware,
@@ -31,7 +32,10 @@ from agent import AgentCreator
 # Load environment variables
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+# Configure logging early (before agent initialization)
+logger = configure_logger("main")
+configure_existing_logger(logging.getLogger("agent"))
+configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
 # Initialize agent globally for reload support
 agent = AgentCreator()
@@ -179,12 +183,10 @@ def main(host: str, port: int, reload: bool):
 
     if reload:
         # Use import string for reload support
-        uvicorn.run(
-            "main:app", host=host, port=port, log_config=log_config, access_log=False, use_colors=False, reload=True
-        )
+        uvicorn.run("main:app", host=host, port=port, log_config=log_config, access_log=False, reload=True)
     else:
         # Use app instance directly for production
-        uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False, use_colors=False, reload=False)
+        uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False, reload=False)
 
 
 if __name__ == "__main__":
