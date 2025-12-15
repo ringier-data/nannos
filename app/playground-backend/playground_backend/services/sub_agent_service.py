@@ -170,7 +170,7 @@ class SubAgentService:
         """Get all sub-agents with versions pending approval (admin only)."""
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
-                   sa.current_version, sa.default_version, sa.deleted_at,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
                    cv.id as cv_id, cv.version as cv_version,
@@ -216,7 +216,7 @@ class SubAgentService:
         """
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
-                   sa.current_version, sa.default_version, sa.deleted_at,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
                    cv.id as cv_id, cv.version as cv_version,
@@ -261,7 +261,7 @@ class SubAgentService:
         """
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
-                   sa.current_version, sa.default_version, sa.deleted_at,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
                    cv.id as cv_id, cv.version as cv_version,
@@ -304,7 +304,7 @@ class SubAgentService:
         """
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
-                   sa.current_version, sa.default_version, sa.deleted_at,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
                    cv.id as cv_id, cv.version as cv_version,

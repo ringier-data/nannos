@@ -194,6 +194,7 @@ Resources:
             - { Name: "ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
             - { Name: "VITE_ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
             - { Name: "ORCHESTRATOR_CLIENT_ID", Value: '{{ orchestrator_oidc_client_id }}' }
+            - { Name: "AGENT_BASE_URL", Value: 'https://{{ agent_creator_fqdn }}' }
             - {
                 Name: POSTGRES_HOST,
                 Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",

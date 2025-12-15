@@ -340,6 +340,7 @@ class RegistryService:
                             system_prompt=system_prompt,
                             mcp_tools=mcp_tools if mcp_tools else None,
                             model_name=cv.model,
+                            sub_agent_id=sa.id,  # Include playground backend ID for tracking
                         )
                     )
                     logger.debug(f"Added local sub-agent '{local_subagents[-1].model_dump_json()}' for user {user_id}")

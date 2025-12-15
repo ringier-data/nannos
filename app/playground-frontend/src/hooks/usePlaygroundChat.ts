@@ -532,6 +532,8 @@ export function usePlaygroundChat({
     };
     setConversations((prev) => [newConv, ...prev]);
     setActiveConversationId(newConv.id);
+    // Mark as loaded to prevent auto-loading from backend (which would overwrite local messages)
+    loadedConversationsRef.current.add(newConv.id);
     return newConv;
   }, []);
 

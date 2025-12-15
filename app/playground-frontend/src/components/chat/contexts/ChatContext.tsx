@@ -552,7 +552,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   // Default settings for auto-initialization
   const DEFAULT_SETTINGS: Settings = {
     agentUrl: 'https://orchestrator.d.nannos.rcplus.io',
-    model: 'gpt4o',
+    model: 'claude-sonnet-4.5',
   };
 
   // Initialize on mount - use existing settings or defaults

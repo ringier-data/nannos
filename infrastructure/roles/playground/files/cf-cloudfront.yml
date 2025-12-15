@@ -39,6 +39,20 @@ Resources:
               - 'PATCH'
               - 'POST'
               - 'DELETE'
+          - TargetOriginId: 'backend'
+            PathPattern: '/mcp'
+            Compress: true
+            CachePolicyId: !ImportValue '{{ project_id }}-common-no-cache-policy-id'
+            OriginRequestPolicyId: !ImportValue  '{{ project_id }}-common-forward-all-origin-request-policy-id'
+            ViewerProtocolPolicy: 'redirect-to-https'
+            AllowedMethods:
+              - 'HEAD'
+              - 'GET'
+              - 'OPTIONS'
+              - 'PUT'
+              - 'PATCH'
+              - 'POST'
+              - 'DELETE'
         DefaultRootObject: index.html
         DefaultCacheBehavior:
           TargetOriginId: 'frontend'
@@ -170,6 +184,13 @@ Resources:
         function handler(event) {
           const request = event.request;
           const uri = request.uri;
+          
+          // Don't rewrite paths that should be handled by backend cache behaviors
+          // These paths are explicitly routed to backend in CacheBehaviors
+          if (uri.startsWith('/api/') || uri.startsWith('/mcp/')) {
+            return request;
+          }
+          
           const lastSegment = uri.split('/').pop()
           
           // Check whether the final path segment URI is missing a file extension.

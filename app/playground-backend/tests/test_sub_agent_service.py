@@ -88,6 +88,79 @@ class TestSubAgentVersionCreation:
         assert updated.config_version.status == SubAgentStatus.DRAFT
 
     @pytest.mark.asyncio
+    async def test_update_metadata_and_config_creates_new_version(self, pg_session: AsyncSession):
+        """Test that updating metadata (name, is_public) along with config creates a new version."""
+        service = SubAgentService()
+        user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
+        agent = await _create_sub_agent(pg_session, user_id, "Original Name")
+
+        # Verify initial state
+        assert agent.name == "Original Name"
+        assert agent.is_public is False
+        assert agent.current_version == 1
+
+        # Update metadata fields along with description (which triggers version)
+        data = SubAgentUpdate(
+            name="Updated Name",
+            is_public=True,
+            description="Updated description",
+        )
+
+        updated = await service.update_sub_agent(pg_session, agent.id, data, user_id)
+
+        # Verify metadata was updated
+        assert updated is not None
+        assert updated.name == "Updated Name"
+        assert updated.is_public is True
+
+        # A new version was created due to description change
+        assert updated.current_version == 2
+        assert updated.config_version is not None
+        assert updated.config_version.version == 2
+        assert updated.config_version.description == "Updated description"
+
+        # Verify the updates persisted by fetching again
+        refetched = await service.get_sub_agent_by_id(pg_session, agent.id)
+        assert refetched is not None
+        assert refetched.name == "Updated Name"
+        assert refetched.is_public is True
+        assert refetched.current_version == 2
+
+    @pytest.mark.asyncio
+    async def test_update_is_public_persists_correctly(self, pg_session: AsyncSession):
+        """Test that is_public field is properly persisted and returned after update."""
+        service = SubAgentService()
+        user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
+        agent = await _create_sub_agent(pg_session, user_id, "Test Agent")
+
+        # Initially not public
+        assert agent.is_public is False
+
+        # Set to public
+        data = SubAgentUpdate(is_public=True, description="")
+        updated = await service.update_sub_agent(pg_session, agent.id, data, user_id)
+
+        assert updated is not None
+        assert updated.is_public is True
+
+        # Verify by fetching from database
+        refetched = await service.get_sub_agent_by_id(pg_session, agent.id)
+        assert refetched is not None
+        assert refetched.is_public is True
+
+        # Set back to private
+        data = SubAgentUpdate(is_public=False, description="")
+        updated = await service.update_sub_agent(pg_session, agent.id, data, user_id)
+
+        assert updated is not None
+        assert updated.is_public is False
+
+        # Verify again
+        refetched = await service.get_sub_agent_by_id(pg_session, agent.id)
+        assert refetched is not None
+        assert refetched.is_public is False
+
+    @pytest.mark.asyncio
     async def test_version_hash_is_unique_for_different_content(self, pg_session: AsyncSession):
         """Test that different configurations generate different hashes."""
         service = SubAgentService()

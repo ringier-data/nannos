@@ -189,6 +189,10 @@ Resources:
             - { Name: 'BUDGET_CHECK_INTERVAL_SECONDS', Value: '300' }
             - { Name: 'BUDGET_WARNING_THRESHOLDS', Value: '0.80,0.90,0.95' }
             - { Name: "BEDROCK_MODEL_ID", Value: '{{ bedrock_model_id }}' }
+            - { Name: "BEDROCK_READ_TIMEOUT", Value: '{{ bedrock_read_timeout }}' }
+            - { Name: "BEDROCK_CONNECT_TIMEOUT", Value: '{{ bedrock_connect_timeout }}' }
+            - { Name: "BEDROCK_MAX_RETRY_ATTEMPTS", Value: '{{ bedrock_max_retry_attempts }}' }
+            - { Name: "BEDROCK_RETRY_MODE", Value: '{{ bedrock_retry_mode }}' }
             - { Name: "CHECKPOINT_DYNAMODB_TABLE_NAME", Value: '{{ checkpoint_dynamodb_table_name }}' }
             - { Name: "CHECKPOINT_S3_BUCKET_NAME", Value: '{{ checkpoint_s3_bucket_name }}' }
             - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }

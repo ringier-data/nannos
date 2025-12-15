@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 router: APIRouter = APIRouter(prefix="/api/v1/sub-agents", tags=["sub-agents"])
 
 
-@router.get("", response_model=SubAgentListResponse)
+@router.get("", response_model=SubAgentListResponse, tags=["MCP"], operation_id="playground_list_sub_agents")
 async def list_sub_agents(
     request: Request,
     db: DbSession,
@@ -145,16 +145,19 @@ async def get_sub_agent_by_config_version(
         raise HTTPException(status_code=500, detail="Failed to get sub-agent")
 
 
-@router.post("", response_model=SubAgent, status_code=201)
+@router.post("", response_model=SubAgent, status_code=201, tags=["MCP"], operation_id="playground_create_sub_agent")
 async def create_sub_agent(
+    request: Request,
     data: SubAgentCreate,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> SubAgent:
     """Create a new sub-agent.
 
     The sub-agent will be created in 'draft' status.
     Use POST /{id}/submit to submit for approval.
+
+    Supports both session-based authentication and Bearer token authentication.
     """
     try:
         sub_agent = await sub_agent_service.create_sub_agent(db, user.id, data)
@@ -199,17 +202,19 @@ async def get_sub_agent(
         raise HTTPException(status_code=500, detail="Failed to get sub-agent")
 
 
-@router.patch("/{sub_agent_id}", response_model=SubAgent)
+@router.patch("/{sub_agent_id}", response_model=SubAgent, tags=["MCP"], operation_id="playground_update_sub_agent")
 async def update_sub_agent(
     sub_agent_id: int,
     data: SubAgentUpdate,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> SubAgent:
     """Update a sub-agent.
 
     Only the owner can update. For local sub-agents, configuration changes
     automatically create a new version in the history.
+
+    Supports both session-based authentication and Bearer token authentication.
     """
     try:
         sub_agent = await sub_agent_service.update_sub_agent(db, sub_agent_id, data, user.id)

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
 from ..config import config
-from ..dependencies import require_auth
+from ..dependencies import require_auth_or_bearer_token
 from ..models.user import User
 
 logger = logging.getLogger(__name__)
@@ -37,10 +37,10 @@ class MCPToolsResponse(BaseModel):
     tools: list[MCPTool]
 
 
-@router.get("/tools", response_model=MCPToolsResponse)
+@router.get("/tools", response_model=MCPToolsResponse, tags=["MCP"], operation_id="playground_list_mcp_tools")
 async def list_mcp_tools(
     request: Request,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> MCPToolsResponse:
     """List available MCP tools from Gatana gateway.
 
@@ -55,87 +55,99 @@ async def list_mcp_tools(
         503 Service Unavailable: If MCP gateway is unreachable
     """
     try:
-        # Get user's access token from request state (populated by session middleware)
-        access_token = request.state.access_token
-        if not access_token:
-            logger.error(f"No access token in session for user {user.email}")
-            raise HTTPException(
-                status_code=401,
-                detail="No access token available. Please log in again.",
-            )
+        # Get user's access token from request state (session) or Authorization header (Bearer token)
 
+        auth_header = request.headers.get("Authorization")
         # Exchange user token for mcp-gateway token
-        oauth2_client = OidcOAuth2Client(
-            client_id=config.oidc.client_id,
-            client_secret=config.oidc.client_secret.get_secret_value(),
-            issuer=config.oidc.issuer,
-        )
-
-        # Check if token is expired or expiring soon (within 60 seconds)
-        token_expiry = getattr(request.state, "access_token_expires_at", None)
-        if token_expiry:
-            time_until_expiry = (token_expiry - datetime.now(timezone.utc)).total_seconds()
-            is_expired = time_until_expiry < 60
-        else:
-            # If no expiry info, assume token might be expired
-            is_expired = True
-            time_until_expiry = 0
-
-        if is_expired:
-            logger.info(
-                f"User access token is expired or expiring soon (expires in {time_until_expiry:.1f}s), refreshing..."
-            )
-            try:
-                # Get refresh token from session
-                refresh_token = getattr(request.state, "refresh_token", None)
-                if not refresh_token:
-                    logger.error(f"No refresh token available for user {user.email}")
-                    raise HTTPException(
-                        status_code=401,
-                        detail="Session expired. Please log in again.",
-                    )
-
-                # Refresh the access token
-                refreshed_tokens = await oauth2_client.refresh_token(refresh_token)
-
-                # Update access token for current request
-                access_token = refreshed_tokens["access_token"]
-
-                # Calculate new expiration time
-                expires_in = int(refreshed_tokens["expires_in"])
-                new_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-                logger.info(
-                    f"User access token refreshed, new expiry at {new_expires_at.isoformat()} "
-                    f"({expires_in} seconds from now)"
-                )
-
-                # Update the session with new tokens (assuming you have a session service)
-                # Note: You'll need to import and use your session service here
-                # await session_service.update_session(
-                #     session_id=request.state.session_id,
-                #     user_id=user.id,
-                #     access_token=refreshed_tokens["access_token"],
-                #     access_token_expires_at=new_expires_at,
-                #     refresh_token=refreshed_tokens.get("refresh_token", refresh_token),
-                #     id_token=refreshed_tokens.get("id_token"),
-                #     issued_at=datetime.now(timezone.utc),
-                # )
-
-                logger.info(f"Successfully refreshed access token for user {user.email}")
-
-            except Exception as e:
-                logger.error(f"Failed to refresh access token: {e}")
+        if not auth_header:
+            access_token = getattr(request.state, "access_token", None)
+            if not access_token:
+                logger.error(f"No access token available for user {user.email}")
                 raise HTTPException(
                     status_code=401,
-                    detail="Session expired: Unable to refresh access token. Please re-authenticate.",
+                    detail="No access token available. Please log in again.",
                 )
 
-        # Exchange user token for mcp-gateway token
-        mcp_gateway_token = await oauth2_client.exchange_token(
-            subject_token=access_token,
-            target_client_id="mcp-gateway",
-            requested_scopes=["openid", "profile", "offline_access"],
-        )
+            # Check if token is expired or expiring soon (within 60 seconds)
+            token_expiry = getattr(request.state, "access_token_expires_at", None)
+            if token_expiry:
+                time_until_expiry = (token_expiry - datetime.now(timezone.utc)).total_seconds()
+                is_expired = time_until_expiry < 60
+            else:
+                # If no expiry info, assume token might be expired
+                is_expired = True
+                time_until_expiry = 0
+
+            if is_expired:
+                logger.info(
+                    f"User access token is expired or expiring soon (expires in {time_until_expiry:.1f}s), refreshing..."
+                )
+                try:
+                    # Get refresh token from session
+                    refresh_token = getattr(request.state, "refresh_token", None)
+                    if not refresh_token:
+                        logger.error(f"No refresh token available for user {user.email}")
+                        raise HTTPException(
+                            status_code=401,
+                            detail="Session expired. Please log in again.",
+                        )
+
+                    # Refresh the access token
+                    refreshed_tokens = await oauth2_client.refresh_token(refresh_token)
+
+                    # Update access token for current request
+                    access_token = refreshed_tokens["access_token"]
+
+                    # Calculate new expiration time
+                    expires_in = int(refreshed_tokens["expires_in"])
+                    new_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+                    logger.info(
+                        f"User access token refreshed, new expiry at {new_expires_at.isoformat()} "
+                        f"({expires_in} seconds from now)"
+                    )
+
+                    # Update the session with new tokens (assuming you have a session service)
+                    # Note: You'll need to import and use your session service here
+                    # await session_service.update_session(
+                    #     session_id=request.state.session_id,
+                    #     user_id=user.id,
+                    #     access_token=refreshed_tokens["access_token"],
+                    #     access_token_expires_at=new_expires_at,
+                    #     refresh_token=refreshed_tokens.get("refresh_token", refresh_token),
+                    #     id_token=refreshed_tokens.get("id_token"),
+                    #     issued_at=datetime.now(timezone.utc),
+                    # )
+
+                    logger.info(f"Successfully refreshed access token for user {user.email}")
+
+                except Exception as e:
+                    logger.error(f"Failed to refresh access token: {e}")
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Session expired: Unable to refresh access token. Please re-authenticate.",
+                    )
+            # Exchange user token for mcp-gateway token
+            oauth2_client = OidcOAuth2Client(
+                client_id=config.oidc.client_id,
+                client_secret=config.oidc.client_secret.get_secret_value(),
+                issuer=config.oidc.issuer,
+            )
+            mcp_gateway_token = await oauth2_client.exchange_token(
+                subject_token=access_token,
+                target_client_id="mcp-gateway",
+                requested_scopes=["openid", "profile", "offline_access"],
+            )
+        else:
+            # Extract Bearer token from Authorization header
+            # NOTE: in this case we should receive the already exchanged token for mcp-gateway
+            if not auth_header.startswith("Bearer "):
+                logger.error("Invalid Authorization header format")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid Authorization header format. Expected 'Bearer <token>'.",
+                )
+            mcp_gateway_token = auth_header[len("Bearer ") :].strip()
+
         logger.info(f"Successfully exchanged token for mcp-gateway for user {user.email}")
 
         async with httpx.AsyncClient(timeout=10.0) as client:

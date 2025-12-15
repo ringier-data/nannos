@@ -5,10 +5,10 @@ import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { SubAgentList } from '@/components/subagents/SubAgentList';
 import {
-  listSubAgentsApiV1SubAgentsGetOptions,
+  playgroundListSubAgentsOptions,
   listPendingApprovalsApiV1SubAgentsPendingGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgent } from '@/api/generated/types.gen';
+import type { SubAgent, SubAgentListResponse } from '@/api/generated/types.gen';
 import { useAuth } from '@/contexts/AuthContext';
 
 type TabId = 'my' | 'accessible' | 'pending';
@@ -40,7 +40,7 @@ export function SubAgentsPage() {
 
   // Fetch owned sub-agents
   const { data: ownedData } = useQuery({
-    ...listSubAgentsApiV1SubAgentsGetOptions({
+    ...playgroundListSubAgentsOptions({
       query: { owned_only: true },
     }),
     enabled: activeTab === 'my',
@@ -48,7 +48,7 @@ export function SubAgentsPage() {
 
   // Fetch all accessible sub-agents (for 'accessible' tab)
   const { data: accessibleData } = useQuery({
-    ...listSubAgentsApiV1SubAgentsGetOptions(),
+    ...playgroundListSubAgentsOptions({}),
     enabled: activeTab === 'accessible',
   });
 
@@ -66,12 +66,12 @@ export function SubAgentsPage() {
   const getSubAgentsForTab = (): SubAgent[] => {
     switch (activeTab) {
       case 'my':
-        return ownedData?.items ?? [];
+        return (ownedData as SubAgentListResponse)?.items ?? [];
       case 'accessible':
         // Filter out owned sub-agents from accessible list
-        return (accessibleData?.items ?? []).filter((sa) => sa.owner_user_id !== user?.id);
+        return ((accessibleData as SubAgentListResponse)?.items ?? []).filter((sa: any) => sa.owner_user_id !== user?.id);
       case 'pending':
-        return pendingData?.items ?? [];
+        return (pendingData as SubAgentListResponse)?.items ?? [];
       default:
         return [];
     }

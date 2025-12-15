@@ -9,7 +9,7 @@ Tests the centralized graph factory architecture:
 
 from unittest.mock import Mock, patch
 
-from app.core import GraphFactory
+from app.core.graph_factory import GraphFactory
 from app.middleware import DynamicToolDispatchMiddleware
 from app.models import AgentSettings
 
