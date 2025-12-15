@@ -23,4 +23,8 @@ ARG WORKDIR
 WORKDIR ${WORKDIR}
 COPY --from=alloy-build ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
 COPY --from=alloy-build ${WORKDIR} .
+
+# Download NLTK punkt tokenizer for semantic chunking
+RUN ./.venv/bin/python -m nltk.downloader punkt
+
 CMD ["./.venv/bin/python", "main.py"]

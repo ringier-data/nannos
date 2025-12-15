@@ -132,13 +132,26 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             return
 
         try:
-            # Create config for graph execution with interrupt support
-            config = {"configurable": {"thread_id": task.context_id}}
-
             # Extract slack user handle - support both naming conventions
             # Client may send 'slackUserId' (camelCase) or 'slack_user_id' (snake_case)
             slack_user_id = request_metadata.get("slackUserId")
-            # If we have a user ID, construct the mention format
+            slack_channel_id = request_metadata.get("slackChannelId")  # for filesystem namespace isolation
+
+            # NOTE: we decide to use channel_id as part of the filesystem namespace since if one has access to the
+            # channel, she should have access to all files shared in that channel.
+            # This is a design decision based on Slack's permission model.
+            # Create config for graph execution with interrupt support
+            config = {
+                "configurable": {"thread_id": task.context_id},
+                "metadata": {
+                    "assistant_id": slack_channel_id if slack_channel_id else user_id,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "slack_thread_ts": request_metadata.get("slackThreadTs"),
+                    "scope": "personal" if not slack_channel_id else "channel",
+                },
+            }
+
             if slack_user_id:
                 slack_user_handle = f"<@{slack_user_id}>"
             else:
@@ -172,11 +185,76 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             current_state = graph.get_state(config)  # type: ignore
 
             # Check if the graph is currently interrupted and this might be a resume request
+            resume_value = None  # Initialize resume_value
             if hasattr(current_state, "interrupts") and current_state.interrupts:
-                resume_value = query
-                logger.info("Resuming from interrupt based on user input")
-            else:
-                resume_value = None
+                # Parse interrupt type and handle permission grants
+                last_interrupt = current_state.interrupts[-1]
+                interrupt_value = getattr(last_interrupt, "value", last_interrupt)
+                interrupt_type = interrupt_value.get("type") if isinstance(interrupt_value, dict) else None
+
+                if interrupt_type in (
+                    "file_permission_request",
+                    "search_permission_request",
+                    "bulk_file_permission_request",
+                ):
+                    # Permission-related interrupt - handle approval/denial
+                    logger.info(f"Resuming from permission interrupt: {interrupt_type}")
+
+                    # Parse user response
+                    response = query.lower().strip() if query else ""
+
+                    if interrupt_type == "file_permission_request":
+                        # TODO: this logic is too basic, improve with NLP parsing if needed
+                        # Single file permission
+                        file_path = interrupt_value.get("file_path") if isinstance(interrupt_value, dict) else None
+                        if response in ("yes", "approve", "allow", "grant"):
+                            resume_value = "approve"
+                            # Update state to grant permission
+                            state_update = current_state.values.copy() if hasattr(current_state, "values") else {}
+                            granted_files = state_update.get("personal_file_read_permissions", set())
+                            if not isinstance(granted_files, set):
+                                granted_files = set(granted_files) if granted_files else set()
+                            granted_files.add(file_path)
+                            state_update["personal_file_read_permissions"] = granted_files
+                            # State will be updated by the graph when resumed
+                            logger.info(f"Granted permission for file: {file_path}")
+                        else:
+                            resume_value = "deny"
+                            logger.info(f"Denied permission for file: {file_path}")
+
+                    elif interrupt_type == "search_permission_request":
+                        # Personal search permission
+                        if response in ("yes", "approve", "allow", "grant"):
+                            resume_value = "approve"
+                            # Update state to grant search permission
+                            state_update = current_state.values.copy() if hasattr(current_state, "values") else {}
+                            state_update["personal_search_permission"] = True
+                            logger.info("Granted personal search permission")
+                        else:
+                            resume_value = "deny"
+                            logger.info("Denied personal search permission")
+
+                    elif interrupt_type == "bulk_file_permission_request":
+                        # Bulk file permission
+                        if response in ("approve all", "approve_all", "yes all", "grant all"):
+                            resume_value = "approve_all"
+                            logger.info("Bulk approval: approve all files")
+                        elif response in ("deny all", "deny_all", "no all"):
+                            resume_value = "deny_all"
+                            logger.info("Bulk approval: deny all files")
+                        elif response in ("review", "individual", "one by one"):
+                            resume_value = "review"
+                            logger.info("Bulk approval: review individually")
+                        else:
+                            # Default to deny for safety
+                            resume_value = "deny_all"
+                            logger.info(f"Unknown bulk response '{response}', defaulting to deny_all")
+                else:
+                    # Other interrupt types (auth, etc.)
+                    resume_value = query
+                    logger.info(f"Resuming from interrupt: {interrupt_type or 'unknown'}")
+
+            if resume_value is None:
                 logger.info("Normal execution (not resuming from interrupt)")
 
             # emit a started status update

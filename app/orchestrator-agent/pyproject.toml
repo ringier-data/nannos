@@ -27,9 +27,14 @@ dependencies = [
     "ringier-a2a-sdk>=0.1.0",
     "langchain-aws>=1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.11",
     "aiobotocore>=2.26.0",
     "python-dateutil>=2.8.2",
     "foundry-platform-sdk==1.63.0",
+    "nltk>=3.9.1",
+    "psycopg>=3.2.0",
+    "psycopg-binary>=3.2.0",
 ]
 
 [dependency-groups]

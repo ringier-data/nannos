@@ -77,6 +77,10 @@ ssmkey_rds_service_password: "/{{ project_id }}/{{ software_component }}/rds-ser
 ssmkey_rds_service_username: "/{{ project_id }}/{{ software_component }}/rds-service-username"
 rds_service_username: "playground_app"
 
+ssmkey_rds_docstore_password: "/{{ project_id }}/{{ software_component }}/rds-docstore-password"
+ssmkey_rds_docstore_username: "/{{ project_id }}/{{ software_component }}/rds-docstore-username"
+rds_docstore_username: "orchestrator_docstore"
+
 rds_alarm_thresholds:
   db.t4g.micro:
     read_latency: 0.05

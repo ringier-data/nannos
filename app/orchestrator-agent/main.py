@@ -39,31 +39,41 @@ class MissingAPIKeyError(Exception):
     """Exception for missing API key."""
 
 
-@asynccontextmanager
-async def lifespan(app):
-    """Application lifespan manager for startup/shutdown tasks."""
-    # Startup: Initialize and start budget guard singleton
-    logger.info("Starting application lifespan...")
+def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
+    """Factory to create lifespan with access to agent_executor."""
 
-    budget_guard = init_budget_guard(
-        project_name=AgentSettings.get_langsmith_project(),
-        token_limit=AgentSettings.get_budget_monthly_token_limit(),
-        check_interval_seconds=AgentSettings.get_budget_check_interval(),
-        warning_thresholds=AgentSettings.get_budget_warning_thresholds(),
-        enabled=AgentSettings.get_budget_enabled(),
-    )
+    @asynccontextmanager
+    async def lifespan(app):
+        """Application lifespan manager for startup/shutdown tasks."""
+        # Startup: Initialize and start budget guard singleton
+        logger.info("Starting application lifespan...")
 
-    # Start background polling
-    await budget_guard.start_polling()
+        budget_guard = init_budget_guard(
+            project_name=AgentSettings.get_langsmith_project(),
+            token_limit=AgentSettings.get_budget_monthly_token_limit(),
+            check_interval_seconds=AgentSettings.get_budget_check_interval(),
+            warning_thresholds=AgentSettings.get_budget_warning_thresholds(),
+            enabled=AgentSettings.get_budget_enabled(),
+        )
 
-    logger.info("Application startup complete")
+        # Start background polling
+        await budget_guard.start_polling()
 
-    yield  # Application runs here
+        # Setup document store database schema (creates tables if they don't exist)
+        logger.info("Setting up document store database schema...")
+        await agent_executor.agent._graph_factory.ensure_store_setup()
+        logger.info("Document store ready")
 
-    # Shutdown: Stop budget guard polling
-    logger.info("Shutting down application...")
-    await budget_guard.stop_polling()
-    logger.info("Application shutdown complete")
+        logger.info("Application startup complete")
+
+        yield  # Application runs here
+
+        # Shutdown: Stop budget guard polling
+        logger.info("Shutting down application...")
+        await budget_guard.stop_polling()
+        logger.info("Application shutdown complete")
+
+    return lifespan
 
 
 @click.command()
@@ -118,8 +128,9 @@ def main(host, port):
         # httpx_client = httpx.AsyncClient()
         # push_config_store = InMemoryPushNotificationConfigStore()
         # push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
+        agent_executor = OrchestratorDeepAgentExecutor()
         request_handler = DefaultRequestHandler(
-            agent_executor=OrchestratorDeepAgentExecutor(),
+            agent_executor=agent_executor,
             task_store=InMemoryTaskStore(),
             # push_config_store=push_config_store,
             # push_sender=push_sender,
@@ -128,7 +139,7 @@ def main(host, port):
         server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
 
         # Add authentication middleware stack (EXECUTION ORDER: bottom to top for requests)
-        app = server.build(lifespan=lifespan)
+        app = server.build(lifespan=create_lifespan(agent_executor))
 
         # UserContextFromRequestStateMiddleware runs AFTER OIDC (transfers user to A2A context)
         app.add_middleware(UserContextFromRequestStateMiddleware)
