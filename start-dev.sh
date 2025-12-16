@@ -16,6 +16,7 @@ NC='\033[0m' # No Color
 BACKEND_ENV="local"
 ORCHESTRATOR_ENV="local"
 AGENT_CREATOR_ENV="local"
+ALLOY_ENV="local"
 LOG_DIR="./logs"
 HELP=false
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -45,6 +46,23 @@ AGENT_CREATOR_URLS=(
     prod "https://agent-creator.nannos.rcplus.io"
 )
 
+typeset -A ALLOY_URLS
+ALLOY_URLS=(
+    local "http://localhost:5004"
+    dev "https://alloy-agent.d.nannos.rcplus.io"
+    stg "https://alloy-agent.s.nannos.rcplus.io"
+    prod "https://alloy-agent.nannos.rcplus.io"
+)
+
+
+typeset -A NAONOUS_MCP_URLS
+NAONOUS_MCP_URLS=(
+    local "http://localhost:8001/mcp"
+    dev "https://naonous.d.alloy.rcplus.io/mcp"
+    stg "https://naonous.s.alloy.rcplus.io/mcp"
+    prod "https://naonous.alloy.rcplus.io/mcp"
+)
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -58,6 +76,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --agent-creator)
             AGENT_CREATOR_ENV="$2"
+            shift 2
+            ;;
+        --alloy)
+            ALLOY_ENV="$2"
             shift 2
             ;;
         --log-dir)
@@ -87,6 +109,7 @@ Options:
   --backend ENV           Backend environment (local|dev|stg|prod) [default: local]
   --orchestrator ENV      Orchestrator environment (local|dev|stg|prod) [default: local]
   --agent-creator ENV     Agent Creator environment (local|dev|stg|prod) [default: local]
+  --alloy ENV            Alloy Agent environment (local|dev|stg|prod) [default: local]
   --log-dir DIR          Directory for log files [default: ./logs]
   -h, --help             Show this help message
 
@@ -105,6 +128,7 @@ Examples:
   tail -f logs/backend.log
   tail -f logs/orchestrator.log
   tail -f logs/agent-creator.log
+  tail -f logs/alloy.log
 
 Logs:
   Each component logs to its own file in the logs directory:
@@ -112,6 +136,7 @@ Logs:
   - logs/backend.log (if running locally)
   - logs/orchestrator.log (if running locally)
   - logs/agent-creator.log (if running locally)
+  - logs/alloy.log (if running locally)
 
 Stopping:
   Press Ctrl+C to stop all components
@@ -120,7 +145,7 @@ EOF
 fi
 
 # Validate environments
-for env in "$BACKEND_ENV" "$ORCHESTRATOR_ENV" "$AGENT_CREATOR_ENV"; do
+for env in "$BACKEND_ENV" "$ORCHESTRATOR_ENV" "$AGENT_CREATOR_ENV" "$ALLOY_ENV"; do
     if [[ ! "$env" =~ ^(local|dev|stg|prod)$ ]]; then
         echo -e "${RED}Error: Invalid environment '$env'. Must be one of: local, dev, stg, prod${NC}"
         exit 1
@@ -242,6 +267,11 @@ ensure_ports_available() {
         check_port 8080 "Agent Creator"
     fi
     
+    # Check alloy port if running locally
+    if [ "$ALLOY_ENV" = "local" ]; then
+        check_port 5004 "Alloy"
+    fi
+    
     # Always check frontend port (always runs locally)
     check_port 5173 "Frontend"
     
@@ -280,6 +310,7 @@ echo -e "Frontend:        ${GREEN}local${NC} (always)"
 echo -e "Backend:         ${GREEN}${BACKEND_ENV}${NC} (${BACKEND_URLS[$BACKEND_ENV]})"
 echo -e "Orchestrator:    ${GREEN}${ORCHESTRATOR_ENV}${NC} (${ORCHESTRATOR_DOMAINS[$ORCHESTRATOR_ENV]})"
 echo -e "Agent Creator:   ${GREEN}${AGENT_CREATOR_ENV}${NC} (${AGENT_CREATOR_URLS[$AGENT_CREATOR_ENV]})"
+echo -e "Alloy Agent:    ${GREEN}${ALLOY_ENV}${NC} (${ALLOY_URLS[$ALLOY_ENV]})"
 echo -e "Logs:            ${GREEN}${LOG_DIR}/${NC}"
 echo -e "${BLUE}================================${NC}\n"
 
@@ -338,7 +369,7 @@ if [ "$BACKEND_ENV" = "local" ]; then
     ensure_docker_db
     
     echo -e "${YELLOW}Configuring Backend (local)...${NC}"
-    cd app/playground-backend
+    pushd app/playground-backend > /dev/null
     
     # Generate .env from template
     cp .env.template .env
@@ -351,6 +382,17 @@ if [ "$BACKEND_ENV" = "local" ]; then
     
     # Set frontend URL (frontend always runs locally)
     update_env_var ".env" "FRONTEND_URL" "http://localhost:5173"
+    
+    # Configure orchestrator based on environment
+    if [ "$ORCHESTRATOR_ENV" = "local" ]; then
+        update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
+        update_env_var ".env" "ORCHESTRATOR_BASE_DOMAIN" "localhost:10001"
+        update_env_var ".env" "ORCHESTRATOR_ENVIRONMENT" "local"
+    else
+        update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
+        update_env_var ".env" "ORCHESTRATOR_BASE_DOMAIN" "${ORCHESTRATOR_DOMAINS[$ORCHESTRATOR_ENV]}"
+        update_env_var ".env" "ORCHESTRATOR_ENVIRONMENT" "$ORCHESTRATOR_ENV"
+    fi
     
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-alloy-infrastructure-agents-langgraph-checkpoints"
@@ -379,7 +421,7 @@ if [ "$BACKEND_ENV" = "local" ]; then
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
-    cd ../..
+    popd > /dev/null
     
     start_component "backend" "app/playground-backend" "uv run --env-file .env python app.py"
     
@@ -401,10 +443,20 @@ fi
 # 2. ORCHESTRATOR
 if [ "$ORCHESTRATOR_ENV" = "local" ]; then
     echo -e "${YELLOW}Configuring Orchestrator (local)...${NC}"
-    cd app/orchestrator-agent
+    pushd app/orchestrator-agent > /dev/null
     
     # Generate .env from template
     cp .env.template .env
+    
+    # Generate .env from template
+    cp .env.template .env
+    
+    # Configure playground backend URL based on backend environment
+    if [ "$BACKEND_ENV" = "local" ]; then
+        update_env_var ".env" "PLAYGROUND_BACKEND_URL" "http://localhost:5001"
+    else
+        update_env_var ".env" "PLAYGROUND_BACKEND_URL" "${BACKEND_URLS[$BACKEND_ENV]}"
+    fi
     
     # Add configuration based on backend environment
     if [ "$BACKEND_ENV" = "local" ]; then        
@@ -473,7 +525,7 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
-    cd ../..
+    popd > /dev/null
     
     start_component "orchestrator" "app/orchestrator-agent" "uv run --env-file .env python main.py --host localhost --reload"
     
@@ -495,7 +547,7 @@ fi
 # 3. AGENT CREATOR
 if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     echo -e "${YELLOW}Configuring Agent Creator (local)...${NC}"
-    cd app/agent-creator
+    pushd app/agent-creator > /dev/null
     
     # Generate .env from template
     cp .env.template .env
@@ -507,8 +559,14 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-alloy-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-alloy-infrastructure-agents-orchestrator-checkpoints"
-    
-    cd ../..
+
+    if ! LANGSMITH_API_KEY=$(aws ssm get-parameter --name /alloy/infrastructure-agents/langsmith-api-key --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch LANGSMITH_API_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "LANGSMITH_API_KEY" "$LANGSMITH_API_KEY"
+
+    popd > /dev/null
     
     start_component "agent-creator" "app/agent-creator" "uv run --env-file .env python main.py --reload"
     
@@ -527,9 +585,49 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     done
 fi
 
-# 4. FRONTEND (always local)
+# 4. ALLOY AGENT
+if [ "$ALLOY_ENV" = "local" ]; then
+    echo -e "${YELLOW}Configuring Alloy Agent (local)...${NC}"
+    pushd app/alloy-agent > /dev/null
+    
+    # Generate .env from template
+    cp .env.template .env
+    
+    # Override environment-specific AWS resources (always use dev for local)
+    update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-alloy-infrastructure-agents-langgraph-checkpoints"
+    update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-alloy-infrastructure-agents-orchestrator-checkpoints"
+    
+    # Set MCP URLs based on ALLOY_ENV (defaults to dev for local)
+    update_env_var ".env" "NAONOUS_MCP_URL" "${NAONOUS_MCP_URLS[$ALLOY_ENV]}"
+
+    if ! LANGSMITH_API_KEY=$(aws ssm get-parameter --name /alloy/infrastructure-agents/langsmith-api-key --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch LANGSMITH_API_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "LANGSMITH_API_KEY" "$LANGSMITH_API_KEY"
+
+    popd > /dev/null
+    
+    start_component "alloy" "app/alloy-agent" "uv run --env-file .env python main.py"
+    
+    # Wait for alloy-agent to be ready
+    echo -e "${YELLOW}Waiting for alloy-agent to be ready...${NC}"
+    for i in {1..30}; do
+        if curl -s http://localhost:5004/health > /dev/null 2>&1; then
+            echo -e "${GREEN}Alloy Agent is ready!${NC}\n"
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            echo -e "${RED}Alloy Agent failed to start. Check ${LOG_DIR}/alloy.log${NC}"
+            exit 1
+        fi
+        sleep 1
+    done
+fi
+
+# 5. FRONTEND (always local)
 echo -e "${YELLOW}Configuring Frontend (local)...${NC}"
-cd app/playground-frontend
+pushd app/playground-frontend > /dev/null
 
 # Determine environment prefix for SSM paths
 case "$BACKEND_ENV" in
@@ -570,7 +668,7 @@ fi
 # Set OVERRIDE_URL for SDK generation
 export OVERRIDE_URL="${BACKEND_URLS[$BACKEND_ENV]}/api/v1/openapi.json"
 
-cd ../..
+popd > /dev/null
 
 start_component "frontend" "app/playground-frontend" "npm run dev"
 
@@ -608,6 +706,11 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
 else
     echo -e "Agent Creator:   ${GREEN}${AGENT_CREATOR_URLS[$AGENT_CREATOR_ENV]}${NC} (remote)"
 fi
+if [ "$ALLOY_ENV" = "local" ]; then
+    echo -e "Alloy Agent:    ${GREEN}http://localhost:5004${NC}"
+else
+    echo -e "Alloy Agent:    ${GREEN}${ALLOY_URLS[$ALLOY_ENV]}${NC} (remote)"
+fi
 echo -e "${BLUE}================================${NC}"
 echo -e "\n${YELLOW}Follow logs:${NC}"
 if [ "$BACKEND_ENV" = "local" ]; then
@@ -618,6 +721,9 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
 fi
 if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     echo -e "  tail -f ${LOG_DIR}/agent-creator.log"
+fi
+if [ "$ALLOY_ENV" = "local" ]; then
+    echo -e "  tail -f ${LOG_DIR}/alloy.log"
 fi
 echo -e "  tail -f ${LOG_DIR}/frontend.log"
 echo -e "\n${YELLOW}Press Ctrl+C to stop all components${NC}\n"

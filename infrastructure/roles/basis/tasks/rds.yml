@@ -77,15 +77,6 @@
     rds_username: "{{ lookup('aws_ssm', ssmkey_rds_master_username) }}"
     rds_password: "{{ lookup('aws_ssm', ssmkey_rds_master_password, decrypt=True) }}"
 
-# ====================== Install pg_vectors extension ===================
-- name: Install pg_vectors extension
-  no_log: '{{ ansible_verbosity < 3 }}'
-  command: >-
-    docker run --rm -e PGPASSWORD psql -c "
-      CREATE EXTENSION IF NOT EXISTS vector
-    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
-  environment:
-    PGPASSWORD: '{{ rds_password }}'
 
 # ====================== Drop 'public' schema ===================
 
@@ -105,6 +96,16 @@
   command: >-
     docker run --rm -e PGPASSWORD psql -c "
       CREATE SCHEMA IF NOT EXISTS {{ rds_schema }} AUTHORIZATION {{ rds_username }}
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
+# ====================== Install pg_vectors extension ===================
+- name: Install pg_vectors extension
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      CREATE EXTENSION IF NOT EXISTS vector SCHEMA {{ rds_schema }}
     " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
   environment:
     PGPASSWORD: '{{ rds_password }}'
@@ -152,11 +153,14 @@
     ssmkey_rds_master_password_key: '{{ ssmkey_rds_master_password }}'
     ssmkey_rds_app_user_username_key: '{{ ssmkey_rds_docstore_username }}'
     ssmkey_rds_app_user_password_key: '{{ ssmkey_rds_docstore_password }}'
+    # NOTE: these privileges are over permissive since they apply to all tables in the schema
+    #       but we stick to ringier.aws_cicd.create_db_user role for simplicity
+    #       TODO: create a specific schema for document store to limit privileges
     database_privileges: 'CONNECT'
     schema_privileges: 'USAGE'
     sequence_privileges: 'USAGE'
-    table_privileges: ''
-    function_privileges: ''
+    table_privileges: 'SELECT'
+    function_privileges: 'EXECUTE'
 
 # ============== Grant table-specific privileges to document store user =======
 

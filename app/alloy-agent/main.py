@@ -1,4 +1,4 @@
-"""Agent Creator A2A Server - Entry point for the FastAPI application."""
+"""Nanous Agent A2A Server - Entry point for the FastAPI application."""
 
 import logging
 import os
@@ -15,20 +15,17 @@ from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentSkill,
-    OpenIdConnectSecurityScheme,
+    HTTPAuthSecurityScheme,
     SecurityScheme,
 )
 from dotenv import load_dotenv
 from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
-from ringier_a2a_sdk.middleware import (
-    OidcUserinfoMiddleware,
-    UserContextFromRequestStateMiddleware,
-)
+from ringier_a2a_sdk.middleware import UserContextFromMetadataMiddleware
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 
-from agent import AgentCreator
+from agent import NanousAgent
 
 # Load environment variables
 load_dotenv()
@@ -39,7 +36,7 @@ configure_existing_logger(logging.getLogger("agent"))
 configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
 # Initialize agent globally for reload support
-agent = AgentCreator()
+agent = NanousAgent()
 
 
 @asynccontextmanager
@@ -61,7 +58,7 @@ async def lifespan(app) -> AsyncIterator[None]:
 
     # Shutdown: cleanup the agent
     await agent.close()
-    logger.info("Application shutdown - Agent Creator closed")
+    logger.info("Application shutdown - Nanous Agent closed")
 
 
 def create_app():
@@ -76,41 +73,30 @@ def create_app():
 
     # Agent skill definition
     skill = AgentSkill(
-        id="create-agents",
-        name="Create Agents",
-        description="Design and create specialized AI agents through conversation",
-        tags=["agent-creation", "agent-design", "configuration", "system-prompts"],
-        examples=[
-            "Create an agent that helps with JIRA ticket management",
-            "I need an agent specialized in Python code review",
-            "Design an agent for analyzing customer support data",
-            "Create a new agent that can help with SQL queries",
-            "Show me the existing agents and help me create a new one",
-            "I want to update the system prompt for my data-analyst agent",
-        ],
-    )
-
-    # Configure OIDC authentication for token exchange (preserves user identity)
-    oidc_scheme = OpenIdConnectSecurityScheme(
-        type="openIdConnect",
-        open_id_connect_url="https://login.alloy.ch/realms/a2a/.well-known/openid-configuration",
-        description="OIDC authentication with token exchange (RFC 8693) - preserves user identity from orchestrator",
-    )
-
-    # Support both local dev and production deployment
-    agent_base_url = os.getenv("AGENT_BASE_URL", "http://localhost:8080")
-
-    # Agent card
-    agent_card = AgentCard(
-        name="Agent Creator",
+        id="manage-campaigns",
+        name="Manage Campaigns",
+        tags=["campaign management", "BYOK", "advertising", "Alloy", "ad operations", "advertising campaigns"],
         description=(
-            "Expert AI Agent Creator specializing in designing and creating specialized "
-            "AI agents for the Alloy Infrastructure Agents platform. Can list existing agents, "
-            "create new agents with custom configurations, update existing agents, and discover "
-            "available MCP tools. Helps users design agent architecture, write system prompts, "
-            "select appropriate models and tools, and follow agent creation best practices. "
-            "Keywords: create agent, new agent, design agent, configure agent, agent setup, "
-            "sub-agent, system prompt, agent tools, agent capabilities."
+            "Expert campaign manager for BYOK (Bring Your Own KPI) campaigns on the Alloy platform. "
+            "Manages complete campaign lifecycle including creating proposals from briefings, "
+            "generating presentation slides, creating campaigns, syncing to Cockpit for deployment, "
+            "and monitoring performance with KPI visualizations. Handles campaign updates and "
+            "re-deployment. Keywords: campaign, BYOK, proposal, Cockpit, KPI, advertising, "
+            "deployment, monitoring, briefing, creative, targeting."
+        ),
+    )
+
+    # Agent base URL
+    agent_base_url = os.getenv("AGENT_BASE_URL", "http://localhost:5004")
+
+    # Agent card - No authentication required (VPN-protected)
+    agent_card = AgentCard(
+        name="Nanous Agent",
+        description=(
+            "Expert campaign manager for BYOK (Bring Your Own KPI) campaigns on the Alloy platform. "
+            "Specializes in the complete campaign lifecycle: proposal creation, slide generation, "
+            "campaign deployment to Cockpit, performance monitoring, and campaign updates. "
+            "Provides natural language interface for all campaign management operations."
         ),
         url=agent_base_url,
         version="1.0.0",
@@ -118,9 +104,15 @@ def create_app():
         default_output_modes=agent.SUPPORTED_CONTENT_TYPES,
         capabilities=capabilities,
         skills=[skill],
-        security_schemes={"agent-creator": SecurityScheme(root=oidc_scheme)},
-        security=[{"agent-creator": ["openid"]}],
         supports_authenticated_extended_card=False,
+        security=[],
+        security_schemes={
+            "bearerAuth": SecurityScheme(
+                root=HTTPAuthSecurityScheme(
+                    type="http", scheme="bearer", bearer_format="JWT", description="Orchestrator JWT authentication"
+                )
+            )
+        },
     )
 
     # Create request handler
@@ -136,17 +128,8 @@ def create_app():
     # Build app with lifespan
     app = server.build(lifespan=lifespan)
 
-    # UserContextFromRequestStateMiddleware runs AFTER OIDC (transfers user to A2A context)
-    app.add_middleware(UserContextFromRequestStateMiddleware)
-
-    # OidcUserinfoMiddleware runs FIRST (validates JWT, sets request.state.user)
-    app.add_middleware(
-        OidcUserinfoMiddleware,
-        issuer=os.environ["OIDC_ISSUER"],
-        jwt_secret_key=os.environ.get("JWT_SECRET_KEY", ""),
-        client_id=os.environ.get("OIDC_CLIENT_ID", "agent-creator"),
-        client_secret=os.environ.get("OIDC_CLIENT_SECRET"),
-    )
+    # No authentication middleware needed (VPN-protected)
+    app.add_middleware(UserContextFromMetadataMiddleware)
 
     # TracingMiddleware for LangSmith distributed tracing (receives trace from orchestrator)
     app.add_middleware(TracingMiddleware)
@@ -167,14 +150,14 @@ app = create_app()
 )
 @click.option(
     "--port",
-    default=8080,
+    default=5004,
     help="Port to bind the server to",
     show_default=True,
     type=int,
 )
 @click.option("--reload", "reload", is_flag=True, default=False, help="Enable auto-reload for development")
 def main(host: str, port: int, reload: bool):
-    """Start the Agent Creator A2A Server.
+    """Start the Nanous Agent A2A Server.
 
     Args:
         host: Host to bind the server to

@@ -82,7 +82,7 @@ def create_app():
         if not os.getenv("GOOGLE_API_KEY"):
             raise MissingAPIKeyError("GOOGLE_API_KEY environment variable not set.")
 
-    capabilities = AgentCapabilities(streaming=True, push_notifications=True)
+    capabilities = AgentCapabilities(streaming=True)
     skill = AgentSkill(
         id="orchestrate_tasks",
         name="Task Orchestration",

@@ -45,6 +45,33 @@ The `start-dev.sh` script is the single source of truth for local environment se
 - Validate configuration at startup
 - Support multiple environments (local, dev, stg, prod)
 
+## Distributed Tracing
+
+### Receiving Traces from Orchestrator
+
+The agent-creator participates in distributed tracing by receiving trace context from the orchestrator.
+
+**Implementation in `main.py`:**
+
+```python
+from langsmith.middleware import TracingMiddleware
+
+app = server.build(lifespan=lifespan)
+app.add_middleware(TracingMiddleware)  # Receives trace from orchestrator
+```
+
+**How it works:**
+1. Orchestrator injects LangSmith trace headers (`langsmith-trace`, `baggage`) in HTTP requests
+2. `TracingMiddleware` extracts headers and continues the trace context
+3. All agent-creator operations appear as children of the orchestrator's run in LangSmith
+
+**Requirements:**
+- `LANGSMITH_API_KEY` must be configured (from AWS SSM in production)
+- `LANGSMITH_TRACING=true` to enable tracing
+- `LANGSMITH_ENDPOINT` and `LANGSMITH_PROJECT` must be set
+
+**CRITICAL**: `TracingMiddleware` must be registered in the middleware stack. If missing, traces will not be connected to the orchestrator.
+
 ## Testing
 
 - Use pytest with pytest-asyncio for async tests

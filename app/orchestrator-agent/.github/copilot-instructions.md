@@ -53,6 +53,31 @@ The `start-dev.sh` script is the single source of truth for local environment se
 - Validate configuration at startup
 - Support multiple environments (local, dev, stg, prod)
 
+## Distributed Tracing
+
+### A2A Sub-Agent Tracing
+
+The orchestrator propagates LangSmith trace context to all A2A sub-agents (agent-creator, alloy-agent) for unified distributed tracing.
+
+**Implementation in `app/subagents/runnable.py`:**
+
+- `A2AClientRunnable._inject_trace_headers()`: Async event hook that dynamically injects trace headers for each HTTP request
+- Uses `get_current_run_tree().to_headers()` to get trace context at request time
+- Registered via httpx `event_hooks={"request": [self._inject_trace_headers]}`
+
+**CRITICAL**: Do NOT inject trace headers at client initialization time. Headers must be injected dynamically for each request using event hooks, otherwise trace context will be stale or missing.
+
+**How it works:**
+1. When orchestrator invokes A2A sub-agent, the event hook captures the current LangSmith run context
+2. Trace headers (`langsmith-trace`, `baggage`) are injected into the HTTP request
+3. Sub-agent's `TracingMiddleware` receives headers and continues the trace
+4. All operations appear as a single hierarchical trace in LangSmith
+
+**Debugging:**
+- Check logs for "Injected LangSmith trace headers" messages
+- Verify `LANGSMITH_API_KEY` is configured for all services
+- Ensure sub-agents have `TracingMiddleware` registered
+
 ## Testing
 
 - Use pytest with pytest-asyncio for async tests

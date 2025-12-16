@@ -19,4 +19,5 @@
       - 'orchestrator'
       - 'playground'
       - 'agent-creator'
+      - 'alloy-agent'
       - 'ringier.aws_cicd.del_workspace'

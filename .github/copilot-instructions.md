@@ -100,6 +100,35 @@ tail -f logs/orchestrator.log
 ```
 
 
+## Distributed Tracing with LangSmith
+
+The system implements distributed tracing across the orchestrator and all A2A sub-agents (agent-creator, alloy-agent, ...) using LangSmith.
+
+### How It Works
+
+1. **Orchestrator Side**: The `A2AClientRunnable` in `app/orchestrator-agent/app/subagents/runnable.py` uses httpx event hooks to dynamically inject LangSmith trace headers (`langsmith-trace` and `baggage`) into every HTTP request to A2A sub-agents.
+
+2. **Sub-Agent Side**: Both agent-creator and alloy-agent use `TracingMiddleware` from `langsmith.middleware` to receive and continue the trace context from incoming request headers.
+
+3. **Result**: All operations appear as a single hierarchical trace in LangSmith with the orchestrator as the parent run and sub-agent operations as child runs.
+
+### Key Implementation Details
+
+- **Dynamic Header Injection**: Use httpx event hooks (`event_hooks={"request": [handler]}`) to inject trace headers at request time, not client initialization time
+- **Middleware Registration**: `TracingMiddleware` must be registered in the FastAPI app for both agent-creator and alloy-agent
+- **Environment Variables**: Ensure `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_ENDPOINT`, and `LANGSMITH_PROJECT` are configured for all services
+- **Infrastructure**: CloudFormation templates must include `LANGSMITH_API_KEY` from SSM and proper IAM permissions
+
+### When Adding New A2A Agents
+
+To ensure new A2A agents participate in distributed tracing:
+
+1. Add `TracingMiddleware` to the FastAPI app
+2. Configure LANGSMITH environment variables in `.env.template`
+3. Add LANGSMITH_API_KEY to CloudFormation task definition (from SSM)
+4. Add SSM permission to read LANGSMITH_API_KEY in the execution role
+5. Update `start-dev.sh` to fetch and set LANGSMITH_API_KEY for the new service
+
 ## Common Tasks
 
 ### Adding a New Environment Variable
