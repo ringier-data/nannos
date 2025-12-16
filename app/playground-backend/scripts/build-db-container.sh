@@ -34,10 +34,10 @@ docker rmi $IMAGE_TAG 2>/dev/null || true # in order to replace in same commit
 
 docker network create -d bridge ${NETWORK_NAME}
 
-docker pull -q docker.rcplus.io/postgres:16
+docker pull -q pgvector/pgvector:pg16
 docker run -d --name $DB_CONTAINER_NAME --network=${NETWORK_NAME} \
   -e POSTGRES_USER=$RAMBLER_USER -e POSTGRES_PASSWORD=$RAMBLER_PASSWORD \
-  -e POSTGRES_DB=$RAMBLER_DATABASE -e PGDATA=$PGDATA postgres:16
+  -e POSTGRES_DB=$RAMBLER_DATABASE -e PGDATA=$PGDATA pgvector/pgvector:pg16
 
 docker pull -q docker.rcplus.io/busybox
 docker pull -q docker.rcplus.io/zhaowde/rambler:latest
@@ -49,6 +49,8 @@ done
 # setup the default database
 docker exec $DB_CONTAINER_NAME psql --username ${RAMBLER_USER} --dbname ${RAMBLER_DATABASE} -c "ALTER USER ${RAMBLER_USER} SET search_path TO ${RAMBLER_SCHEMA}"
 docker exec $DB_CONTAINER_NAME psql --username ${RAMBLER_USER} --dbname ${RAMBLER_DATABASE} -c "CREATE SCHEMA ${RAMBLER_SCHEMA}"
+# Install pgvector extension (provisioning step)
+docker exec $DB_CONTAINER_NAME psql --username ${RAMBLER_USER} --dbname ${RAMBLER_DATABASE} -c "CREATE EXTENSION IF NOT EXISTS vector"
 docker run -v "/$(pwd)/${SCRIPTS}:/scripts:ro" --network=${NETWORK_NAME} \
   -e RAMBLER_DRIVER -e RAMBLER_PROTOCOL -e RAMBLER_HOST=${DB_CONTAINER_NAME} \
   -e RAMBLER_PORT -e RAMBLER_USER -e RAMBLER_PASSWORD -e RAMBLER_DATABASE -e \

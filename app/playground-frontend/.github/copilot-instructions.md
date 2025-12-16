@@ -8,6 +8,18 @@
 - Tailwind CSS for styling
 - shadcn/ui for UI components
 
+## Local Development Environment
+
+**CRITICAL: Any changes that impact the local development environment MUST be reflected in `/start-dev.sh`**
+
+This includes:
+- New environment variables (add to .env generation in start-dev.sh)
+- Configuration changes that affect local setup
+- New service dependencies or startup requirements
+- Build configuration changes that affect how the app runs locally
+
+The `start-dev.sh` script is the single source of truth for local environment setup. Always update it when making changes that affect how the application runs locally.
+
 ## Code Style
 
 - Use functional components with hooks

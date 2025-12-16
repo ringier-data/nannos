@@ -11,8 +11,12 @@ include .env.tmp
 export
 export PYTHON=uv run python
 
+.PHONY: nltk-data
+nltk-data:  ## Download NLTK punkt tokenizer
+	uv run python -m nltk.downloader punkt
+
 .PHONY: lint
-lint:
+lint: nltk-data
 	uv run ruff check .
 	uv run mypy . --explicit-package-bases
 
@@ -21,7 +25,7 @@ python:
 	uv run python
 
 .PHONY: start-app
-start-app:
+start-app: nltk-data
 	uv run python main.py --host localhost
 
 .PHONY: stop-app

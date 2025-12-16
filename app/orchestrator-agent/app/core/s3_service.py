@@ -89,6 +89,38 @@ class S3Service:
         logger.debug(f"Generated presigned URL for {s3_uri} (expires in {expiration}s)")
         return url
 
+    async def upload_content(
+        self,
+        content: bytes,
+        bucket: str,
+        key: str,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        """Upload content to S3.
+
+        Args:
+            content: Content bytes to upload
+            bucket: S3 bucket name
+            key: S3 object key
+            content_type: MIME type (default: application/octet-stream)
+
+        Returns:
+            S3 URI (s3://bucket/key)
+
+        Raises:
+            Exception: If upload fails
+        """
+        async with self._session.create_client("s3", region_name=self.region) as client:
+            await client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=content,
+                ContentType=content_type,
+            )
+        s3_uri = f"s3://{bucket}/{key}"
+        logger.info(f"Uploaded {len(content)} bytes to {s3_uri}")
+        return s3_uri
+
 
 # Singleton instance
 _s3_service: Optional[S3Service] = None

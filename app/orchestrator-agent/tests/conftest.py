@@ -12,6 +12,21 @@ app_dir = Path(__file__).parent.parent / "app"
 sys.path.insert(0, str(app_dir))
 
 
+@pytest.fixture(scope="session", autouse=True)
+def download_nltk_data():
+    """Download NLTK punkt tokenizer before running tests.
+
+    This fixture runs once per test session and ensures NLTK data
+    is available for semantic chunking tests.
+    """
+    import nltk
+
+    try:
+        nltk.data.find("tokenizers/punkt")
+    except LookupError:
+        nltk.download("punkt", quiet=True)
+
+
 # Configure pytest-asyncio
 pytest_plugins = ("pytest_asyncio",)
 

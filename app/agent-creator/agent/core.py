@@ -382,7 +382,7 @@ class AgentCreator(BaseAgent):
         connect_timeout = int(os.getenv("BEDROCK_CONNECT_TIMEOUT", "10"))  # Default: 10 seconds
         max_attempts = int(os.getenv("BEDROCK_MAX_RETRY_ATTEMPTS", "3"))  # Default: 3 retries
         retry_mode = os.getenv("BEDROCK_RETRY_MODE", "adaptive")  # Default: adaptive
-        
+
         boto_config = BotoConfig(
             read_timeout=read_timeout,
             connect_timeout=connect_timeout,
@@ -391,14 +391,14 @@ class AgentCreator(BaseAgent):
                 "mode": retry_mode,
             },
         )
-        
+
         # Create bedrock-runtime client with custom configuration
         bedrock_client = boto3.client(
             "bedrock-runtime",
             region_name=self.bedrock_region,
             config=boto_config,
         )
-        
+
         logger.info(
             f"Created Bedrock client with read_timeout={read_timeout}s, "
             f"connect_timeout={connect_timeout}s, max_retry_attempts={max_attempts} ({retry_mode} mode)"

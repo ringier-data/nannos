@@ -21,15 +21,19 @@ from typing import Any, Optional
 from deepagents import create_deep_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy
-from langchain_aws import ChatBedrockConverse
+from langchain_aws import BedrockEmbeddings, ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph_checkpoint_aws import DynamoDBSaver
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from ..handlers import handle_auth_error, should_retry
 from ..middleware import (
     AuthErrorDetectionMiddleware,
+    DocumentStoreMiddleware,
     DynamicToolDispatchMiddleware,
     RepeatedToolCallMiddleware,
     TodoStatusMiddleware,
@@ -133,6 +137,23 @@ class GraphFactory:
         )
         logger.info("Initialized shared DynamoDB checkpointer with S3 offloading support")
 
+        # Create shared document store with PostgreSQL + pgvector
+        # This enables semantic document storage and retrieval across all graphs
+        # Store PostgreSQL connection details for lazy initialization
+        # AsyncPostgresStore will be created when first accessed (requires event loop)
+        self._postgres_conn = (
+            f"postgresql://{config.POSTGRES_USER}:{config.POSTGRES_PASSWORD}"
+            f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DB}"
+        )
+        self._embeddings_model = BedrockEmbeddings(
+            model_id="amazon.titan-embed-text-v2:0",
+            region_name=config.get_bedrock_region(),
+        )
+        self._store: AsyncPostgresStore | None = None
+        self._connection_pool: AsyncConnectionPool | None = None
+        self._store_setup_complete: bool = False
+        logger.debug("Configured AsyncPostgresStore (will initialize on first access)")
+
         # Create middleware instances (shared across all graphs)
         self._a2a_middleware = a2a_middleware or A2ATaskTrackingMiddleware()
         self._auth_middleware = AuthErrorDetectionMiddleware()
@@ -144,12 +165,105 @@ class GraphFactory:
             retry_on=should_retry,
             on_failure=handle_auth_error,
         )
+        # DocumentStoreMiddleware for automatic semantic indexing and permission tracking
+        # Reads user_id from runtime metadata at execution time (no user-specific instance needed)
+        self._document_store_middleware = DocumentStoreMiddleware(agent_settings=config)
         logger.debug("Initialized middleware stack")
 
     @property
     def checkpointer(self) -> DynamoDBSaver:
         """Get the shared checkpointer instance."""
         return self._checkpointer
+
+    @property
+    def store(self) -> AsyncPostgresStore:
+        """Get the shared document store instance.
+
+        Lazy initialization: creates the store on first access.
+        Note: Pool connections are created asynchronously on first use.
+
+        IMPORTANT: Call ensure_store_setup() once before using the store for the first time.
+        """
+        if self._store is None:
+            # Create connection pool for AsyncPostgresStore (create once and reuse)
+            # Connections will be created asynchronously on first database operation
+            if self._connection_pool is None:
+                self._connection_pool = AsyncConnectionPool(
+                    self._postgres_conn,
+                    min_size=2,
+                    max_size=10,
+                    kwargs={
+                        "autocommit": True,
+                        "prepare_threshold": 0,
+                        "row_factory": dict_row,
+                    },
+                )
+
+            self._store = AsyncPostgresStore(
+                conn=self._connection_pool,
+                index={
+                    "dims": 1024,  # Titan Embeddings V2 dimension
+                    "embed": self._embeddings_model,
+                    "fields": ["context_description", "content"],  # Fields to index for semantic search
+                },
+            )
+            logger.info("Initialized AsyncPostgresStore with Titan Embeddings V2 (1024 dims) and connection pool")
+        return self._store
+
+    async def ensure_store_setup(self) -> None:
+        """Ensure the database schema is set up for the document store.
+
+        This method creates the necessary tables and indexes in PostgreSQL if they don't exist.
+        It handles cleanup of incompatible existing schemas.
+        It's safe to call multiple times - subsequent calls are no-ops.
+        Should be called once when the application starts before using the store.
+        """
+        if not self._store_setup_complete:
+            store = self.store  # Access property to ensure store is initialized
+
+            # Check if store table exists with incompatible schema and clean it up
+            try:
+                from langgraph.checkpoint.postgres import _ainternal
+
+                async with _ainternal.get_connection(store.conn) as conn:
+                    async with conn.cursor() as cur:
+                        # Check if store table exists
+                        await cur.execute("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables 
+                                WHERE table_name = 'store'
+                            )
+                        """)
+                        table_exists = (await cur.fetchone())[0]
+
+                        if table_exists:
+                            # Check if prefix column exists
+                            await cur.execute("""
+                                SELECT EXISTS (
+                                    SELECT FROM information_schema.columns 
+                                    WHERE table_name = 'store' AND column_name = 'prefix'
+                                )
+                            """)
+                            has_prefix = (await cur.fetchone())[0]
+
+                            if not has_prefix:
+                                # Drop incompatible table and related objects
+                                logger.warning("Found incompatible 'store' table schema, dropping and recreating...")
+                                await cur.execute("DROP TABLE IF EXISTS store CASCADE")
+                                await cur.execute("DROP TABLE IF EXISTS store_migrations CASCADE")
+                                await cur.execute("DROP TABLE IF EXISTS vector_migrations CASCADE")
+                                await cur.execute("DROP TABLE IF EXISTS store_vectors CASCADE")
+                                await conn.commit()
+                                logger.info("Dropped incompatible schema objects")
+
+            except Exception as e:
+                logger.error(f"Error checking/cleaning store schema: {e}")
+                # Continue anyway - setup() will handle it
+
+            # Now run the standard setup
+            await store.setup()
+            self._store_setup_complete = True
+            logger.info("AsyncPostgresStore schema setup completed successfully")
 
     @property
     def a2a_middleware(self) -> A2ATaskTrackingMiddleware:
@@ -214,12 +328,14 @@ class GraphFactory:
         # UserPreferencesMiddleware injects user preferences (language, etc.) into system prompt
         user_preferences_middleware = UserPreferencesMiddleware()
 
-        # Order: DynamicToolDispatch → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo
+        # Order: DynamicToolDispatch → UserPreferences → DocumentStore → LoopDetection → Auth → Retry → A2A → Todo
         # UserPreferences comes early to modify system prompt before other middleware
+        # DocumentStore wraps write_file/edit_file for auto-indexing (after tool dispatch)
         # LoopDetection comes before Auth/Retry to catch loops early
         return [
             dynamic_tool_middleware,
             user_preferences_middleware,
+            self._document_store_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,
             self._retry_middleware,
@@ -254,6 +370,10 @@ class GraphFactory:
         is_bedrock = isinstance(model, ChatBedrockConverse)
         middleware = self._create_middleware_stack(is_bedrock)
 
+        # Ensure store is initialized before creating graph (required for longterm memory)
+        # Access the store property to trigger lazy initialization
+        store_instance = self.store
+
         # Note: Sub-agents (both local and remote A2A) are now registered dynamically
         # via GraphRuntimeContext.subagent_registry at request time, not at graph creation.
         # This enables per-user sub-agent discovery and unified handling.
@@ -266,6 +386,8 @@ class GraphFactory:
                 subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
                 system_prompt=self.config.SYSTEM_INSTRUCTION,
                 checkpointer=self._checkpointer,
+                store=store_instance,  # Shared PostgreSQL document store (initialized)
+                use_longterm_memory=True,
                 middleware=middleware,  # type: ignore
                 context_schema=GraphRuntimeContext,
             )
@@ -277,6 +399,8 @@ class GraphFactory:
                 subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
                 system_prompt=self.config.SYSTEM_INSTRUCTION,
                 checkpointer=self._checkpointer,
+                store=store_instance,  # Shared PostgreSQL document store (initialized)
+                use_longterm_memory=True,
                 middleware=middleware,  # type: ignore
                 response_format=AutoStrategy(schema=FinalResponseSchema),
                 context_schema=GraphRuntimeContext,

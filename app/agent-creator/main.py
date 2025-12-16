@@ -19,6 +19,7 @@ from a2a.types import (
     SecurityScheme,
 )
 from dotenv import load_dotenv
+from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
     OidcUserinfoMiddleware,
     UserContextFromRequestStateMiddleware,
@@ -31,17 +32,20 @@ from agent import AgentCreator
 # Load environment variables
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+# Configure logging early (before agent initialization)
+logger = configure_logger("main")
+configure_existing_logger(logging.getLogger("agent"))
+configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
-# Global agent instance
-agent: AgentCreator | None = None
+# Initialize agent globally for reload support
+agent = AgentCreator()
 
 
 @asynccontextmanager
 async def lifespan(app) -> AsyncIterator[None]:
     """Lifespan context manager for the FastAPI application.
 
-    Handles cleanup on shutdown. Agent is initialized in main() before app creation.
+    Handles cleanup on shutdown.
 
     Args:
         app: The FastAPI application instance
@@ -55,9 +59,8 @@ async def lifespan(app) -> AsyncIterator[None]:
     yield
 
     # Shutdown: cleanup the agent
-    if agent:
-        await agent.close()
-        logger.info("Application shutdown - Agent Creator closed")
+    await agent.close()
+    logger.info("Application shutdown - Agent Creator closed")
 
 
 def create_app():
@@ -66,9 +69,6 @@ def create_app():
     Returns:
         FastAPI application instance
     """
-    if agent is None:
-        msg = "Agent not initialized. This should not happen in production."
-        raise RuntimeError(msg)
 
     # Agent capabilities
     capabilities = AgentCapabilities(streaming=True, push_notifications=True)
@@ -149,6 +149,10 @@ def create_app():
     return app
 
 
+# Create app instance for uvicorn to import
+app = create_app()
+
+
 @click.command()
 @click.option(
     "--host",
@@ -163,27 +167,26 @@ def create_app():
     show_default=True,
     type=int,
 )
-def main(host: str, port: int):
+@click.option("--reload", "reload", is_flag=True, default=False, help="Enable auto-reload for development")
+def main(host: str, port: int, reload: bool):
     """Start the Agent Creator A2A Server.
 
     Args:
         host: Host to bind the server to
         port: Port to bind the server to
+        reload: Enable auto-reload for development
     """
-    # Initialize agent before creating app
-    global agent
-    agent = AgentCreator()
-    logger.info("Agent Creator initialized")
-
-    # Create the app
-    app = create_app()
-
     # Load log configuration
     log_conf_path = "log_conf.yml"
     with open(log_conf_path) as f:
         log_config = yaml.safe_load(f)
 
-    uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False)
+    if reload:
+        # Use import string for reload support
+        uvicorn.run("main:app", host=host, port=port, log_config=log_config, access_log=False, reload=True)
+    else:
+        # Use app instance directly for production
+        uvicorn.run(app, host=host, port=port, log_config=log_config, access_log=False, reload=False)
 
 
 if __name__ == "__main__":

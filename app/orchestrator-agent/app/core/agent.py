@@ -29,6 +29,7 @@ from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 from .graph_factory import DEFAULT_MODEL, GraphFactory
 from .registry import RegistryService, User
+from .s3_service import get_s3_service
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,9 @@ class OrchestratorDeepAgent:
             oauth2_client=self.oauth2_client,
             checkpointer=self._graph_factory.checkpointer,
             static_tools=static_tools,
+            document_store=self._graph_factory.store,
+            s3_service=get_s3_service(),
+            document_store_bucket=self.config.DOCUMENT_STORE_S3_BUCKET or None,
         )
 
     async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:

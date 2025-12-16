@@ -77,6 +77,16 @@
     rds_username: "{{ lookup('aws_ssm', ssmkey_rds_master_username) }}"
     rds_password: "{{ lookup('aws_ssm', ssmkey_rds_master_password, decrypt=True) }}"
 
+# ====================== Install pg_vectors extension ===================
+- name: Install pg_vectors extension
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      CREATE EXTENSION IF NOT EXISTS vector
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
 # ====================== Drop 'public' schema ===================
 
 - name: Drop public schema
@@ -131,3 +141,52 @@
     RAMBLER_TABLE: 'migrations'
     RAMBLER_SCHEMA: '{{ rds_schema }}'
     RAMBLER_SSLMODE: 'require'
+
+# ============== Create document store user (after migrations) =======
+
+- include_role:
+    name: 'ringier.aws_cicd.create_db_user'
+  vars:
+    app_db_username: '{{ rds_docstore_username }}'
+    ssmkey_rds_master_username_key: '{{ ssmkey_rds_master_username }}'
+    ssmkey_rds_master_password_key: '{{ ssmkey_rds_master_password }}'
+    ssmkey_rds_app_user_username_key: '{{ ssmkey_rds_docstore_username }}'
+    ssmkey_rds_app_user_password_key: '{{ ssmkey_rds_docstore_password }}'
+    database_privileges: 'CONNECT'
+    schema_privileges: 'USAGE'
+    sequence_privileges: 'USAGE'
+    table_privileges: ''
+    function_privileges: ''
+
+# ============== Grant table-specific privileges to document store user =======
+
+- name: Get document store user password
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    docstore_password: "{{ lookup('aws_ssm', ssmkey_rds_docstore_password, decrypt=True) }}"
+
+- name: Grant privileges on store tables to document store user
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{ rds_schema }}.store TO {{ rds_docstore_username }};
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{ rds_schema }}.store_vectors TO {{ rds_docstore_username }};
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{ rds_schema }}.store_migrations TO {{ rds_docstore_username }};
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {{ rds_schema }}.vector_migrations TO {{ rds_docstore_username }};
+      GRANT CREATE ON SCHEMA {{ rds_schema }} TO {{ rds_docstore_username }};
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+  register: grant_result
+
+- name: Grant ALTER privilege on store tables to document store user
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      ALTER TABLE {{ rds_schema }}.store OWNER TO {{ rds_docstore_username }};
+      ALTER TABLE {{ rds_schema }}.store_vectors OWNER TO {{ rds_docstore_username }};
+      ALTER TABLE {{ rds_schema }}.store_migrations OWNER TO {{ rds_docstore_username }};
+      ALTER TABLE {{ rds_schema }}.vector_migrations OWNER TO {{ rds_docstore_username }};
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'

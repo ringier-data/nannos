@@ -46,6 +46,16 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_langsmith_api_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_jwt_secret_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_oidc_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_docstore_password }}'
+              - Sid: "GetProjectSsmParams"
+                Effect: "Allow"
+                Action:
+                  - "ssm:DescribeParameters"
+                  - "ssm:GetParameter"
+                  - "ssm:GetParameters"
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/{{ software_component }}/*"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca"
       Tags:
         - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role' }
         - { Key: 'Project', Value: '{{ project_id }}' }
@@ -111,6 +121,17 @@ Resources:
                     - '${BucketArn}/*'
                     - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
                   - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+              - Sid: 'S3DocumentStoreAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
               - Sid: 'BedrockInvokeModel'
                 Effect: 'Allow'
                 Action:
@@ -125,6 +146,7 @@ Resources:
                   - 'kms:DescribeKey'
                   - 'kms:GenerateDataKey'
                   - 'kms:Decrypt'
+                  - 'kms:Encrypt'
                 Resource:
                   - !ImportValue '{{ project_id }}-sensitive-data-kms-key-arn'
               - Sid: 'GetVaultSecrets'
@@ -184,6 +206,17 @@ Resources:
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
             - { Name: 'JWT_SESSION_EXPIRY_MINUTES', Value: '{{ orchestrator_jwt_session_expiry_minutes }}' }
+            - {
+                Name: POSTGRES_HOST,
+                Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",
+              }
+            - { Name: POSTGRES_PORT, Value: "{{ rds_port }}" }
+            - { Name: POSTGRES_DB, Value: "{{ rds_db_name }}" }
+            - { Name: POSTGRES_USER, Value: "orchestrator_docstore" }
+            - { Name: POSTGRES_SCHEMA, Value: "{{ rds_schema }}" }
+            - { Name: POSTGRES_USE_SSL, Value: "true" }
+            - { Name: POSTGRES_VERIFY_SSL, Value: "true" }
+            - { Name: 'DOCUMENT_STORE_S3_BUCKET', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-files' }
             - { Name: 'BUDGET_ENABLED', Value: 'true' }
             - { Name: 'BUDGET_MONTHLY_TOKEN_LIMIT', Value: '{{ budget_monthly_token_limit }}' }
             - { Name: 'BUDGET_CHECK_INTERVAL_SECONDS', Value: '300' }
@@ -202,6 +235,11 @@ Resources:
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
             - { Name: 'JWT_SECRET_KEY', ValueFrom: '{{ ssmkey_orchestrator_jwt_secret_key }}' }
             - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_oidc_client_secret }}' }
+            - { Name: 'POSTGRES_PASSWORD', ValueFrom: '{{ ssmkey_rds_docstore_password }}' }
+            - {
+                Name: "POSTGRES_SSL_CA",
+                ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",
+              }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ orchestrator_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
             Interval: 60

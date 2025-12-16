@@ -159,6 +159,7 @@ Resources:
             - { Name: "BEDROCK_MAX_RETRY_ATTEMPTS", Value: '{{ bedrock_max_retry_attempts }}' }
             - { Name: "BEDROCK_RETRY_MODE", Value: '{{ bedrock_retry_mode }}' }
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
+            - { Name: 'PLAYGROUND_FRONTEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
           Secrets:
             - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_agent_creator_oidc_client_secret }}' }
           HealthCheck:

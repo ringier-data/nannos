@@ -8,8 +8,10 @@ import logging
 from typing import Any
 
 from deepagents import CompiledSubAgent
+from langgraph.store.postgres.aio import AsyncPostgresStore
 
 from ..core.model_factory import ModelType, create_model
+from ..core.s3_service import S3Service
 from ..subagents.dynamic_agent import create_dynamic_local_subagent
 from ..subagents.file_analyzer import create_file_analyzer_subagent
 from ..subagents.foundry_runnable import create_foundry_local_subagent
@@ -25,6 +27,9 @@ def build_runtime_context(
     oauth2_client: Any = None,
     checkpointer: Any = None,
     static_tools: list[Any] | None = None,
+    document_store: "AsyncPostgresStore | None" = None,
+    s3_service: "S3Service | None" = None,
+    document_store_bucket: str | None = None,
 ) -> GraphRuntimeContext:
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
@@ -33,6 +38,7 @@ def build_runtime_context(
     - Built-in local sub-agents (like file-analyzer)
     - Remote A2A agents from discovery
     - Dynamic local sub-agents from user configuration
+    - Document store tools (if dependencies provided)
 
     Dynamic local sub-agents are instantiated with:
     - Tools inherited from orchestrator if mcp_gateway_url is None
@@ -46,6 +52,9 @@ def build_runtime_context(
         oauth2_client: OAuth2 client for authenticated MCP discovery.
         checkpointer: Shared checkpointer for dynamic sub-agent multi-turn conversations.
         static_tools: Static tools from orchestrator (e.g., get_current_time, create_presigned_url).
+        document_store: AsyncPostgresStore instance for document storage (optional).
+        s3_service: S3Service for uploading direct retrieval results (optional).
+        document_store_bucket: S3 bucket name for document store results (optional).
 
     Returns:
         GraphRuntimeContext for graph invocation
@@ -57,6 +66,21 @@ def build_runtime_context(
             tool_registry[tool.name] = tool
         elif isinstance(tool, dict):
             tool_registry[tool.get("name", str(tool))] = tool
+
+    # Add document store tools if dependencies are provided
+    if document_store is not None and s3_service is not None and document_store_bucket:
+        logger.info(f"Adding document store tools for user {user_config.user_id}")
+        from ..core.document_store_tools import create_document_store_tools
+
+        doc_tools = create_document_store_tools(
+            store=document_store,
+            s3_service=s3_service,
+            s3_bucket=document_store_bucket,
+            user_id=user_config.user_id,
+        )
+        for tool in doc_tools:
+            tool_registry[tool.name] = tool
+        logger.info(f"Added {len(doc_tools)} document store tools: {[t.name for t in doc_tools]}")
 
     # Start with built-in local sub-agents (like file-analyzer)
     # These run in-process but use the same registry as remote A2A agents
