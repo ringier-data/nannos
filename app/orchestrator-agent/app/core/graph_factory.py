@@ -274,7 +274,7 @@ class GraphFactory:
         """Create a model instance for the given model type.
 
         Args:
-            model_type: The type of model to create ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model to create ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The created model instance
@@ -285,7 +285,7 @@ class GraphFactory:
         """Get or create a model instance (cached).
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The model instance (cached or newly created)
@@ -361,7 +361,7 @@ class GraphFactory:
         """Create a graph for the given model type.
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The newly created graph

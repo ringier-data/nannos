@@ -119,7 +119,7 @@ class OrchestratorDeepAgent:
         middleware setup, and graph creation.
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
@@ -234,7 +234,7 @@ class OrchestratorDeepAgent:
         """
         # Determine if we need Bedrock-specific static tools
         # (FinalResponseSchema is only for Bedrock models)
-        is_bedrock = user_config.model == "claude-sonnet-4.5"
+        is_bedrock = user_config.model in ("claude-sonnet-4.5", "claude-haiku-4-5")
         static_tools = self._graph_factory.get_static_tools(is_bedrock)
 
         return build_runtime_context(
@@ -256,7 +256,7 @@ class OrchestratorDeepAgent:
         - User tools/subagents come from GraphRuntimeContext at runtime via DynamicToolDispatchMiddleware
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The compiled LangGraph for this model type

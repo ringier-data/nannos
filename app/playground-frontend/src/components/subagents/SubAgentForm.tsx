@@ -639,7 +639,9 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="gpt4o">GPT-4o</SelectItem>
+                        <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
                         <SelectItem value="claude-sonnet-4.5">Claude Sonnet 4.5</SelectItem>
+                        <SelectItem value="claude-haiku-4-5">Claude Haiku 4.5</SelectItem>
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
@@ -746,7 +748,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                     <div className="text-sm">
                       <p className="font-medium mb-1">Model Selection</p>
                       <p className="text-muted-foreground text-xs">
-                        GPT-4o is faster and more cost-effective. Claude Sonnet 4.5 excels at complex reasoning and code tasks.
+                        GPT-4o: balanced performance. GPT-4o Mini: cost-effective for simpler tasks. 
+                        Claude Sonnet 4.5: best for complex reasoning. Claude Haiku 4.5: ultra-fast and efficient.
                       </p>
                     </div>
                   </>

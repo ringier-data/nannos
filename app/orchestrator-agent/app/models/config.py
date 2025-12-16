@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
 
 # Model type literal for type safety
-ModelType = Literal["gpt4o", "claude-sonnet-4.5"]
+ModelType = Literal["gpt4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-haiku-4-5"]
 
 
 @dataclass
@@ -136,7 +136,9 @@ class UserConfig(BaseModel):
     email: str = Field(..., description="User's email address")
     language: str = Field(default="en", description="User's preferred language")
     timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
-    model: Optional[ModelType] = Field(default=None, description="LLM model to use (gpt4o or claude-sonnet-4.5)")
+    model: Optional[ModelType] = Field(
+        default=None, description="LLM model to use (gpt4o, gpt-4o-mini, claude-sonnet-4.5, or claude-haiku-4-5)"
+    )
     message_formatting: Literal["markdown", "slack", "plain"] = Field(
         default="markdown",
         description="Message formatting style: 'markdown' (default), 'slack', or 'plain'",
@@ -332,16 +334,6 @@ class AgentSettings:
     )
 
     @classmethod
-    def get_azure_deployment(cls) -> str:
-        """Get Azure OpenAI deployment name."""
-        return os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"]
-
-    @classmethod
-    def get_azure_model_name(cls) -> str:
-        """Get Azure OpenAI model name."""
-        return os.environ["AZURE_OPENAI_CHAT_MODEL_NAME"]
-
-    @classmethod
     def get_oidc_client_id(cls) -> str:
         """Get Okta/Keycloak OAuth2 client ID."""
         return os.environ["OIDC_CLIENT_ID"]
@@ -355,11 +347,6 @@ class AgentSettings:
     def get_oidc_issuer(cls) -> str:
         """Get Okta/Keycloak issuer URL."""
         return os.environ["OIDC_ISSUER"]
-
-    @classmethod
-    def get_bedrock_model_id(cls) -> str:
-        """Get AWS Bedrock model ID."""
-        return os.environ["BEDROCK_MODEL_ID"]
 
     @classmethod
     def get_bedrock_region(cls) -> str:
