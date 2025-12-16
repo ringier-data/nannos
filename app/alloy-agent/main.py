@@ -19,10 +19,11 @@ from a2a.types import (
     SecurityScheme,
 )
 from dotenv import load_dotenv
+from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
+from ringier_a2a_sdk.middleware import UserContextFromMetadataMiddleware
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
-from ringier_a2a_sdk.middleware import UserContextFromMetadataMiddleware
 
 from agent import NanousAgent
 
@@ -108,10 +109,7 @@ def create_app():
         security_schemes={
             "bearerAuth": SecurityScheme(
                 root=HTTPAuthSecurityScheme(
-                    type="http",
-                    scheme="bearer",
-                    bearer_format="JWT",
-                    description="Orchestrator JWT authentication"
+                    type="http", scheme="bearer", bearer_format="JWT", description="Orchestrator JWT authentication"
                 )
             )
         },
@@ -127,12 +125,14 @@ def create_app():
     # Create A2A FastAPI application
     server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
 
-
     # Build app with lifespan
     app = server.build(lifespan=lifespan)
 
     # No authentication middleware needed (VPN-protected)
     app.add_middleware(UserContextFromMetadataMiddleware)
+
+    # TracingMiddleware for LangSmith distributed tracing (receives trace from orchestrator)
+    app.add_middleware(TracingMiddleware)
 
     return app
 

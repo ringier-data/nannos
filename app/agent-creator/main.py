@@ -19,6 +19,7 @@ from a2a.types import (
     SecurityScheme,
 )
 from dotenv import load_dotenv
+from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
     OidcUserinfoMiddleware,
@@ -146,6 +147,10 @@ def create_app():
         client_id=os.environ.get("OIDC_CLIENT_ID", "agent-creator"),
         client_secret=os.environ.get("OIDC_CLIENT_SECRET"),
     )
+
+    # TracingMiddleware for LangSmith distributed tracing (receives trace from orchestrator)
+    app.add_middleware(TracingMiddleware)
+
     return app
 
 

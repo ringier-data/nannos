@@ -37,6 +37,7 @@ from a2a.types import (
     Role as A2ARole,
 )
 from langchain_core.messages import AIMessage
+from langsmith.run_helpers import get_current_run_tree
 
 from ..authentication import (
     AuthenticationMethod,
@@ -94,6 +95,17 @@ class A2AClientRunnable(BaseA2ARunnable):
         """Return the agent description."""
         return self.agent_card.description or "No description provided."
 
+    async def _inject_trace_headers(self, request: httpx.Request) -> None:
+        """Inject LangSmith distributed tracing headers into each request.
+
+        This event hook is called for every HTTP request, allowing us to
+        dynamically inject trace context headers based on the current run.
+        """
+        if run_tree := get_current_run_tree():
+            trace_headers = run_tree.to_headers()
+            request.headers.update(trace_headers)
+            logger.debug(f"Injected LangSmith trace headers: {list(trace_headers.keys())}")
+
     async def _get_client(self) -> Client:
         """Lazy initialization of A2A client."""
         if self._client is None:
@@ -105,7 +117,11 @@ class A2AClientRunnable(BaseA2ARunnable):
                     pool=self.config.timeout_pool,
                 )
                 headers = {"User-Agent": f"{self.config.user_agent_prefix} (A2A-Client)"}
-                self._http_client = httpx.AsyncClient(timeout=timeout, headers=headers)
+
+                # Create httpx client with event hook for dynamic trace header injection
+                self._http_client = httpx.AsyncClient(
+                    timeout=timeout, headers=headers, event_hooks={"request": [self._inject_trace_headers]}
+                )
 
             client_config = ClientConfig(
                 httpx_client=self._http_client,

@@ -66,6 +66,34 @@ The agent manages the complete campaign lifecycle:
 - Support multiple environments (local, dev, stg, prod)
 - VPN-protected MCP server access (no auth tokens required)
 
+## Distributed Tracing
+
+### Receiving Traces from Orchestrator
+
+The alloy-agent (Nanous Agent) participates in distributed tracing by receiving trace context from the orchestrator.
+
+**Implementation in `main.py`:**
+
+```python
+from langsmith.middleware import TracingMiddleware
+
+app = server.build(lifespan=lifespan)
+app.add_middleware(TracingMiddleware)  # Receives trace from orchestrator
+```
+
+**How it works:**
+1. Orchestrator injects LangSmith trace headers (`langsmith-trace`, `baggage`) in HTTP requests
+2. `TracingMiddleware` extracts headers and continues the trace context
+3. All alloy-agent operations appear as children of the orchestrator's run in LangSmith
+4. MCP tool calls are also captured in the trace hierarchy
+
+**Requirements:**
+- `LANGSMITH_API_KEY` must be configured (from AWS SSM in production)
+- `LANGSMITH_TRACING=true` to enable tracing
+- `LANGSMITH_ENDPOINT` and `LANGSMITH_PROJECT` must be set
+
+**CRITICAL**: `TracingMiddleware` must be registered in the middleware stack. If missing, traces will not be connected to the orchestrator.
+
 ## Testing
 
 - Use pytest with pytest-asyncio for async tests
