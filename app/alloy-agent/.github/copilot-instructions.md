@@ -1,4 +1,4 @@
-# Nanous Agent Copilot Instructions
+# Naonous Agent Copilot Instructions
 
 ## Tech Stack
 
@@ -42,7 +42,7 @@ The `start-dev.sh` script is the single source of truth for local environment se
 
 ### MCP Tool Integration
 
-- MCP tools are discovered from the Nanous MCP server at `https://naonous.d.alloy.rcplus.io/mcp`
+- MCP tools are discovered from the Naonous MCP server at `https://naonous.d.alloy.rcplus.io/mcp`
 - No authentication required (VPN-protected access)
 - Tools are discovered once at initialization and reused
 - Use `StreamableHttpConnection` for MCP server connection
@@ -70,7 +70,7 @@ The agent manages the complete campaign lifecycle:
 
 ### Receiving Traces from Orchestrator
 
-The alloy-agent (Nanous Agent) participates in distributed tracing by receiving trace context from the orchestrator.
+The alloy-agent (Naonous Agent) participates in distributed tracing by receiving trace context from the orchestrator.
 
 **Implementation in `main.py`:**
 
@@ -104,7 +104,7 @@ app.add_middleware(TracingMiddleware)  # Receives trace from orchestrator
 
 ## Available MCP Tools
 
-The agent has access to these campaign management tools from the Nanous MCP server:
+The agent has access to these campaign management tools from the Naonous MCP server:
 
 ### Campaign Proposal Tools
 - `campaign_proposal_proposal_campaign_create_post` - Create proposals

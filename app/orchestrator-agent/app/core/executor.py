@@ -7,6 +7,7 @@ from a2a.types import (
     InternalError,
     InvalidParamsError,
     Part,
+    Task,
     TaskState,
     TextPart,
     UnsupportedOperationError,
@@ -16,6 +17,8 @@ from a2a.utils import (
     new_task,
 )
 from a2a.utils.errors import ServerError
+
+from app.models.responses import AgentStreamResponse
 
 from ..models.config import UserConfig
 
@@ -279,7 +282,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}")
             raise ServerError(error=InternalError()) from e
 
-    async def _handle_stream_item(self, item, updater, task, is_final: bool) -> None:
+    async def _handle_stream_item(
+        self, item: AgentStreamResponse, updater: TaskUpdater, task: Task, is_final: bool
+    ) -> None:
         """Handle a stream item from the agent and update the task accordingly."""
         # item is an AgentStreamResponse object
         state = item.state

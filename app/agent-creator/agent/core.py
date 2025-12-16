@@ -263,7 +263,7 @@ When configuring MCP tools:
 
 ## !IMPORTANT
 
-- **ALWAYS provide a link** to the created agent using the format: {PLAYGROUND_FRONTEND_URL}/sub-agents/{sub_agent_id}
+- **ALWAYS provide a link** to the created agent using the format: {PLAYGROUND_FRONTEND_URL}/subagents/{sub_agent_id}
 - **ALWAYS validate** that agent names follow the pattern: /^[a-z0-9-]+$/
 - **If you feel you would benefit from tools you don't have access to**, communicate it clearly to the user.
 

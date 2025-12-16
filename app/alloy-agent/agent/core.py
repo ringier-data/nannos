@@ -1,4 +1,4 @@
-"""Nanous Agent - Manages BYOK campaign lifecycle on Alloy.
+"""Naonous Agent - Manages BYOK campaign lifecycle on Alloy.
 
 This module implements an A2A agent that helps users manage the complete
 lifecycle of BYOK (Bring Your Own KPI) campaigns through natural language conversation.
@@ -83,7 +83,7 @@ NAONOUS_AGENT_SYSTEM_PROMPT = """You are an expert Campaign Manager for Alloy's 
 
 ## Your Capabilities
 
-You have access to comprehensive campaign management tools via the Nanous MCP server:
+You have access to comprehensive campaign management tools via the Naonous MCP server:
 
 ### Campaign Proposal Tools
 1. **campaign_proposal** - Create new campaign proposals from briefings
@@ -315,11 +315,11 @@ def _create_final_response_tool() -> BaseTool:
     )
 
 
-class NanousAgent(BaseAgent):
-    """Nanous Agent - Manages BYOK campaign lifecycle on Alloy.
+class NaonousAgent(BaseAgent):
+    """Naonous Agent - Manages BYOK campaign lifecycle on Alloy.
 
     This agent uses Claude Sonnet 4.5 via AWS Bedrock and has access to the
-    Nanous MCP server for campaign management operations.
+    Naonous MCP server for campaign management operations.
 
     Architecture:
     - MCP tools discovered once at initialization (no authentication required)
@@ -331,9 +331,9 @@ class NanousAgent(BaseAgent):
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
 
     def __init__(self):
-        """Initialize the Nanous Agent.
+        """Initialize the Naonous Agent.
 
-        Discovers MCP tools from Nanous server and creates the DeepAgent graph.
+        Discovers MCP tools from Naonous server and creates the DeepAgent graph.
         """
         super().__init__()
 
@@ -416,8 +416,9 @@ class NanousAgent(BaseAgent):
         """Ensure MCP tools are discovered and loaded.
 
         This is called lazily on first request to avoid blocking __init__.
+        Creates a fallback graph without MCP tools if discovery fails.
         """
-        if self._mcp_tools is not None:
+        if self._mcp_tools is not None and self._graph is not None:
             return
 
         if self._mcp_tools_lock:
@@ -425,14 +426,14 @@ class NanousAgent(BaseAgent):
 
             for _ in range(10):
                 await asyncio.sleep(0.1)
-                if self._mcp_tools is not None:
+                if self._mcp_tools is not None and self._graph is not None:
                     return
             logger.warning("Timeout waiting for MCP tools discovery")
-            return
+            # Continue to create fallback graph
 
         self._mcp_tools_lock = True
         try:
-            logger.info("Discovering MCP tools from Nanous server...")
+            logger.info("Discovering MCP tools from Naonous server...")
 
             # Create MCP client (no authentication needed - behind VPN)
             connections = {
@@ -470,14 +471,36 @@ class NanousAgent(BaseAgent):
             logger.info("Graph created with MCP tools")
         except Exception as e:
             logger.error(f"Failed to discover MCP tools: {e}", exc_info=True)
+            logger.warning("Creating fallback graph without MCP tools")
+
+            # Create fallback graph without MCP tools
             self._mcp_tools = []
-            logger.warning("Continuing without MCP tools")
+            try:
+                self._graph = create_deep_agent(
+                    model=self._model,
+                    tools=[_create_final_response_tool()],
+                    subagents=[],
+                    system_prompt=(
+                        "You are an expert Campaign Manager for Alloy's BYOK platform. "
+                        "However, you are currently unable to access campaign management tools "
+                        "due to a connection issue. Please inform the user that the system is "
+                        "temporarily unavailable and suggest they try again later or contact support."
+                    ),
+                    checkpointer=self._checkpointer,
+                    middleware=[],
+                )
+                logger.info("Fallback graph created successfully")
+            except Exception as fallback_error:
+                logger.error(f"Failed to create fallback graph: {fallback_error}", exc_info=True)
+                raise RuntimeError(
+                    "Unable to initialize agent: both MCP tool loading and fallback graph creation failed"
+                ) from fallback_error
         finally:
             self._mcp_tools_lock = False
 
     async def close(self):
         """Cleanup resources."""
-        logger.info("NanousAgent closed")
+        logger.info("NaonousAgent closed")
 
     async def stream(self, query: str, user_config: UserConfig, task: Task) -> AsyncIterable[AgentStreamResponse]:
         """Stream responses for a user query.
@@ -493,6 +516,16 @@ class NanousAgent(BaseAgent):
         try:
             # Ensure MCP tools are loaded
             await self._ensure_mcp_tools_loaded()
+
+            # Verify graph was created
+            if self._graph is None:
+                logger.error("Graph is None after _ensure_mcp_tools_loaded()")
+                yield AgentStreamResponse(
+                    state=TaskState.failed,
+                    content="The agent failed to initialize properly. Please contact support or try again later.",
+                    metadata={"error": "graph_initialization_failed"},
+                )
+                return
 
             logger.info(f"Processing query for user {user_config.user_id}")
 
@@ -581,7 +614,7 @@ class NanousAgent(BaseAgent):
             logger.info("Final response sent successfully")
 
         except Exception as e:
-            logger.error(f"Error in NanousAgent.stream: {e}", exc_info=True)
+            logger.error(f"Error in NaonousAgent.stream: {e}", exc_info=True)
             yield AgentStreamResponse(
                 state=TaskState.failed,
                 content=f"An error occurred while processing your request: {str(e)}",
