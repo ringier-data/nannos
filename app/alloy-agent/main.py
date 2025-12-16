@@ -1,4 +1,4 @@
-"""Nanous Agent A2A Server - Entry point for the FastAPI application."""
+"""Naonous Agent A2A Server - Entry point for the FastAPI application."""
 
 import logging
 import os
@@ -25,7 +25,7 @@ from ringier_a2a_sdk.middleware import UserContextFromMetadataMiddleware
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 
-from agent import NanousAgent
+from agent import NaonousAgent
 
 # Load environment variables
 load_dotenv()
@@ -36,7 +36,7 @@ configure_existing_logger(logging.getLogger("agent"))
 configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
 # Initialize agent globally for reload support
-agent = NanousAgent()
+agent = NaonousAgent()
 
 
 @asynccontextmanager
@@ -58,7 +58,7 @@ async def lifespan(app) -> AsyncIterator[None]:
 
     # Shutdown: cleanup the agent
     await agent.close()
-    logger.info("Application shutdown - Nanous Agent closed")
+    logger.info("Application shutdown - Naonous Agent closed")
 
 
 def create_app():
@@ -91,7 +91,7 @@ def create_app():
 
     # Agent card - No authentication required (VPN-protected)
     agent_card = AgentCard(
-        name="Nanous Agent",
+        name="Naonous Agent",
         description=(
             "Expert campaign manager for BYOK (Bring Your Own KPI) campaigns on the Alloy platform. "
             "Specializes in the complete campaign lifecycle: proposal creation, slide generation, "
@@ -157,7 +157,7 @@ app = create_app()
 )
 @click.option("--reload", "reload", is_flag=True, default=False, help="Enable auto-reload for development")
 def main(host: str, port: int, reload: bool):
-    """Start the Nanous Agent A2A Server.
+    """Start the Naonous Agent A2A Server.
 
     Args:
         host: Host to bind the server to

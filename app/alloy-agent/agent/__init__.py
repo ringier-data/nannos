@@ -1,5 +1,5 @@
-"""Nanous Agent - Campaign lifecycle management for BYOK campaigns."""
+"""Naonous Agent - Campaign lifecycle management for BYOK campaigns."""
 
-from agent.core import NanousAgent
+from agent.core import NaonousAgent
 
-__all__ = ["NanousAgent"]
+__all__ = ["NaonousAgent"]

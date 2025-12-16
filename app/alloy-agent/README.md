@@ -16,7 +16,7 @@ The Alloy Agent is a specialized AI agent that helps users manage the complete l
 
 - **Natural Language Interface**: Interact with campaigns using conversational queries
 - **Complete Lifecycle Management**: From proposal to deployment to monitoring
-- **MCP Tool Integration**: Access to Nanous MCP server tools
+- **MCP Tool Integration**: Access to Naonous MCP server tools
 - **Claude Sonnet 4.5**: Powered by AWS Bedrock for intelligent responses
 - **Conversation Persistence**: DynamoDB checkpointer maintains conversation context
 - **VPN-Protected**: No authentication required (behind VPN)
@@ -25,7 +25,7 @@ The Alloy Agent is a specialized AI agent that helps users manage the complete l
 
 - **LangGraph**: Agent orchestration and workflow management
 - **AWS Bedrock**: Claude Sonnet 4.5 for natural language understanding
-- **MCP Protocol**: Tool discovery and execution via Nanous MCP server
+- **MCP Protocol**: Tool discovery and execution via Naonous MCP server
 - **DynamoDB**: Conversation checkpointing and state persistence
 - **FastAPI**: A2A-compatible server implementation
 
@@ -39,7 +39,7 @@ cp .env.template .env
 
 Key configuration options:
 
-- `NAONOUS_MCP_URL`: URL to the Nanous MCP server (default: https://naonous.d.alloy.rcplus.io/mcp)
+- `NAONOUS_MCP_URL`: URL to the Naonous MCP server (default: https://naonous.d.alloy.rcplus.io/mcp)
 - `BEDROCK_MODEL_ID`: AWS Bedrock model ID (default: Claude Sonnet 4.5)
 - `CHECKPOINT_DYNAMODB_TABLE_NAME`: DynamoDB table for checkpoints
 - `PORT`: Server port (default: 5004)
@@ -158,7 +158,7 @@ Agent: [Generates visualization, provides insights and recommendations]
 
 ## Integration with Alloy Infrastructure
 
-The Nanous Agent is part of the Alloy Infrastructure Agents ecosystem:
+The Naonous Agent is part of the Alloy Infrastructure Agents ecosystem:
 
 - Communicates with other agents via A2A protocol
 - Discoverable by the orchestrator agent
