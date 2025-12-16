@@ -342,7 +342,7 @@ class AgentCreator(BaseAgent):
         # Configuration from environment
         self.playground_backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
         self.playground_frontend_url = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
-        self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "us-central-1")
+        self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "eu-central-1")
         self.bedrock_model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0")
 
         # Checkpointer configuration
