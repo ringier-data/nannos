@@ -152,7 +152,6 @@ Resources:
             - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing | string | lower }}' }
             - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
-            - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
             - { Name: "CHECKPOINT_DYNAMODB_TABLE_NAME", Value: '{{ checkpoint_dynamodb_table_name }}' }
             - { Name: "CHECKPOINT_S3_BUCKET_NAME", Value: '{{ checkpoint_s3_bucket_name }}' }
             - { Name: "BEDROCK_MODEL_ID", Value: '{{ bedrock_model_id }}' }
@@ -164,6 +163,7 @@ Resources:
             - { Name: 'PLAYGROUND_FRONTEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
           Secrets:
             - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_agent_creator_oidc_client_secret }}' }
+            - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ agent_creator_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
             Interval: 60
