@@ -227,6 +227,7 @@ class AgentSettings:
         "- ALWAYS update the todo list before completing the user request to reflect any remaining tasks\n"
         "- Keep the user informed of progress by consistently updating task statuses\n"
         "- The todo list is your primary way to communicate progress to the user\n"
+        "- Each todo item should include to which sub-agent it was delegated\n"
         "\n"
         '**CRITICAL - What "completed" Means for Todos:**\n'
         'A todo should ONLY be marked "completed" when the ACTUAL GOAL of the todo has been achieved. Examples:\n'
