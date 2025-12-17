@@ -32,10 +32,9 @@ export function setAdminModeInStorage(enabled: boolean): void {
 // is imported in openapi-ts.config.ts
 export const createClientConfig: CreateClientConfig = (configuration) => ({
   ...configuration,
-  // Use apiBaseUrl from config if set, otherwise keep the default baseUrl
-  ...(config.apiBaseUrl && {
-    baseUrl: config.apiBaseUrl,
-  }),
-  // Send cookies with cross-origin requests (required for session cookies)
-  credentials: 'include',
+  // Always override the hardcoded baseUrl from SDK generation
+  // Empty string means relative URLs, which work with Vite proxy (local) and CloudFront (production)
+  baseUrl: config.apiBaseUrl,
+  // Note: credentials defaults to 'same-origin' which is correct for our setup
+  // All requests are same-origin: Vite proxy in dev, CloudFront in production
 });
