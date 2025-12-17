@@ -233,7 +233,7 @@ When configuring MCP tools:
    - Provide the user with:
      - Confirmation of creation
      - The agent's name and description
-     - Link to the agent: {PLAYGROUND_FRONTEND_URL}/sub-agents/{sub_agent_id}
+     - Link to the agent: {PLAYGROUND_FRONTEND_URL}/app/subagents/{sub_agent_id}
      - How to activate and use it
      - Any limitations or considerations
 
