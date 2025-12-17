@@ -14,8 +14,9 @@ from a2a.types import Task, TaskState
 from botocore.config import Config as BotoConfig
 from deepagents import create_deep_agent
 from langchain.agents.middleware.types import AgentMiddleware
+from langchain.agents.structured_output import AutoStrategy
 from langchain_aws import ChatBedrockConverse
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.graph.state import CompiledStateGraph
@@ -291,30 +292,6 @@ class FinalResponseSchema(BaseModel):
     )
 
 
-def _create_final_response_tool() -> BaseTool:
-    """Create the FinalResponseSchema tool for Bedrock models.
-
-    Returns:
-        StructuredTool for final response handling
-    """
-
-    def final_response_handler(**kwargs):
-        """Handler for FinalResponseSchema tool - returns the structured response."""
-        return FinalResponseSchema(**kwargs)
-
-    return StructuredTool.from_function(
-        func=final_response_handler,
-        name="FinalResponseSchema",
-        description=(
-            "REQUIRED: You MUST call this tool to provide your final response. "
-            "This tool signals task completion and determines the appropriate task state "
-            "(completed, working, input_required, or failed). Call this after you've finished "
-            "processing the user's request and determined the outcome."
-        ),
-        args_schema=FinalResponseSchema,
-    )
-
-
 class NaonousAgent(BaseAgent):
     """Naonous Agent - Manages BYOK campaign lifecycle on Alloy.
 
@@ -458,7 +435,7 @@ class NaonousAgent(BaseAgent):
 
             # Create graph with MCP tools and tenant enforcement middleware
             logger.info("Creating graph with MCP tools and tenant enforcement middleware...")
-            tools = self._mcp_tools + [_create_final_response_tool()]
+            tools = self._mcp_tools
 
             self._graph = create_deep_agent(
                 model=self._model,
@@ -467,6 +444,7 @@ class NaonousAgent(BaseAgent):
                 system_prompt=NAONOUS_AGENT_SYSTEM_PROMPT,
                 checkpointer=self._checkpointer,
                 middleware=[TenantEnforcementMiddleware()],
+                response_format=AutoStrategy(schema=FinalResponseSchema),
             )
             logger.info("Graph created with MCP tools")
         except Exception as e:
@@ -478,7 +456,7 @@ class NaonousAgent(BaseAgent):
             try:
                 self._graph = create_deep_agent(
                     model=self._model,
-                    tools=[_create_final_response_tool()],
+                    tools=[],
                     subagents=[],
                     system_prompt=(
                         "You are an expert Campaign Manager for Alloy's BYOK platform. "
@@ -488,6 +466,7 @@ class NaonousAgent(BaseAgent):
                     ),
                     checkpointer=self._checkpointer,
                     middleware=[],
+                    response_format=AutoStrategy(schema=FinalResponseSchema),
                 )
                 logger.info("Fallback graph created successfully")
             except Exception as fallback_error:

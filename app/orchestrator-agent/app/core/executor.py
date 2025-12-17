@@ -271,7 +271,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 final=False,
             )
 
-            async for item in self.agent.stream(message_parts, user_config, task.context_id, resume=resume_value):
+            async for item in self.agent.stream(message_parts, user_config, config=config, resume=resume_value):
                 current_state = graph.get_state(config)  # type: ignore
                 if hasattr(current_state, "interrupts") and current_state.interrupts:
                     is_final = False

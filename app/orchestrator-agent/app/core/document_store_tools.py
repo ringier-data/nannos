@@ -1,8 +1,8 @@
 """Document store tools for semantic search over persisted filesystem files.
 
-These tools integrate with the filesystem middleware to provide semantic search
-capabilities. Files written to long-term storage are automatically indexed by
-the DocumentStoreMiddleware.
+These tools integrate with the IndexingStoreBackend to provide semantic search
+capabilities. Files written to long-term storage (/memories/*) are automatically
+indexed by the IndexingStoreBackend.
 
 Provides two tools:
 1. docstore_search: Search indexed files using semantic similarity
@@ -15,13 +15,44 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from langchain.agents.middleware.types import AgentState
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph.types import interrupt
+from typing_extensions import NotRequired
 
-from ..middleware import DocumentStoreState
 from .s3_service import S3Service
+
+
+class DocumentStoreState(AgentState):
+    """Extended agent state with cross-namespace permission tracking.
+
+    Tracks granular, conversation-scoped permissions for privacy-first
+    cross-namespace access (e.g., Slack channel accessing personal files).
+
+    Permission Design:
+    - File-level: Set of approved file paths for read_personal_file tool
+    - Search-level: Boolean flag for search_documents_rag with include_personal=True
+    - Conversation-scoped: Permissions reset per thread_id (Slack thread)
+    - Interrupt-based: Uses LangGraph interrupt() for explicit user consent
+    """
+
+    personal_file_read_permissions: NotRequired[set[str]]
+    """Set of approved personal file paths for current conversation.
+    
+    Granted via read_personal_file tool interrupt → user approval.
+    Format: {"path/to/file.py", "path/to/other.md", ...}
+    Resets per conversation (thread_id isolation).
+    """
+
+    personal_search_permission: NotRequired[bool]
+    """Permission to search personal documents in current conversation.
+    
+    Granted via search_documents_rag(include_personal=True) interrupt → user approval.
+    When True, semantic search includes (user_id, "documents") namespace.
+    Defaults to False, resets per conversation.
+    """
 
 
 class FilesystemState(dict):
@@ -185,9 +216,9 @@ async def _search_documents_rag_impl(
 ) -> str:
     """Implementation of semantic search over indexed filesystem files.
 
-    Searches files that have been indexed by DocumentStoreMiddleware when
-    written to long-term storage. Searches user-scoped namespace for
-    cross-assistant document search.
+    Searches files that have been indexed by IndexingStoreBackend when
+    written to long-term storage (/memories/*). Searches user-scoped namespace
+    for cross-assistant document search.
 
     Args:
         query: Search query
@@ -235,7 +266,7 @@ async def _search_documents_rag_impl(
 
     # Perform semantic search
     results = await store.asearch(
-        namespace_prefix=namespace,
+        namespace,
         query=query,
         limit=top_k,
     )

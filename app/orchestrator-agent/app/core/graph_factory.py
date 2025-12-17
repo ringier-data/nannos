@@ -19,21 +19,22 @@ import logging
 from typing import Any, Optional
 
 from deepagents import create_deep_agent
+from deepagents.backends.composite import CompositeBackend, StateBackend
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy
-from langchain_aws import BedrockEmbeddings, ChatBedrockConverse
+from langchain_aws import BedrockEmbeddings
 from langchain_core.language_models import BaseChatModel
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph_checkpoint_aws import DynamoDBSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from ..backends import IndexingStoreBackend
 from ..handlers import handle_auth_error, should_retry
 from ..middleware import (
     AuthErrorDetectionMiddleware,
-    DocumentStoreMiddleware,
     DynamicToolDispatchMiddleware,
     RepeatedToolCallMiddleware,
     TodoStatusMiddleware,
@@ -50,30 +51,6 @@ logger = logging.getLogger(__name__)
 
 # Default model when none specified
 DEFAULT_MODEL: ModelType = "claude-sonnet-4.5"
-
-
-def _create_final_response_tool() -> BaseTool:
-    """Create the FinalResponseSchema tool for Bedrock models.
-
-    Returns:
-        StructuredTool for final response handling
-    """
-
-    def final_response_handler(**kwargs):
-        """Handler for FinalResponseSchema tool - returns the structured response."""
-        return FinalResponseSchema(**kwargs)
-
-    return StructuredTool.from_function(
-        func=final_response_handler,
-        name="FinalResponseSchema",
-        description=(
-            "REQUIRED: You MUST call this tool to provide your final response. "
-            "This tool signals task completion and determines the appropriate task state "
-            "(completed, working, input_required, or failed). Call this after you've finished "
-            "processing the user's request and determined the outcome."
-        ),
-        args_schema=FinalResponseSchema,
-    )
 
 
 class GraphFactory:
@@ -118,7 +95,7 @@ class GraphFactory:
         self._graphs: dict[str, CompiledStateGraph] = {}
 
         # Static tools cache (created once per model type, reused)
-        self._static_tools_cache: dict[bool, list[BaseTool]] = {}
+        self._static_tools_cache: list[BaseTool] = []
 
         # Create shared checkpointer for all graphs
         # This enables conversation continuity when users switch models
@@ -165,9 +142,6 @@ class GraphFactory:
             retry_on=should_retry,
             on_failure=handle_auth_error,
         )
-        # DocumentStoreMiddleware for automatic semantic indexing and permission tracking
-        # Reads user_id from runtime metadata at execution time (no user-specific instance needed)
-        self._document_store_middleware = DocumentStoreMiddleware(agent_settings=config)
         logger.debug("Initialized middleware stack")
 
     @property
@@ -209,6 +183,29 @@ class GraphFactory:
             )
             logger.info("Initialized AsyncPostgresStore with Titan Embeddings V2 (1024 dims) and connection pool")
         return self._store
+
+    @property
+    def backend_factory(self) -> Any:
+        """Get the backend factory for FilesystemMiddleware.
+
+        Returns a factory function that creates a CompositeBackend with:
+        - Default: StateBackend (ephemeral storage in agent state)
+        - /memories/: IndexingStoreBackend (persistent storage with semantic indexing)
+
+        The factory takes a ToolRuntime parameter and returns a CompositeBackend.
+        This is the same backend configuration used by the orchestrator.
+
+        Returns:
+            Callable that takes ToolRuntime and returns CompositeBackend
+        """
+
+        def create_backend(rt: Any) -> CompositeBackend:
+            return CompositeBackend(
+                default=StateBackend(rt),
+                routes={"/memories/": IndexingStoreBackend(rt, self.config)},
+            )
+
+        return create_backend
 
     async def ensure_store_setup(self) -> None:
         """Ensure the database schema is set up for the document store.
@@ -274,7 +271,7 @@ class GraphFactory:
         """Create a model instance for the given model type.
 
         Args:
-            model_type: The type of model to create ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model to create ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The created model instance
@@ -285,7 +282,7 @@ class GraphFactory:
         """Get or create a model instance (cached).
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The model instance (cached or newly created)
@@ -295,17 +292,15 @@ class GraphFactory:
             self._models[model_type] = self._create_model(model_type)
         return self._models[model_type]
 
-    def _create_middleware_stack(self, is_bedrock: bool) -> list[Any]:
+    def _create_middleware_stack(self) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
-        Args:
-            is_bedrock: Whether this is for a Bedrock model
 
         Returns:
             Complete middleware stack with DynamicToolDispatchMiddleware first
         """
         # Static tools available to all models (cached to avoid recreation)
-        if is_bedrock not in self._static_tools_cache:
+        if not self._static_tools_cache:
             static_tools: list[BaseTool] = []
 
             # Add time tool for current time and relative date calculations
@@ -314,28 +309,24 @@ class GraphFactory:
             # Add presigned URL tool for dispatching files to sub-agents
             static_tools.append(create_presigned_url_tool())
 
-            # Add FinalResponseSchema for Bedrock models
-            if is_bedrock:
-                static_tools.append(_create_final_response_tool())
-
-            self._static_tools_cache[is_bedrock] = static_tools
+            self._static_tools_cache = static_tools
         else:
-            static_tools = self._static_tools_cache[is_bedrock]
+            static_tools = self._static_tools_cache
 
         # DynamicToolDispatchMiddleware must be first to intercept model calls
-        dynamic_tool_middleware = DynamicToolDispatchMiddleware(static_tools=static_tools)
+        # Add Static tools directly to the graph (not via middleware) in case you want
+        # FinalResponseSchema's return_direct=True to be respected by the model
+        dynamic_tool_middleware = DynamicToolDispatchMiddleware(static_tools=[])
 
         # UserPreferencesMiddleware injects user preferences (language, etc.) into system prompt
         user_preferences_middleware = UserPreferencesMiddleware()
 
-        # Order: DynamicToolDispatch → UserPreferences → DocumentStore → LoopDetection → Auth → Retry → A2A → Todo
+        # Order: DynamicToolDispatch → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo
         # UserPreferences comes early to modify system prompt before other middleware
-        # DocumentStore wraps write_file/edit_file for auto-indexing (after tool dispatch)
         # LoopDetection comes before Auth/Retry to catch loops early
         return [
             dynamic_tool_middleware,
             user_preferences_middleware,
-            self._document_store_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,
             self._retry_middleware,
@@ -343,32 +334,28 @@ class GraphFactory:
             self._todo_middleware,
         ]
 
-    def get_static_tools(self, is_bedrock: bool = False) -> list[BaseTool]:
+    def get_static_tools(self) -> list[BaseTool]:
         """Get static tools for the given model type.
-
-        Args:
-            is_bedrock: Whether to get tools for Bedrock models (includes FinalResponseSchema)
 
         Returns:
             List of static tools (cached)
         """
-        if is_bedrock not in self._static_tools_cache:
+        if not self._static_tools_cache:
             # Trigger middleware creation to populate cache
-            self._create_middleware_stack(is_bedrock)
-        return self._static_tools_cache[is_bedrock]
+            self._create_middleware_stack()
+        return self._static_tools_cache
 
     def _create_graph(self, model_type: ModelType) -> CompiledStateGraph:
         """Create a graph for the given model type.
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The newly created graph
         """
         model = self._get_or_create_model(model_type)
-        is_bedrock = isinstance(model, ChatBedrockConverse)
-        middleware = self._create_middleware_stack(is_bedrock)
+        middleware = self._create_middleware_stack()
 
         # Ensure store is initialized before creating graph (required for longterm memory)
         # Access the store property to trigger lazy initialization
@@ -378,34 +365,30 @@ class GraphFactory:
         # via GraphRuntimeContext.subagent_registry at request time, not at graph creation.
         # This enables per-user sub-agent discovery and unified handling.
 
-        if is_bedrock:
-            logger.info(f"Creating Bedrock graph for model: {model_type}")
-            compiled_graph = create_deep_agent(
-                model=model,
-                tools=[],  # Tools come from GraphRuntimeContext via middleware
-                subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
-                system_prompt=self.config.SYSTEM_INSTRUCTION,
-                checkpointer=self._checkpointer,
-                store=store_instance,  # Shared PostgreSQL document store (initialized)
-                use_longterm_memory=True,
-                middleware=middleware,  # type: ignore
-                context_schema=GraphRuntimeContext,
-            )
-        else:
-            logger.info(f"Creating OpenAI graph for model: {model_type}")
-            compiled_graph = create_deep_agent(
-                model=model,
-                tools=[],  # Tools come from GraphRuntimeContext via middleware
-                subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
-                system_prompt=self.config.SYSTEM_INSTRUCTION,
-                checkpointer=self._checkpointer,
-                store=store_instance,  # Shared PostgreSQL document store (initialized)
-                use_longterm_memory=True,
-                middleware=middleware,  # type: ignore
-                response_format=AutoStrategy(schema=FinalResponseSchema),
-                context_schema=GraphRuntimeContext,
+        # Backend with automatic semantic indexing
+        # IndexingStoreBackend handles /memories/* paths and automatically indexes
+        # all written files for semantic search, including large tool results evicted
+        # by FilesystemMiddleware
+        def create_backend(rt: Any) -> CompositeBackend:
+            return CompositeBackend(
+                default=StateBackend(rt),
+                routes={"/memories/": IndexingStoreBackend(rt, self.config)},
             )
 
+        backend = create_backend
+        static_tools_list = self.get_static_tools()
+        compiled_graph = create_deep_agent(
+            model=model,
+            tools=static_tools_list,  # Include static tools with FinalResponseSchema
+            subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
+            system_prompt=self.config.SYSTEM_INSTRUCTION,
+            checkpointer=self._checkpointer,
+            store=store_instance,  # Shared PostgreSQL document store (initialized)
+            backend=backend,  # type: ignore[arg-type]
+            middleware=middleware,  # type: ignore[arg-type]
+            context_schema=GraphRuntimeContext,
+            response_format=AutoStrategy(schema=FinalResponseSchema),
+        )
         # Override deepagents default recursion_limit (1000) with configured value
         # This prevents infinite loops from reaching the high default limit
         compiled_graph = compiled_graph.with_config({"recursion_limit": self.config.MAX_RECURSION_LIMIT})

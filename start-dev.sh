@@ -560,6 +560,12 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-alloy-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-alloy-infrastructure-agents-orchestrator-checkpoints"
 
+    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /alloy/infrastructure-agents/agent-creator/oidc-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch OIDC_CLIENT_SECRET from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
+
     if ! LANGSMITH_API_KEY=$(aws ssm get-parameter --name /alloy/infrastructure-agents/langsmith-api-key --output json --with-decryption | jq -r .Parameter.Value); then
         echo -e "${RED}Failed to fetch LANGSMITH_API_KEY from AWS SSM${NC}"
         exit 1

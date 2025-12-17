@@ -14,8 +14,9 @@ import boto3
 from a2a.types import Task, TaskState
 from botocore.config import Config as BotoConfig
 from deepagents import create_deep_agent
+from langchain.agents.structured_output import AutoStrategy
 from langchain_aws import ChatBedrockConverse
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest, MCPToolCallResult
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
@@ -118,7 +119,7 @@ Before creating an agent, thoroughly understand:
 - What specific tasks or domain the agent should handle
 - What tools or capabilities it needs
 - How specialized vs. general-purpose it should be
-- What model (GPT-4o or Claude Sonnet 4.5) is most appropriate
+- What model (GPT-4o, GPT-4o-mini, Claude Sonnet 4.5, or Claude Haiku 4.5) is most appropriate
 
 ### 2. Naming Conventions
 - Use **lowercase letters, numbers, and hyphens only** (pattern: /^[a-z0-9-]+$/)
@@ -174,7 +175,9 @@ Output format:
 
 ### 5. Selecting the Right Model
 - **GPT-4o**: Best for general-purpose tasks, faster responses, strong coding capabilities
-- **Claude Sonnet 4.5**: Best for detailed analysis, longer context understanding, nuanced communication
+- **GPT-4o-mini**: Cost-effective option for simpler tasks, faster responses, good for routine operations
+- **Claude Sonnet 4.5**: Best for detailed analysis, longer context understanding, nuanced communication, supports thinking mode
+- **Claude Haiku 4.5**: Ultra-fast and cost-efficient for high-volume, low-latency tasks
 
 ### 6. Configuring Agent Type
 - **Local agents** (type: "local"): Run in-process with custom system prompts and tool access
@@ -290,30 +293,6 @@ class FinalResponseSchema(BaseModel):
     message: str = Field(
         ...,
         description="A clear, helpful message to the user about the task outcome",
-    )
-
-
-def _create_final_response_tool() -> BaseTool:
-    """Create the FinalResponseSchema tool for Bedrock models.
-
-    Returns:
-        StructuredTool for final response handling
-    """
-
-    def final_response_handler(**kwargs):
-        """Handler for FinalResponseSchema tool - returns the structured response."""
-        return FinalResponseSchema(**kwargs)
-
-    return StructuredTool.from_function(
-        func=final_response_handler,
-        name="FinalResponseSchema",
-        description=(
-            "REQUIRED: You MUST call this tool to provide your final response. "
-            "This tool signals task completion and determines the appropriate task state "
-            "(completed, working, input_required, or failed). Call this after you've finished "
-            "processing the user's request and determined the outcome."
-        ),
-        args_schema=FinalResponseSchema,
     )
 
 
@@ -471,7 +450,7 @@ class AgentCreator(BaseAgent):
             system_prompt = AGENT_CREATOR_SYSTEM_PROMPT.replace(
                 "{PLAYGROUND_FRONTEND_URL}", self.playground_frontend_url
             )
-            tools = self._mcp_tools + [_create_final_response_tool()]
+            tools = self._mcp_tools
 
             self._graph = create_deep_agent(
                 model=self._model,
@@ -480,6 +459,7 @@ class AgentCreator(BaseAgent):
                 system_prompt=system_prompt,
                 checkpointer=self._checkpointer,
                 middleware=[],  # No middleware needed, interceptor handles it
+                response_format=AutoStrategy(schema=FinalResponseSchema),
             )
             logger.info("Graph recreated with MCP tools")
         except Exception as e:

@@ -119,7 +119,7 @@ class OrchestratorDeepAgent:
         middleware setup, and graph creation.
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
@@ -234,8 +234,7 @@ class OrchestratorDeepAgent:
         """
         # Determine if we need Bedrock-specific static tools
         # (FinalResponseSchema is only for Bedrock models)
-        is_bedrock = user_config.model == "claude-sonnet-4.5"
-        static_tools = self._graph_factory.get_static_tools(is_bedrock)
+        static_tools = self._graph_factory.get_static_tools()
 
         return build_runtime_context(
             user_config,
@@ -246,6 +245,7 @@ class OrchestratorDeepAgent:
             document_store=self._graph_factory.store,
             s3_service=get_s3_service(),
             document_store_bucket=self.config.DOCUMENT_STORE_S3_BUCKET or None,
+            backend_factory=self._graph_factory.backend_factory,
         )
 
     async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:
@@ -256,7 +256,7 @@ class OrchestratorDeepAgent:
         - User tools/subagents come from GraphRuntimeContext at runtime via DynamicToolDispatchMiddleware
 
         Args:
-            model_type: The type of model ('gpt4o' or 'claude-sonnet-4.5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The compiled LangGraph for this model type
@@ -269,11 +269,17 @@ class OrchestratorDeepAgent:
         self,
         message_parts: list[Part],
         user_config: UserConfig,
-        context_id: str,
+        config: dict[str, Any],
         resume: Any = None,
     ) -> AsyncIterable[AgentStreamResponse]:
         """
         Stream agent responses with runtime user context injection.
+
+        Args:
+            message_parts: User message parts (text + files)
+            user_config: User configuration with credentials and preferences
+            config: graph config from executor (contains metadata like user_id, assistant_id).
+            resume: Optional resume value for interrupt handling
 
         ARCHITECTURE:
         - GraphRuntimeContext: Injected at runtime via `context` parameter for personalization
@@ -317,7 +323,9 @@ class OrchestratorDeepAgent:
                 print(response.content)
         """
         logger.debug(
-            f"Processing {len(message_parts)} message parts, User ID: {user_config.user_id}, Context ID: {context_id}"
+            f"Processing {len(message_parts)} message parts, "
+            f"User ID: {user_config.user_id}, "
+            f"Context ID: {config.get('configurable', {}).get('thread_id')}"
         )
 
         try:
@@ -338,15 +346,6 @@ class OrchestratorDeepAgent:
         # Discovers tools/agents if not already done, then builds context with all registries
         user_config = await self.discover_capabilities(user_config)
         runtime_context = self.build_runtime_context(user_config)
-
-        # Create config with thread_id for conversation isolation
-        # GraphRuntimeContext is passed via `context` parameter, NOT stored in config or checkpointed
-        config = {
-            "configurable": {
-                "thread_id": context_id,  # For conversation memory (checkpointed)
-            }
-        }
-        logger.debug(f"Config created with thread_id={context_id}, runtime_context.language={runtime_context.language}")
 
         # Determine input based on whether we're resuming or starting fresh
         if resume is not None:

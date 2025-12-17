@@ -408,9 +408,6 @@ The middleware stack is applied to all graphs:
 def _create_middleware_stack(self, is_bedrock: bool) -> list:
     """Create the complete middleware stack for a graph."""
     
-    # Static tools for Bedrock (FinalResponseSchema)
-    static_tools = [_create_final_response_tool()] if is_bedrock else []
-    
     # Order: DynamicToolDispatch → UserPreferences → Auth → Retry → A2A → Todo
     return [
         DynamicToolDispatchMiddleware(static_tools=static_tools),  # 1. Binds tools at runtime
