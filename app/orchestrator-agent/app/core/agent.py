@@ -245,6 +245,7 @@ class OrchestratorDeepAgent:
             document_store=self._graph_factory.store,
             s3_service=get_s3_service(),
             document_store_bucket=self.config.DOCUMENT_STORE_S3_BUCKET or None,
+            backend_factory=self._graph_factory.backend_factory,
         )
 
     async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:

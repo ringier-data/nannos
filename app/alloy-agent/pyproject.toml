@@ -9,7 +9,7 @@ dependencies = [
     "uvicorn>=0.38.0",
     "click>=8.1.8",
     # DeepAgents and LangChain
-    "deepagents>=0.1.4,<0.2.0",
+    "deepagents>=0.3.0,<0.4.0",
     "langchain>=1.0.0",
     "langchain-aws>=1.1.0",
     "langchain-mcp-adapters>=0.1.3",

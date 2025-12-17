@@ -30,6 +30,7 @@ def build_runtime_context(
     document_store: "AsyncPostgresStore | None" = None,
     s3_service: "S3Service | None" = None,
     document_store_bucket: str | None = None,
+    backend_factory: Any = None,
 ) -> GraphRuntimeContext:
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
@@ -44,6 +45,8 @@ def build_runtime_context(
     - Tools inherited from orchestrator if mcp_gateway_url is None
     - MCP tool discovery (lazy) if mcp_gateway_url is set
     - Shared checkpointer for multi-turn conversation state
+    - Shared document store for persistent memory (FilesystemMiddleware)
+    - Shared backend factory for semantic indexing (IndexingStoreBackend)
     - Custom model selection via config.model_name (if specified)
 
     Args:
@@ -55,6 +58,7 @@ def build_runtime_context(
         document_store: AsyncPostgresStore instance for document storage (optional).
         s3_service: S3Service for uploading direct retrieval results (optional).
         document_store_bucket: S3 bucket name for document store results (optional).
+        backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
 
     Returns:
         GraphRuntimeContext for graph invocation
@@ -151,6 +155,7 @@ def build_runtime_context(
                     # (tools are overridden if config.mcp_gateway_url is set)
                     # Pass oauth2_client and user_token for authenticated MCP discovery
                     # Pass checkpointer for multi-turn conversation state
+                    # Pass store and backend_factory for FilesystemMiddleware persistence
                     # Pass user preferences for personalized sub-agent behavior
                     dynamic_subagent = create_dynamic_local_subagent(
                         config=config,
@@ -163,6 +168,9 @@ def build_runtime_context(
                         user_language=user_config.language,
                         user_timezone=user_config.timezone,
                         custom_prompt=user_config.custom_prompt,
+                        store=document_store,
+                        backend_factory=backend_factory,
+                        agent_settings=agent_settings,
                     )
                     subagent_registry[config.name] = dynamic_subagent
                     logger.info(f"Registered dynamic local sub-agent: {config.name} (model: {subagent_model_type})")

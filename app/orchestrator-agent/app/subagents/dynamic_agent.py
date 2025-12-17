@@ -28,6 +28,8 @@ import logging
 from typing import Any, Dict, List, Literal, Optional
 
 from deepagents import CompiledSubAgent
+from deepagents.backends.composite import StateBackend
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents import create_agent
 from langchain.agents.structured_output import AutoStrategy
 from langchain_core.language_models import BaseChatModel
@@ -37,6 +39,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
@@ -173,6 +176,9 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         user_timezone: Optional[str] = None,
         custom_prompt: Optional[str] = None,
         sub_agent_id: Optional[int] = None,
+        store: Optional[AsyncPostgresStore] = None,
+        backend_factory: Optional[Any] = None,
+        agent_settings: Optional[Any] = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -188,6 +194,9 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             user_timezone: User's timezone (IANA timezone name)
             custom_prompt: User's custom prompt addendum
             sub_agent_id: Optional playground backend sub_agent ID for tracking agent-created agents
+            store: Shared AsyncPostgresStore for document storage (enables FilesystemMiddleware persistence)
+            backend_factory: Factory function for creating CompositeBackend (for FilesystemMiddleware)
+            agent_settings: AgentSettings for IndexingStoreBackend (enables semantic indexing)
         """
         self.config = config
         self.model = model
@@ -200,6 +209,9 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         self.user_language = user_language
         self.user_timezone = user_timezone
         self.custom_prompt = custom_prompt
+        self.store = store
+        self.backend_factory = backend_factory
+        self.agent_settings = agent_settings
         self._agent = None
         self._discovered_tools: Optional[List[BaseTool]] = None
 
@@ -365,9 +377,6 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         The agent uses SubAgentResponseSchema to explicitly determine task state,
         following the same pattern as the orchestrator's FinalResponseSchema.
 
-        For Bedrock models, we add SubAgentResponseSchema as a tool.
-        For OpenAI models, we use AutoStrategy for structured output.
-
         Returns:
             The compiled LangGraph agent
         """
@@ -388,13 +397,28 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             system_prompt += preferences_addendum
             logger.debug(f"Added user preferences addendum to {self.name} system prompt")
 
+        # Create backend for FilesystemMiddleware
+        # Use orchestrator's backend factory if provided, otherwise fallback to simple StateBackend
+        if self.backend_factory:
+            backend = self.backend_factory
+            logger.debug(f"Using orchestrator backend factory for {self.name}")
+        else:
+            # Fallback to simple StateBackend (ephemeral only, no persistence)
+            backend = lambda rt: StateBackend(rt)
+            logger.debug(f"Using simple StateBackend for {self.name} (no persistence)")
+
+        # Create middleware list with FilesystemMiddleware
+        middleware_list = [FilesystemMiddleware(backend=backend)]
+
         # Use AutoStrategy for structured output (works for both Bedrock and OpenAI)
         self._agent = create_agent(
             self.model,
             system_prompt=system_prompt,
             tools=tools,
             checkpointer=self.checkpointer,  # Shared checkpointer for multi-turn conversations
+            store=self.store,  # Shared document store for persistent memory
             response_format=AutoStrategy(schema=SubAgentResponseSchema),
+            middleware=middleware_list,
         )
 
         return self._agent
@@ -562,6 +586,9 @@ def create_dynamic_local_subagent(
     user_language: Optional[str] = None,
     user_timezone: Optional[str] = None,
     custom_prompt: Optional[str] = None,
+    store: Optional[AsyncPostgresStore] = None,
+    backend_factory: Optional[Any] = None,
+    agent_settings: Optional[Any] = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
@@ -579,6 +606,9 @@ def create_dynamic_local_subagent(
         user_language: User's preferred language (ISO 639-1 code)
         user_timezone: User's timezone (IANA timezone name)
         custom_prompt: User's custom prompt addendum
+        store: Shared AsyncPostgresStore for document storage (enables FilesystemMiddleware persistence)
+        backend_factory: Factory function for creating CompositeBackend (for FilesystemMiddleware)
+        agent_settings: AgentSettings for IndexingStoreBackend (enables semantic indexing)
 
     Returns:
         CompiledSubAgent that can be registered with the orchestrator
@@ -605,6 +635,9 @@ def create_dynamic_local_subagent(
         user_timezone=user_timezone,
         custom_prompt=custom_prompt,
         sub_agent_id=config.sub_agent_id,
+        store=store,
+        backend_factory=backend_factory,
+        agent_settings=agent_settings,
     )
 
     return CompiledSubAgent(

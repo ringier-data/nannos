@@ -184,6 +184,29 @@ class GraphFactory:
             logger.info("Initialized AsyncPostgresStore with Titan Embeddings V2 (1024 dims) and connection pool")
         return self._store
 
+    @property
+    def backend_factory(self) -> Any:
+        """Get the backend factory for FilesystemMiddleware.
+
+        Returns a factory function that creates a CompositeBackend with:
+        - Default: StateBackend (ephemeral storage in agent state)
+        - /memories/: IndexingStoreBackend (persistent storage with semantic indexing)
+
+        The factory takes a ToolRuntime parameter and returns a CompositeBackend.
+        This is the same backend configuration used by the orchestrator.
+
+        Returns:
+            Callable that takes ToolRuntime and returns CompositeBackend
+        """
+
+        def create_backend(rt: Any) -> CompositeBackend:
+            return CompositeBackend(
+                default=StateBackend(rt),
+                routes={"/memories/": IndexingStoreBackend(rt, self.config)},
+            )
+
+        return create_backend
+
     async def ensure_store_setup(self) -> None:
         """Ensure the database schema is set up for the document store.
 
