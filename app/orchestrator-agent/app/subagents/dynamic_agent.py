@@ -349,14 +349,26 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         """
         if self._discovered_tools is not None:
             logger.info(f"orchestrator tools: {self.orchestrator_tools}")
-            # TODO: we could add more fine grained control from the sub-agent config
-            basic_tools = [tool for tool in self.orchestrator_tools if tool.name in ["get_current_time"]]
-            basic_tool_names = [tool.name for tool in basic_tools]
+            # When MCP tools are whitelisted, also include essential orchestrator tools:
+            # - get_current_time: For temporal awareness
+            # - search_documents_rag: For semantic search over indexed documents
+            # - read_personal_file: For accessing personal workspace files
+            # - docstore_export: For exporting files to S3
+            # - create_presigned_url: For creating S3 presigned URLs
+            essential_tool_names = [
+                "get_current_time",
+                "docstore_search",
+                "read_personal_file",
+                "docstore_export",
+                "create_presigned_url",
+            ]
+            essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
+            essential_tool_names_found = [tool.name for tool in essential_tools]
             logger.info(
-                f"Using MCP tools + basic tools for '{self.name}': "
-                f"{len(self._discovered_tools)} MCP tools + {len(basic_tools)} basic tools {basic_tool_names}"
+                f"Using MCP tools + essential orchestrator tools for '{self.name}': "
+                f"{len(self._discovered_tools)} MCP tools + {len(essential_tools)} essential tools {essential_tool_names_found}"
             )
-            return self._discovered_tools + basic_tools
+            return self._discovered_tools + essential_tools
         # Validate orchestrator tools before returning them
         # This ensures tools inherited from orchestrator also have valid schemas
         orchestrator_tool_names = [tool.name for tool in self.orchestrator_tools]
