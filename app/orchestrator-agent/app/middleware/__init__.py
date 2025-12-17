@@ -23,7 +23,6 @@ Usage:
 """
 
 from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState
-from .document_store import DocumentStoreMiddleware, DocumentStoreState
 from .dynamic_tool_dispatch import DynamicToolDispatchMiddleware
 from .loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware
 from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
@@ -31,8 +30,6 @@ from .user_preferences_middleware import UserPreferencesMiddleware
 
 __all__ = [
     "DynamicToolDispatchMiddleware",
-    "DocumentStoreMiddleware",
-    "DocumentStoreState",
     "AuthErrorDetectionMiddleware",
     "AuthErrorState",
     "TodoStatusMiddleware",

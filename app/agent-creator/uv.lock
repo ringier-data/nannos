@@ -63,7 +63,7 @@ requires-dist = [
     { name = "aiodynamo", specifier = ">=24.7" },
     { name = "authlib", specifier = ">=1.6.5" },
     { name = "click", specifier = ">=8.1.8" },
-    { name = "deepagents", specifier = ">=0.1.4,<0.2.0" },
+    { name = "deepagents", specifier = ">=0.3.0,<0.4.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", specifier = ">=1.0.0" },
     { name = "langchain-aws", specifier = ">=1.1.0" },
@@ -283,6 +283,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3a/ea/4be7a4a640d599b5691c7cf27e125155d7d3643ecbe37e32941f412e3de5/botocore-1.42.8.tar.gz", hash = "sha256:4921aa454f82fed0880214eab21126c98a35fe31ede952693356f9c85ce3574b", size = 14861038, upload-time = "2025-12-11T21:54:04.031Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1c/24/a4301564a979368d6f3644f47acc921450b5524b8846e827237d98b04746/botocore-1.42.8-py3-none-any.whl", hash = "sha256:4cb89c74dd9083d16e45868749b999265a91309b2499907c84adeffa0a8df89b", size = 14534173, upload-time = "2025-12-11T21:54:01.143Z" },
+]
+
+[[package]]
+name = "bracex"
+version = "2.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/9a/fec38644694abfaaeca2798b58e276a8e61de49e2e37494ace423395febc/bracex-2.6.tar.gz", hash = "sha256:98f1347cd77e22ee8d967a30ad4e310b233f7754dbf31ff3fceb76145ba47dc7", size = 26642, upload-time = "2025-06-22T19:12:31.254Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9d/2a/9186535ce58db529927f6cf5990a849aa9e052eea3e2cfefe20b9e1802da/bracex-2.6-py3-none-any.whl", hash = "sha256:0b0049264e7340b3ec782b5cb99beb325f36c3782a32e36e876452fd49a09952", size = 11508, upload-time = "2025-06-22T19:12:29.781Z" },
 ]
 
 [[package]]
@@ -529,16 +538,17 @@ wheels = [
 
 [[package]]
 name = "deepagents"
-version = "0.1.4"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
+    { name = "wcmatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/e3/3828ebe68519fc09dd03a48ae323e3be51496f72a271208c4e7ec980a64d/deepagents-0.1.4.tar.gz", hash = "sha256:3ad7ba86975c302a4f7e8c59abfaa4f22f6c7f69f9e1bdf7eb8233be97dbe63d", size = 34181, upload-time = "2025-10-23T16:00:24.31Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/c7/d3c2840bd0e66b6cd5948aa69625e129328ad261308e18fcb9a9420709da/deepagents-0.3.0.tar.gz", hash = "sha256:3dd4d2ed53efb1ef78aeb1020a5696c0ec7e58e627b305a6665d33fe6fbdedff", size = 51387, upload-time = "2025-12-08T21:38:44.077Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cf/7a/466b7f29de27f05f3f74e00b83604924a74a666bb73f8d917e5c23c37fa5/deepagents-0.1.4-py3-none-any.whl", hash = "sha256:fd3b6d4b1a14db8da8858c73e623fbc7cfe56164bd7641cc5ec9bcd989d3da47", size = 28022, upload-time = "2025-10-23T16:00:23.379Z" },
+    { url = "https://files.pythonhosted.org/packages/22/e9/60bab7f37ff38bf982ea578e457ed1878ded613a3425462bcd07b00487e9/deepagents-0.3.0-py3-none-any.whl", hash = "sha256:9e23532d8d535dc2b0b4e0834453a1223a6a8f81b77947c0faf54537d05ce89a", size = 54065, upload-time = "2025-12-08T21:38:42.956Z" },
 ]
 
 [[package]]
@@ -1934,6 +1944,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/cb/ce/f06b84e2697fef4688ca63bdb2fdf113ca0a3be33f94488f2cadb690b0cf/uvicorn-0.38.0.tar.gz", hash = "sha256:fd97093bdd120a2609fc0d3afe931d4d4ad688b6e75f0f929fde1bc36fe0e91d", size = 80605, upload-time = "2025-10-18T13:46:44.63Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ee/d9/d88e73ca598f4f6ff671fb5fde8a32925c2e08a637303a1d12883c7305fa/uvicorn-0.38.0-py3-none-any.whl", hash = "sha256:48c0afd214ceb59340075b4a052ea1ee91c16fbc2a9b1469cca0e54566977b02", size = 68109, upload-time = "2025-10-18T13:46:42.958Z" },
+]
+
+[[package]]
+name = "wcmatch"
+version = "10.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "bracex" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/79/3e/c0bdc27cf06f4e47680bd5803a07cb3dfd17de84cde92dd217dcb9e05253/wcmatch-10.1.tar.gz", hash = "sha256:f11f94208c8c8484a16f4f48638a85d771d9513f4ab3f37595978801cb9465af", size = 117421, upload-time = "2025-06-22T19:14:02.49Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/d8/0d1d2e9d3fabcf5d6840362adcf05f8cf3cd06a73358140c3a97189238ae/wcmatch-10.1-py3-none-any.whl", hash = "sha256:5848ace7dbb0476e5e55ab63c6bbd529745089343427caa5537f230cc01beb8a", size = 39854, upload-time = "2025-06-22T19:14:00.978Z" },
 ]
 
 [[package]]

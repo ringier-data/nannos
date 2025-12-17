@@ -32,7 +32,7 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import AutoStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
@@ -118,31 +118,6 @@ class SubAgentResponseSchema(BaseModel):
             "- For 'input_required': Clear question asking for the specific information needed\n"
             "- For 'failed': Explanation of the error and any possible remediation"
         )
-    )
-
-
-def _create_subagent_response_tool() -> BaseTool:
-    """Create the SubAgentResponseSchema tool for Bedrock models.
-
-    Bedrock models don't support response_format, so we use a tool instead.
-
-    Returns:
-        StructuredTool for sub-agent response handling
-    """
-
-    def response_handler(**kwargs):
-        """Handler for SubAgentResponseSchema tool - returns the structured response."""
-        return SubAgentResponseSchema(**kwargs)
-
-    return StructuredTool.from_function(
-        func=response_handler,
-        name="SubAgentResponseSchema",
-        description=(
-            "REQUIRED: You MUST call this tool to provide your response. "
-            "This tool signals your task state (completed, input_required, or failed) "
-            "and provides your message to the orchestrator."
-        ),
-        args_schema=SubAgentResponseSchema,
     )
 
 
@@ -413,27 +388,14 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             system_prompt += preferences_addendum
             logger.debug(f"Added user preferences addendum to {self.name} system prompt")
 
-        # Check if this is a Bedrock model (needs tool-based structured output)
-        is_bedrock = hasattr(self.model, "_client") and "bedrock" in str(type(self.model)).lower()
-
-        if is_bedrock:
-            # Bedrock: Add response schema as a tool
-            agent_tools = list(tools) + [_create_subagent_response_tool()]
-            self._agent = create_agent(
-                self.model,
-                system_prompt=system_prompt,
-                tools=agent_tools,
-                checkpointer=self.checkpointer,  # Shared checkpointer for multi-turn conversations
-            )
-        else:
-            # OpenAI: Use structured output via response_format
-            self._agent = create_agent(
-                self.model,
-                system_prompt=system_prompt,
-                tools=tools,
-                checkpointer=self.checkpointer,  # Shared checkpointer for multi-turn conversations
-                response_format=AutoStrategy(schema=SubAgentResponseSchema),
-            )
+        # Use AutoStrategy for structured output (works for both Bedrock and OpenAI)
+        self._agent = create_agent(
+            self.model,
+            system_prompt=system_prompt,
+            tools=tools,
+            checkpointer=self.checkpointer,  # Shared checkpointer for multi-turn conversations
+            response_format=AutoStrategy(schema=SubAgentResponseSchema),
+        )
 
         return self._agent
 
@@ -529,6 +491,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             return self._build_response_from_schema(structured_response, context_id, task_id)
 
         # Check messages for tool call with SubAgentResponseSchema (Bedrock)
+        logger.info(f"Translating agent result for '{self.name}'")
         messages = result.get("messages", [])
         for msg in reversed(messages):
             # Check if this is a tool message with SubAgentResponseSchema result
