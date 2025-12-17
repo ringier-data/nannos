@@ -230,6 +230,7 @@ Resources:
             - { Name: "CHECKPOINT_S3_BUCKET_NAME", Value: '{{ checkpoint_s3_bucket_name }}' }
             - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
             - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
+            - { Name: "MAX_RECURSION_LIMIT", Value: '{{ max_recursion_limit }}' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
