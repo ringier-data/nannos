@@ -48,23 +48,53 @@ class FinalResponseSchema(BaseModel):
             "- For 'completed': Clear and concise summary of what was accomplished\n"
             "- For 'working': Explain what's happening asynchronously and estimated timeline\n"
             "- For 'input_required': Ask a clear, specific question that the user needs to answer\n"
-            "- For 'failed': Explain what went wrong and suggest possible next steps or alternatives"
+            "- For 'failed': Explain what went wrong and suggest possible next steps or alternatives\n"
+            "\n"
+            "⚠️ CRITICAL - When include_subagent_output=true:\n"
+            "Use EMPTY STRING '' in 99% of cases! Sub-agents include their own introductions.\n"
+            "Adding your own introduction creates redundant, confusing text.\n"
+            "\n"
+            "Examples:\n"
+            "✅ include_subagent_output=true, message='' (sub-agent output is self-contained)\n"
+            "❌ include_subagent_output=true, message='Here\\'s the result:' (creates redundancy!)\n"
+            "\n"
+            "ONLY add a message if sub-agent returns raw data WITHOUT explanation (rare)."
         )
     )
 
-    reasoning: str = Field(
-        description=(
-            "Brief internal reasoning for why this task_state was chosen. "
-            "Explain the key factors from todo list and conversation that led to this decision. "
-            "This helps with debugging and transparency but is not shown to the user."
-        )
-    )
+    # reasoning: str = Field(
+    #     description=(
+    #         "Brief internal reasoning for why this task_state was chosen. "
+    #         "Explain the key factors from todo list and conversation that led to this decision. "
+    #         "This helps with debugging and transparency but is not shown to the user.\n"
+    #         "\n"
+    #         "When using include_subagent_output=true, also explain:\n"
+    #         "- Why passing through the sub-agent's output is appropriate (e.g., 'complete answer', 'detailed analysis')\n"
+    #         "- Whether you're providing an introduction or pure pass-through (empty message)"
+    #     )
+    # )
 
     todo_summary: Optional[str] = Field(
         default=None,
         description=(
             "Optional brief summary of todo list state (e.g., '3/5 tasks completed, 2 in progress'). "
             "Useful for 'working' state to give progress visibility."
+        ),
+    )
+
+    include_subagent_output: bool = Field(
+        default=False,
+        description=(
+            "Set to true when the most recent sub-agent response should be appended to your message. "
+            "Use this when:"
+            "\n- The sub-agent returned a complete, well-formatted answer that fully addresses the user's request"
+            "\n- The response is long or detailed (analysis, data, reports, etc.) and regenerating would be wasteful"
+            "\n- You want to preserve the sub-agent's exact output without modification"
+            "\n\nWhen true:"
+            "\n- Set 'message' field to EMPTY STRING '' (default - sub-agents have their own intros)"
+            "\n- The full sub-agent output will be automatically appended"
+            "\n- This saves tokens and preserves the original formatting and details"
+            "\n\nIMPORTANT: Use message='' to avoid redundant introductions!"
         ),
     )
 

@@ -21,7 +21,7 @@ from typing import Any, Optional
 from deepagents import create_deep_agent
 from deepagents.backends.composite import CompositeBackend, StateBackend
 from langchain.agents.middleware import ToolRetryMiddleware
-from langchain.agents.structured_output import AutoStrategy
+from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_aws import BedrockEmbeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -377,6 +377,14 @@ class GraphFactory:
 
         backend = create_backend
         static_tools_list = self.get_static_tools()
+
+        # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
+        # Use AutoStrategy for Bedrock models (more efficient)
+        if model_type in ("gpt4o", "gpt-4o-mini"):
+            response_format = ToolStrategy(schema=FinalResponseSchema)
+        else:
+            response_format = AutoStrategy(schema=FinalResponseSchema)
+
         compiled_graph = create_deep_agent(
             model=model,
             tools=static_tools_list,  # Include static tools with FinalResponseSchema
@@ -387,7 +395,7 @@ class GraphFactory:
             backend=backend,  # type: ignore[arg-type]
             middleware=middleware,  # type: ignore[arg-type]
             context_schema=GraphRuntimeContext,
-            response_format=AutoStrategy(schema=FinalResponseSchema),
+            response_format=response_format,
         )
         # Override deepagents default recursion_limit (1000) with configured value
         # This prevents infinite loops from reaching the high default limit

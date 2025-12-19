@@ -31,7 +31,7 @@ from deepagents import CompiledSubAgent
 from deepagents.backends.composite import StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents import create_agent
-from langchain.agents.structured_output import AutoStrategy
+from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
@@ -43,6 +43,7 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
+from ..middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from ..utils import get_language_display_name
 from .base import LocalA2ARunnable, SubAgentInput
 from .models import LocalLangGraphSubAgentConfig
@@ -420,16 +421,25 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             logger.debug(f"Using simple StateBackend for {self.name} (no persistence)")
 
         # Create middleware list with FilesystemMiddleware
-        middleware_list = [FilesystemMiddleware(backend=backend)]
+        middleware_list = [
+            FilesystemMiddleware(backend=backend),
+            RepeatedToolCallMiddleware(max_repeats=3, window_size=10),
+        ]
 
-        # Use AutoStrategy for structured output (works for both Bedrock and OpenAI)
+        # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
+        # Use AutoStrategy for Bedrock models (more efficient)
+        if self.model.__class__.__name__ == "AzureChatOpenAI":
+            response_format = ToolStrategy(schema=SubAgentResponseSchema)
+        else:
+            response_format = AutoStrategy(schema=SubAgentResponseSchema)
+
         self._agent = create_agent(
             self.model,
             system_prompt=system_prompt,
             tools=tools,
             checkpointer=self.checkpointer,  # Shared checkpointer for multi-turn conversations
             store=self.store,  # Shared document store for persistent memory
-            response_format=AutoStrategy(schema=SubAgentResponseSchema),
+            response_format=response_format,
             middleware=middleware_list,
         )
 

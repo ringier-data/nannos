@@ -383,6 +383,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         # Return Command with state update (similar to SubAgentMiddleware)
         state_update = {k: v for k, v in result.items() if k not in excluded_keys} if isinstance(result, dict) else {}
+
+        # Note: Sub-agent output content is already stored in the ToolMessage above.
+        # When include_subagent_output=true, stream_handler will extract it from messages.
+
         return Command(
             update={
                 **state_update,
