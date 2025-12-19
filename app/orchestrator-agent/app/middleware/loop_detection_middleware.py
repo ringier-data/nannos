@@ -7,13 +7,14 @@ potential infinite loop.
 Key Features:
 - Tracks tool calls (name + arguments hash) in a sliding window
 - Detects repeated identical tool calls (configurable threshold)
-- Uses interrupt() to pause execution and request user confirmation
+- Blocks looping tool calls with error ToolMessages (like ToolCallLimitMiddleware)
+- Allows non-looping tool calls to execute normally
 - Provides clear feedback about the detected loop pattern
 
 Architecture:
-- Wrap-style hooks: Intercept tool calls to track patterns
+- after_model hook: Checks for loops after model generates tool calls
 - State-based tracking: Uses agent state to maintain call history
-- Interrupt on detection: Uses LangGraph's interrupt() mechanism
+- Selective blocking: Only blocks looping tool calls, lets others execute
 
 Integration:
     ```python
@@ -22,7 +23,7 @@ Integration:
         tools=tools,
         middleware=[
             DynamicToolDispatchMiddleware(),
-            RepeatedToolCallMiddleware(max_repeats=3, window_size=10),
+            RepeatedToolCallMiddleware(max_repeats=3, max_tool_repeats=5, window_size=10),
             AuthErrorDetectionMiddleware(),
         ],
         checkpointer=MemorySaver()
@@ -33,14 +34,11 @@ Integration:
 import hashlib
 import json
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Annotated, Any
 
-from a2a.types import TaskState
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
-from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import ToolMessage
-from langgraph.types import Command
+from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr
+from langchain_core.messages import AIMessage, ToolCall, ToolMessage
+from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
 
@@ -50,63 +48,76 @@ logger = logging.getLogger(__name__)
 class LoopDetectionState(AgentState):
     """Extended agent state with tool call tracking for loop detection.
 
-    Tracks recent tool calls to detect repeated patterns that indicate loops.
+    Tracks tool call history to detect repeated patterns per tool.
+    Similar to ToolCallLimitMiddleware but tracks both same-args and same-tool patterns.
     """
 
-    tool_call_history: NotRequired[list[dict[str, Any]]]
-    """History of recent tool calls for loop detection. Format:
-    [
-        {
-            "tool": "tool_name",
-            "args_hash": "hash_of_args",
-            "timestamp": float,
-            "result_summary": "first_100_chars_of_result"
-        }
-    ]
+    tool_call_history: NotRequired[Annotated[dict[str, list[str]], PrivateStateAttr]]
+    """Per-tool history of argument hashes. Format:
+    {
+        "tool_name": ["args_hash1", "args_hash2", ...],
+        ...
+    }
     """
 
 
 class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
     """Middleware for detecting and preventing infinite tool call loops.
 
-    ARCHITECTURE:
-    This middleware uses a sliding window to track recent tool calls and detects
-    when the same tool with identical arguments is being called repeatedly.
+    Extends ToolCallLimitMiddleware pattern with dual loop detection:
+    1. Same tool + same arguments (max_repeats threshold)
+    2. Same tool regardless of arguments (max_tool_repeats threshold)
 
-    How it works:
-    1. awrap_tool_call: Intercept tool executions
-    2. Tool executes and returns ToolMessage
-    3. Extract tool name and hash arguments for comparison
-    4. Add to sliding window history (limited to window_size)
-    5. Check if same tool+args appears more than max_repeats times
-    6. If loop detected: Call interrupt() with clear message
-    7. User can choose to continue or stop
+    Unlike ToolCallLimitMiddleware which tracks absolute counts, this tracks:
+    - Per-tool history of argument hashes in a sliding window
+    - Blocks tool calls that exceed either threshold
+    - Injects error ToolMessages for blocked calls
+    - Lets non-looping calls execute normally
+
+    The model receives error messages and can adjust its strategy accordingly.
 
     Configuration:
-    - max_repeats: Number of identical calls before triggering (default: 3)
-    - window_size: Size of sliding window to track (default: 10)
-
-    Interrupt Value Format:
-    {
-        "task_state": TaskState.input_required,
-        "message": "Detected repeated tool calls...",
-        "interrupt_reason": "repeated_tool_calls",
-        "tool": "tool_name",
-        "repeat_count": 4,
-        "pattern": "ls() called 4 times with same arguments"
-    }
+    - max_repeats: Same tool+args threshold before blocking (default: 3)
+    - max_tool_repeats: Same tool (any args) threshold before blocking (default: 5)
+    - window_size: Sliding window size for history tracking (default: 10)
+    - tool_name: Specific tool to track, or None for all tools (default: None)
     """
 
-    def __init__(self, max_repeats: int = 3, window_size: int = 10):
+    state_schema = LoopDetectionState  # type: ignore[assignment]
+
+    def __init__(
+        self,
+        *,
+        tool_name: str | None = None,
+        max_repeats: int = 3,
+        max_tool_repeats: int = 5,
+        window_size: int = 10,
+    ):
         """Initialize loop detection middleware.
 
         Args:
-            max_repeats: Number of identical tool calls before interrupting (default: 3)
-            window_size: Size of sliding window for tracking calls (default: 10)
+            tool_name: Specific tool to track. If None, tracks all tools.
+            max_repeats: Same tool+args threshold (default: 3)
+            max_tool_repeats: Same tool threshold (default: 5)
+            window_size: Sliding window size (default: 10)
         """
+        super().__init__()
+        self.tool_name = tool_name
         self.max_repeats = max_repeats
+        self.max_tool_repeats = max_tool_repeats
         self.window_size = window_size
-        logger.info(f"RepeatedToolCallMiddleware initialized: max_repeats={max_repeats}, window_size={window_size}")
+        logger.info(
+            f"RepeatedToolCallMiddleware initialized: tool_name={tool_name}, "
+            f"max_repeats={max_repeats}, max_tool_repeats={max_tool_repeats}, window_size={window_size}"
+        )
+
+    @property
+    def name(self) -> str:
+        """The name of the middleware instance."""
+        base_name = self.__class__.__name__
+        if self.tool_name:
+            return f"{base_name}[{self.tool_name}]"
+        return base_name
 
     def _hash_args(self, args: dict[str, Any]) -> str:
         """Create a stable hash of tool arguments for comparison.
@@ -118,134 +129,181 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             SHA256 hash of sorted JSON representation
         """
         try:
-            # Sort keys for stable hashing
             args_json = json.dumps(args, sort_keys=True)
             return hashlib.sha256(args_json.encode()).hexdigest()[:16]
         except (TypeError, ValueError) as e:
-            # Fallback for non-serializable args
             logger.warning(f"Failed to hash args: {e}, using str representation")
             return hashlib.sha256(str(args).encode()).hexdigest()[:16]
 
-    def _check_for_loop(self, tool_name: str, args_hash: str, history: list[dict[str, Any]]) -> tuple[bool, int]:
-        """Check if current tool call indicates a repeated loop pattern.
+    def _matches_tool_filter(self, tool_call: ToolCall) -> bool:
+        """Check if a tool call matches this middleware's tool filter.
+
+        Args:
+            tool_call: The tool call to check.
+
+        Returns:
+            True if this middleware should track this tool call.
+        """
+        return self.tool_name is None or tool_call["name"] == self.tool_name
+
+    def _check_for_loop(self, tool_name: str, args_hash: str, tool_history: list[str]) -> tuple[bool, int, str]:
+        """Check if adding this call would create a loop pattern.
 
         Args:
             tool_name: Name of the tool being called
             args_hash: Hash of the tool arguments
-            history: Recent tool call history
+            tool_history: List of arg hashes for this specific tool
 
         Returns:
-            Tuple of (is_loop_detected, repeat_count)
+            Tuple of (is_loop_detected, repeat_count, loop_type)
+            where loop_type is 'same_args' or 'same_tool'
         """
-        # Count how many times this exact tool+args combination appears in history
-        repeat_count = sum(1 for call in history if call["tool"] == tool_name and call["args_hash"] == args_hash)
+        # Count same arguments (+1 for current call)
+        same_args_count = tool_history.count(args_hash) + 1
 
-        # Check if we've exceeded the threshold
-        is_loop = repeat_count >= self.max_repeats
+        # Count all calls to this tool (+1 for current call)
+        same_tool_count = len(tool_history) + 1
 
-        if is_loop:
+        # Check thresholds
+        if same_args_count > self.max_repeats:
             logger.warning(
-                f"Loop detected: {tool_name} with args_hash={args_hash} called {repeat_count} times "
-                f"(threshold: {self.max_repeats})"
+                f"Loop detected: {tool_name} with args_hash={args_hash} "
+                f"called {same_args_count} times (threshold: {self.max_repeats})"
             )
+            return True, same_args_count, "same_args"
 
-        return is_loop, repeat_count
+        if same_tool_count > self.max_tool_repeats:
+            unique_args = len(set(tool_history + [args_hash]))
+            logger.warning(
+                f"Loop detected: {tool_name} called {same_tool_count} times "
+                f"with {unique_args} unique arg sets (threshold: {self.max_tool_repeats})"
+            )
+            return True, same_tool_count, "same_tool"
 
-    async def awrap_tool_call(
+        return False, 0, ""
+
+    async def aafter_model(
         self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
-    ) -> ToolMessage | Command:
-        """Track tool calls and detect repeated patterns indicating loops.
+        state: LoopDetectionState,
+        runtime: Runtime[ContextT],
+    ) -> dict[str, Any] | None:
+        """Check tool calls for loop patterns and block looping calls.
 
-        This async wrap-style hook:
-        1. Retrieves current tool call history from state
-        2. Executes the tool via handler
-        3. Checks if this tool+args combination has been called too many times
-        4. If loop detected: Interrupts execution with user prompt
-        5. Records the call in history (sliding window)
+        Follows ToolCallLimitMiddleware pattern:
+        - Only blocks looping tool calls with error ToolMessages
+        - Lets non-looping calls execute normally
+        - Updates history state for tracking
 
         Args:
-            request: Tool call request with tool name and arguments
-            handler: Async callback to execute the tool
+            state: Current agent state
+            runtime: LangGraph runtime context
 
         Returns:
-            ToolMessage or Command from tool execution, or interrupt if loop detected
+            State updates with history and error messages for blocked calls
         """
-        from langgraph.types import interrupt
+        # Get the last AIMessage
+        messages = state.get("messages", [])
+        if not messages:
+            return None
 
-        tool_name = request.tool_call.get("name", "")
-        args = request.tool_call.get("args", {})
-        args_hash = self._hash_args(args)
+        last_ai_message = None
+        for message in reversed(messages):
+            if isinstance(message, AIMessage):
+                last_ai_message = message
+                break
 
-        # Get current history from state (initialize if not present)
-        state = request.runtime.state
-        history = list(state.get("tool_call_history", []))
+        if not last_ai_message or not last_ai_message.tool_calls:
+            return None
 
-        # Check for loop BEFORE executing the tool
-        is_loop, repeat_count = self._check_for_loop(tool_name, args_hash, history)
+        # Get current history (per-tool tracking)
+        history = state.get("tool_call_history", {}).copy()
 
-        if is_loop:
-            # Build detailed message about the loop pattern
-            # Find all matching calls to show the pattern
-            matching_calls = [call for call in history if call["tool"] == tool_name and call["args_hash"] == args_hash]
+        # Track blocked calls and update history
+        blocked_calls: list[dict[str, Any]] = []
 
-            pattern_desc = f"'{tool_name}' called {repeat_count} times with identical arguments"
-            if matching_calls:
-                # Show result summaries to indicate lack of progress
-                results = [call.get("result_summary", "")[:50] for call in matching_calls[-3:]]
-                pattern_desc += f". Recent results: {results}"
+        for tool_call in last_ai_message.tool_calls:
+            tool_name = tool_call["name"]
 
-            interrupt_value = {
-                "task_state": TaskState.input_required,
-                "message": (
-                    f"⚠️ **Loop Detected**: The tool `{tool_name}` has been called {repeat_count} times "
-                    f"with the same arguments, which may indicate an infinite loop or unproductive repetition.\n\n"
-                    f"**Pattern**: {pattern_desc}\n\n"
-                    f"This often happens when:\n"
-                    f"- A tool returns empty results but the agent keeps retrying\n"
-                    f"- The agent doesn't understand the tool's response\n"
-                    f"- The agent is stuck in a decision loop\n\n"
-                    f"Would you like to:\n"
-                    f"- **Continue**: Reply 'yes' or 'continue' to allow more attempts\n"
-                    f"- **Stop**: Reply 'stop' or provide different instructions"
+            # Skip if doesn't match filter
+            if not self._matches_tool_filter(tool_call):
+                continue
+
+            args = tool_call.get("args", {})
+            args_hash = self._hash_args(args)
+
+            # Get this tool's history
+            tool_history = history.get(tool_name, [])
+
+            # Check for loop
+            is_loop, repeat_count, loop_type = self._check_for_loop(tool_name, args_hash, tool_history)
+
+            if is_loop:
+                # Build description
+                if loop_type == "same_args":
+                    same_count = tool_history.count(args_hash)
+                    desc = f"Tool '{tool_name}' called {same_count} times with identical arguments"
+                else:  # same_tool
+                    unique_count = len(set(tool_history))
+                    desc = (
+                        f"Tool '{tool_name}' called {repeat_count} times (with {unique_count} different argument sets)"
+                    )
+
+                blocked_calls.append(
+                    {
+                        "tool_call": tool_call,
+                        "tool_name": tool_name,
+                        "loop_type": loop_type,
+                        "description": desc,
+                        "repeat_count": repeat_count,
+                    }
+                )
+
+                logger.warning(f"Loop detected: {desc}")
+
+                # CRITICAL: Add blocked calls to history so count increases
+                # This provides escalating feedback to the model
+                tool_history.append(args_hash)
+            else:
+                # Not looping - add to history
+                tool_history.append(args_hash)
+
+            # Always update history (for both looping and non-looping)
+            # Maintain sliding window
+            if len(tool_history) > self.window_size:
+                tool_history = tool_history[-self.window_size :]
+
+            history[tool_name] = tool_history
+
+        # If no blocked calls, just update history
+        if not blocked_calls:
+            logger.debug(f"[LOOP DETECTION] Tracked {len(last_ai_message.tool_calls)} tool call(s)")
+            return {"tool_call_history": history}
+
+        # Build error ToolMessages for blocked calls (only blocked ones!)
+        # Use very strong, explicit language for GPT-4o-mini
+        error_messages = [
+            ToolMessage(
+                content=(
+                    f"❌ BLOCKED: {info['description']}. "
+                    f"This tool has been called {info['repeat_count']} times and is NOT working. "
+                    f"STOP trying '{info['tool_name']}'. "
+                    f"You MUST use a completely different approach or give up. "
+                    f"Continuing to call this tool will fail."
                 ),
-                "interrupt_reason": "repeated_tool_calls",
-                "tool": tool_name,
-                "repeat_count": repeat_count,
-                "pattern": pattern_desc,
-            }
+                tool_call_id=info["tool_call"]["id"],
+                name=info["tool_name"],
+                status="error",
+            )
+            for info in blocked_calls
+        ]
 
-            logger.info(f"[LOOP DETECTION] Interrupting due to repeated tool calls: {tool_name}")
-            interrupt(interrupt_value)
+        logger.info(
+            f"[LOOP DETECTION] Blocked {len(blocked_calls)} looping tool call(s): "
+            f"{[info['tool_name'] for info in blocked_calls]}"
+        )
 
-            # This line shouldn't be reached, but return for safety
-            # Execute the tool anyway in case interrupt is bypassed
-            result = await handler(request)
-        else:
-            # Execute the tool normally
-            result = await handler(request)
-
-        # Record this call in history (sliding window)
-        result_summary = ""
-        if isinstance(result, ToolMessage):
-            content = result.content if isinstance(result.content, str) else str(result.content)
-            result_summary = content[:100]  # First 100 chars for pattern matching
-
-        call_record = {
-            "tool": tool_name,
-            "args_hash": args_hash,
-            "result_summary": result_summary,
+        # Return updated history and error messages
+        return {
+            "tool_call_history": history,
+            "messages": error_messages,
         }
-
-        # Maintain sliding window (keep only last window_size calls)
-        history.append(call_record)
-        if len(history) > self.window_size:
-            history = history[-self.window_size :]
-
-        # Update state with new history
-        # Note: This assumes the state will be updated by the framework
-        # The state update happens automatically in the agent loop
-        request.runtime.state["tool_call_history"] = history
-
-        return result
