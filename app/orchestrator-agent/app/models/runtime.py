@@ -10,12 +10,12 @@ from typing import Any
 from deepagents import CompiledSubAgent
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
+from ..a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
+from ..agents.dynamic_agent import create_dynamic_local_subagent
+from ..agents.file_analyzer import create_file_analyzer_subagent
+from ..agents.foundry_agent import create_foundry_local_subagent
 from ..core.model_factory import ModelType, create_model
 from ..core.s3_service import S3Service
-from ..subagents.dynamic_agent import create_dynamic_local_subagent
-from ..subagents.file_analyzer import create_file_analyzer_subagent
-from ..subagents.foundry_runnable import create_foundry_local_subagent
-from ..subagents.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
 from .config import GraphRuntimeContext, UserConfig
 
 logger = logging.getLogger(__name__)

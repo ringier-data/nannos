@@ -43,10 +43,10 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+from ..a2a.base import LocalA2ARunnable, SubAgentInput
+from ..a2a.models import LocalLangGraphSubAgentConfig
+from ..middleware import RepeatedToolCallMiddleware
 from ..utils import get_language_display_name
-from .base import LocalA2ARunnable, SubAgentInput
-from .models import LocalLangGraphSubAgentConfig
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
-from app.subagents.middleware import A2ATaskTrackingMiddleware, A2ATrackingState
+from app.middleware import A2ATaskTrackingMiddleware, A2ATrackingState
 
 
 class TestA2ATaskTrackingMiddlewareBeforeModel:

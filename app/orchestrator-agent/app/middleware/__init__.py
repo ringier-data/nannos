@@ -14,14 +14,16 @@ Key Components:
 
 Usage:
     from app.middleware import (
-        DynamicToolDispatchMiddleware,
+        A2ATaskTrackingMiddleware,
         AuthErrorDetectionMiddleware,
+        DynamicToolDispatchMiddleware,
+        RepeatedToolCallMiddleware,
         TodoStatusMiddleware,
         UserPreferencesMiddleware,
-        RepeatedToolCallMiddleware,
     )
 """
 
+from .a2a_tracking import A2ATaskTrackingMiddleware, A2ATrackingState
 from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState
 from .dynamic_tool_dispatch import DynamicToolDispatchMiddleware
 from .loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware

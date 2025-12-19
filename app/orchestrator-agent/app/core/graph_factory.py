@@ -34,6 +34,7 @@ from psycopg_pool import AsyncConnectionPool
 from ..backends import IndexingStoreBackend
 from ..handlers import handle_auth_error, should_retry
 from ..middleware import (
+    A2ATaskTrackingMiddleware,
     AuthErrorDetectionMiddleware,
     DynamicToolDispatchMiddleware,
     RepeatedToolCallMiddleware,
@@ -42,7 +43,6 @@ from ..middleware import (
 )
 from ..models import AgentSettings, FinalResponseSchema
 from ..models.config import GraphRuntimeContext, ModelType
-from ..subagents import A2ATaskTrackingMiddleware
 from .file_tools import create_presigned_url_tool
 from .model_factory import create_model
 from .time_tools import create_time_tool

@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from ..subagents.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
+from ..a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
 
 logger = logging.getLogger(__name__)
 

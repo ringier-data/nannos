@@ -1,12 +1,13 @@
 import logging
 from typing import Any, Optional
 
-from a2a.types import AgentCard
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
+from a2a.types import AgentCard
+
 from ..authentication import SmartTokenInterceptor
+from .client import A2AClientRunnable
 from .config import A2AClientConfig
-from .runnable import A2AClientRunnable
 
 logger = logging.getLogger(__name__)
 
