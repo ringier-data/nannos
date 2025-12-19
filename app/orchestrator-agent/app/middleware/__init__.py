@@ -31,6 +31,8 @@ from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
 from .user_preferences_middleware import UserPreferencesMiddleware
 
 __all__ = [
+    "A2ATaskTrackingMiddleware",
+    "A2ATrackingState",
     "DynamicToolDispatchMiddleware",
     "AuthErrorDetectionMiddleware",
     "AuthErrorState",

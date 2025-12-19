@@ -39,6 +39,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.errors import GraphInterrupt
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
@@ -491,6 +492,12 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
             # Extract response from agent result
             return self._translate_agent_result(result, context_id, task_id)
+
+        except GraphInterrupt as gi:
+            # is not an error - just an interrupt from the graph execution
+            logger.info(f"[DYNAMIC AGENT] Graph interrupted in '{self.name}': {gi}")
+            # Re-raise so the orchestrator can handle it properly
+            raise
 
         except Exception as e:
             logger.exception(f"Error in dynamic agent '{self.name}': {e}")
