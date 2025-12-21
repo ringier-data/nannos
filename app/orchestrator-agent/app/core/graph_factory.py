@@ -135,7 +135,7 @@ class GraphFactory:
         self._a2a_middleware = a2a_middleware or A2ATaskTrackingMiddleware()
         self._auth_middleware = AuthErrorDetectionMiddleware()
         self._todo_middleware = TodoStatusMiddleware()
-        self._loop_detection_middleware = RepeatedToolCallMiddleware(max_repeats=3, window_size=10)
+        self._loop_detection_middleware = RepeatedToolCallMiddleware(max_repeats=5, window_size=10)
         self._retry_middleware = ToolRetryMiddleware(
             max_retries=config.MAX_RETRIES,
             backoff_factor=config.BACKOFF_FACTOR,

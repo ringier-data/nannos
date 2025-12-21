@@ -508,10 +508,15 @@ class NaonousAgent(BaseAgent):
 
             logger.info(f"Processing query for user {user_config.user_id}")
 
-            # Execute graph
+            # Execute graph with thread isolation
+            # CRITICAL: Use checkpoint_ns to isolate sub-agent checkpoints from orchestrator.
+            # The orchestrator and sub-agents share the same DynamoDB table, so we namespace
+            # sub-agent checkpoints to prevent internal messages (like MCP tool calls) from
+            # leaking into the orchestrator's conversation history.
             config = {
                 "configurable": {
                     "thread_id": task.context_id,
+                    "checkpoint_ns": "alloy-agent",  # Namespace isolation
                 }
             }
 

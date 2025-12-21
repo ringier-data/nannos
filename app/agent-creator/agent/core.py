@@ -529,9 +529,14 @@ class AgentCreator(BaseAgent):
             logger.info("Set user credentials in context variables")
 
             # Execute graph with thread isolation
+            # CRITICAL: Use checkpoint_ns to isolate sub-agent checkpoints from orchestrator.
+            # The orchestrator and sub-agents share the same DynamoDB table, so we namespace
+            # sub-agent checkpoints to prevent internal messages (like MCP tool calls) from
+            # leaking into the orchestrator's conversation history.
             config = {
                 "configurable": {
                     "thread_id": task.context_id,
+                    "checkpoint_ns": "agent-creator",  # Namespace isolation
                 }
             }
 

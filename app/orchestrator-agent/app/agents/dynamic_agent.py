@@ -31,6 +31,7 @@ from deepagents import CompiledSubAgent
 from deepagents.backends.composite import StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
@@ -424,7 +425,11 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         # Create middleware list with FilesystemMiddleware
         middleware_list = [
             FilesystemMiddleware(backend=backend),
-            RepeatedToolCallMiddleware(max_repeats=3, window_size=10),
+            ToolRetryMiddleware(
+                max_retries=5,
+                backoff_factor=2.0,
+            ),
+            RepeatedToolCallMiddleware(max_repeats=5, window_size=10),
         ]
 
         # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
@@ -484,7 +489,15 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             agent_input = {"messages": [HumanMessage(content=content)]}
 
             # Use context_id as thread_id for conversation continuity when checkpointer is available
-            config = {"configurable": {"thread_id": context_id}} if context_id and self.checkpointer else {}
+            # CRITICAL: Use checkpoint_ns to isolate dynamic sub-agent checkpoints from orchestrator.
+            # The orchestrator and dynamic sub-agents share the same DynamoDB table, so we namespace
+            # sub-agent checkpoints to prevent internal messages (like tool calls) from
+            # leaking into the orchestrator's conversation history.
+            config = (
+                {"configurable": {"thread_id": context_id, "checkpoint_ns": f"dynamic-{self.name}"}}
+                if context_id and self.checkpointer
+                else {}
+            )
 
             # Invoke the agent
             logger.debug(f"Invoking dynamic agent '{self.name}' with content: {content[:100]}...")
