@@ -90,7 +90,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         *,
         tool_name: str | None = None,
         max_repeats: int = 3,
-        max_tool_repeats: int = 5,
+        max_tool_repeats: int | None = None,
         window_size: int = 10,
     ):
         """Initialize loop detection middleware.
@@ -171,8 +171,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 f"called {same_args_count} times (threshold: {self.max_repeats})"
             )
             return True, same_args_count, "same_args"
-
-        if same_tool_count > self.max_tool_repeats:
+        if self.max_tool_repeats is not None and same_tool_count > self.max_tool_repeats:
             unique_args = len(set(tool_history + [args_hash]))
             logger.warning(
                 f"Loop detected: {tool_name} called {same_tool_count} times "
