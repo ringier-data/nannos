@@ -96,6 +96,7 @@ def test_final_response_schema_optional_fields():
     response = FinalResponseSchema(task_state=TaskState.completed, message="Done", reasoning="Task complete")
 
     assert response.todo_summary is None
+    assert response.include_subagent_output is False
 
     # Response with optional todo_summary
     response_with_summary = FinalResponseSchema(
@@ -103,3 +104,35 @@ def test_final_response_schema_optional_fields():
     )
 
     assert response_with_summary.todo_summary == "1/3 done"
+    assert response_with_summary.include_subagent_output is False
+
+
+def test_final_response_schema_include_subagent_output():
+    """Test the include_subagent_output field."""
+    # Default value (False)
+    response = FinalResponseSchema(
+        task_state=TaskState.completed,
+        message="Here's the analysis:",
+        reasoning="Sub-agent completed analysis",
+    )
+    assert response.include_subagent_output is False
+
+    # Explicit True - for pass-through with introduction
+    response_with_intro = FinalResponseSchema(
+        task_state=TaskState.completed,
+        message="The data analyst found the following:",
+        reasoning="Sub-agent returned detailed analysis",
+        include_subagent_output=True,
+    )
+    assert response_with_intro.include_subagent_output is True
+    assert response_with_intro.message == "The data analyst found the following:"
+
+    # Explicit True - for pure pass-through with empty message
+    response_passthrough = FinalResponseSchema(
+        task_state=TaskState.completed,
+        message="",
+        reasoning="Sub-agent response is complete, passing through as-is",
+        include_subagent_output=True,
+    )
+    assert response_passthrough.include_subagent_output is True
+    assert response_passthrough.message == ""

@@ -1,7 +1,7 @@
 """Agent Creator - Designs and creates specialized AI agents.
 
 This module implements an A2A agent that helps users create and configure
-specialized sub-agents through natural language conversation.
+specialized subagents through natural language conversation.
 """
 
 import logging
@@ -102,14 +102,14 @@ class UserCredentialInjector:
 
 
 # System prompt for the agent creator
-AGENT_CREATOR_SYSTEM_PROMPT = """You are an expert AI Agent Creator for the Alloy Infrastructure Agents platform. Your role is to design, create, and manage specialized sub-agents based on user requirements.
+AGENT_CREATOR_SYSTEM_PROMPT = """You are an expert AI Agent Creator for the Alloy Infrastructure Agents platform. Your role is to design, create, and manage specialized subagents based on user requirements.
 
 ## Your Capabilities
 
 You have access to four nannos tools:
-1. **playground_list_sub_agents** - View existing sub-agents to avoid duplicates and understand the current agent ecosystem
-2. **playground_create_sub_agent** - Create new sub-agents with specific configurations
-3. **playground_update_sub_agent** - Modify existing sub-agents to improve or fix their configurations
+1. **playground_list_sub_agents** - View existing subagents to avoid duplicates and understand the current agent ecosystem
+2. **playground_create_sub_agent** - Create new subagents with specific configurations
+3. **playground_update_sub_agent** - Modify existing subagents to improve or fix their configurations
 4. **playground_list_mcp_tools** - Discover available MCP tools that can be assigned to agents
 
 ## Agent Creation Best Practices
@@ -233,7 +233,7 @@ When configuring MCP tools:
    - Provide the user with:
      - Confirmation of creation
      - The agent's name and description
-     - Link to the agent: {PLAYGROUND_FRONTEND_URL}/sub-agents/{sub_agent_id}
+     - Link to the agent: {PLAYGROUND_FRONTEND_URL}/app/subagents/{sub_agent_id}
      - How to activate and use it
      - Any limitations or considerations
 
@@ -529,9 +529,14 @@ class AgentCreator(BaseAgent):
             logger.info("Set user credentials in context variables")
 
             # Execute graph with thread isolation
+            # CRITICAL: Use checkpoint_ns to isolate sub-agent checkpoints from orchestrator.
+            # The orchestrator and sub-agents share the same DynamoDB table, so we namespace
+            # sub-agent checkpoints to prevent internal messages (like MCP tool calls) from
+            # leaking into the orchestrator's conversation history.
             config = {
                 "configurable": {
                     "thread_id": task.context_id,
+                    "checkpoint_ns": "agent-creator",  # Namespace isolation
                 }
             }
 

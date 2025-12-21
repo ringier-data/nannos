@@ -21,6 +21,9 @@ from collections.abc import AsyncIterable, Sequence
 from typing import Any, Dict, Optional
 
 import httpx
+from langchain_core.messages import AIMessage
+from langsmith.run_helpers import get_current_run_tree
+
 from a2a.client import Client, ClientConfig, ClientFactory
 from a2a.types import (
     AgentCard,
@@ -36,8 +39,6 @@ from a2a.types import (
 from a2a.types import (
     Role as A2ARole,
 )
-from langchain_core.messages import AIMessage
-from langsmith.run_helpers import get_current_run_tree
 
 from ..authentication import (
     AuthenticationMethod,

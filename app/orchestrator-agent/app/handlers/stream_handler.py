@@ -4,6 +4,7 @@ Stream response handling for OrchestratorDeepAgent.
 Handles parsing agent state, building response objects, and auth requirement detection.
 """
 
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -366,7 +367,7 @@ class StreamHandler:
                 # Extract validated fields
                 task_state = parsed.task_state
                 message = parsed.message
-                reasoning = parsed.reasoning
+                # reasoning = parsed.reasoning
                 todo_summary = parsed.todo_summary
             except Exception as e:
                 logger.error(f"Failed to parse structured_response: {e}", exc_info=True)
@@ -382,10 +383,83 @@ class StreamHandler:
             )
             logger.debug(f"[STREAM HANDLER] Message: {message}")
 
+            # Check if we should append sub-agent output
+            include_subagent_output = getattr(parsed, "include_subagent_output", False)
+            logger.info(f"[STREAM HANDLER] include_subagent_output={include_subagent_output}")
+            if include_subagent_output:
+                # Extract sub-agent output from the most recent "task" ToolMessage in current turn
+                # The content is already stored there by DynamicToolDispatchMiddleware
+                #
+                # IMPORTANT: Filter out non-sub-agent tool messages:
+                # - FinalResponseSchema (Bedrock structured output)
+                # - Other tools (file operations, etc.)
+                # Only extract from ToolMessages that correspond to "task" tool calls (sub-agents)
+                if isinstance(final_state, dict):
+                    messages = final_state.get("messages", [])
+                    if messages:
+                        # Get current turn messages (after last HumanMessage)
+                        current_turn_messages = StreamHandler._extract_current_turn_messages(messages)
+
+                        # Build a map of tool_call_id -> tool_name for filtering
+                        tool_call_map = {}
+                        for msg in current_turn_messages:
+                            if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tool_call in msg.tool_calls:
+                                    tool_call_map[tool_call.get("id")] = tool_call
+
+                        # Find the most recent "task" ToolMessage (sub-agent response)
+                        subagent_content = None
+                        for msg in reversed(current_turn_messages):
+                            if isinstance(msg, ToolMessage):
+                                tool_call = tool_call_map.get(msg.tool_call_id)
+                                # Filter: only process "task" tool calls (sub-agents)
+                                if tool_call and tool_call.get("name") == "task":
+                                    # Found a sub-agent ToolMessage
+                                    try:
+                                        # Sub-agent content may be JSON-wrapped
+                                        if isinstance(msg.content, str):
+                                            parsed_content = json.loads(msg.content)
+                                            subagent_content = parsed_content.get("message", msg.content)
+                                        else:
+                                            subagent_content = msg.content
+                                    except json.JSONDecodeError:
+                                        subagent_content = msg.content
+
+                                    logger.info(
+                                        f"[STREAM HANDLER] Found sub-agent ToolMessage (tool_call_id={msg.tool_call_id}, "
+                                        f"subagent={tool_call.get('args', {}).get('subagent_type')}, "
+                                        f"content_length={len(subagent_content) if subagent_content else 0})"
+                                    )
+                                    break
+
+                        if subagent_content:
+                            # Append sub-agent output to message
+                            # Use double newline separator if message is not empty, otherwise just the content
+                            if message:
+                                message = f"{message}\n\n{subagent_content}"
+                            else:
+                                message = subagent_content
+                            logger.info(
+                                f"[STREAM HANDLER] Appended sub-agent output to message "
+                                f"(original length: {len(parsed.message)}, appended: {len(subagent_content)}, "
+                                f"total: {len(message)})"
+                            )
+                        else:
+                            logger.warning(
+                                "[STREAM HANDLER] include_subagent_output=true but no sub-agent ToolMessage found in current turn "
+                                "(FinalResponseSchema and other tool messages filtered out)"
+                            )
+                    else:
+                        logger.warning("[STREAM HANDLER] include_subagent_output=true but no messages in state")
+                else:
+                    logger.warning(
+                        f"[STREAM HANDLER] include_subagent_output=true but final_state is not a dict: {type(final_state)}"
+                    )
+
             # Build metadata
             metadata = {}
-            if reasoning:
-                metadata["reasoning"] = reasoning
+            # if reasoning:
+            #     metadata["reasoning"] = reasoning
             if todo_summary:
                 metadata["todo_summary"] = todo_summary
 

@@ -42,6 +42,7 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from langsmith import traceable
 
@@ -383,6 +384,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         # Return Command with state update (similar to SubAgentMiddleware)
         state_update = {k: v for k, v in result.items() if k not in excluded_keys} if isinstance(result, dict) else {}
+
+        # Note: Sub-agent output content is already stored in the ToolMessage above.
+        # When include_subagent_output=true, stream_handler will extract it from messages.
+
         return Command(
             update={
                 **state_update,
@@ -533,6 +538,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             content, a2a_metadata = self._extract_subagent_response(result, subagent_type)
             return self._build_subagent_command(result, content, a2a_metadata, tool_call_id, excluded_keys)
 
+        except GraphInterrupt as gi:
+            # is not an error - just an interrupt from the graph execution
+            logger.info(f"[DYNAMIC TOOL DISPATCH] Subagent '{subagent_type}' interrupted: {gi}")
+            # Re-raise so orchestrator can handle it
+            raise
         except Exception as e:
             logger.exception(f"Subagent '{subagent_type}' failed: {e}")
             return ToolMessage(
@@ -608,6 +618,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             content, a2a_metadata = self._extract_subagent_response(result, subagent_type)
             return self._build_subagent_command(result, content, a2a_metadata, tool_call_id, excluded_keys)
 
+        except GraphInterrupt as gi:
+            # is not an error - just an interrupt from the graph execution
+            logger.info(f"[DYNAMIC TOOL DISPATCH] Subagent '{subagent_type}' interrupted: {gi}")
+            # Re-raise so orchestrator can handle it
+            raise
         except Exception as e:
             logger.exception(f"Subagent '{subagent_type}' failed: {e}")
             return ToolMessage(

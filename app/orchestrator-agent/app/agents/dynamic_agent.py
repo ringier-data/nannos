@@ -31,7 +31,8 @@ from deepagents import CompiledSubAgent
 from deepagents.backends.composite import StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents import create_agent
-from langchain.agents.structured_output import AutoStrategy
+from langchain.agents.middleware import ToolRetryMiddleware
+from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
@@ -39,13 +40,15 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.errors import GraphInterrupt
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
+from ..a2a.base import LocalA2ARunnable, SubAgentInput
+from ..a2a.models import LocalLangGraphSubAgentConfig
+from ..middleware import RepeatedToolCallMiddleware
 from ..utils import get_language_display_name
-from .base import LocalA2ARunnable, SubAgentInput
-from .models import LocalLangGraphSubAgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -349,14 +352,26 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         """
         if self._discovered_tools is not None:
             logger.info(f"orchestrator tools: {self.orchestrator_tools}")
-            # TODO: we could add more fine grained control from the sub-agent config
-            basic_tools = [tool for tool in self.orchestrator_tools if tool.name in ["get_current_time"]]
-            basic_tool_names = [tool.name for tool in basic_tools]
+            # When MCP tools are whitelisted, also include essential orchestrator tools:
+            # - get_current_time: For temporal awareness
+            # - search_documents_rag: For semantic search over indexed documents
+            # - read_personal_file: For accessing personal workspace files
+            # - docstore_export: For exporting files to S3
+            # - create_presigned_url: For creating S3 presigned URLs
+            essential_tool_names = [
+                "get_current_time",
+                "docstore_search",
+                "read_personal_file",
+                "docstore_export",
+                "create_presigned_url",
+            ]
+            essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
+            essential_tool_names_found = [tool.name for tool in essential_tools]
             logger.info(
-                f"Using MCP tools + basic tools for '{self.name}': "
-                f"{len(self._discovered_tools)} MCP tools + {len(basic_tools)} basic tools {basic_tool_names}"
+                f"Using MCP tools + essential orchestrator tools for '{self.name}': "
+                f"{len(self._discovered_tools)} MCP tools + {len(essential_tools)} essential tools {essential_tool_names_found}"
             )
-            return self._discovered_tools + basic_tools
+            return self._discovered_tools + essential_tools
         # Validate orchestrator tools before returning them
         # This ensures tools inherited from orchestrator also have valid schemas
         orchestrator_tool_names = [tool.name for tool in self.orchestrator_tools]
@@ -408,16 +423,29 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             logger.debug(f"Using simple StateBackend for {self.name} (no persistence)")
 
         # Create middleware list with FilesystemMiddleware
-        middleware_list = [FilesystemMiddleware(backend=backend)]
+        middleware_list = [
+            FilesystemMiddleware(backend=backend),
+            ToolRetryMiddleware(
+                max_retries=5,
+                backoff_factor=2.0,
+            ),
+            RepeatedToolCallMiddleware(max_repeats=5, window_size=10),
+        ]
 
-        # Use AutoStrategy for structured output (works for both Bedrock and OpenAI)
+        # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
+        # Use AutoStrategy for Bedrock models (more efficient)
+        if self.model.__class__.__name__ == "AzureChatOpenAI":
+            response_format = ToolStrategy(schema=SubAgentResponseSchema)
+        else:
+            response_format = AutoStrategy(schema=SubAgentResponseSchema)
+
         self._agent = create_agent(
             self.model,
             system_prompt=system_prompt,
             tools=tools,
             checkpointer=self.checkpointer,  # Shared checkpointer for multi-turn conversations
             store=self.store,  # Shared document store for persistent memory
-            response_format=AutoStrategy(schema=SubAgentResponseSchema),
+            response_format=response_format,
             middleware=middleware_list,
         )
 
@@ -461,7 +489,15 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             agent_input = {"messages": [HumanMessage(content=content)]}
 
             # Use context_id as thread_id for conversation continuity when checkpointer is available
-            config = {"configurable": {"thread_id": context_id}} if context_id and self.checkpointer else {}
+            # CRITICAL: Use checkpoint_ns to isolate dynamic sub-agent checkpoints from orchestrator.
+            # The orchestrator and dynamic sub-agents share the same DynamoDB table, so we namespace
+            # sub-agent checkpoints to prevent internal messages (like tool calls) from
+            # leaking into the orchestrator's conversation history.
+            config = (
+                {"configurable": {"thread_id": context_id, "checkpoint_ns": f"dynamic-{self.name}"}}
+                if context_id and self.checkpointer
+                else {}
+            )
 
             # Invoke the agent
             logger.debug(f"Invoking dynamic agent '{self.name}' with content: {content[:100]}...")
@@ -469,6 +505,12 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
             # Extract response from agent result
             return self._translate_agent_result(result, context_id, task_id)
+
+        except GraphInterrupt as gi:
+            # is not an error - just an interrupt from the graph execution
+            logger.info(f"[DYNAMIC AGENT] Graph interrupted in '{self.name}': {gi}")
+            # Re-raise so the orchestrator can handle it properly
+            raise
 
         except Exception as e:
             logger.exception(f"Error in dynamic agent '{self.name}': {e}")

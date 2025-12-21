@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from deepagents import CompiledSubAgent
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from ..subagents.models import LocalSubAgentConfig
+from ..a2a.models import LocalSubAgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +260,45 @@ class AgentSettings:
         'Keep todo as "in_progress". Your overall task_state should be "input_required".\n'
         '- "completed": The sub-agent finished successfully. NOW you can mark the todo as "completed".\n'
         '- "failed": The sub-agent encountered an error. Mark the todo as "failed".\n'
+        "\n"
+        "**EFFICIENT SUB-AGENT OUTPUT HANDLING - AVOID REGENERATING CONTENT:**\n"
+        "IMPORTANT: When a sub-agent returns content that directly answers the user's question, DO NOT regenerate or summarize it!\n"
+        "Instead, use the pass-through mechanism to preserve the sub-agent's exact output.\n"
+        "\n"
+        "⚠️ CRITICAL RULE FOR include_subagent_output:\n"
+        "When setting include_subagent_output=true, almost ALWAYS use message='' (empty string)!\n"
+        "The sub-agent's output already includes its own introduction and context.\n"
+        "Adding your own introduction creates redundant, repetitive text that confuses users.\n"
+        "\n"
+        "Set include_subagent_output=true when:\n"
+        "- The sub-agent's response IS the answer the user wants (jokes, analysis, reports, data, code, etc.)\n"
+        "- The output is detailed/long and regenerating would waste tokens AND lose detail\n"
+        "- You want to preserve exact formatting, tables, code blocks, markdown, etc.\n"
+        "- The sub-agent did the actual work and you're just coordinating\n"
+        "\n"
+        "RULE: When include_subagent_output=true → Use message='' (99% of cases)\n"
+        "ONLY add a message if the sub-agent output has ZERO context (just raw data/numbers without explanation).\n"
+        "\n"
+        "✅ CORRECT Examples:\n"
+        "- User: 'Tell me a joke' → Joke sub-agent returns joke with intro → include_subagent_output=true, message='' ✓\n"
+        "- User: 'Analyze this data' → Sub-agent returns 'Analysis Results: ...' → include_subagent_output=true, message='' ✓\n"
+        "- User: 'Show GitHub issue #123' → Sub-agent returns formatted issue → include_subagent_output=true, message='' ✓\n"
+        "\n"
+        "❌ WRONG Examples:\n"
+        "- message='Here\\'s the joke:' when sub-agent already has intro → Creates redundancy! Use message='' instead.\n"
+        "- message='Analysis results:' when sub-agent output already says that → Redundant! Use message='' instead.\n"
+        "\n"
+        "Exception (rare): ONLY add message if sub-agent returns raw data WITHOUT any explanation:\n"
+        "- Sub-agent returns just '42' → message='The answer is:' → include_subagent_output=true\n"
+        "- Sub-agent returns just '| Name | Age |...' → message='User data:' → include_subagent_output=true\n"
+        "\n"
+        "Remember: Sub-agents are smart and include their own introductions. Trust them!\n"
+        "\n"
+        "Do NOT use include_subagent_output=true when:\n"
+        "- You need to synthesize/combine outputs from MULTIPLE sub-agents\n"
+        "- The sub-agent's response needs YOUR clarification or additional context\n"
+        "- You're providing a summary rather than the full output\n"
+        "- You have additional information to add beyond what the sub-agent returned\n"
         "\n"
         "**CRITICAL - Wrong Sub-Agent Called:**\n"
         "If you call a sub-agent and it returns an unexpected response (e.g., asking for Jira project when you wanted GitHub help), "

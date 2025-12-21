@@ -110,7 +110,7 @@ def create_app():
             "available MCP tools. Helps users design agent architecture, write system prompts, "
             "select appropriate models and tools, and follow agent creation best practices. "
             "Keywords: create agent, new agent, design agent, configure agent, agent setup, "
-            "sub-agent, system prompt, agent tools, agent capabilities."
+            "subagent, system prompt, agent tools, agent capabilities."
         ),
         url=agent_base_url,
         version="1.0.0",

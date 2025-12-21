@@ -15,8 +15,9 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
+from ..a2a import make_a2a_async_runnable
+from ..middleware import A2ATaskTrackingMiddleware
 from ..models import AgentSettings
-from ..subagents import A2ATaskTrackingMiddleware, make_a2a_async_runnable
 
 logger = logging.getLogger(__name__)
 

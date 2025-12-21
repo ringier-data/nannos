@@ -2,6 +2,11 @@
 
 This module provides utilities for building GraphRuntimeContext from UserConfig.
 Separated from config.py to avoid circular dependencies with model_factory.
+
+Agent creation imports are done inside build_runtime_context to avoid circular imports:
+- models/config (GraphRuntimeContext) is imported by middleware/dynamic_tool_dispatch
+- agents/* imports from middleware
+- To break the cycle, we import agents only when building context, not at module level
 """
 
 import logging
@@ -10,12 +15,9 @@ from typing import Any
 from deepagents import CompiledSubAgent
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
+from ..a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
 from ..core.model_factory import ModelType, create_model
 from ..core.s3_service import S3Service
-from ..subagents.dynamic_agent import create_dynamic_local_subagent
-from ..subagents.file_analyzer import create_file_analyzer_subagent
-from ..subagents.foundry_runnable import create_foundry_local_subagent
-from ..subagents.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
 from .config import GraphRuntimeContext, UserConfig
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,9 @@ def build_runtime_context(
         logger.info(f"Added {len(doc_tools)} document store tools: {[t.name for t in doc_tools]}")
 
     # Start with built-in local sub-agents (like file-analyzer)
+    # Import agent creation functions here to avoid circular imports
+    from ..agents.file_analyzer import create_file_analyzer_subagent
+
     # These run in-process but use the same registry as remote A2A agents
     subagent_registry: dict[str, CompiledSubAgent] = {}
     subagent_registry["file-analyzer"] = create_file_analyzer_subagent()
@@ -110,6 +115,10 @@ def build_runtime_context(
                 f"Added {len(filtered_static_tools)} static tools to orchestrator_tools for sub-agents: {tool_names}"
             )
         orchestrator_model_type = user_config.model or "gpt4o"  # Default orchestrator model
+
+        # Import agent creation functions here to avoid circular imports
+        from ..agents.dynamic_agent import create_dynamic_local_subagent
+        from ..agents.foundry_agent import create_foundry_local_subagent
 
         for config in user_config.local_subagents:
             try:

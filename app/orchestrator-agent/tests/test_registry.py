@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from app.a2a.models import LocalSubAgentConfig
 from app.core.registry import RegistryConfig, RegistryService, User
-from app.subagents.models import LocalSubAgentConfig
 
 
 @pytest.fixture

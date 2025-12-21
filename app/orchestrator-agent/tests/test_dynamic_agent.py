@@ -4,12 +4,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.subagents.dynamic_agent import (
+from app.a2a.models import LocalSubAgentConfig
+from app.agents.dynamic_agent import (
     DynamicLocalAgentRunnable,
     SubAgentResponseSchema,
     create_dynamic_local_subagent,
 )
-from app.subagents.models import LocalSubAgentConfig
 
 
 class TestDynamicLocalAgentRunnable:

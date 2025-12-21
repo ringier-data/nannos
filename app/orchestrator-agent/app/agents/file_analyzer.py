@@ -19,9 +19,8 @@ as remote A2A agents, ensuring consistent middleware behavior.
 """
 
 import logging
-import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from deepagents import CompiledSubAgent
@@ -31,9 +30,11 @@ from langchain_core.messages import (
     ImageContentBlock,
     TextContentBlock,
 )
-from langchain_openai import AzureChatOpenAI
+from langsmith import traceable
 
-from .base import LocalA2ARunnable, SubAgentInput
+from app.core.model_factory import create_model
+
+from ..a2a.base import LocalA2ARunnable, SubAgentInput
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,10 @@ FILE_ANALYZER_DESCRIPTION = (
 )
 
 # Regex to extract URLs from text
-URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
-S3_URI_PATTERN = re.compile(r"s3://[^\s<>\"']+")
+# Uses negative lookbehind to exclude trailing punctuation (periods, commas, etc.)
+# that often follow URLs in natural text
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+(?<![.,;!?\)\]])")
+S3_URI_PATTERN = re.compile(r"s3://[^\s<>\"']+(?<![.,;!?\)\]])")
 
 # MIME type categories for file handling
 TEXT_MIME_TYPES = {
@@ -150,28 +153,10 @@ async def _detect_file_type(url: str, client: httpx.AsyncClient) -> str:
     return "unknown"
 
 
-def _create_file_analyzer_model() -> AzureChatOpenAI:
+def _create_file_analyzer_model():
     """Create the model for file analysis."""
-    mini_deployment = os.environ.get("AZURE_OPENAI_VISION_DEPLOYMENT")
-    mini_model = os.environ.get("AZURE_OPENAI_VISION_MODEL_NAME", "gpt-4o-mini")
 
-    if mini_deployment:
-        logger.info(f"Using vision model: {mini_model} (deployment: {mini_deployment})")
-        return AzureChatOpenAI(
-            azure_deployment=mini_deployment,
-            temperature=0.3,
-            model=mini_model,
-        )
-
-    main_deployment = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT")
-    main_model = os.environ.get("AZURE_OPENAI_CHAT_MODEL_NAME", "gpt-4o")
-    logger.info(f"Using main model for vision: {main_model} (no AZURE_OPENAI_VISION_DEPLOYMENT configured)")
-
-    return AzureChatOpenAI(
-        azure_deployment=main_deployment,
-        temperature=0.3,
-        model=main_model,
-    )
+    return create_model("gpt-4o-mini", config=None, thinking=False)
 
 
 class FileAnalyzerRunnable(LocalA2ARunnable):
@@ -191,6 +176,93 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
     def description(self) -> str:
         """Return the agent description."""
         return FILE_ANALYZER_DESCRIPTION
+
+    @traceable(name="fetch_files")
+    async def _fetch_files(
+        self,
+        urls: List[str],
+        client: httpx.AsyncClient,
+    ) -> List[TextContentBlock | ImageContentBlock | FileContentBlock]:
+        """Fetch and prepare content blocks from URLs.
+
+        Args:
+            urls: List of HTTPS URLs to fetch
+            client: HTTP client for making requests
+
+        Returns:
+            List of content blocks ready for model input
+        """
+        content_blocks: List[TextContentBlock | ImageContentBlock | FileContentBlock] = []
+
+        for file_url in urls:
+            logger.info(f"Processing: {file_url[:80]}...")
+            file_type = await _detect_file_type(file_url, client)
+
+            if file_type == "text":
+                logger.info("Detected text file, fetching content...")
+                response = await client.get(file_url)
+                response.raise_for_status()
+
+                if len(response.content) > MAX_TEXT_FETCH_BYTES:
+                    raise ValueError(
+                        f"File too large ({len(response.content):,} bytes). Maximum is {MAX_TEXT_FETCH_BYTES:,} bytes."
+                    )
+
+                text_block: TextContentBlock = {
+                    "type": "text",
+                    "text": f"\n--- File: {file_url.split('?')[0].rsplit('/', 1)[-1]} ---\n{response.text}\n",
+                }
+                content_blocks.append(text_block)
+
+            elif file_type == "image":
+                logger.info("Detected image file, adding to vision request...")
+                image_block: ImageContentBlock = {"type": "image", "url": file_url}
+                content_blocks.append(image_block)
+
+            elif file_type == "document":
+                logger.info("Detected document file, adding to request...")
+                file_block: FileContentBlock = {
+                    "type": "file",
+                    "url": file_url,
+                    "mime_type": "application/pdf",
+                }
+                content_blocks.append(file_block)
+
+            else:
+                logger.info("Unknown file type, adding as generic file...")
+                file_block: FileContentBlock = {"type": "file", "url": file_url}
+                content_blocks.append(file_block)
+
+        return content_blocks
+
+    @traceable(name="synthesize_analysis")
+    async def _synthesize_analysis(
+        self,
+        content: str,
+        file_blocks: List[TextContentBlock | ImageContentBlock | FileContentBlock],
+    ) -> str:
+        """Synthesize analysis from fetched file content.
+
+        Args:
+            content: Original user request
+            file_blocks: Content blocks from fetched files
+
+        Returns:
+            Analysis result as string
+        """
+        model = _create_file_analyzer_model()
+
+        # Build complete content blocks with prompt
+        prompt_block: TextContentBlock = {
+            "type": "text",
+            "text": f"{FILE_ANALYZER_SYSTEM_PROMPT}\n\nUser request: {content}",
+        }
+
+        all_content_blocks = [prompt_block] + file_blocks
+
+        analysis_message = HumanMessage(content_blocks=all_content_blocks)
+        response = await model.ainvoke([analysis_message])
+        return str(response.content)
 
     async def _process(
         self,
@@ -220,62 +292,17 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 task_id=task_id,
             )
 
-        logger.info(f"Analyzing {len(urls)} file(s) from URLs...")
+        logger.info(f"Analyzing {len(urls)} file(s) from URLs...: {urls}")
 
         try:
-            model = _create_file_analyzer_model()
-            content_blocks: list = []
-
-            prompt_block: TextContentBlock = {
-                "type": "text",
-                "text": f"{FILE_ANALYZER_SYSTEM_PROMPT}\n\nUser request: {content}",
-            }
-            content_blocks.append(prompt_block)
-
+            # Fetch files and prepare content blocks
             async with httpx.AsyncClient(timeout=30.0) as client:
-                for file_url in urls:
-                    logger.info(f"Processing: {file_url[:80]}...")
-                    file_type = await _detect_file_type(file_url, client)
+                file_blocks = await self._fetch_files(urls, client)
 
-                    if file_type == "text":
-                        logger.info("Detected text file, fetching content...")
-                        response = await client.get(file_url)
-                        response.raise_for_status()
+            # Synthesize analysis from fetched content
+            analysis_result = await self._synthesize_analysis(content, file_blocks)
 
-                        if len(response.content) > MAX_TEXT_FETCH_BYTES:
-                            raise ValueError(
-                                f"File too large ({len(response.content):,} bytes). "
-                                f"Maximum is {MAX_TEXT_FETCH_BYTES:,} bytes."
-                            )
-
-                        text_block: TextContentBlock = {
-                            "type": "text",
-                            "text": f"\n--- File: {file_url.split('?')[0].rsplit('/', 1)[-1]} ---\n{response.text}\n",
-                        }
-                        content_blocks.append(text_block)
-
-                    elif file_type == "image":
-                        logger.info("Detected image file, adding to vision request...")
-                        image_block: ImageContentBlock = {"type": "image", "url": file_url}
-                        content_blocks.append(image_block)
-
-                    elif file_type == "document":
-                        logger.info("Detected document file, adding to request...")
-                        file_block: FileContentBlock = {
-                            "type": "file",
-                            "url": file_url,
-                            "mime_type": "application/pdf",
-                        }
-                        content_blocks.append(file_block)
-
-                    else:
-                        logger.info("Unknown file type, adding as generic file...")
-                        file_block: FileContentBlock = {"type": "file", "url": file_url}
-                        content_blocks.append(file_block)
-
-            analysis_message = HumanMessage(content_blocks=content_blocks)
-            response = await model.ainvoke([analysis_message])
-            return self._build_success_response(str(response.content), context_id=context_id, task_id=task_id)
+            return self._build_success_response(analysis_result, context_id=context_id, task_id=task_id)
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (401, 403):

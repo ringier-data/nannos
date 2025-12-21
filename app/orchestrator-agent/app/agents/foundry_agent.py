@@ -35,8 +35,8 @@ from foundry_sdk import AsyncFoundryClient as PlatformAsyncFoundryClient
 from foundry_sdk import Auth, ConfidentialClientAuth
 from pydantic import BaseModel, Field, model_validator
 
-from ..subagents.models import LocalFoundrySubAgentConfig
-from .base import LocalA2ARunnable, SubAgentInput
+from ..a2a.base import LocalA2ARunnable, SubAgentInput
+from ..a2a.models import LocalFoundrySubAgentConfig
 
 logger = logging.getLogger(__name__)
 

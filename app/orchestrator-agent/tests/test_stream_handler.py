@@ -832,3 +832,79 @@ class TestConservativeOverrideLogic:
         assert response.state == TaskState.input_required
         assert response.metadata is not None
         assert response.metadata["agent_name"] == "JiraAgent"
+
+
+class TestIncludeSubagentOutput:
+    """Tests for include_subagent_output pass-through behavior."""
+
+    def test_include_subagent_output_appends_tool_content(self):
+        """When include_subagent_output=True, append latest ToolMessage content to message."""
+        # Current turn: Human -> AI(task tool) -> ToolMessage(sub-agent) -> AI(FinalResponseSchema)
+        final_state = {
+            "messages": [
+                HumanMessage(content="Tell me a joke"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "smart-joke-responder"},
+                            "id": "call_task_1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Why did the model cross the road? To reduce loss!", tool_call_id="call_task_1"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "Here's the joke the smart-joke-responder created based on the TensorFlow Serving README:",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.completed
+        # Should include both intro and tool content separated by a blank line
+        assert "Here's the joke the smart-joke-responder created" in response.content
+        assert "Why did the model cross the road?" in response.content
+        assert "\n\n" in response.content
+
+    def test_include_subagent_output_no_tool_message_uses_intro_only(self):
+        """If no ToolMessage exists, keep only the LLM message (no crash)."""
+        final_state = {
+            "messages": [
+                HumanMessage(content="Tell me a joke"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "Here's the joke:",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_2",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.completed
+        assert response.content == "Here's the joke:"
