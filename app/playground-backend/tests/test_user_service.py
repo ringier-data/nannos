@@ -4,8 +4,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from playground_backend.services.user_service import UserService
-
 
 # Alias pg_session to db_session for compatibility with tests
 @pytest_asyncio.fixture
@@ -14,10 +12,7 @@ async def db_session(pg_session):
     yield pg_session
 
 
-@pytest.fixture
-def user_service():
-    """Create UserService instance."""
-    return UserService()
+# user_service fixture now provided by conftest.py with proper DI
 
 
 @pytest.mark.asyncio

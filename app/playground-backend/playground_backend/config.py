@@ -44,7 +44,7 @@ class PostgresConfig(BaseModel):
     database: str = Field(default_factory=lambda: os.getenv("POSTGRES_DB", "playground"))
     user: str = Field(default_factory=lambda: os.getenv("POSTGRES_USER", "postgres"))
     password: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("POSTGRES_PASSWORD", "password")))
-    schema: str = Field(default_factory=lambda: os.getenv("POSTGRES_SCHEMA", "playground"))
+    default_schema: str = Field(default_factory=lambda: os.getenv("POSTGRES_SCHEMA", "playground"))
 
     @property
     def connection_url(self) -> str:

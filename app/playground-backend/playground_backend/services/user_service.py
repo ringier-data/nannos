@@ -15,7 +15,6 @@ from ..models.user import (
     UserStatus,
     UserWithGroups,
 )
-from ..repositories.user_repository import user_repository
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +22,39 @@ logger = logging.getLogger(__name__)
 class UserService:
     """Manages users in PostgreSQL."""
 
-    def __init__(self):
-        self.repo = user_repository
+    def __init__(self, user_repository=None, audit_service=None):
+        """Initialize user service.
+
+        Args:
+            user_repository: Optional user repository instance.
+                If None, must be set via set_repository() before use.
+            audit_service: Optional audit service instance.
+                If None, must be set via set_audit_service() before use.
+        """
+        self._repo = user_repository
+        self._audit_service = audit_service
+
+    def set_repository(self, user_repository):
+        """Set the user repository (dependency injection)."""
+        self._repo = user_repository
+
+    def set_audit_service(self, audit_service):
+        """Set the audit service (dependency injection)."""
+        self._audit_service = audit_service
+
+    @property
+    def repo(self):
+        """Get the user repository, raising error if not set."""
+        if self._repo is None:
+            raise RuntimeError("UserRepository not injected. Call set_repository() during initialization.")
+        return self._repo
+
+    @property
+    def audit_service(self):
+        """Get the audit service, raising error if not set."""
+        if self._audit_service is None:
+            raise RuntimeError("AuditService not injected. Call set_audit_service() during initialization.")
+        return self._audit_service
 
     async def get_user(self, db: AsyncSession, user_id: str) -> User | None:
         """Retrieve a user by ID.
@@ -436,9 +466,8 @@ class UserService:
             # Audit only if this was a new user creation (not an update)
             if not user_exists:
                 from ..models.audit import AuditAction, AuditEntityType
-                from ..services.audit_service import audit_service
 
-                await audit_service.log_action(
+                await self.audit_service.log_action(
                     db=db,
                     actor_sub=sub,  # User creates themselves via OIDC
                     entity_type=AuditEntityType.USER,
@@ -538,7 +567,3 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to update user role: {e}")
             raise
-
-
-# Module-level singleton
-user_service = UserService()

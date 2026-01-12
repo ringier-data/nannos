@@ -87,6 +87,7 @@ class OrchestratorDeepAgent:
         self,
         model: ModelType | None = None,
         thinking: bool = False,
+        cost_logger=None,
     ):
         self.config = AgentSettings()
         self.thinking = thinking
@@ -94,7 +95,8 @@ class OrchestratorDeepAgent:
 
         # Initialize GraphFactory - centralizes all graph-related concerns
         # (model creation, checkpointer, middleware, graph caching)
-        self._graph_factory = GraphFactory(config=self.config, thinking=thinking)
+        # Pass cost_logger during initialization for proper dependency injection
+        self._graph_factory = GraphFactory(config=self.config, thinking=thinking, cost_logger=cost_logger)
 
         # Initialize client credentials auth for agent-to-agent communication
         self.oauth2_client = OidcOAuth2Client(
@@ -187,7 +189,7 @@ class OrchestratorDeepAgent:
             "name": user_config.name,
         }
         sub_agents = await self.agent_discovery_service.register_agents(
-            agent_urls=user.agent_urls,
+            agent_metadata=user.agent_metadata,  # Pass metadata with sub_agent_id
             token=user_config.access_token.get_secret_value(),
             user_context=user_context,
             streaming_middleware=self._graph_factory.a2a_middleware,
@@ -236,6 +238,11 @@ class OrchestratorDeepAgent:
         # (FinalResponseSchema is only for Bedrock models)
         static_tools = self._graph_factory.get_static_tools()
 
+        # Extract backend_url from cost_logger if available
+        backend_url = None
+        if self._graph_factory.cost_logger and hasattr(self._graph_factory.cost_logger, "backend_url"):
+            backend_url = self._graph_factory.cost_logger.backend_url
+
         return build_runtime_context(
             user_config,
             agent_settings=self.config,
@@ -246,6 +253,8 @@ class OrchestratorDeepAgent:
             s3_service=get_s3_service(),
             document_store_bucket=self.config.DOCUMENT_STORE_S3_BUCKET or None,
             backend_factory=self._graph_factory.backend_factory,
+            cost_logger=self._graph_factory.cost_logger,
+            backend_url=backend_url,
         )
 
     async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:
@@ -499,3 +508,11 @@ class OrchestratorDeepAgent:
     def get_agent_response(self, final_state) -> AgentStreamResponse:
         """Parse the agent response to extract structured information and check for auth requirements."""
         return StreamHandler.parse_agent_response(final_state)
+
+    async def close(self) -> None:
+        """Close and clean up agent resources.
+
+        This method should be called when the agent is no longer needed (e.g., on application shutdown).
+        It delegates to the GraphFactory to handle cleanup of cost logger, database connections, etc.
+        """
+        await self._graph_factory.close()

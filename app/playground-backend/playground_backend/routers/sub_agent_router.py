@@ -21,11 +21,16 @@ from ..models.sub_agent import (
     SubAgentVersionApproval,
 )
 from ..models.user import User
-from ..services.sub_agent_service import sub_agent_service
+from ..services.sub_agent_service import SubAgentService
 
 logger = logging.getLogger(__name__)
 
 router: APIRouter = APIRouter(prefix="/api/v1/sub-agents", tags=["sub-agents"])
+
+
+def get_sub_agent_service(request: Request) -> SubAgentService:
+    """Get sub-agent service from app state."""
+    return request.app.state.sub_agent_service
 
 
 @router.get("", response_model=SubAgentListResponse, tags=["MCP"], operation_id="playground_list_sub_agents")
@@ -49,6 +54,7 @@ async def list_sub_agents(
     - Use `owned_only=true` to see only owned sub-agents
     - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
         if owned_only:
@@ -71,10 +77,12 @@ async def list_sub_agents(
 
 @router.get("/pending", response_model=SubAgentListResponse)
 async def list_pending_approvals(
+    request: Request,
     db: DbSession,
     user: User = Depends(require_admin),
 ) -> SubAgentListResponse:
     """List sub-agents pending approval (admin only)."""
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agents = await sub_agent_service.get_pending_approvals(db)
         return SubAgentListResponse(items=sub_agents, total=len(sub_agents))
@@ -85,6 +93,7 @@ async def list_pending_approvals(
 
 @router.get("/configs/by-hash/{version_hash}", response_model=SubAgent)
 async def get_sub_agent_by_config_hash(
+    request: Request,
     version_hash: str,
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
@@ -96,6 +105,7 @@ async def get_sub_agent_by_config_hash(
 
     User must be owner or have group access to the sub-agent.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.get_sub_agent_by_version_hash(db, version_hash)
         if not sub_agent:
@@ -116,6 +126,7 @@ async def get_sub_agent_by_config_hash(
 
 @router.get("/configs/{config_version_id}", response_model=SubAgent)
 async def get_sub_agent_by_config_version(
+    request: Request,
     config_version_id: int,
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
@@ -127,6 +138,7 @@ async def get_sub_agent_by_config_version(
 
     User must be owner or have group access to the sub-agent.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.get_sub_agent_by_config_version_id(db, config_version_id)
         if not sub_agent:
@@ -159,6 +171,7 @@ async def create_sub_agent(
 
     Supports both session-based authentication and Bearer token authentication.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.create_sub_agent(db, user.id, data)
         return sub_agent
@@ -181,6 +194,7 @@ async def get_sub_agent(
     If no version is specified, returns the current version.
     User must be owner, have group access, or be admin (with admin mode enabled).
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
         sub_agent = await sub_agent_service.get_sub_agent_by_id(db, sub_agent_id, version=version)
@@ -204,6 +218,7 @@ async def get_sub_agent(
 
 @router.patch("/{sub_agent_id}", response_model=SubAgent, tags=["MCP"], operation_id="playground_update_sub_agent")
 async def update_sub_agent(
+    request: Request,
     sub_agent_id: int,
     data: SubAgentUpdate,
     db: DbSession,
@@ -216,6 +231,7 @@ async def update_sub_agent(
 
     Supports both session-based authentication and Bearer token authentication.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.update_sub_agent(db, sub_agent_id, data, user.id)
         if not sub_agent:
@@ -243,6 +259,7 @@ async def delete_sub_agent(
 
     Only the owner or an admin (with admin mode enabled) can delete.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
         deleted = await sub_agent_service.delete_sub_agent(db, sub_agent_id, user.id, is_admin=effective_admin)
@@ -269,6 +286,7 @@ async def activate_sub_agent(
     User must have access to the sub-agent (owner, public, or group member).
     Sub-agent must be approved (have a default_version).
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
         activated = await sub_agent_service.activate_sub_agent(db, sub_agent_id, user.id, is_admin=effective_admin)
@@ -289,11 +307,13 @@ async def activate_sub_agent(
 
 @router.post("/{sub_agent_id}/deactivate", status_code=200)
 async def deactivate_sub_agent(
+    request: Request,
     sub_agent_id: int,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> dict:
     """Deactivate a sub-agent for the current user."""
+    sub_agent_service = get_sub_agent_service(request)
     try:
         deactivated = await sub_agent_service.deactivate_sub_agent(db, sub_agent_id, user.id)
         if deactivated:
@@ -309,6 +329,7 @@ async def deactivate_sub_agent(
 
 @router.post("/{sub_agent_id}/submit", response_model=SubAgent)
 async def submit_for_approval(
+    request: Request,
     sub_agent_id: int,
     data: SubAgentSubmitRequest,
     db: DbSession,
@@ -319,6 +340,7 @@ async def submit_for_approval(
     Only the owner can submit. Sub-agent must be in 'draft' or 'rejected' status.
     Requires a change_summary describing what changed in this version.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.submit_for_approval(db, sub_agent_id, user.id, data.change_summary)
         if not sub_agent:
@@ -337,6 +359,7 @@ async def submit_for_approval(
 
 @router.post("/{sub_agent_id}/approve", response_model=SubAgent)
 async def approve_sub_agent(
+    request: Request,
     sub_agent_id: int,
     data: SubAgentApproval,
     db: DbSession,
@@ -347,6 +370,7 @@ async def approve_sub_agent(
     - action: 'approve' or 'reject'
     - rejection_reason: Required when action is 'reject'
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         if data.action == "reject" and not data.rejection_reason:
             raise HTTPException(status_code=400, detail="Rejection reason is required when rejecting")
@@ -381,6 +405,7 @@ async def get_sub_agent_permissions(
 
     Owner, admin (with admin mode enabled), or users with write permission can view permissions.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
         sub_agent = await sub_agent_service.get_sub_agent_by_id(db, sub_agent_id)
@@ -415,6 +440,7 @@ async def get_sub_agent_versions(
     Returns version history with all configuration data.
     User must be owner, have group access, or be admin.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
         sub_agent = await sub_agent_service.get_sub_agent_by_id(db, sub_agent_id)
@@ -447,6 +473,7 @@ async def update_sub_agent_permissions(
 
     Owner, admin (with admin mode enabled), or users with write permission can update permissions.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
 
@@ -484,6 +511,7 @@ async def update_sub_agent_permissions(
 
 @router.post("/{sub_agent_id}/versions/{version}/revert", response_model=SubAgent)
 async def revert_to_version(
+    request: Request,
     sub_agent_id: int,
     version: int,
     db: DbSession,
@@ -494,6 +522,7 @@ async def revert_to_version(
     Creates a new version with the reverted configuration.
     Only owner can revert. Only works for local sub-agents.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.revert_to_version(db, sub_agent_id, version, user.id)
         if not sub_agent:
@@ -512,6 +541,7 @@ async def revert_to_version(
 
 @router.post("/{sub_agent_id}/versions/{version}/submit", response_model=SubAgent)
 async def submit_version_for_approval(
+    request: Request,
     sub_agent_id: int,
     version: int,
     data: SubAgentSubmitRequest,
@@ -523,6 +553,7 @@ async def submit_version_for_approval(
     Only the owner can submit. Version must be in 'draft' or 'rejected' status.
     Requires a change_summary describing what changed in this version.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.submit_version_for_approval(
             db, sub_agent_id, version, user.id, data.change_summary
@@ -543,6 +574,7 @@ async def submit_version_for_approval(
 
 @router.delete("/{sub_agent_id}/versions/{version}", response_model=dict)
 async def delete_version(
+    request: Request,
     sub_agent_id: int,
     version: int,
     db: DbSession,
@@ -554,6 +586,7 @@ async def delete_version(
     Only draft, pending_approval, or rejected versions can be deleted.
     Approved versions cannot be deleted to preserve release history.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         deleted = await sub_agent_service.delete_version(db, sub_agent_id, version, user.id)
         if not deleted:
@@ -572,6 +605,7 @@ async def delete_version(
 
 @router.post("/{sub_agent_id}/versions/{version}/review", response_model=SubAgent)
 async def review_version(
+    request: Request,
     sub_agent_id: int,
     version: int,
     data: SubAgentVersionApproval,
@@ -585,6 +619,7 @@ async def review_version(
 
     When approved, the version automatically becomes the default version.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         if data.action == "reject" and not data.rejection_reason:
             raise HTTPException(status_code=400, detail="Rejection reason is required when rejecting")
@@ -611,6 +646,7 @@ async def review_version(
 
 @router.put("/{sub_agent_id}/default-version", response_model=SubAgent)
 async def set_default_version(
+    request: Request,
     sub_agent_id: int,
     data: SubAgentSetDefaultVersion,
     db: DbSession,
@@ -621,6 +657,7 @@ async def set_default_version(
     Only the owner can set the default version.
     The version must be in 'approved' status.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.set_default_version(db, sub_agent_id, data.version, user.id)
         if not sub_agent:
@@ -639,6 +676,7 @@ async def set_default_version(
 
 @router.get("/admin/pending-versions")
 async def list_pending_version_approvals(
+    request: Request,
     db: DbSession,
     user: User = Depends(require_admin),
 ) -> list[dict]:
@@ -646,6 +684,7 @@ async def list_pending_version_approvals(
 
     Returns version info with sub-agent context for approval queue.
     """
+    sub_agent_service = get_sub_agent_service(request)
     try:
         pending = await sub_agent_service.get_pending_version_approvals(db)
         return pending

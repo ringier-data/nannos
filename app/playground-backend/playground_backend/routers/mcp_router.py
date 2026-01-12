@@ -92,6 +92,13 @@ async def list_mcp_tools(
                             detail="Session expired. Please log in again.",
                         )
 
+                    # Create OAuth2 client for refresh
+                    oauth2_client = OidcOAuth2Client(
+                        client_id=config.oidc.client_id,
+                        client_secret=config.oidc.client_secret.get_secret_value(),
+                        issuer=config.oidc.issuer,
+                    )
+
                     # Refresh the access token
                     refreshed_tokens = await oauth2_client.refresh_token(refresh_token)
 

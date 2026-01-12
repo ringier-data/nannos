@@ -1,5 +1,9 @@
 # Playground Backend Copilot Instructions
 
+## Maintaining These Instructions
+
+When implementing new features or refactoring existing code, consider if these instructions need updating. Only document design decisions that are non-obvious and would require reading large portions of the codebase to understand them.
+
 ## Tech Stack
 
 - FastAPI with async/await
@@ -27,6 +31,28 @@ The `start-dev.sh` script is the single source of truth for local environment se
 - Type hints are required for all function signatures
 - Use dependency injection via FastAPI's `Depends()`
 - Prefer explicit over implicit error handling
+
+## Python Environment
+
+This project uses `uv` for dependency management:
+
+```bash
+# Install dependencies
+uv sync
+
+# Run Python commands
+uv run python script.py
+
+# Run tests (prefer runTests MCP tool when available)
+uv run pytest tests/ -v
+
+# Run with coverage
+uv run pytest tests/ --cov=playground_backend --cov-report=html
+```
+
+## File Writing Safety
+
+NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incremental edits with proper file writing tools instead.
 
 ## Architecture Patterns
 
@@ -140,6 +166,14 @@ Available in `AuditAction` enum:
 - Always include `-- rambler up` and `-- rambler down` comments
 
 ## Testing
+
+**Prefer the runTests MCP tool over terminal commands when running tests.**
+
+Fallback to direct pytest commands when needed:
+```bash
+uv run pytest tests/ -v
+uv run pytest tests/test_specific.py::test_function -v
+```
 
 ### Test Structure
 - Use `pg_session` fixture for database access (not `db_session`)
@@ -356,6 +390,21 @@ has_access = await user_group_service.check_resource_permission(
 - **`check_action_allowed()`**: Check if group role allows an action
 - **`check_user_permission()`**: Check system-level permissions (groups, users)
 - **`check_resource_permission()`**: Check access to specific resources (sub-agents, secrets)
+
+## Critical Design Decisions
+
+### Repository Pattern with Automatic Audit Logging (repositories/base.py)
+
+ALL database write operations (INSERT/UPDATE/DELETE) MUST use the repository pattern. The `AuditedRepository` base class automatically logs every mutation with before/after state. Direct SQL writes bypass the audit trail. Repositories call `audit_service.log_action()` automatically in `create()`, `update()`, and `delete()` methods.
+
+### Two-Layer RBAC with Permission Intersection (authorization.py, services/user_group_service.py)
+
+Effective permissions = System Role ∩ Group Role ∩ Resource Permissions. System roles (`member`, `approver`, `admin`) define what users CAN do system-wide. Group roles (`read`, `write`, `manager`) define what their role ALLOWS in a group. Resource permissions define what a group HAS on a resource. Special actions like `approve` require BOTH system approver role AND group write access. Admin `.admin` suffix actions bypass group intersection but require admin-mode enabled.
+
+### Real Database Testing Over Mocking (tests/)
+
+Prefer actual PostgreSQL database writes for testing audit logging and data mutations, not mocks. This catches serialization issues, constraint violations, and race conditions that mocks would miss. Use `pg_session` fixture for real database operations.
+
 
 ## Important Notes
 

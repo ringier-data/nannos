@@ -23,6 +23,7 @@ from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
     OidcUserinfoMiddleware,
+    SubAgentIdMiddleware,
     UserContextFromRequestStateMiddleware,
 )
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
@@ -54,12 +55,14 @@ async def lifespan(app) -> AsyncIterator[None]:
     Yields:
         None
     """
-    # Startup
+
+    # await agent.startup()
     logger.info("Application startup complete")
 
     yield
 
-    # Shutdown: cleanup the agent
+    # Shutdown: cleanup the agent (cost logger, etc.)
+    await agent.shutdown()
     await agent.close()
     logger.info("Application shutdown - Agent Creator closed")
 
@@ -136,8 +139,12 @@ def create_app():
     # Build app with lifespan
     app = server.build(lifespan=lifespan)
 
-    # UserContextFromRequestStateMiddleware runs AFTER OIDC (transfers user to A2A context)
+    # UserContextFromRequestStateMiddleware runs AFTER SubAgentId (transfers user + sub_agent_id to A2A context)
     app.add_middleware(UserContextFromRequestStateMiddleware)
+
+    # SubAgentIdMiddleware extracts sub_agent_id from request metadata for cost tracking
+    # Must run BEFORE UserContextFromRequestStateMiddleware so sub_agent_id is in request.state
+    app.add_middleware(SubAgentIdMiddleware)
 
     # OidcUserinfoMiddleware runs FIRST (validates JWT, sets request.state.user)
     app.add_middleware(

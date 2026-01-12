@@ -40,11 +40,16 @@ class UserConfig(BaseModel):
     """
 
     user_id: str = Field(..., description="User identifier")
-    access_token: Optional[SecretStr] = Field(default=None, description="User authentication token (optional for downstream agents)")
+    access_token: Optional[SecretStr] = Field(
+        default=None, description="User authentication token (optional for downstream agents)"
+    )
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
     language: str = Field(default="en", description="User's preferred language")
     timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
+    sub_agent_id: Optional[int] = Field(
+        default=None, description="Sub-agent ID for cost attribution (set by orchestrator)"
+    )
     sub_agents: Optional[list] = Field(default=None, description="Discovered sub-agents")
     tools: Optional[list] = Field(default=None, description="Discovered tools")
 

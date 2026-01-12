@@ -5,11 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.middleware.user_preferences_middleware import (
-    LANGUAGE_NAMES,
     UserPreferencesMiddleware,
-    get_language_display_name,
 )
 from app.models.config import GraphRuntimeContext
+from app.utils import LANGUAGE_NAMES, get_language_display_name
 
 
 class TestGetLanguageDisplayName:
@@ -99,9 +98,12 @@ class TestUserPreferencesMiddleware:
         assert "MUST respond in German" in addendum
 
     def test_build_preferences_addendum_with_empty_language(self, middleware, user_context_no_language):
-        """Should return empty addendum when language is empty."""
+        """Should return addendum with timezone but no language when language is empty."""
         addendum = middleware._build_preferences_addendum(user_context_no_language)
-        assert addendum == ""
+        # Should still include timezone info even without language
+        assert "**User Preferences:**" in addendum
+        assert "User Timezone" in addendum
+        assert "Response Language" not in addendum  # Language part should be skipped
 
     def test_build_preferences_addendum_with_custom_prompt(self, middleware):
         """Should include custom_prompt in addendum when set."""

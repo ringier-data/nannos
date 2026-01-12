@@ -6,32 +6,19 @@ specialized subagents through natural language conversation.
 
 import logging
 import os
-from collections.abc import AsyncIterable, Awaitable, Callable
-from contextvars import ContextVar
-from typing import Optional
+from collections.abc import Awaitable, Callable
 
-import boto3
-from a2a.types import Task, TaskState
-from botocore.config import Config as BotoConfig
-from deepagents import create_deep_agent
-from langchain.agents.structured_output import AutoStrategy
-from langchain_aws import ChatBedrockConverse
-from langchain_core.tools import BaseTool
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.interceptors import MCPToolCallRequest, MCPToolCallResult
+from langchain_core.messages import ToolMessage
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from langgraph.graph.state import CompiledStateGraph
-from langgraph_checkpoint_aws import DynamoDBSaver
+from langgraph.types import Command
+from mcp.types import CallToolResult
 from pydantic import BaseModel, Field
-from ringier_a2a_sdk.agent import BaseAgent
-from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
+from ringier_a2a_sdk.agent import LangGraphBedrockAgent
+from ringier_a2a_sdk.cost_tracking.logger import get_request_credentials
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
 logger = logging.getLogger(__name__)
-
-# Context variables for thread-safe credential storage
-_current_user_id: ContextVar[Optional[str]] = ContextVar("current_user_id", default=None)
-_current_access_token: ContextVar[Optional[str]] = ContextVar("current_access_token", default=None)
 
 
 class UserCredentialInjector:
@@ -49,8 +36,8 @@ class UserCredentialInjector:
     async def __call__(
         self,
         request: MCPToolCallRequest,
-        handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
-    ) -> MCPToolCallResult:
+        handler: Callable[[MCPToolCallRequest], Awaitable[CallToolResult | ToolMessage | Command]],
+    ) -> CallToolResult | ToolMessage | Command:
         """Inject user credentials into the request headers.
 
         Args:
@@ -61,8 +48,7 @@ class UserCredentialInjector:
             The result from the handler
         """
         # Get credentials from context variables (thread-safe)
-        user_id = _current_user_id.get()
-        access_token = _current_access_token.get()
+        user_id, access_token = get_request_credentials()
 
         if not user_id or not access_token:
             logger.error(
@@ -296,339 +282,70 @@ class FinalResponseSchema(BaseModel):
     )
 
 
-class AgentCreator(BaseAgent):
+class AgentCreator(LangGraphBedrockAgent):
     """Agent Creator - Helps users design and create specialized AI agents.
 
     This agent uses Claude Sonnet 4.5 via AWS Bedrock and has access to playground
     backend MCP tools for managing the agent lifecycle.
 
     Architecture:
+    - Extends LangGraphBedrockAgent base class
     - MCP tools discovered once at initialization (unauthenticated)
-    - User credentials injected at runtime for tool execution
+    - User credentials injected at runtime for tool execution via UserCredentialInjector
     - Shared DynamoDB checkpointer for conversation persistence
-    - Single graph instance reused across requests
     """
 
-    SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
-
     def __init__(self):
-        """Initialize the Agent Creator.
-
-        Discovers MCP tools from playground backend and creates the DeepAgent graph.
-        """
-        super().__init__()
-
-        # Configuration from environment
+        """Initialize the Agent Creator."""
+        # Store configuration before calling super().__init__()
         self.playground_backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
         self.playground_frontend_url = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
-        self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "eu-central-1")
-        self.bedrock_model_id = os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0")
 
-        # Checkpointer configuration
-        checkpoint_table = os.getenv("CHECKPOINT_DYNAMODB_TABLE_NAME", "agent-creator-checkpoints")
-        checkpoint_region = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
-        checkpoint_ttl_days = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
-        checkpoint_compression = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
-        checkpoint_s3_bucket = os.getenv("CHECKPOINT_S3_BUCKET_NAME")
-
-        # Create shared checkpointer
-        s3_config = None
-        if checkpoint_s3_bucket:
-            s3_config = {"bucket_name": checkpoint_s3_bucket}
-            logger.info(f"S3 offloading enabled for large checkpoints: {checkpoint_s3_bucket}")
-
-        self._checkpointer = DynamoDBSaver(
-            table_name=checkpoint_table,
-            region_name=checkpoint_region,
-            ttl_seconds=checkpoint_ttl_days * 24 * 60 * 60,
-            enable_checkpoint_compression=checkpoint_compression,
-            s3_offload_config=s3_config,  # type: ignore[arg-type]
-        )
-        logger.info(f"Initialized DynamoDB checkpointer: {checkpoint_table}")
-
-        # Create credential injection interceptor (credentials set per-request via contextvars)
+        # Create credential injection interceptor
         self._credential_injector = UserCredentialInjector()
 
-        # MCP tools will be discovered lazily on first request
-        # (Can't await in __init__, so we defer discovery)
-        self._mcp_tools: Optional[list[BaseTool]] = None
-        self._mcp_tools_lock = False  # Simple flag to prevent concurrent discovery
-        logger.info("MCP tool discovery will happen on first request")
+        super().__init__()
 
-        # Configure boto3 client with timeouts and retry logic from environment variables
-        # to handle long-running Claude Sonnet 4.5 requests
-        read_timeout = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))  # Default: 5 minutes
-        connect_timeout = int(os.getenv("BEDROCK_CONNECT_TIMEOUT", "10"))  # Default: 10 seconds
-        max_attempts = int(os.getenv("BEDROCK_MAX_RETRY_ATTEMPTS", "3"))  # Default: 3 retries
-        retry_mode = os.getenv("BEDROCK_RETRY_MODE", "adaptive")  # Default: adaptive
+    async def startup(self):
+        """Async startup hook to be called from FastAPI lifespan/startup event."""
+        if hasattr(self, "_cost_logger") and self._cost_logger:
+            await self._cost_logger.start()
+            logger.info("Cost logger background worker started")
 
-        boto_config = BotoConfig(
-            read_timeout=read_timeout,
-            connect_timeout=connect_timeout,
-            retries={
-                "max_attempts": max_attempts,
-                "mode": retry_mode,
-            },
-        )
+    async def shutdown(self):
+        """Async shutdown hook to be called from FastAPI lifespan/shutdown event."""
+        if hasattr(self, "_cost_logger") and self._cost_logger:
+            await self._cost_logger.shutdown()
+            logger.info("Cost logger shutdown complete")
 
-        # Create bedrock-runtime client with custom configuration
-        bedrock_client = boto3.client(
-            "bedrock-runtime",
-            region_name=self.bedrock_region,
-            config=boto_config,
-        )
+    # Abstract method implementations
 
-        logger.info(
-            f"Created Bedrock client with read_timeout={read_timeout}s, "
-            f"connect_timeout={connect_timeout}s, max_retry_attempts={max_attempts} ({retry_mode} mode)"
-        )
+    def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+        """Return MCP server connection for playground backend.
 
-        # Create the model
-        self._model = ChatBedrockConverse(
-            client=bedrock_client,
-            region_name=self.bedrock_region,
-            model=self.bedrock_model_id,
-            temperature=0,
-        )
-        logger.info(f"Initialized Bedrock model: {self.bedrock_model_id}")
-
-        self._graph: CompiledStateGraph | None = None
-        self._mcp_client: Optional[MultiServerMCPClient] = None
-
-    async def _ensure_mcp_tools_loaded(self):
-        """Ensure MCP tools are discovered and loaded.
-
-        This is called lazily on first request to avoid blocking __init__.
-        Uses a simple lock to prevent concurrent discovery.
+        Returns connection without authentication - credentials are injected
+        at runtime via UserCredentialInjector.
         """
-        if self._mcp_tools is not None:
-            return  # Already loaded
-
-        if self._mcp_tools_lock:
-            # Another request is loading, wait a bit
-            import asyncio
-
-            for _ in range(10):  # Wait up to 1 second
-                await asyncio.sleep(0.1)
-                if self._mcp_tools is not None:
-                    return
-            logger.warning("Timeout waiting for MCP tools discovery")
-            return
-
-        # Acquire lock and discover tools
-        self._mcp_tools_lock = True
-        try:
-            logger.info("Discovering MCP tools from playground backend...")
-
-            # Create MCP client without credentials
-            playground_mcp_url = f"{self.playground_backend_url}/mcp"
-            connections = {
-                "playground": StreamableHttpConnection(
-                    transport="streamable_http",
-                    url=playground_mcp_url,
-                )
-            }
-
-            # Create MCP client
-            self._mcp_client = MultiServerMCPClient(connections=connections)
-
-            # Load tools with interceptor for credential injection
-            # Pass session=None so tools create sessions per-call with modified headers
-            from langchain_mcp_adapters.tools import load_mcp_tools
-
-            self._mcp_tools = await load_mcp_tools(
-                session=None,  # Important: tools create sessions per-call
-                connection=connections["playground"],
-                tool_interceptors=[self._credential_injector],
-                server_name="playground",
-            )
-
-            logger.info(f"Discovered {len(self._mcp_tools)} MCP tools")
-
-            # Recreate graph with MCP tools
-            logger.info("Recreating graph with MCP tools...")
-            system_prompt = AGENT_CREATOR_SYSTEM_PROMPT.replace(
-                "{PLAYGROUND_FRONTEND_URL}", self.playground_frontend_url
-            )
-            tools = self._mcp_tools
-
-            self._graph = create_deep_agent(
-                model=self._model,
-                tools=tools,
-                subagents=[],
-                system_prompt=system_prompt,
-                checkpointer=self._checkpointer,
-                middleware=[],  # No middleware needed, interceptor handles it
-                response_format=AutoStrategy(schema=FinalResponseSchema),
-            )
-            logger.info("Graph recreated with MCP tools")
-        except Exception as e:
-            logger.error(f"Failed to discover MCP tools: {e}", exc_info=True)
-            # Use empty list as fallback
-            self._mcp_tools = []
-            logger.warning("Continuing without MCP tools")
-        finally:
-            self._mcp_tools_lock = False
-
-    async def _discover_mcp_tools(self) -> list[BaseTool]:
-        """Discover MCP tools from playground backend (unauthenticated).
-
-        Note: This discovers tool schemas without authentication.
-        Actual tool execution requires user credentials injected at runtime.
-
-        Returns:
-            List of MCP tools filtered to the required 4 tools
-        """
-        connections = {}
         playground_mcp_url = f"{self.playground_backend_url}/mcp"
-        connections["playground"] = StreamableHttpConnection(
-            transport="streamable_http",
-            url=playground_mcp_url,
-        )
-        client = MultiServerMCPClient(connections=connections)
-        tools = await client.get_tools()
-        return tools
-
-    async def close(self):
-        """Cleanup resources.
-
-        Tools create sessions on-the-fly, so no persistent session to clean up.
-        """
-        logger.info("AgentCreator closed")
-
-    async def stream(self, query: str, user_config: UserConfig, task: Task) -> AsyncIterable[AgentStreamResponse]:
-        """Stream responses for a user query.
-
-        This creates a fresh MCP client with the user's credentials for each request,
-        then executes the graph and streams the results.
-
-        Args:
-            query: The user's natural language query
-            user_config: User configuration including user_id and access_token
-            task: The task context for the current interaction
-
-        Yields:
-            AgentStreamResponse objects with state updates and content
-        """
-        try:
-            # Ensure MCP tools are loaded before processing
-            await self._ensure_mcp_tools_loaded()
-
-            # Validate user credentials
-            logger.info(f"Processing query for user {user_config.user_id}")
-
-            if not user_config.access_token:
-                raise ValueError("User access token is required for MCP tool execution")
-
-            access_token = user_config.access_token.get_secret_value()
-
-            # Set credentials in context variables (thread-safe for concurrent requests)
-            # The interceptor will read these values when tools are called
-            _current_user_id.set(user_config.user_id)
-            _current_access_token.set(access_token)
-            logger.info("Set user credentials in context variables")
-
-            # Execute graph with thread isolation
-            # CRITICAL: Use checkpoint_ns to isolate sub-agent checkpoints from orchestrator.
-            # The orchestrator and sub-agents share the same DynamoDB table, so we namespace
-            # sub-agent checkpoints to prevent internal messages (like MCP tool calls) from
-            # leaking into the orchestrator's conversation history.
-            config = {
-                "configurable": {
-                    "thread_id": task.context_id,
-                    "checkpoint_ns": "agent-creator",  # Namespace isolation
-                }
-            }
-
-            # Convert query to messages format
-            from langchain_core.messages import AIMessage, HumanMessage
-
-            input_messages = [HumanMessage(content=query)]
-
-            # Stream graph execution and accumulate final content
-            chunk_count = 0
-            final_user_content = []  # Accumulate all user-facing content
-
-            async for event in self._graph.astream({"messages": input_messages}, config):
-                chunk_count += 1
-                logger.debug(f"Graph event #{chunk_count}: {type(event)}")
-
-                # LangGraph returns dict events with node names as keys
-                if isinstance(event, dict):
-                    # Extract messages from the event
-                    for node_name, node_data in event.items():
-                        if isinstance(node_data, dict) and "messages" in node_data:
-                            messages = node_data["messages"]
-                            if isinstance(messages, list):
-                                for msg in messages:
-                                    if isinstance(msg, AIMessage) and msg.content:
-                                        content = str(msg.content)
-                                        logger.debug(f"Content from {node_name}: {content[:100]}...")
-                                        # Accumulate content for final response
-                                        final_user_content.append(content)
-                                        # Stream content as working state (progress updates)
-                                        yield AgentStreamResponse(
-                                            state=TaskState.working,
-                                            content=content,
-                                        )
-
-            logger.debug(f"Stream processing complete. Total chunks: {chunk_count}")
-
-            # Get final state to check for interrupts and extract final response
-            final_state = self._graph.get_state(config)
-
-            # Check for interrupts
-            if final_state.interrupts:
-                yield AgentStreamResponse(
-                    state=TaskState.input_required,
-                    content="Process interrupted. Additional input required.",
-                )
-                return
-
-            # Extract final state from FinalResponseSchema tool call (if present)
-            task_state = TaskState.completed
-
-            if final_state.values and "messages" in final_state.values:
-                messages = final_state.values["messages"]
-                # Look for the last AI message with FinalResponseSchema tool call
-                for msg in reversed(messages):
-                    if isinstance(msg, AIMessage):
-                        # Check if FinalResponseSchema tool was called
-                        if hasattr(msg, "tool_calls") and msg.tool_calls:
-                            for tool_call in msg.tool_calls:
-                                if tool_call.get("name") == "FinalResponseSchema":
-                                    args = tool_call.get("args", {})
-                                    state_str = args.get("task_state", "completed")
-                                    # Map string state to TaskState enum
-                                    if state_str == "input_required":
-                                        task_state = TaskState.input_required
-                                    elif state_str == "failed":
-                                        task_state = TaskState.failed
-                                    elif state_str == "working":
-                                        task_state = TaskState.working
-                                    else:
-                                        task_state = TaskState.completed
-                                    logger.info(f"FinalResponseSchema found: state={task_state}")
-                                    break
-
-                        if task_state != TaskState.completed or msg.tool_calls:
-                            break
-
-            # Send final completion with the accumulated user-facing content
-            # The FinalResponseSchema's "message" field is for internal tracking, not displayed to user
-            final_content = "\n\n".join(final_user_content) if final_user_content else "Request processed successfully."
-
-            logger.info(f"Sending final completion: task_state={task_state}, content_length={len(final_content)}")
-            yield AgentStreamResponse(
-                state=task_state,
-                content=final_content,
+        return {
+            "playground": StreamableHttpConnection(
+                transport="streamable_http",
+                url=playground_mcp_url,
             )
-            logger.info("Final response sent successfully")
+        }
 
-        except Exception as e:
-            logger.error(f"Error in AgentCreator.stream: {e}", exc_info=True)
-            yield AgentStreamResponse(
-                state=TaskState.failed,
-                content=f"An error occurred while processing your request: {str(e)}",
-                metadata={"error": str(e)},
-            )
+    def _get_system_prompt(self) -> str:
+        """Return agent creator system prompt with configured frontend URL."""
+        return AGENT_CREATOR_SYSTEM_PROMPT.replace("{PLAYGROUND_FRONTEND_URL}", self.playground_frontend_url)
+
+    def _get_checkpoint_namespace(self) -> str:
+        """Return checkpoint namespace for agent-creator."""
+        return "agent-creator"
+
+    def _get_bedrock_model_id(self) -> str:
+        """Return Bedrock model ID for agent creator."""
+        return os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0")
+
+    def _get_tool_interceptors(self) -> list:
+        """Return credential injector for MCP tool calls."""
+        return [self._credential_injector]

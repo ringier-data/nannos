@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +19,10 @@ from ..models.sub_agent import (
     SubAgentType,
     SubAgentUpdate,
 )
-from ..repositories.sub_agent_repository import ApprovalContext, sub_agent_repository
+from ..repositories.sub_agent_repository import ApprovalContext
+
+if TYPE_CHECKING:
+    from ..repositories.sub_agent_repository import SubAgentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +40,25 @@ class SubAgentService:
     - For specific version: join with the requested version
     """
 
-    def __init__(self):
-        self.repo = sub_agent_repository
+    def __init__(self, sub_agent_repository=None):
+        """Initialize sub-agent service.
+
+        Args:
+            sub_agent_repository: Optional sub-agent repository instance.
+                If None, must be set via set_repository() before use.
+        """
+        self._repo: "SubAgentRepository | None" = sub_agent_repository
+
+    def set_repository(self, sub_agent_repository: "SubAgentRepository") -> None:
+        """Set the sub-agent repository (dependency injection)."""
+        self._repo = sub_agent_repository
+
+    @property
+    def repo(self):
+        """Get the sub-agent repository, raising error if not set."""
+        if self._repo is None:
+            raise RuntimeError("SubAgentRepository not injected. Call set_repository() during initialization.")
+        return self._repo
 
     async def get_accessible_sub_agents(
         self,
@@ -79,6 +99,7 @@ class SubAgentService:
                    cv.foundry_query_api_name as cv_foundry_query_api_name,
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
@@ -130,6 +151,7 @@ class SubAgentService:
                        cv.foundry_query_api_name as cv_foundry_query_api_name,
                        cv.foundry_scopes as cv_foundry_scopes,
                        cv.foundry_version as cv_foundry_version,
+                       cv.pricing_config as cv_pricing_config,
                        cv.change_summary as cv_change_summary, cv.status as cv_status,
                        cv.approved_by_user_id as cv_approved_by_user_id,
                        cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
@@ -185,6 +207,7 @@ class SubAgentService:
                    cv.foundry_query_api_name as cv_foundry_query_api_name,
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
@@ -230,6 +253,7 @@ class SubAgentService:
                    cv.foundry_query_api_name as cv_foundry_query_api_name,
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
@@ -275,6 +299,7 @@ class SubAgentService:
                    cv.foundry_query_api_name as cv_foundry_query_api_name,
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
@@ -318,6 +343,7 @@ class SubAgentService:
                    cv.foundry_query_api_name as cv_foundry_query_api_name,
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
@@ -452,6 +478,7 @@ class SubAgentService:
             foundry_query_api_name=data.foundry_query_api_name,
             foundry_scopes=[s.value for s in data.foundry_scopes] if data.foundry_scopes else None,
             foundry_version=data.foundry_version,
+            pricing_config=data.pricing_config,
         )
 
         await db.commit()
@@ -510,6 +537,7 @@ class SubAgentService:
             or data.foundry_ontology_rid is not None
             or data.foundry_query_api_name is not None
             or data.foundry_scopes is not None
+            or data.pricing_config is not None
         )
 
         if needs_new_version:
@@ -643,6 +671,12 @@ class SubAgentService:
                 data.mcp_tools if data.mcp_tools is not None else (current_config.mcp_tools if current_config else [])
             )
 
+            # Handle pricing_config (for remote and foundry agents)
+            version_pricing_config = (
+                data.pricing_config
+                if data.pricing_config is not None
+                else (current_config.pricing_config if current_config else None)
+            )
             # Create new version
             await self._create_config_version(
                 db,
@@ -662,6 +696,7 @@ class SubAgentService:
                 foundry_query_api_name=version_foundry_query_api_name,
                 foundry_scopes=version_foundry_scopes,
                 foundry_version=version_foundry_version,
+                pricing_config=version_pricing_config,
             )
 
             # Update current_version pointer
@@ -1122,6 +1157,7 @@ class SubAgentService:
             foundry_query_api_name=target.config_version.foundry_query_api_name,
             foundry_scopes=target.config_version.foundry_scopes,
             foundry_version=target.config_version.foundry_version,
+            pricing_config=target.config_version.pricing_config,
         )
 
         await self.repo.update_current_version(
@@ -1333,6 +1369,7 @@ class SubAgentService:
         foundry_query_api_name: str | None = None,
         foundry_scopes: list[str] | None = None,
         foundry_version: str | None = None,
+        pricing_config: dict | None = None,
     ) -> int:
         """Create a new configuration version entry. Returns the new version ID."""
         now = datetime.now(timezone.utc)
@@ -1359,6 +1396,7 @@ class SubAgentService:
             foundry_query_api_name=foundry_query_api_name,
             foundry_scopes=foundry_scopes,
             foundry_version=foundry_version,
+            pricing_config=pricing_config,
         )
 
     def _row_to_sub_agent_with_version(self, row: Any) -> SubAgent:
@@ -1374,7 +1412,7 @@ class SubAgentService:
         if row.get("cv_id") is not None:
             config_version = SubAgentConfigVersion(
                 id=row["cv_id"],
-                sub_agent_id=row["id"],
+                sub_agent_id=row["id"],  # sa.id from sub_agents table (equals cv.sub_agent_id)
                 version=row["cv_version"],
                 version_hash=row.get("cv_version_hash"),
                 release_number=row.get("cv_release_number"),
@@ -1391,6 +1429,7 @@ class SubAgentService:
                 foundry_query_api_name=row.get("cv_foundry_query_api_name"),
                 foundry_scopes=row.get("cv_foundry_scopes"),
                 foundry_version=row.get("cv_foundry_version"),
+                pricing_config=row.get("cv_pricing_config"),
                 change_summary=row["cv_change_summary"],
                 status=row["cv_status"],
                 approved_by_user_id=row["cv_approved_by_user_id"],
@@ -1438,6 +1477,7 @@ class SubAgentService:
             foundry_query_api_name=row.get("foundry_query_api_name"),
             foundry_scopes=row.get("foundry_scopes"),
             foundry_version=row.get("foundry_version"),
+            pricing_config=row.get("pricing_config"),
             change_summary=row["change_summary"],
             status=row["status"],
             approved_by_user_id=row["approved_by_user_id"],
@@ -1528,7 +1568,3 @@ class SubAgentService:
         await self.repo.deactivate_sub_agent(db=db, actor_sub=actor_sub, user_id=user_id, sub_agent_id=sub_agent_id)
         await db.commit()
         return True
-
-
-# Singleton instance
-sub_agent_service = SubAgentService()

@@ -9,19 +9,6 @@ import pytest_asyncio
 
 from playground_backend.models.user import UserStatus
 from playground_backend.services.user_group_service import UserGroupService
-from playground_backend.services.user_service import UserService
-
-
-@pytest.fixture
-def user_service():
-    """Create UserService instance."""
-    return UserService()
-
-
-@pytest.fixture
-def user_group_service():
-    """Create UserGroupService instance."""
-    return UserGroupService()
 
 
 # Alias pg_session to db_session for compatibility with tests

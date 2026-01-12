@@ -26,12 +26,14 @@ import {
 } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { MODEL_OPTIONS } from '@/config/models';
 import type {
   SubAgent,
   SubAgentType,
   SubAgentFormData,
 } from './types';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
+import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
 import { useQuery } from '@tanstack/react-query';
 import { listSecretsApiV1SecretsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
 
@@ -90,6 +92,16 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
   const [foundryVersion, setFoundryVersion] = useState(
     config?.foundry_version ?? ''
   );
+
+  // Pricing configuration (remote and foundry agents only)
+  const pricingConfig = config?.pricing_config as any;
+  const [rateCardEntries, setRateCardEntries] = useState<Array<{billing_unit: string; price_per_million: string}>>(
+    pricingConfig?.rate_card_entries?.map((e: any) => ({
+      billing_unit: e.billing_unit,
+      price_per_million: e.price_per_million.toString()
+    })) ?? [{ billing_unit: 'requests', price_per_million: '' }]
+  );
+  const [isPricingOpen, setIsPricingOpen] = useState(false);
 
   // Query for secrets
   const { data: secretsData, isLoading: isLoadingSecrets } = useQuery({
@@ -171,7 +183,20 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
 
     let configuration;
     if (type === 'remote') {
-      configuration = { agent_url: agentUrl.trim() };
+      configuration = { 
+        agent_url: agentUrl.trim(),
+        ...(rateCardEntries.length > 0 && rateCardEntries.some(e => e.billing_unit && e.price_per_million) ? {
+          pricing_config: {
+            format: 'detailed',
+            rate_card_entries: rateCardEntries
+              .filter(e => e.billing_unit && e.price_per_million)
+              .map(e => ({
+                billing_unit: e.billing_unit,
+                price_per_million: parseFloat(e.price_per_million)
+              }))
+          }
+        } : {})
+      };
     } else if (type === 'local') {
       configuration = {
         system_prompt: systemPrompt.trim(),
@@ -186,6 +211,17 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
         foundry_query_api_name: foundryQueryApiName.trim(),
         foundry_scopes: foundryScopes,
         ...(foundryVersion.trim() && { foundry_version: foundryVersion.trim() }),
+        ...(rateCardEntries.length > 0 && rateCardEntries.some(e => e.billing_unit && e.price_per_million) ? {
+          pricing_config: {
+            format: 'detailed',
+            rate_card_entries: rateCardEntries
+              .filter(e => e.billing_unit && e.price_per_million)
+              .map(e => ({
+                billing_unit: e.billing_unit,
+                price_per_million: parseFloat(e.price_per_million)
+              }))
+          }
+        } : {})
       };
     }
 
@@ -216,6 +252,7 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       setFoundryQueryApiName('');
       setFoundryScopes([]);
       setFoundryVersion('');
+      setRateCardEntries([{ billing_unit: 'requests', price_per_million: '' }]);
     } else if (newType === 'local') {
       setAgentUrl('');
       setFoundryHostname('');
@@ -225,6 +262,7 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       setFoundryQueryApiName('');
       setFoundryScopes([]);
       setFoundryVersion('');
+      setRateCardEntries([{ billing_unit: 'requests', price_per_million: '' }]);
     } else if (newType === 'foundry') {
       setAgentUrl('');
       setSystemPrompt('');
@@ -638,10 +676,11 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                         <SelectValue placeholder="Select a model" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="gpt4o">GPT-4o</SelectItem>
-                        <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
-                        <SelectItem value="claude-sonnet-4.5">Claude Sonnet 4.5</SelectItem>
-                        <SelectItem value="claude-haiku-4-5">Claude Haiku 4.5</SelectItem>
+                        {MODEL_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
@@ -669,6 +708,19 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
               )}
             </CardContent>
           </Card>
+
+          {/* Pricing Configuration Card - Collapsible, only for remote and foundry agents */}
+          {(type === 'remote' || type === 'foundry') && (
+            <PricingConfigurationSection
+              isEditing={true}
+              expanded={isPricingOpen}
+              onExpandedChange={setIsPricingOpen}
+              rateCardEntries={rateCardEntries}
+              onRateCardEntriesChange={setRateCardEntries}
+              disabled={isSubmitting}
+              asCard={true}
+            />
+          )}
 
           {/* MCP Tools Card - Collapsible, only for local agents */}
           {type === 'local' && (

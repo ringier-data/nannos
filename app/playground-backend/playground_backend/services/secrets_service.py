@@ -12,7 +12,6 @@ from uuid6 import uuid7
 
 from ..authorization import check_action_allowed, check_capability
 from ..models.secret import Secret, SecretCreate, SecretType
-from ..repositories.secrets_repository import secrets_repository
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +19,29 @@ logger = logging.getLogger(__name__)
 class SecretsService:
     """Manages secrets stored in AWS SSM Parameter Store with database metadata."""
 
-    def __init__(self):
-        """Initialize the secrets service with aiobotocore session."""
+    def __init__(self, secrets_repository=None):
+        """Initialize the secrets service with aiobotocore session.
+
+        Args:
+            secrets_repository: Optional secrets repository instance.
+                If None, must be set via set_repository() before use.
+        """
         self.session = get_session()
         self.region_name = os.environ.get("AWS_REGION", "eu-central-1")
         self.ssm_vault_prefix = os.environ.get("SSM_VAULT_PREFIX", "/alloy/infrastructure-agents/vault")
         self.kms_key_id = os.environ.get("KMS_VAULT_KEY_ID", "alias/dev-alloy-sensitive-data-kms-key")
-        self.repo = secrets_repository
+        self._repo = secrets_repository
+
+    def set_repository(self, secrets_repository):
+        """Set the secrets repository (dependency injection)."""
+        self._repo = secrets_repository
+
+    @property
+    def repo(self):
+        """Get the secrets repository, raising error if not set."""
+        if self._repo is None:
+            raise RuntimeError("SecretsRepository not injected. Call set_repository() during initialization.")
+        return self._repo
 
     def _generate_ssm_parameter_name(self) -> str:
         """Generate unique SSM parameter name using vault prefix and UUID."""
@@ -492,7 +507,3 @@ class SecretsService:
         )
         await db.commit()
         return True
-
-
-# Singleton instance
-secrets_service = SecretsService()

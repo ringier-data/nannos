@@ -8,7 +8,7 @@ Also includes configuration models for dynamic local sub-agents.
 """
 
 import json
-from typing import Annotated, Any, Dict, Literal, Optional
+from typing import Annotated, Any, Dict, Literal, Optional, Union
 
 from a2a.types import Message, Task, TaskState
 from langchain.messages import AIMessage
@@ -123,7 +123,7 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
     )
 
 
-LocalSubAgentConfig = Annotated[LocalFoundrySubAgentConfig | LocalLangGraphSubAgentConfig, Discriminator("type")]
+LocalSubAgentConfig = Annotated[Union[LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig], Discriminator("type")]
 
 
 class A2ATaskResponse(BaseModel):

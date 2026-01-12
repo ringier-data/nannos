@@ -3,22 +3,28 @@
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
 from ..dependencies import require_admin
 from ..models.audit import AuditAction, AuditEntityType, AuditLogListResponse
 from ..models.user import PaginationMeta, User
-from ..services.audit_service import audit_service
+from ..services.audit_service import AuditService
 
 router = APIRouter(prefix="/api/v1/admin/audit-logs", tags=["admin-audit"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
+def get_audit_service(request: Request) -> AuditService:
+    """Get audit service from app state."""
+    return request.app.state.audit_service
+
+
 @router.get("", response_model=AuditLogListResponse)
 async def list_audit_logs(
+    request: Request,
     db: DbSession,
     _: User = Depends(require_admin),
     page: int = Query(1, ge=1, description="Page number"),
@@ -34,6 +40,7 @@ async def list_audit_logs(
 
     Admin only endpoint.
     """
+    audit_service = get_audit_service(request)
     logs, total = await audit_service.list_logs(
         db,
         page=page,

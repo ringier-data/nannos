@@ -12,7 +12,7 @@ For concrete agent implementations (dynamic agents, file analyzer, etc.),
 see the agents/ module.
 
 Usage:
-    from app.a2a import (
+    from app.a2a_utils import (
         BaseA2ARunnable,
         LocalA2ARunnable,
         A2AClientConfig,
@@ -20,22 +20,20 @@ Usage:
         make_a2a_async_runnable,
         A2AClientRunnable,
     )
-"""
 
-# Authentication components (re-exported from parent module for convenience)
-from ..authentication import (
-    AuthenticationMethod,
-    AuthPayload,
-    OAuth2ClientConfig,
-    ServiceAuthRequirement,
-    SmartTokenInterceptor,
-)
+    # For authentication components, import directly:
+    from app.authentication import SmartTokenInterceptor, OAuth2ClientConfig
+
+Note: Authentication components are no longer re-exported from this module
+to avoid circular dependencies (SOLID: Dependency Inversion Principle).
+Import them directly from app.authentication instead.
+"""
 
 # Base classes
 from .base import BaseA2ARunnable, LocalA2ARunnable, SubAgentInput
 
 # A2A client for remote agents
-from .client import A2AClientRunnable
+from .client_runnable import A2AClientRunnable
 
 # Configuration
 from .config import A2AClientConfig
@@ -69,10 +67,4 @@ __all__ = [
     "LocalSubAgentConfig",
     "LocalLangGraphSubAgentConfig",
     "LocalFoundrySubAgentConfig",
-    # Authentication
-    "SmartTokenInterceptor",
-    "AuthenticationMethod",
-    "ServiceAuthRequirement",
-    "OAuth2ClientConfig",
-    "AuthPayload",
 ]

@@ -8,31 +8,56 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..controllers.auth_controller import (
-    AuthController,
-    register_oauth_provider,
-)
+from ..controllers.auth_controller import AuthController, register_oauth_provider
 from ..db.session import get_db_session
 from ..dependencies import require_auth, require_auth_or_bearer_token
 from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import User, UserSettingsResponse, UserSettingsUpdate
-from ..services.audit_service import audit_service
+from ..services.audit_service import AuditService
 from ..services.session_service import SessionService
-from ..services.user_group_service import user_group_service
+from ..services.user_group_service import UserGroupService
 from ..services.user_service import UserService
-from ..services.user_settings_service import user_settings_service
+from ..services.user_settings_service import UserSettingsService
 
 logger = logging.getLogger(__name__)
 
 # Create router
 router: APIRouter = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
-# Initialize services (these will be created once and reused)
-session_service: SessionService = SessionService()
-user_service: UserService = UserService()
-auth_controller: AuthController = AuthController(session_service, user_service)
 
-# Register OAuth provider (must be done once at module load time)
+def get_user_settings_service(request: Request) -> UserSettingsService:
+    """Get user settings service from app state."""
+    return request.app.state.user_settings_service
+
+
+def get_session_service(request: Request) -> SessionService:
+    """Get session service from app state."""
+    return request.app.state.session_service
+
+
+def get_user_service(request: Request) -> UserService:
+    """Get user service from app state."""
+    return request.app.state.user_service
+
+
+def get_audit_service(request: Request) -> AuditService:
+    """Get audit service from app state."""
+    return request.app.state.audit_service
+
+
+def get_user_group_service(request: Request) -> UserGroupService:
+    """Get user group service from app state."""
+    return request.app.state.user_group_service
+
+
+def get_auth_controller(request: Request) -> AuthController:
+    session_service = get_session_service(request)
+    user_service = get_user_service(request)
+    auth_controller = AuthController(session_service=session_service, user_service=user_service)
+    return auth_controller
+
+
+# Initialize auth controller (needs to be created at module load time for OAuth registration)
 register_oauth_provider()
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
@@ -48,6 +73,7 @@ async def login(request: Request) -> RedirectResponse:
     Returns:
         Redirect to OIDC authorization endpoint
     """
+    auth_controller = get_auth_controller(request)
     return await auth_controller.get_login(request)
 
 
@@ -62,6 +88,7 @@ async def login_callback(request: Request, response: Response) -> RedirectRespon
     Returns:
         Redirect to the originally requested page with session cookie set
     """
+    auth_controller = get_auth_controller(request)
     return await auth_controller.get_login_callback(request, response)
 
 
@@ -75,6 +102,7 @@ async def logout(request: Request) -> RedirectResponse:
     Returns:
         Redirect to OIDC logout endpoint
     """
+    auth_controller = get_auth_controller(request)
     return await auth_controller.get_logout(request)
 
 
@@ -88,11 +116,13 @@ async def logout_callback(request: Request) -> RedirectResponse:
     Returns:
         Redirect to the specified page
     """
+    auth_controller = get_auth_controller(request)
     return await auth_controller.get_logout_callback(request)
 
 
 @router.get("/me")
 async def get_current_user(
+    request: Request,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> dict:
@@ -104,6 +134,7 @@ async def get_current_user(
     Raises:
         401 Unauthorized: If the user is not authenticated.
     """
+    user_group_service = get_user_group_service(request)
     # Get user's group memberships with their roles
     groups = await user_group_service.get_user_group_memberships(db, user.id)
 
@@ -121,6 +152,7 @@ async def get_current_user(
 
 @router.get("/me/settings", response_model=UserSettingsResponse)
 async def get_current_user_settings(
+    request: Request,
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
 ) -> UserSettingsResponse:
@@ -135,13 +167,15 @@ async def get_current_user_settings(
     Raises:
         401 Unauthorized: If the user is not authenticated.
     """
+    user_settings_service = get_user_settings_service(request)
     settings = await user_settings_service.get_settings(db, user.id)
     return UserSettingsResponse(data=settings)
 
 
 @router.patch("/me/settings", response_model=UserSettingsResponse)
 async def update_current_user_settings(
-    request: UserSettingsUpdate,
+    update_request: UserSettingsUpdate,
+    request: Request,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> UserSettingsResponse:
@@ -156,13 +190,14 @@ async def update_current_user_settings(
     Raises:
         401 Unauthorized: If the user is not authenticated.
     """
+    user_settings_service = get_user_settings_service(request)
     settings = await user_settings_service.upsert_settings(
         db,
         user.id,
-        language=request.language,
-        timezone_str=request.timezone,
-        custom_prompt=request.custom_prompt,
-        mcp_tools=request.mcp_tools,
+        language=update_request.language,
+        timezone_str=update_request.timezone,
+        custom_prompt=update_request.custom_prompt,
+        mcp_tools=update_request.mcp_tools,
     )
     await db.commit()
     return UserSettingsResponse(data=settings)
@@ -183,7 +218,8 @@ class AdminModeToggleResponse(BaseModel):
 
 @router.post("/admin-mode", response_model=AdminModeToggleResponse)
 async def toggle_admin_mode(
-    request: AdminModeToggleRequest,
+    toggle_request: AdminModeToggleRequest,
+    request: Request,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> AdminModeToggleResponse:
@@ -208,6 +244,7 @@ async def toggle_admin_mode(
             detail="Only administrators can toggle admin mode",
         )
 
+    audit_service = get_audit_service(request)
     # Log the admin mode toggle for audit
     await audit_service.log_action(
         db=db,
@@ -215,10 +252,10 @@ async def toggle_admin_mode(
         entity_type=AuditEntityType.SESSION,
         entity_id=user.sub,
         action=AuditAction.ADMIN_MODE_ACTIVATED,
-        changes={"enabled": request.enabled},
+        changes={"enabled": toggle_request.enabled},
     )
     await db.commit()
 
-    logger.info(f"Admin mode {'enabled' if request.enabled else 'disabled'} by {user.email}")
+    logger.info(f"Admin mode {'enabled' if toggle_request.enabled else 'disabled'} by {user.email}")
 
-    return AdminModeToggleResponse(success=True, enabled=request.enabled)
+    return AdminModeToggleResponse(success=True, enabled=toggle_request.enabled)

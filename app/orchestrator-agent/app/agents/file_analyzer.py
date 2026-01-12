@@ -34,7 +34,7 @@ from langsmith import traceable
 
 from app.core.model_factory import create_model
 
-from ..a2a.base import LocalA2ARunnable, SubAgentInput
+from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
 
 logger = logging.getLogger(__name__)
 

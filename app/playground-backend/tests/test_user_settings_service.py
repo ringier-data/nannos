@@ -4,26 +4,11 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from playground_backend.services.user_service import UserService
-from playground_backend.services.user_settings_service import UserSettingsService
-
 
 @pytest_asyncio.fixture
 async def db_session(pg_session):
     """Alias for pg_session to match test expectations."""
     yield pg_session
-
-
-@pytest.fixture
-def user_settings_service():
-    """Create UserSettingsService instance."""
-    return UserSettingsService()
-
-
-@pytest.fixture
-def user_service():
-    """Create UserService instance."""
-    return UserService()
 
 
 @pytest.mark.asyncio

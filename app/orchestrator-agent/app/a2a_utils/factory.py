@@ -1,12 +1,11 @@
 import logging
 from typing import Any, Optional
 
+from a2a.types import AgentCard
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from a2a.types import AgentCard
-
 from ..authentication import SmartTokenInterceptor
-from .client import A2AClientRunnable
+from .client_runnable import A2AClientRunnable
 from .config import A2AClientConfig
 
 logger = logging.getLogger(__name__)
@@ -75,8 +74,9 @@ def make_a2a_async_runnable(
             user_token=user_token,
             user_context=user_context,
             oauth2_client=oauth2_client,
+            sub_agent_id=config.sub_agent_id,  # Pass sub_agent_id from config to interceptor
         )
-        logger.debug(f"Using SmartTokenInterceptor for {agent_card.name}")
+        logger.debug(f"Using SmartTokenInterceptor for {agent_card.name} with sub_agent_id={config.sub_agent_id}")
 
     else:
         logger.info(f"No user_token provided for {agent_card.name}. Agent will be called without authentication.")

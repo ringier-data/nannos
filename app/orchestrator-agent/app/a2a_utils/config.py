@@ -38,6 +38,7 @@ class A2AClientConfig:
         user_agent_prefix: str = "Orchestrator/1.0",
         circuit_breaker_threshold: int = 5,
         circuit_breaker_timeout: float = 30.0,
+        sub_agent_id: int | None = None,
     ):
         """Initialize A2A configuration.
 
@@ -50,6 +51,7 @@ class A2AClientConfig:
             user_agent_prefix: User agent prefix for HTTP requests (default: "Orchestrator/1.0")
             circuit_breaker_threshold: Number of failures before circuit opens (default: 5)
             circuit_breaker_timeout: Seconds before circuit attempts to close (default: 30.0)
+            sub_agent_id: Sub-agent ID for cost tracking attribution (optional)
         """
         self.timeout_connect = timeout_connect
         self.timeout_read = timeout_read
@@ -59,3 +61,4 @@ class A2AClientConfig:
         self.user_agent_prefix = user_agent_prefix
         self.circuit_breaker_threshold = circuit_breaker_threshold
         self.circuit_breaker_timeout = circuit_breaker_timeout
+        self.sub_agent_id = sub_agent_id

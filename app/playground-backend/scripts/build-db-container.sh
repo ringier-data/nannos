@@ -34,10 +34,10 @@ docker rmi $IMAGE_TAG 2>/dev/null || true # in order to replace in same commit
 
 docker network create -d bridge ${NETWORK_NAME}
 
-docker pull -q pgvector/pgvector:pg16
+docker pull -q docker.rcplus.io/pgvector/pgvector:pg16
 docker run -d --name $DB_CONTAINER_NAME --network=${NETWORK_NAME} \
   -e POSTGRES_USER=$RAMBLER_USER -e POSTGRES_PASSWORD=$RAMBLER_PASSWORD \
-  -e POSTGRES_DB=$RAMBLER_DATABASE -e PGDATA=$PGDATA pgvector/pgvector:pg16
+  -e POSTGRES_DB=$RAMBLER_DATABASE -e PGDATA=$PGDATA docker.rcplus.io/pgvector/pgvector:pg16
 
 docker pull -q docker.rcplus.io/busybox
 docker pull -q docker.rcplus.io/zhaowde/rambler:latest

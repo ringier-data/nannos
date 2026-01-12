@@ -17,6 +17,7 @@ from a2a.utils import (
     new_task,
 )
 from a2a.utils.errors import ServerError
+from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
 
 from app.models.responses import AgentStreamResponse
 
@@ -33,8 +34,8 @@ logger = logging.getLogger(__name__)
 class OrchestratorDeepAgentExecutor(AgentExecutor):
     """OrchestratorDeepAgent Executor Example."""
 
-    def __init__(self):
-        self.agent = OrchestratorDeepAgent()
+    def __init__(self, cost_logger=None):
+        self.agent = OrchestratorDeepAgent(cost_logger=cost_logger)
 
     async def execute(
         self,
@@ -96,6 +97,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             logger.error("[ZERO-TRUST] No user_token found in call_context - authentication may have failed")
             raise ServerError(error=InvalidParamsError())
 
+        # Set the access token for cost tracking (ContextVar)
+        set_request_access_token(user_token)
         logger.info(f"[ZERO-TRUST] Using verified user_id for graph retrieval: {user_id}")
         if sub_agent_config_hash:
             logger.info(f"[PLAYGROUND] Playground mode enabled for sub-agent config hash: {sub_agent_config_hash}")
@@ -153,6 +156,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "slack_thread_ts": request_metadata.get("slackThreadTs"),
                     "scope": "personal" if not slack_channel_id else "channel",
                 },
+                "tags": [
+                    f"user:{user_id}",
+                    f"conversation:{task.context_id}",
+                ],
             }
 
             if slack_user_id:

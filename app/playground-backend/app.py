@@ -50,8 +50,10 @@ from playground_backend.routers.conversation_router import router as conversatio
 from playground_backend.routers.group_router import router as group_router
 from playground_backend.routers.mcp_router import router as mcp_router
 from playground_backend.routers.message_router import router as message_router
+from playground_backend.routers.rate_card_router import router as rate_card_router
 from playground_backend.routers.secrets_router import router as secrets_router
 from playground_backend.routers.sub_agent_router import router as sub_agent_router
+from playground_backend.routers.usage_router import router as usage_router
 from playground_backend.service_instances import cleanup_services, initialize_services
 from playground_backend.utils.connection_pool import connection_pool
 from playground_backend.utils.cookie_signer import verify_cookie
@@ -203,6 +205,8 @@ app.include_router(admin_user_router)
 app.include_router(admin_group_router)
 app.include_router(admin_audit_router)
 app.include_router(group_router)
+app.include_router(usage_router)
+app.include_router(rate_card_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.

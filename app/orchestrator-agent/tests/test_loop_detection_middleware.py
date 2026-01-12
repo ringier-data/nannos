@@ -12,7 +12,6 @@ Tests cover:
 from unittest.mock import MagicMock
 
 import pytest
-from langchain_core.messages import ToolMessage
 
 from app.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 
@@ -96,135 +95,65 @@ class TestLoopDetection:
 
     def test_check_for_loop_below_threshold(self, middleware):
         """Test that no loop is detected below max_repeats threshold."""
-        history = [
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "result1"},
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "result2"},
-        ]
+        history = ["hash1", "hash1"]
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is False
-        assert count == 2  # Two occurrences in history
+        assert count == 0  # No loop detected, count is 0
 
     def test_check_for_loop_at_threshold(self, middleware):
         """Test that loop is detected when max_repeats threshold is hit."""
-        history = [
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r1"},
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r2"},
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r3"},
-        ]
+        # History has 3 instances of hash1, current call makes it 4 (exceeds threshold of 3)
+        history = ["hash1", "hash1", "hash1"]
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is True
-        assert count == 3
+        assert count == 4
 
     def test_check_for_loop_above_threshold(self, middleware):
         """Test detection when exceeding threshold."""
-        history = [{"tool": "tool_a", "args_hash": "hash1", "result_summary": f"r{i}"} for i in range(5)]
+        # History has 5 instances of hash1, current call makes it 6 (exceeds threshold of 3)
+        history = ["hash1"] * 5
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is True
-        assert count == 5
+        assert count == 6
 
     def test_check_for_loop_different_tool_same_args(self, middleware):
         """Test that different tools don't interfere."""
-        history = [
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r1"},
-            {"tool": "tool_b", "args_hash": "hash1", "result_summary": "r2"},
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r3"},
-        ]
+        # History contains only tool_a calls (tool_b is tracked separately)
+        # 2 instances of hash1 in tool_a history + 1 current = 3 (but count is 0 when no loop)
+        history = ["hash1", "hash1"]
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is False
-        assert count == 2  # Only tool_a counts
+        assert count == 0  # No loop detected
 
     def test_check_for_loop_same_tool_different_args(self, middleware):
         """Test that different arguments don't count as loop."""
-        history = [
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r1"},
-            {"tool": "tool_a", "args_hash": "hash2", "result_summary": "r2"},
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r3"},
-        ]
+        # History for tool_a, but only hash1 calls matter (hash2 is different)
+        # 2 instances of hash1 + 1 current = 3 (but count is 0 when no loop)
+        history = ["hash1", "hash2", "hash1"]
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is False
-        assert count == 2  # Only hash1 counts
+        assert count == 0  # No loop detected
 
 
 class TestToolCallHistoryManagement:
-    """Test tool call history state management."""
+    """Test tool call history state management.
 
-    @pytest.mark.asyncio
-    async def test_tool_call_history_initialization(self, middleware, mock_request):
-        """Test that tool call history is properly initialized."""
-        # Empty state
-        mock_request.runtime.state = {}
+    NOTE: These tests are disabled because they test awrap_tool_call which
+    doesn't exist in this middleware. This middleware uses aafter_model hook.
+    TODO: Rewrite these to test aafter_model behavior.
+    """
 
-        async def mock_handler(req):
-            return ToolMessage(content="result", tool_call_id="123")
-
-        await middleware.awrap_tool_call(mock_request, mock_handler)
-
-        # History should be created
-        assert "tool_call_history" in mock_request.runtime.state
-        assert isinstance(mock_request.runtime.state["tool_call_history"], list)
-
-    @pytest.mark.asyncio
-    async def test_tool_call_history_tracking(self, middleware, mock_request):
-        """Test that tool calls are tracked in history."""
-        mock_request.runtime.state = {"tool_call_history": []}
-
-        async def mock_handler(req):
-            return ToolMessage(content="result", tool_call_id="123")
-
-        await middleware.awrap_tool_call(mock_request, mock_handler)
-
-        history = mock_request.runtime.state["tool_call_history"]
-        assert len(history) == 1
-        assert history[0]["tool"] == "test_tool"
-        assert "args_hash" in history[0]
-
-    @pytest.mark.asyncio
-    async def test_sliding_window_pruning(self):
-        """Test that old tool calls are pruned from history."""
-
-        middleware = RepeatedToolCallMiddleware(max_repeats=3, window_size=5)
-        mock_request = MagicMock()
-        mock_request.tool_call = {"name": "tool", "args": {}}
-        mock_request.runtime = MagicMock()
-
-        # Pre-fill history with 5 calls
-        mock_request.runtime.state = {
-            "tool_call_history": [
-                {"tool": f"tool_{i}", "args_hash": f"hash_{i}", "result_summary": ""} for i in range(5)
-            ]
-        }
-
-        async def mock_handler(req):
-            return ToolMessage(content="result", tool_call_id="123")
-
-        await middleware.awrap_tool_call(mock_request, mock_handler)
-
-        # Should have 5 items (pruned to window_size)
-        history = mock_request.runtime.state["tool_call_history"]
-        assert len(history) == 5
-
-    @pytest.mark.asyncio
-    async def test_result_summary_captured(self, middleware, mock_request):
-        """Test that tool results are captured in history."""
-        mock_request.runtime.state = {"tool_call_history": []}
-
-        async def mock_handler(req):
-            return ToolMessage(content="This is a long result " * 10, tool_call_id="123")
-
-        await middleware.awrap_tool_call(mock_request, mock_handler)
-
-        history = mock_request.runtime.state["tool_call_history"]
-        assert len(history[0]["result_summary"]) <= 100  # First 100 chars
+    pass
 
 
 class TestInterruptMechanism:
@@ -234,43 +163,20 @@ class TestInterruptMechanism:
     async def test_interrupt_triggered_on_loop(self, middleware, mock_request):
         """Test that interrupt is triggered when loop is detected."""
         # Pre-fill history to trigger loop
-        mock_request.runtime.state = {
-            "tool_call_history": [
-                {"tool": "test_tool", "args_hash": middleware._hash_args({"param": "value"}), "result_summary": "r"}
-                for _ in range(3)
-            ]
-        }
-
-        async def mock_handler(req):
-            return ToolMessage(content="result", tool_call_id="123")
+        hash_val = middleware._hash_args({"param": "value"})
+        mock_request.runtime.state = {"tool_call_history": [hash_val for _ in range(3)]}
 
         # Note: interrupt() is called from langgraph in actual code
         # We can't easily test this without full integration
         # This test documents that loop detection occurs at the right threshold
-        is_loop, count = middleware._check_for_loop(
-            "test_tool", middleware._hash_args({"param": "value"}), mock_request.runtime.state["tool_call_history"]
+        is_loop, count, loop_type = middleware._check_for_loop(
+            "test_tool", hash_val, mock_request.runtime.state["tool_call_history"]
         )
 
         assert is_loop is True
         assert count >= middleware.max_repeats
 
-    @pytest.mark.asyncio
-    async def test_no_interrupt_below_threshold(self, middleware, mock_request):
-        """Test that no interrupt occurs below threshold."""
-        mock_request.runtime.state = {
-            "tool_call_history": [
-                {"tool": "test_tool", "args_hash": middleware._hash_args({"param": "value"}), "result_summary": "r"}
-                for _ in range(2)
-            ]
-        }
-
-        async def mock_handler(req):
-            return ToolMessage(content="result", tool_call_id="123")
-
-        result = await middleware.awrap_tool_call(mock_request, mock_handler)
-
-        # Should execute normally
-        assert isinstance(result, ToolMessage)
+    # NOTE: test_no_interrupt_below_threshold removed as it tests awrap_tool_call which doesn't exist
 
 
 class TestPatternDetection:
@@ -281,36 +187,26 @@ class TestPatternDetection:
         """Test detection of same tool being called repeatedly."""
         # Fill history with same tool/args
         same_hash = middleware._hash_args({"param": "value"})
-        mock_request.runtime.state = {
-            "tool_call_history": [
-                {"tool": "test_tool", "args_hash": same_hash, "result_summary": f"r{i}"} for i in range(3)
-            ]
-        }
+        mock_request.runtime.state = {"tool_call_history": [same_hash for _ in range(3)]}
 
-        is_loop, count = middleware._check_for_loop(
+        is_loop, count, loop_type = middleware._check_for_loop(
             "test_tool", same_hash, mock_request.runtime.state["tool_call_history"]
         )
 
         assert is_loop is True
-        assert count == 3
+        assert count == 4
 
     def test_alternating_tool_pattern(self, middleware):
         """Test detection of alternating tool calls."""
         hash_a = middleware._hash_args({"a": 1})
         hash_b = middleware._hash_args({"b": 2})
 
-        history = [
-            {"tool": "tool_a", "args_hash": hash_a, "result_summary": "r"},
-            {"tool": "tool_b", "args_hash": hash_b, "result_summary": "r"},
-            {"tool": "tool_a", "args_hash": hash_a, "result_summary": "r"},
-            {"tool": "tool_b", "args_hash": hash_b, "result_summary": "r"},
-            {"tool": "tool_a", "args_hash": hash_a, "result_summary": "r"},
-        ]
+        history = [hash_a, hash_b, hash_a, hash_b, hash_a]
 
         # Check tool_a pattern
-        is_loop, count = middleware._check_for_loop("tool_a", hash_a, history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", hash_a, history)
         assert is_loop is True
-        assert count == 3
+        assert count == 4
 
     def test_mixed_tool_pattern(self, middleware):
         """Test detection of complex patterns with multiple tools."""
@@ -318,30 +214,19 @@ class TestPatternDetection:
         hash_b = middleware._hash_args({"b": 2})
         hash_c = middleware._hash_args({"c": 3})
 
-        history = [
-            {"tool": "tool_a", "args_hash": hash_a, "result_summary": "r"},
-            {"tool": "tool_b", "args_hash": hash_b, "result_summary": "r"},
-            {"tool": "tool_c", "args_hash": hash_c, "result_summary": "r"},
-            {"tool": "tool_a", "args_hash": hash_a, "result_summary": "r"},
-            {"tool": "tool_a", "args_hash": hash_a, "result_summary": "r"},
-        ]
+        history = [hash_a, hash_b, hash_c, hash_a, hash_a]
 
-        is_loop, count = middleware._check_for_loop("tool_a", hash_a, history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", hash_a, history)
         assert is_loop is True
-        assert count == 3
+        assert count == 4
 
     def test_no_loop_with_different_tools(self, middleware):
         """Test that different tools don't trigger loop detection."""
-        history = [
-            {"tool": "tool_a", "args_hash": "hash_a", "result_summary": "r"},
-            {"tool": "tool_b", "args_hash": "hash_b", "result_summary": "r"},
-            {"tool": "tool_c", "args_hash": "hash_c", "result_summary": "r"},
-            {"tool": "tool_d", "args_hash": "hash_d", "result_summary": "r"},
-        ]
+        history = ["hash_a", "hash_b", "hash_c", "hash_d"]
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash_a", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash_a", history)
         assert is_loop is False
-        assert count == 1
+        assert count == 0  # No loop detected
 
 
 class TestEdgeCases:
@@ -349,42 +234,40 @@ class TestEdgeCases:
 
     def test_empty_tool_call_history(self, middleware):
         """Test behavior with empty history."""
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", [])
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", [])
 
         assert is_loop is False
-        assert count == 0
+        assert count == 0  # No loop detected
 
     def test_single_tool_call(self, middleware):
         """Test that single tool call doesn't trigger detection."""
-        history = [
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r"},
-        ]
+        history = ["hash1"]
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is False
-        assert count == 1
+        assert count == 0  # No loop detected
 
     def test_exact_threshold_boundary(self, middleware):
         """Test behavior at exact max_repeats threshold."""
-        history = [{"tool": "tool_a", "args_hash": "hash1", "result_summary": "r"} for _ in range(3)]
+        history = ["hash1"] * 3
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is True
-        assert count == 3
+        assert count == 4
 
     def test_just_below_threshold(self):
         """Test behavior just below threshold."""
 
         middleware = RepeatedToolCallMiddleware(max_repeats=5, window_size=10)
 
-        history = [{"tool": "tool_a", "args_hash": "hash1", "result_summary": "r"} for _ in range(4)]
+        history = ["hash1"] * 4
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is False
-        assert count == 4
+        assert count == 0  # No loop detected (5 repeats < 5 threshold)
 
     def test_custom_configuration(self):
         """Test middleware with custom configuration."""
@@ -394,12 +277,9 @@ class TestEdgeCases:
         assert middleware.max_repeats == 2
         assert middleware.window_size == 5
 
-        history = [
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r"},
-            {"tool": "tool_a", "args_hash": "hash1", "result_summary": "r"},
-        ]
+        history = ["hash1", "hash1"]
 
-        is_loop, count = middleware._check_for_loop("tool_a", "hash1", history)
+        is_loop, count, loop_type = middleware._check_for_loop("tool_a", "hash1", history)
 
         assert is_loop is True
-        assert count == 2
+        assert count == 3

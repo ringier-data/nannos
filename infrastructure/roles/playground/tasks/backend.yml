@@ -2,6 +2,13 @@
 - name: 'copy ringier-a2a-sdk into playground-backend directory'
   block:
     # NOTE: necessary until we will distribute ringier-a2a-sdk via a package index
+    - name: 'clean Python cache from source before copying'
+      shell: |
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -name "*.pyc" -delete 2>/dev/null || true
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -name "*.pyo" -delete 2>/dev/null || true
+      changed_when: false
+
     - name: 'copy ringier-a2a-sdk'
       synchronize:
         src: '{{ playbook_dir }}/../app/ringier-a2a-sdk/'
@@ -9,12 +16,14 @@
         rsync_opts:
           - '--exclude=__pycache__'
           - '--exclude=*.pyc'
+          - '--exclude=*.pyo'
           - '--exclude=.venv'
           - '--exclude=.git'
           - '--exclude=.pytest_cache'
           - '--exclude=tests'
           - '--exclude=.mypy_cache'
           - '--exclude=.ruff_cache'
+          - '--delete'
 
     - name: 'build and push the Chat UI Docker image to ECR'
       include_role:

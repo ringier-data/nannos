@@ -24,6 +24,7 @@ class TestListMcpTools:
         request.state.access_token = "valid_user_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         request.state.refresh_token = "valid_refresh_token"
+        request.headers = {}  # No Authorization header
         return request
 
     @pytest.fixture
@@ -71,7 +72,7 @@ class TestListMcpTools:
         }
 
     @pytest.mark.asyncio
-    async def test_successful_token_exchange_and_tool_fetch(self, mock_request, mock_user, sample_mcp_response):
+    async def test_successful_token_exchange_and_tool_fetch(self, mock_request, mock_user, sample_mcp_response, client):
         """Test successful flow: token exchange → MCP request → parse tools."""
         with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             # Mock OAuth2 client
@@ -149,6 +150,7 @@ class TestListMcpTools:
         """Test that missing access token raises 401."""
         request = MagicMock()
         request.state.access_token = None
+        request.headers = {}
 
         with pytest.raises(HTTPException) as exc_info:
             await list_mcp_tools(request, mock_user)
@@ -164,20 +166,24 @@ class TestListMcpTools:
         request.state.access_token = "expired_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
         request.state.refresh_token = "valid_refresh_token"
+        request.headers = {}
 
         with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
-            mock_oauth = AsyncMock()
-            # First call: refresh token
-            mock_oauth.refresh_token = AsyncMock(
+            # Create two separate mock instances for refresh and exchange
+            mock_oauth_refresh = AsyncMock()
+            mock_oauth_refresh.refresh_token = AsyncMock(
                 return_value={
                     "access_token": "refreshed_token",
                     "expires_in": 3600,
                     "refresh_token": "new_refresh_token",
                 }
             )
-            # Second call: exchange token
-            mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
-            mock_oauth_class.return_value = mock_oauth
+
+            mock_oauth_exchange = AsyncMock()
+            mock_oauth_exchange.exchange_token = AsyncMock(return_value="mcp_token")
+
+            # First call returns refresh client, second call returns exchange client
+            mock_oauth_class.side_effect = [mock_oauth_refresh, mock_oauth_exchange]
 
             with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
@@ -193,10 +199,10 @@ class TestListMcpTools:
                 result = await list_mcp_tools(request, mock_user)
 
                 # Verify token was refreshed
-                mock_oauth.refresh_token.assert_awaited_once_with("valid_refresh_token")
+                mock_oauth_refresh.refresh_token.assert_awaited_once_with("valid_refresh_token")
 
                 # Verify token exchange used refreshed token
-                mock_oauth.exchange_token.assert_awaited_once_with(
+                mock_oauth_exchange.exchange_token.assert_awaited_once_with(
                     subject_token="refreshed_token",
                     target_client_id="mcp-gateway",
                     requested_scopes=["openid", "profile", "offline_access"],
@@ -211,6 +217,7 @@ class TestListMcpTools:
         request.state.access_token = "expired_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
         request.state.refresh_token = "invalid_refresh_token"
+        request.headers = {}
 
         with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
@@ -230,6 +237,7 @@ class TestListMcpTools:
         request.state.access_token = "expired_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
         request.state.refresh_token = None
+        request.headers = {}
 
         with pytest.raises(HTTPException) as exc_info:
             await list_mcp_tools(request, mock_user)
@@ -242,12 +250,14 @@ class TestListMcpTools:
         """Test that failed token exchange raises 401."""
         with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
+            # Simulate token exchange failure
             mock_oauth.exchange_token = AsyncMock(side_effect=Exception("Token exchange failed"))
             mock_oauth_class.return_value = mock_oauth
 
             with pytest.raises(HTTPException) as exc_info:
                 await list_mcp_tools(mock_request, mock_user)
 
+            # The exception handler catches "token" in error message and converts to 401
             assert exc_info.value.status_code == 401
             assert "Token exchange failed" in exc_info.value.detail
 

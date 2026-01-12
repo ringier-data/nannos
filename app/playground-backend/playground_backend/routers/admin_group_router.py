@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
@@ -16,15 +16,21 @@ from ..models.user_group import (
     UserGroupListResponse,
     UserGroupUpdate,
 )
-from ..services.user_group_service import user_group_service
+from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-groups"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
+def get_user_group_service(request: Request) -> UserGroupService:
+    """Get user group service from app state."""
+    return request.app.state.user_group_service
+
+
 @router.get("", response_model=UserGroupListResponse)
 async def list_groups(
+    request: Request,
     db: DbSession,
     _: User = Depends(require_admin),
     page: int = Query(1, ge=1, description="Page number"),
@@ -35,6 +41,7 @@ async def list_groups(
 
     Admin only endpoint.
     """
+    user_group_service = get_user_group_service(request)
     groups, total = await user_group_service.list_groups(
         db,
         page=page,
@@ -51,6 +58,7 @@ async def list_groups(
 @router.get("/{group_id}", response_model=UserGroupDetailResponse)
 async def get_group(
     group_id: int,
+    request: Request,
     db: DbSession,
     _: User = Depends(require_admin),
 ) -> UserGroupDetailResponse:
@@ -58,6 +66,7 @@ async def get_group(
 
     Admin only endpoint.
     """
+    user_group_service = get_user_group_service(request)
     group = await user_group_service.get_group_with_members(db, group_id)
 
     if group is None:
@@ -71,7 +80,8 @@ async def get_group(
 
 @router.post("", response_model=UserGroupDetailResponse, status_code=status.HTTP_201_CREATED)
 async def create_group(
-    request: UserGroupCreate,
+    request: Request,
+    create_request: UserGroupCreate,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> UserGroupDetailResponse:
@@ -79,12 +89,13 @@ async def create_group(
 
     Admin only endpoint.
     """
+    user_group_service = get_user_group_service(request)
     try:
         group = await user_group_service.create_group(
             db,
             actor_sub=admin.sub,
-            name=request.name,
-            description=request.description,
+            name=create_request.name,
+            description=create_request.description,
         )
         await db.commit()
 
@@ -113,7 +124,8 @@ async def create_group(
 @router.put("/{group_id}", response_model=UserGroupDetailResponse)
 async def update_group(
     group_id: int,
-    request: UserGroupUpdate,
+    request: Request,
+    update_request: UserGroupUpdate,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> UserGroupDetailResponse:
@@ -121,13 +133,14 @@ async def update_group(
 
     Admin only endpoint.
     """
+    user_group_service = get_user_group_service(request)
     try:
         # Build kwargs with only provided fields
         update_kwargs = {}
-        if request.name is not None:
-            update_kwargs["name"] = request.name
-        if request.description is not None:
-            update_kwargs["description"] = request.description
+        if update_request.name is not None:
+            update_kwargs["name"] = update_request.name
+        if update_request.description is not None:
+            update_kwargs["description"] = update_request.description
 
         updated_group = await user_group_service.update_group(
             db,
@@ -169,6 +182,7 @@ async def update_group(
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_group(
     group_id: int,
+    request: Request,
     db: DbSession,
     admin: User = Depends(require_admin),
     force: bool = Query(False, description="Force delete even if sub-agents are assigned"),
@@ -177,6 +191,7 @@ async def delete_group(
 
     Admin only endpoint.
     """
+    user_group_service = get_user_group_service(request)
     try:
         success = await user_group_service.delete_group(
             db,
@@ -201,7 +216,8 @@ async def delete_group(
 
 @router.delete("/bulk", response_model=BulkGroupDeleteResponse)
 async def bulk_delete_groups(
-    request: BulkGroupDelete,
+    request: Request,
+    delete_request: BulkGroupDelete,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> BulkGroupDeleteResponse:
@@ -209,11 +225,12 @@ async def bulk_delete_groups(
 
     Admin only endpoint.
     """
+    user_group_service = get_user_group_service(request)
     results = await user_group_service.bulk_delete_groups(
         db,
         actor_sub=admin.sub,
-        group_ids=request.group_ids,
-        force=request.force,
+        group_ids=delete_request.group_ids,
+        force=delete_request.force,
     )
     await db.commit()
 

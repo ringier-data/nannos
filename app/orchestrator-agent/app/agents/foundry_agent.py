@@ -34,9 +34,10 @@ from deepagents import CompiledSubAgent
 from foundry_sdk import AsyncFoundryClient as PlatformAsyncFoundryClient
 from foundry_sdk import Auth, ConfidentialClientAuth
 from pydantic import BaseModel, Field, model_validator
+from ringier_a2a_sdk.agent.cost_tracking_mixin import CostTrackingMixin
 
-from ..a2a.base import LocalA2ARunnable, SubAgentInput
-from ..a2a.models import LocalFoundrySubAgentConfig
+from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
+from ..a2a_utils.models import LocalFoundrySubAgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class StructuredResponse(BaseModel):
         return values
 
 
-class FoundryLocalAgentRunnable(LocalA2ARunnable):
+class FoundryLocalAgentRunnable(CostTrackingMixin, LocalA2ARunnable):
     """Runnable for executing Foundry ontology queries as sub-agents.
 
     TODO: shall we inherit from DynamicLocalAgentRunnable instead?
@@ -97,21 +98,39 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         self,
         config: LocalFoundrySubAgentConfig,
         user: dict[str, Any],
+        backend_url: Optional[str] = None,
+        sub_agent_id: Optional[int] = None,
     ):
         """Initialize Foundry agent runnable.
 
         Args:
             config: Foundry agent configuration
-            ssm_parameter_name: SSM parameter path to retrieve client_secret
+            user: User context dict
+            backend_url: Backend URL for cost tracking (optional)
+            sub_agent_id: Sub-agent ID for cost attribution (optional)
         """
+        # Initialize mixins first
+        super().__init__()
+
         self.config = config
         self.user = user
+        self.sub_agent_id = sub_agent_id
         self._client: PlatformAsyncFoundryClient | None = None
         self._client_secret: str | None = None
 
         # AWS session for SSM
         self.session = get_session()
         self.region_name = os.environ.get("AWS_REGION", "eu-central-1")
+
+        # Enable cost tracking if backend_url provided
+        if backend_url:
+            self.enable_cost_tracking(
+                backend_url=backend_url,
+                sub_agent_id=sub_agent_id,
+            )
+            logger.info(f"Cost tracking enabled for Foundry agent '{self.config.name}' (sub_agent_id={sub_agent_id})")
+        else:
+            logger.info(f"Cost tracking not enabled for Foundry agent '{self.config.name}' (no backend_url)")
 
     @property
     def name(self) -> str:
@@ -273,6 +292,10 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             if new_session_rid:
                 logger.debug(f"Foundry session created: {new_session_rid}")
 
+            # Extract and report usage for cost tracking
+            logger.debug("Reporting Foundry agent usage for cost tracking")
+            await self._report_usage(result, context_id)
+
             # Format response content
             try:
                 task_id = result.get("sessionRid", task_id)
@@ -298,6 +321,46 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
 
             return self._build_error_response(f"Foundry agent execution failed: {e}", context_id=ctx_id, task_id=tsk_id)
 
+    async def _report_usage(
+        self,
+        result: dict[str, Any],
+        context_id: Optional[str],
+    ) -> None:
+        """Extract usage from Foundry response and report for cost tracking.
+
+        Manual instrumentation: Checks for optional 'usage' field in response.
+        If present, uses it for cost tracking. Otherwise defaults to counting requests.
+
+        Args:
+            result: Foundry API response
+            context_id: Context ID for conversation tracking
+        """
+        if not self._cost_tracking_enabled:
+            return
+
+        # Extract usage from response if present
+        usage_data = result.get("usage")
+
+        if usage_data and isinstance(usage_data, dict):
+            # Use the provided usage breakdown
+            billing_unit_breakdown = usage_data
+            logger.debug(f"Foundry agent usage from response: {billing_unit_breakdown}")
+        else:
+            # Default to counting requests
+            billing_unit_breakdown = {"requests": 1}
+            logger.debug("Foundry agent usage: defaulting to request count")
+
+        # Report usage via cost tracking mixin
+        # sub_agent_id is automatically used from CostLogger instance attribute
+        logger.debug(f"Reporting Foundry agent usage: {billing_unit_breakdown}")
+        await self.report_llm_usage(
+            user_id=self.user.get("sub", "unknown"),
+            billing_unit_breakdown=billing_unit_breakdown,
+            provider="foundry",
+            model_name=self.config.query_api_name,
+            conversation_id=context_id,
+        )
+
     def classify(self, message: str) -> Literal[TaskState.input_required, TaskState.completed, TaskState.failed]:
         # Simple classification logic (to be replaced with actual logic)
         if (
@@ -313,8 +376,37 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         else:
             return TaskState.completed
 
+    async def ainvoke(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        """Async invoke with automatic cost tracking flush.
+
+        Overrides parent to flush cost tracking after each invocation,
+        since local sub-agents don't have cleanup lifecycle hooks.
+
+        Args:
+            input_data: Input data matching SubAgentInput schema
+
+        Returns:
+            Dict with 'messages' and A2A metadata
+        """
+        try:
+            # Call parent implementation
+            result = await super().ainvoke(input_data)
+            return result
+        finally:
+            # Always flush cost tracking after invocation
+            # This ensures records are sent immediately, not batched
+            if self._cost_tracking_enabled:
+                try:
+                    await self.flush_cost_tracking()
+                    logger.debug(f"Flushed cost tracking for Foundry agent '{self.config.name}'")
+                except Exception as e:
+                    logger.warning(f"Failed to flush cost tracking for '{self.config.name}': {e}")
+
     async def acleanup(self):
-        """Clean up resources (close Foundry client)."""
+        """Clean up resources (close Foundry client and flush cost tracking)."""
+        # Flush cost tracking before cleanup
+        await self.flush_cost_tracking()
+
         if self._client is not None:
             # Note: AsyncFoundryClient may need explicit cleanup
             # Check SDK documentation for proper cleanup
@@ -325,15 +417,19 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
 def create_foundry_local_subagent(
     config: LocalFoundrySubAgentConfig,
     user: dict[str, Any],
+    backend_url: Optional[str] = None,
+    sub_agent_id: Optional[int] = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
-    Factory function that creates a CompiledSubAgent wrapping a DynamicLocalAgentRunnable.
+    Factory function that creates a CompiledSubAgent wrapping a FoundryLocalAgentRunnable.
     This can be registered in the orchestrator's subagent_registry for use with the task tool.
 
     Args:
-        config: LocalFoundrySubAgentConfig with name, description, system_prompt, mcp_tools
+        config: LocalFoundrySubAgentConfig with name, description, and Foundry settings
         user: User context dict with user_id, email, name
+        backend_url: Backend URL for cost tracking (optional)
+        sub_agent_id: Sub-agent ID for cost attribution (optional)
 
     Returns:
         CompiledSubAgent that can be registered with the orchestrator
@@ -345,12 +441,18 @@ def create_foundry_local_subagent(
             system_prompt="You are a data analysis expert...",
             mcp_tools=["query_database", "generate_chart"],  # Whitelist specific tools
         )
-        subagent = create_foundry_local_subagent(config, user)
+        subagent = create_foundry_local_subagent(
+            config, user,
+            backend_url="https://backend.example.com",
+            sub_agent_id=123
+        )
         subagent_registry["data-analyst"] = subagent
     """
     runnable = FoundryLocalAgentRunnable(
         config=config,
         user=user,
+        backend_url=backend_url,
+        sub_agent_id=sub_agent_id,
     )
 
     return CompiledSubAgent(

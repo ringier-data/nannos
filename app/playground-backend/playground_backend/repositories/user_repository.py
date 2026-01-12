@@ -8,7 +8,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
-from ..services.audit_service import audit_service
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -133,7 +132,7 @@ class UserRepository(AuditedRepository):
                 )
 
         # Log audit
-        await audit_service.log_action(
+        await self.audit_service.log_action(
             db=db,
             entity_type=AuditEntityType.USER,
             entity_id=user_id,
@@ -183,7 +182,3 @@ class UserRepository(AuditedRepository):
         except Exception as e:
             logger.error(f"Error updating user {user_id} status in bulk operation: {e}")
             return False
-
-
-# Module-level singleton
-user_repository = UserRepository()

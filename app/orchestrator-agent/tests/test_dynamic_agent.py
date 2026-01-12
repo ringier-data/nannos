@@ -3,8 +3,11 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import Tool
 
-from app.a2a.models import LocalSubAgentConfig
+from app.a2a_utils.base import SubAgentInput
+from app.a2a_utils.models import LocalLangGraphSubAgentConfig
 from app.agents.dynamic_agent import (
     DynamicLocalAgentRunnable,
     SubAgentResponseSchema,
@@ -23,7 +26,8 @@ class TestDynamicLocalAgentRunnable:
     @pytest.fixture
     def basic_config(self):
         """Create a basic config without MCP URL."""
-        return LocalSubAgentConfig(
+        return LocalLangGraphSubAgentConfig(
+            type="langgraph",
             name="test-agent",
             description="A test agent for unit testing",
             system_prompt="You are a helpful test assistant.",
@@ -31,12 +35,13 @@ class TestDynamicLocalAgentRunnable:
 
     @pytest.fixture
     def mcp_config(self):
-        """Create a config with MCP URL."""
-        return LocalSubAgentConfig(
+        """Create a config with MCP tools."""
+        return LocalLangGraphSubAgentConfig(
+            type="langgraph",
             name="mcp-agent",
             description="Agent with MCP tools",
             system_prompt="You are an expert with tools.",
-            mcp_gateway_url="https://tools.example.com/mcp",
+            mcp_tools=["tool1", "tool2"],
         )
 
     def test_name_property(self, basic_config, mock_model):
@@ -56,9 +61,13 @@ class TestDynamicLocalAgentRunnable:
         assert runnable._discovered_tools is None
 
     def test_inherits_orchestrator_tools(self, basic_config, mock_model):
-        """Test that tools are inherited when no MCP URL is set."""
-        mock_tool = MagicMock()
-        mock_tool.name = "test_tool"
+        """Test that no tool is inherited when no MCP tools specified."""
+
+        # Use a proper Tool with actual function
+        def test_func(x: str) -> str:
+            return f"Result: {x}"
+
+        mock_tool = Tool(name="test_tool", description="A test tool", func=test_func)
         orchestrator_tools = [mock_tool]
 
         runnable = DynamicLocalAgentRunnable(
@@ -67,10 +76,9 @@ class TestDynamicLocalAgentRunnable:
             orchestrator_tools=orchestrator_tools,
         )
 
-        # Tools should be from orchestrator since no MCP URL
+        # Tools should be from orchestrator since no MCP tools specified
         effective_tools = runnable._get_effective_tools()
-        assert len(effective_tools) == 1
-        assert effective_tools[0].name == "test_tool"
+        assert len(effective_tools) == 0
 
     @pytest.mark.asyncio
     async def test_lazy_agent_creation(self, basic_config, mock_model):
@@ -88,7 +96,7 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.subagents.dynamic_agent.create_agent", return_value=mock_graph):
+        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
             await runnable._ensure_agent()
 
         # Agent should now exist
@@ -111,8 +119,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.subagents.dynamic_agent.create_agent", return_value=mock_graph):
-            result = await runnable._process("Do something", context_id="ctx-123")
+        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+            result = await runnable._process(
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Please complete the task.")])
+            )
 
         # Check A2A response format
         assert "messages" in result
@@ -138,8 +148,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.subagents.dynamic_agent.create_agent", return_value=mock_graph):
-            result = await runnable._process("Create a ticket", context_id="ctx-123")
+        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+            result = await runnable._process(
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Create a ticket")])
+            )
 
         # Check A2A response format indicates input required
         assert "state" in result
@@ -153,8 +165,10 @@ class TestDynamicLocalAgentRunnable:
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
 
         # Mock create_agent to raise an exception
-        with patch("app.subagents.dynamic_agent.create_agent", side_effect=Exception("Model error")):
-            result = await runnable._process("Do something", context_id="ctx-123")
+        with patch("app.agents.dynamic_agent.create_agent", side_effect=Exception("Model error")):
+            result = await runnable._process(
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")])
+            )
 
         # Check A2A response format indicates failure
         # A2A protocol: failed state means task did not complete successfully, so is_complete=False
@@ -164,45 +178,17 @@ class TestDynamicLocalAgentRunnable:
         assert "error" in result.get("messages", [{}])[-1].content.lower() or "error" in str(result).lower()
 
     @pytest.mark.asyncio
-    async def test_mcp_discovery_lazy(self, mcp_config, mock_model):
-        """Test that MCP tools are discovered lazily on first invocation."""
-        mock_tool = MagicMock()
-        mock_tool.name = "discovered_tool"
-
+    async def test_mcp_tools_config(self, mcp_config, mock_model):
+        """Test that agent can be configured with MCP tool names."""
         runnable = DynamicLocalAgentRunnable(
             config=mcp_config,
             model=mock_model,
             orchestrator_tools=[],
         )
 
-        # Tools should not be discovered yet
-        assert runnable._discovered_tools is None
-
-        # Mock MCP discovery
-        with patch.object(runnable, "_discover_mcp_tools", new_callable=AsyncMock) as mock_discover:
-            mock_discover.return_value = [mock_tool]
-
-            # Mock create_agent
-            mock_graph = AsyncMock()
-            mock_graph.ainvoke = AsyncMock(
-                return_value={
-                    "messages": [MagicMock(content="Done")],
-                    "structured_response": SubAgentResponseSchema(
-                        task_state="completed",
-                        message="Done",
-                    ),
-                }
-            )
-
-            with patch("app.subagents.dynamic_agent.create_agent", return_value=mock_graph):
-                await runnable._ensure_agent()
-
-            # MCP discovery should have been called
-            mock_discover.assert_called_once()
-
-        # Discovered tools should now be set
-        assert runnable._discovered_tools is not None
-        assert len(runnable._discovered_tools) == 1
+        # Config should have MCP tools specified
+        assert runnable.config.mcp_tools == ["tool1", "tool2"]
+        assert runnable.config.name == "mcp-agent"
 
     @pytest.mark.asyncio
     async def test_process_with_bedrock_tool_call(self, basic_config, mock_model):
@@ -225,8 +211,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.subagents.dynamic_agent.create_agent", return_value=mock_graph):
-            result = await runnable._process("Do something", context_id="ctx-123")
+        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+            result = await runnable._process(
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")])
+            )
 
         # Check A2A response format indicates failure
         assert result["state"] == "failed"
@@ -245,8 +233,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.subagents.dynamic_agent.create_agent", return_value=mock_graph):
-            result = await runnable._process("Do something", context_id="ctx-123")
+        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+            result = await runnable._process(
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")])
+            )
 
         # Should fall back to completed state with warning
         assert result["state"] == "completed"
@@ -258,7 +248,8 @@ class TestCreateDynamicLocalSubagent:
 
     def test_creates_compiled_subagent(self):
         """Test that factory creates a proper CompiledSubAgent."""
-        config = LocalSubAgentConfig(
+        config = LocalLangGraphSubAgentConfig(
+            type="langgraph",
             name="factory-test",
             description="Test from factory",
             system_prompt="You are a test.",
@@ -274,7 +265,8 @@ class TestCreateDynamicLocalSubagent:
 
     def test_passes_orchestrator_tools(self):
         """Test that orchestrator tools are passed to runnable."""
-        config = LocalSubAgentConfig(
+        config = LocalLangGraphSubAgentConfig(
+            type="langgraph",
             name="tools-test",
             description="Test with tools",
             system_prompt="You are a test.",

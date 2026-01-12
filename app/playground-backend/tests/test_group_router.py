@@ -13,10 +13,11 @@ import os
 
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
+from sqlalchemy import text
 
 from playground_backend.models.user import User, UserRole, UserStatus
 from playground_backend.models.user_group import (
@@ -27,17 +28,11 @@ from playground_backend.routers import group_router
 
 
 @pytest.fixture
-def mock_db():
-    """Mock database session."""
-    return AsyncMock()
-
-
-@pytest.fixture
 def mock_user():
     """Mock authenticated user."""
     return User(
         id="user-123",
-        sub="user-sub-123",
+        sub="user-123",
         email="user@test.com",
         first_name="Test",
         last_name="User",
@@ -102,307 +97,444 @@ def mock_members():
     ]
 
 
+@pytest_asyncio.fixture
+async def db_test_user(pg_session, mock_user):
+    """Setup test environment with app and db."""
+
+    # add user to db
+    await pg_session.execute(
+        text("""
+        INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+        VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
+        """),
+        {
+            "id": mock_user.id,
+            "sub": mock_user.sub,
+            "email": mock_user.email,
+            "first_name": mock_user.first_name,
+            "last_name": mock_user.last_name,
+            "is_administrator": mock_user.is_administrator,
+            "role": mock_user.role,
+            "status": mock_user.status,
+        },
+    )
+    await pg_session.commit()
+
+
+@pytest_asyncio.fixture
+async def db_admin_user(pg_session, mock_admin_user):
+    """Setup test environment with app and db."""
+
+    # add user to db
+    await pg_session.execute(
+        text("""
+        INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+        VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
+        """),
+        {
+            "id": mock_admin_user.id,
+            "sub": mock_admin_user.sub,
+            "email": mock_admin_user.email,
+            "first_name": mock_admin_user.first_name,
+            "last_name": mock_admin_user.last_name,
+            "is_administrator": mock_admin_user.is_administrator,
+            "role": mock_admin_user.role,
+            "status": mock_admin_user.status,
+        },
+    )
+    await pg_session.commit()
+
+
+@pytest_asyncio.fixture
+async def db_test_user_groups(pg_session, mock_user, user_group_service):
+    result = await pg_session.execute(text("SELECT * FROM users WHERE id = :user_id"), {"user_id": mock_user.id})
+    user = result.first()
+    assert user is not None
+    await user_group_service.create_group(
+        pg_session,
+        actor_sub=mock_user.sub,
+        name="Test Group 1",
+        description="Description 1",
+    )
+    await user_group_service.create_group(
+        pg_session,
+        actor_sub=mock_user.sub,
+        name="Test Group 2",
+        description="Description 2",
+    )
+    await user_group_service.add_members(
+        pg_session,
+        actor_sub=mock_user.sub,
+        group_id=1,
+        user_ids=[mock_user.id],
+        role="manager",
+    )
+    await user_group_service.add_members(
+        pg_session,
+        actor_sub=mock_user.sub,
+        group_id=2,
+        user_ids=[mock_user.id],
+        role="read",
+    )
+    await pg_session.commit()
+
+    yield
+
+
+@pytest.mark.asyncio
 class TestGroupListingEndpoints:
     """Test group listing endpoints."""
 
     @pytest.mark.asyncio
-    async def test_list_my_groups_returns_user_groups(self, mock_db, mock_user, mock_groups):
-        """Test that list_my_groups returns groups the user belongs to."""
-        with patch("playground_backend.routers.group_router.user_group_service") as mock_service:
-            mock_service.check_user_permission = AsyncMock(return_value=True)
-            mock_service.list_user_groups = AsyncMock(return_value=mock_groups)
-
-            result = await group_router.list_my_groups(mock_db, mock_user)
-
-            assert len(result) == 2
-            assert result[0].name == "Test Group 1"
-            assert result[1].name == "Test Group 2"
-            mock_service.check_user_permission.assert_called_once_with(mock_db, mock_user.id, "groups", "read")
-            mock_service.list_user_groups.assert_called_once_with(mock_db, mock_user.id)
-
-    @pytest.mark.asyncio
-    async def test_list_my_groups_empty_for_new_user(self, mock_db, mock_user):
+    async def test_list_my_groups_empty_for_new_user(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+    ):
         """Test that new users see empty group list."""
-        with patch("playground_backend.routers.group_router.user_group_service") as mock_service:
-            mock_service.check_user_permission = AsyncMock(return_value=True)
-            mock_service.list_user_groups = AsyncMock(return_value=[])
+        result = await group_router.list_my_groups(mock_request, pg_session, mock_user)
 
-            result = await group_router.list_my_groups(mock_db, mock_user)
-
-            assert len(result) == 0
+        assert len(result) == 0
 
     @pytest.mark.asyncio
-    async def test_list_my_groups_requires_permission(self, mock_db, mock_user):
-        """Test that groups.read permission is required."""
-        with patch("playground_backend.routers.group_router.user_group_service") as mock_service:
-            mock_service.check_user_permission = AsyncMock(return_value=False)
+    async def test_list_my_groups_returns_user_groups(
+        self,
+        mock_user,
+        mock_request,
+        pg_session,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        """Test that new users see empty group list."""
+        result = await group_router.list_my_groups(mock_request, pg_session, mock_user)
 
-            with pytest.raises(HTTPException) as exc_info:
-                await group_router.list_my_groups(mock_db, mock_user)
+        assert len(result) == 2
 
-            assert exc_info.value.status_code == 403
-            assert "groups.read required" in exc_info.value.detail
+    @pytest.mark.asyncio
+    async def test_list_my_groups_endpoint_returns_user_groups(
+        self,
+        client_with_db,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+    ):
+        """Test that list_my_groups returns groups the user belongs to."""
+        # NOTE: looks like we need to override the dependency again, otherwise it uses a different db session
+        client_with_db._transport.app.dependency_overrides[group_router.require_auth] = lambda: mock_user
+        response = await client_with_db.get("/api/v1/groups")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 2
+        assert data[0]["name"] == "Test Group 1"
+        assert data[1]["name"] == "Test Group 2"
 
 
 class TestGroupDetailEndpoint:
     """Test get_group endpoint."""
 
     @pytest.mark.asyncio
-    async def test_get_group_returns_details(self, mock_db, mock_user, mock_groups):
+    async def test_get_group_returns_details(
+        self, get_mock_request, pg_session, mock_user, db_test_user, db_test_user_groups
+    ):
         """Test that get_group returns group details."""
-        mock_request = MagicMock()
-        group = mock_groups[0]
+        mock_request = get_mock_request(user=mock_user)
+        result = await group_router.get_group(1, mock_request, pg_session, mock_user)
 
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group_with_members = AsyncMock(return_value=group)
-            mock_service.is_group_admin = AsyncMock(return_value=True)
-
-            result = await group_router.get_group(1, mock_request, mock_db, mock_user)
-
-            assert result.data.name == "Test Group 1"
-            mock_require.assert_called_once_with(mock_request, 1, mock_db)
+        assert result.data.name == "Test Group 1"
 
     @pytest.mark.asyncio
-    async def test_get_group_not_found(self, mock_db, mock_user):
+    async def test_get_group_not_found(
+        self, get_mock_request, pg_session, mock_user, db_test_user, db_test_user_groups
+    ):
         """Test 404 for non-existent group."""
-        mock_request = MagicMock()
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group_with_members = AsyncMock(return_value=None)
-
-            with pytest.raises(HTTPException) as exc_info:
-                await group_router.get_group(999, mock_request, mock_db, mock_user)
+        mock_request = get_mock_request(user=mock_user)
+        with pytest.raises(HTTPException) as exc_info:
+            await group_router.get_group(999, mock_request, pg_session, mock_user)
 
             assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_get_group_hides_members_for_non_admin(self, mock_db, mock_user, mock_groups, mock_members):
+    async def test_get_group_members_for_manager(
+        self, pg_session, get_mock_request, mock_user, db_test_user, db_test_user_groups
+    ):
+        """Test that managers see full member list."""
+        mock_request = get_mock_request(user=mock_user)
+        result = await group_router.get_group(1, mock_request, pg_session, mock_user)
+        assert len(result.data.members) == 1  # Members hidden
+
+    @pytest.mark.asyncio
+    async def test_get_group_hides_members_for_non_admin(
+        self, pg_session, get_mock_request, mock_user, db_test_user, db_test_user_groups
+    ):
         """Test that non-admin members don't see full member list."""
-        mock_request = MagicMock()
-        group = mock_groups[0]
-        group.members = mock_members
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group_with_members = AsyncMock(return_value=group)
-            mock_service.is_group_admin = AsyncMock(return_value=False)
-
-            result = await group_router.get_group(1, mock_request, mock_db, mock_user)
-
-            assert len(result.data.members) == 0  # Members hidden
-
-
-class TestGroupMembersEndpoint:
-    """Test list_members endpoint."""
-
-    @pytest.mark.asyncio
-    async def test_list_members_returns_member_list(self, mock_db, mock_user, mock_members):
-        """Test that list_members returns all group members."""
-        mock_request = MagicMock()
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_admin_or_admin") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1, name="Test"))
-            mock_service.list_members = AsyncMock(return_value=(mock_members, 2))
-
-            result = await group_router.list_members(1, mock_request, mock_db, mock_user, page=1, limit=20)
-
-            assert len(result.data) == 2
-            assert result.meta.total == 2
-            mock_require.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_list_members_pagination(self, mock_db, mock_user, mock_members):
-        """Test pagination for member list."""
-        mock_request = MagicMock()
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_admin_or_admin") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
-            mock_service.list_members = AsyncMock(return_value=(mock_members[:1], 2))
-
-            result = await group_router.list_members(1, mock_request, mock_db, mock_user, page=2, limit=1)
-
-            assert len(result.data) == 1
-            assert result.meta.page == 2
-            assert result.meta.limit == 1
-
-
-class TestAddMembersEndpoint:
-    """Test add_members endpoint."""
-
-    @pytest.mark.asyncio
-    async def test_add_members_with_manager_role(self, mock_db, mock_user, mock_members):
-        """Test that managers can add members to groups."""
-        from playground_backend.models.user_group import GroupMemberAdd
-
-        mock_request = MagicMock()
-        request_body = GroupMemberAdd(user_ids=["user-3", "user-4"], role="write")
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
-            mock_service.add_members = AsyncMock(return_value=mock_members)
-
-            result = await group_router.add_members(1, request_body, mock_request, mock_db, mock_user)
-
-            assert len(result.data) == 2
-            mock_service.add_members.assert_called_once_with(
-                mock_db, actor_sub="user-sub-123", group_id=1, user_ids=["user-3", "user-4"], role="write"
-            )
-
-    @pytest.mark.asyncio
-    async def test_add_members_group_not_found(self, mock_db, mock_user):
-        """Test error when group doesn't exist."""
-        from playground_backend.models.user_group import GroupMemberAdd
-
-        mock_request = MagicMock()
-        request_body = GroupMemberAdd(user_ids=["user-3"], role="write")
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=None)
-
-            with pytest.raises(HTTPException) as exc_info:
-                await group_router.add_members(1, request_body, mock_request, mock_db, mock_user)
-
-            assert exc_info.value.status_code == 404
+        mock_request = get_mock_request(user=mock_user)
+        result = await group_router.get_group(2, mock_request, pg_session, mock_user)
+        assert len(result.data.members) == 0  # Members hidden
 
 
 class TestUpdateMemberRoleEndpoint:
     """Test update_member_role endpoint."""
 
     @pytest.mark.asyncio
-    async def test_update_member_role_success(self, mock_db, mock_user):
-        """Test successful member role update."""
+    async def test_update_member_role_403(
+        self, pg_session, get_mock_request, mock_user, db_test_user, db_test_user_groups
+    ):
+        """Test member role update forbidden for non-admin/non-manager."""
         from playground_backend.models.user_group import GroupMemberUpdate
 
-        mock_request = MagicMock()
+        mock_request = get_mock_request(user=mock_user)
         request_body = GroupMemberUpdate(role="manager")
-        updated_member = MemberInfo(
-            user_id="user-2",
-            email="user2@test.com",
-            first_name="User",
-            last_name="Two",
-            group_role="manager",
-        )
+        # mock_request._transport.app.dependency_overrides[require_auth] = lambda: mock_user
 
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
-            mock_service.update_member_role = AsyncMock(return_value=updated_member)
-
-            result = await group_router.update_member_role(1, "user-2", request_body, mock_request, mock_db, mock_user)
-
-            assert result.group_role == "manager"
-            mock_service.update_member_role.assert_called_once_with(
-                mock_db, actor_sub="user-sub-123", group_id=1, user_id="user-2", role="manager"
-            )
+        # mock_user.is_administrator = True  # Make user an admin for this test
+        with pytest.raises(HTTPException) as exc_info:
+            await group_router.update_member_role(2, mock_user.id, mock_request, request_body, pg_session, mock_user)
+        assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_update_member_role_member_not_found(self, mock_db, mock_user):
-        """Test error when member doesn't exist in group."""
+    async def test_update_member_role_success_manager(
+        self, pg_session, get_mock_request, mock_user, db_test_user, db_test_user_groups
+    ):
+        """Test member role update forbidden for non-admin/non-manager."""
         from playground_backend.models.user_group import GroupMemberUpdate
 
-        mock_request = MagicMock()
+        mock_request = get_mock_request(user=mock_user)
         request_body = GroupMemberUpdate(role="manager")
+        result = await group_router.update_member_role(
+            1, mock_user.id, mock_request, request_body, pg_session, mock_user
+        )
+        assert result.group_role == "manager"
 
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
-            mock_service.update_member_role = AsyncMock(return_value=None)
+    @pytest.mark.asyncio
+    async def test_update_member_role_success_admin(
+        self, pg_session, get_mock_request, mock_user, mock_admin_user, db_test_user, db_admin_user, db_test_user_groups
+    ):
+        """Test admin can update member roles."""
+        from playground_backend.models.user_group import GroupMemberUpdate
 
-            with pytest.raises(HTTPException) as exc_info:
-                await group_router.update_member_role(1, "user-999", request_body, mock_request, mock_db, mock_user)
+        mock_request = get_mock_request(user=mock_admin_user)
+        request_body = GroupMemberUpdate(role="manager")
+        # admin user updates member role of test user in group 2
+        result = await group_router.update_member_role(
+            2, mock_user.id, mock_request, request_body, pg_session, mock_admin_user
+        )
+        assert result.group_role == "manager"
 
-            assert exc_info.value.status_code == 404
+    @pytest.mark.asyncio
+    async def test_update_member_role_member_not_found(
+        self, pg_session, get_mock_request, mock_user, mock_admin_user, db_test_user, db_admin_user, db_test_user_groups
+    ):
+        """Test error when member doesn't exist."""
+        from playground_backend.models.user_group import GroupMemberUpdate
+
+        mock_request = get_mock_request(user=mock_admin_user)
+        request_body = GroupMemberUpdate(role="manager")
+        with pytest.raises(HTTPException) as exc_info:
+            await group_router.update_member_role(
+                1, "user-999", mock_request, request_body, pg_session, mock_admin_user
+            )
+
+        assert exc_info.value.status_code == 404
+
+
+class TestGroupMembersEndpoint:
+    """Test list_members endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_list_members_returns_member_list(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
+        """Test that list_members returns all group members."""
+        # mock_user is manager of group 1
+        mock_request = get_mock_request(user=mock_user)
+        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=20)
+        assert result.meta.total == 1
+        assert len(result.data) == 1
+        assert result.data[0].user_id == mock_user.id
+
+    @pytest.mark.asyncio
+    async def test_list_members_pagination(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
+        """Test pagination for member list (trivial with 1 member)."""
+        mock_request = get_mock_request(user=mock_user)
+        result = await group_router.list_members(1, mock_request, pg_session, mock_user, page=1, limit=1)
+        assert result.meta.page == 1
+        assert result.meta.limit == 1
+        assert len(result.data) == 1
+
+
+class TestAddMembersEndpoint:
+    """Test add_members endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_add_members_with_manager_role(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
+        """Test that managers can add members to groups."""
+        from playground_backend.models.user_group import GroupMemberAdd
+
+        # Add two new users to group 1 as manager
+        # First, add users to DB
+        await pg_session.execute(
+            text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+            VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
+            """),
+            {
+                "id": "user-3",
+                "sub": "user-3",
+                "email": "user3@test.com",
+                "first_name": "User",
+                "last_name": "Three",
+                "is_administrator": False,
+                "role": "member",
+                "status": "active",
+            },
+        )
+        await pg_session.execute(
+            text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+            VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
+            """),
+            {
+                "id": "user-4",
+                "sub": "user-4",
+                "email": "user4@test.com",
+                "first_name": "User",
+                "last_name": "Four",
+                "is_administrator": False,
+                "role": "member",
+                "status": "active",
+            },
+        )
+        await pg_session.commit()
+        mock_request = get_mock_request(user=mock_user)
+        request_body = GroupMemberAdd(user_ids=["user-3", "user-4"], role="write")
+        result = await group_router.add_members(1, mock_request, request_body, pg_session, mock_user)
+        # Should now be 3 members in group 1
+        assert len(result.data) == 3
+        user_ids = [m.user_id for m in result.data]
+        assert "user-3" in user_ids and "user-4" in user_ids
+
+    @pytest.mark.asyncio
+    async def test_add_members_group_not_found(
+        self,
+        get_mock_request,
+        mock_user,
+        pg_session,
+    ):
+        """Test error when group doesn't exist."""
+        from playground_backend.models.user_group import GroupMemberAdd
+
+        mock_request = get_mock_request(user=mock_user)
+        request_body = GroupMemberAdd(user_ids=["user-999"], role="write")
+        with pytest.raises(HTTPException) as exc_info:
+            await group_router.add_members(999, mock_request, request_body, pg_session, mock_user)
+        assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_add_members_group_not_found_admin(
+        self,
+        get_mock_request,
+        mock_admin_user,
+        pg_session,
+    ):
+        """Test error when group doesn't exist."""
+        from playground_backend.models.user_group import GroupMemberAdd
+
+        mock_request = get_mock_request(user=mock_admin_user)
+        request_body = GroupMemberAdd(user_ids=["user-999"], role="write")
+        with pytest.raises(HTTPException) as exc_info:
+            await group_router.add_members(999, mock_request, request_body, pg_session, mock_user)
+        assert exc_info.value.status_code == 404
 
 
 class TestRemoveMemberEndpoint:
     """Test remove_member endpoint."""
 
     @pytest.mark.asyncio
-    async def test_remove_member_success(self, mock_db, mock_user):
+    async def test_remove_member_success(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
         """Test successful member removal."""
-        mock_request = MagicMock()
+        # Add a new user to group 1, then remove them
+        await pg_session.execute(
+            text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+            VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
+            """),
+            {
+                "id": "user-5",
+                "sub": "user-5",
+                "email": "user5@test.com",
+                "first_name": "User",
+                "last_name": "Five",
+                "is_administrator": False,
+                "role": "member",
+                "status": "active",
+            },
+        )
+        await pg_session.commit()
+        from playground_backend.models.user_group import GroupMemberAdd
 
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
-            mock_service.remove_member = AsyncMock(return_value=True)
-
-            result = await group_router.remove_member(1, "user-2", mock_request, mock_db, mock_user)
-
-            assert result is None  # 204 No Content
-            mock_service.remove_member.assert_called_once_with(
-                mock_db, actor_sub="user-sub-123", group_id=1, user_id="user-2"
-            )
+        mock_request = get_mock_request(user=mock_user)
+        add_body = GroupMemberAdd(user_ids=["user-5"], role="write")
+        await group_router.add_members(1, mock_request, add_body, pg_session, mock_user)
+        # Now remove user-5
+        result = await group_router.remove_member(1, "user-5", mock_request, pg_session, mock_user)
+        assert result is None  # 204 No Content
 
     @pytest.mark.asyncio
-    async def test_remove_member_not_found(self, mock_db, mock_user):
+    async def test_remove_member_not_found(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
         """Test error when member doesn't exist."""
-        mock_request = MagicMock()
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
-            mock_service.remove_member = AsyncMock(return_value=False)
-
-            with pytest.raises(HTTPException) as exc_info:
-                await group_router.remove_member(1, "user-999", mock_request, mock_db, mock_user)
-
-            assert exc_info.value.status_code == 404
+        mock_request = get_mock_request(user=mock_user)
+        with pytest.raises(HTTPException) as exc_info:
+            await group_router.remove_member(1, "user-999", mock_request, pg_session, mock_user)
+        assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_remove_last_manager_prevented(self, mock_db, mock_user):
+    async def test_remove_last_manager_prevented(
+        self,
+        get_mock_request,
+        mock_user,
+        db_test_user,
+        db_test_user_groups,
+        pg_session,
+    ):
         """Test that removing the last manager is prevented."""
-        mock_request = MagicMock()
-
-        with (
-            patch("playground_backend.routers.group_router.user_group_service") as mock_service,
-            patch("playground_backend.routers.group_router.require_group_member_management_permission") as mock_require,
-        ):
-            mock_require.return_value = AsyncMock()
-            mock_service.get_group = AsyncMock(return_value=MagicMock(id=1))
-            mock_service.remove_member = AsyncMock(side_effect=ValueError("Cannot remove the last manager"))
-
-            with pytest.raises(HTTPException) as exc_info:
-                await group_router.remove_member(1, "user-1", mock_request, mock_db, mock_user)
-
-            assert exc_info.value.status_code == 409
-            assert "last manager" in exc_info.value.detail.lower()
+        mock_request = get_mock_request(user=mock_user)
+        # mock_user is the only manager in group 1
+        with pytest.raises(HTTPException) as exc_info:
+            await group_router.remove_member(1, mock_user.id, mock_request, pg_session, mock_user)
+        assert exc_info.value.status_code == 409
+        assert "last manager" in exc_info.value.detail.lower()

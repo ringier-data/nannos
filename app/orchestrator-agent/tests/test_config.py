@@ -1,8 +1,5 @@
 """Unit tests for configuration models and settings."""
 
-import os
-from unittest.mock import patch
-
 import pytest
 
 from app.models.config import AgentSettings, ResponseFormat
@@ -24,14 +21,6 @@ class TestResponseFormat:
 
 class TestAgentSettings:
     """Tests for AgentSettings configuration."""
-
-    def test_azure_settings(self):
-        """Test Azure OpenAI settings."""
-        with patch.dict(
-            os.environ, {"AZURE_OPENAI_CHAT_DEPLOYMENT": "test_deployment", "AZURE_OPENAI_CHAT_MODEL_NAME": "gpt-4"}
-        ):
-            assert AgentSettings.get_azure_deployment() == "test_deployment"
-            assert AgentSettings.get_azure_model_name() == "gpt-4"
 
     def test_retry_configuration(self):
         """Test retry configuration constants."""

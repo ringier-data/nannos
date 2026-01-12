@@ -15,7 +15,8 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..a2a import make_a2a_async_runnable
+from ..a2a_utils import make_a2a_async_runnable
+from ..a2a_utils.config import A2AClientConfig
 from ..middleware import A2ATaskTrackingMiddleware
 from ..models import AgentSettings
 
@@ -44,7 +45,7 @@ class AgentDiscoveryService:
 
     async def register_agents(
         self,
-        agent_urls: List[str],
+        agent_metadata: dict[str, dict[str, Any]],
         token: str,
         user_context: Optional[dict[str, Any]] = None,
         streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
@@ -52,7 +53,7 @@ class AgentDiscoveryService:
         """Discover available sub-agents by fetching their agent cards.
 
         Args:
-            agent_urls: List of agent URLs to discover
+            agent_metadata: Metadata map from agent_url -> {sub_agent_id, name, description}
             token: User's access token for authentication and token exchange
             user_context: Optional user context dict with user_id, email, name
             client_credentials_auth: Optional OidcClientCredentialsAuth for client credentials flow
@@ -65,13 +66,18 @@ class AgentDiscoveryService:
         logger.debug("Starting agent discovery...")
 
         sub_agents = []
-        for base_url in agent_urls:
+        for base_url in agent_metadata.keys():
             try:
+                # Get metadata for this agent URL
+                metadata = agent_metadata.get(base_url, {})
+                sub_agent_id = metadata.get("sub_agent_id")
+
                 agent = await self._discover_single_agent(
                     base_url,
                     streaming_middleware,
                     token,
                     user_context,
+                    sub_agent_id=sub_agent_id,  # Pass sub_agent_id to discovery
                 )
                 if agent:
                     sub_agents.append(agent)
@@ -89,6 +95,7 @@ class AgentDiscoveryService:
         streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
         user_token: Optional[str] = None,
         user_context: Optional[dict[str, Any]] = None,
+        sub_agent_id: Optional[int] = None,
     ) -> Optional[CompiledSubAgent]:
         """Discover a single agent from the given URL.
 
@@ -117,13 +124,16 @@ class AgentDiscoveryService:
             logger.debug(f"Agent card parsed: name={agent_card.name}, url={agent_card.url}")
 
         # Create the A2A runnable with the proper agent card and authentication
+        # Pass sub_agent_id via config for cost tracking attribution
+        config = A2AClientConfig(sub_agent_id=sub_agent_id)
         base_runnable = make_a2a_async_runnable(
             agent_card,
             self.oauth2_client,
             user_token=user_token,
             user_context=user_context,
+            config=config,
         )
-        logger.debug(f"A2A runnable created successfully for {agent_card.url}")
+        logger.debug(f"A2A runnable created successfully for {agent_card.url} with sub_agent_id={sub_agent_id}")
 
         # Create the sub-agent (middleware will be applied by create_deep_agent)
         agent_name = agent_card.name.replace(" ", "")  # Remove spaces for tool name

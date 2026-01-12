@@ -7,6 +7,7 @@ import { ChatPage } from './pages/ChatPage';
 import { SubAgentsPage } from './pages/SubAgentsPage';
 import { SubAgentCreatePage } from './pages/SubAgentCreatePage';
 import { SubAgentDetailPage } from './pages/SubAgentDetailPage';
+import { UsagePage } from './pages/UsagePage';
 import { AdminRoute } from './components/AdminRoute';
 import { GroupManagerRoute } from './components/GroupManagerRoute';
 import { UsersPage } from './pages/admin/UsersPage';
@@ -14,6 +15,7 @@ import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { GroupsPage } from './pages/admin/GroupsPage';
 import { GroupDetailPage } from './pages/admin/GroupDetailPage';
 import { AuditPage } from './pages/admin/AuditPage';
+import { RateCardsPage } from './pages/admin/RateCardsPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -52,6 +54,7 @@ function App() {
         <Route path="subagents" element={<SubAgentsPage />} />
         <Route path="subagents/new" element={<SubAgentCreatePage />} />
         <Route path="subagents/:id" element={<SubAgentDetailPage />} />
+        <Route path="usage" element={<UsagePage />} />
         <Route path="groups" element={<GroupManagerRoute><GroupsPage /></GroupManagerRoute>} />
         <Route path="groups/:id" element={<GroupManagerRoute><GroupDetailPage /></GroupManagerRoute>} />
         <Route path="admin/users" element={<AdminRoute><UsersPage /></AdminRoute>} />
@@ -59,6 +62,7 @@ function App() {
         <Route path="admin/groups" element={<AdminRoute><GroupsPage /></AdminRoute>} />
         <Route path="admin/groups/:id" element={<AdminRoute><GroupDetailPage /></AdminRoute>} />
         <Route path="admin/audit" element={<AdminRoute><AuditPage /></AdminRoute>} />
+        <Route path="admin/rate-cards" element={<AdminRoute><RateCardsPage /></AdminRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/app" replace />} />
     </Routes>

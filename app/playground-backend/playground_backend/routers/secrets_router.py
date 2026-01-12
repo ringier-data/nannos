@@ -29,10 +29,10 @@ def get_secrets_service(request: Request) -> SecretsService:
 
 @router.post("", response_model=Secret, status_code=status.HTTP_201_CREATED)
 async def create_secret(
+    request: Request,
     secret_data: SecretCreate,
     db: DbSession,
     current_user: User = Depends(require_auth),
-    request: Request = None,  # type: ignore[assignment]
 ):
     """Create a new secret.
 
@@ -67,9 +67,9 @@ async def create_secret(
 
 @router.get("", response_model=SecretListResponse)
 async def list_secrets(
+    request: Request,
     db: DbSession,
     current_user: User = Depends(require_auth),
-    request: Request = None,  # type: ignore[assignment]
 ):
     """List all secrets accessible to the current user.
 
@@ -102,10 +102,10 @@ async def list_secrets(
 
 @router.get("/{secret_id}", response_model=Secret)
 async def get_secret(
+    request: Request,
     secret_id: int,
     db: DbSession,
     current_user: User = Depends(require_auth),
-    request: Request = None,  # type: ignore[assignment]
 ):
     """Get a secret by ID (metadata only, not the actual secret value).
 
@@ -162,10 +162,10 @@ async def get_secret(
 
 @router.delete("/{secret_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_secret(
+    request: Request,
     secret_id: int,
     db: DbSession,
     current_user: User = Depends(require_auth),
-    request: Request = None,  # type: ignore[assignment]
 ):
     """Delete a secret (soft delete).
 

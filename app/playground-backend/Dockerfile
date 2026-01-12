@@ -15,6 +15,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.7.15 /uv /uvx /bin/
 
 WORKDIR ${WORKDIR}
 COPY . .
+# Clean any Python cache that might have been copied
+RUN find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    find . -name "*.pyc" -delete 2>/dev/null || true && \
+    find . -name "*.pyo" -delete 2>/dev/null || true
 RUN mv ringier-a2a-sdk ../ringier-a2a-sdk
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 RUN uv pip install validators

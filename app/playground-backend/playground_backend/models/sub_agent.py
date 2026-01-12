@@ -111,6 +111,16 @@ class SubAgentConfigVersion(BaseModel):
     foundry_scopes: list[str] | None = None  # Stored as TEXT[] in database
     foundry_version: str | None = None
 
+    # Agent-specific pricing configuration (remote and foundry agents only)
+    pricing_config: dict | None = Field(
+        default=None,
+        description=(
+            "Agent-specific rate card configuration. Only applicable for remote and foundry agents. "
+            "Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} "
+            "or {'price_per_million_requests': 0.05}"
+        ),
+    )
+
     change_summary: str | None = None
     status: SubAgentStatus = SubAgentStatus.DRAFT
     approved_by_user_id: str | None = None
@@ -170,6 +180,16 @@ class SubAgentCreate(BaseModel):
     foundry_scopes: list[FoundryScope] | None = None
     foundry_version: str | None = None
 
+    # Agent-specific pricing configuration (remote and foundry agents only)
+    pricing_config: dict | None = Field(
+        default=None,
+        description=(
+            "Agent-specific rate card configuration. Only applicable for remote and foundry agents. "
+            "Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} "
+            "or {'price_per_million_requests': 0.05}"
+        ),
+    )
+
 
 class SubAgentUpdate(BaseModel):
     """Request model for updating a sub-agent."""
@@ -192,6 +212,16 @@ class SubAgentUpdate(BaseModel):
     foundry_query_api_name: str | None = None
     foundry_scopes: list[FoundryScope] | None = None
     foundry_version: str | None = None
+
+    # Agent-specific pricing configuration (remote and foundry agents only)
+    pricing_config: dict | None = Field(
+        default=None,
+        description=(
+            "Agent-specific rate card configuration. Only applicable for remote and foundry agents. "
+            "Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} "
+            "or {'price_per_million_requests': 0.05}"
+        ),
+    )
 
     change_summary: str | None = None  # For version history
 

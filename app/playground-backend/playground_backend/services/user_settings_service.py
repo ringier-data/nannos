@@ -138,7 +138,3 @@ class UserSettingsService:
         except Exception as e:
             logger.error(f"Failed to upsert user settings: {e}")
             raise
-
-
-# Module-level singleton
-user_settings_service = UserSettingsService()

@@ -16,7 +16,6 @@ class TestBedrockTimeoutConfiguration:
         """Test that boto3 client uses default timeout values when env vars not set."""
         # Setup
         config = Mock(spec=AgentSettings)
-        config.get_bedrock_model_id.return_value = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
         config.get_bedrock_region.return_value = "eu-central-1"
 
         mock_bedrock_client = Mock()
@@ -55,7 +54,6 @@ class TestBedrockTimeoutConfiguration:
         """Test that boto3 client respects custom timeout values from environment."""
         # Setup
         config = Mock(spec=AgentSettings)
-        config.get_bedrock_model_id.return_value = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
         config.get_bedrock_region.return_value = "eu-central-1"
 
         mock_bedrock_client = Mock()
@@ -86,7 +84,6 @@ class TestBedrockTimeoutConfiguration:
         """Test that thinking mode passes through correctly with timeout config."""
         # Setup
         config = Mock(spec=AgentSettings)
-        config.get_bedrock_model_id.return_value = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
         config.get_bedrock_region.return_value = "eu-central-1"
 
         mock_boto_client.return_value = Mock()
@@ -107,8 +104,6 @@ class TestBedrockTimeoutConfiguration:
         """Test that Azure models don't create boto3 clients."""
         # Setup
         config = Mock(spec=AgentSettings)
-        config.get_azure_deployment.return_value = "gpt-4o"
-        config.get_azure_model_name.return_value = "gpt-4o"
 
         # Execute
         with patch("app.core.model_factory.boto3.client") as mock_boto_client:

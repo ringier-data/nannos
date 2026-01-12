@@ -14,8 +14,9 @@ from typing import Any
 
 from deepagents import CompiledSubAgent
 from langgraph.store.postgres.aio import AsyncPostgresStore
+from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
-from ..a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
+from ..a2a_utils.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
 from ..core.model_factory import ModelType, create_model
 from ..core.s3_service import S3Service
 from .config import GraphRuntimeContext, UserConfig
@@ -33,6 +34,8 @@ def build_runtime_context(
     s3_service: "S3Service | None" = None,
     document_store_bucket: str | None = None,
     backend_factory: Any = None,
+    cost_logger: Any = None,
+    backend_url: str | None = None,
 ) -> GraphRuntimeContext:
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
@@ -44,8 +47,9 @@ def build_runtime_context(
     - Document store tools (if dependencies provided)
 
     Dynamic local sub-agents are instantiated with:
-    - Tools inherited from orchestrator if mcp_gateway_url is None
-    - MCP tool discovery (lazy) if mcp_gateway_url is set
+    - Essential orchestrator tools always included (get_current_time, docstore, etc.)
+    - MCP tool discovery (lazy) if mcp_tools is a non-empty list
+    - NO additional MCP tools if mcp_tools is None or empty list
     - Shared checkpointer for multi-turn conversation state
     - Shared document store for persistent memory (FilesystemMiddleware)
     - Shared backend factory for semantic indexing (IndexingStoreBackend)
@@ -61,6 +65,8 @@ def build_runtime_context(
         s3_service: S3Service for uploading direct retrieval results (optional).
         document_store_bucket: S3 bucket name for document store results (optional).
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
+        cost_logger: CostLogger instance for cost tracking callbacks (optional).
+        backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
 
     Returns:
         GraphRuntimeContext for graph invocation
@@ -131,6 +137,8 @@ def build_runtime_context(
                             "name": user_config.name,
                             "email": user_config.email,
                         },
+                        backend_url=backend_url,
+                        sub_agent_id=config.sub_agent_id,
                     )
                     subagent_registry[config.name] = dynamic_subagent
                     logger.info(f"Registered Foundry local sub-agent: {config.name}")
@@ -141,7 +149,7 @@ def build_runtime_context(
                     subagent_model_type: ModelType
                     if config.model_name:
                         # Validate and use the specified model
-                        if config.model_name in ["gpt4o", "claude-sonnet-4.5"]:
+                        if config.model_name in ["gpt4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-haiku-4-5"]:
                             subagent_model_type = config.model_name  # type: ignore
                             logger.info(f"Sub-agent '{config.name}' using custom model: {config.model_name}")
                         else:
@@ -157,8 +165,20 @@ def build_runtime_context(
                             f"Sub-agent '{config.name}' inheriting orchestrator model: {orchestrator_model_type}"
                         )
 
-                    # Create the model for this sub-agent using the utility function
-                    subagent_model = create_model(subagent_model_type, agent_settings)
+                    # Create the model for this sub-agent with cost tracking callbacks
+                    if cost_logger:
+                        # Create model with CostTrackingCallback for cost tracking
+                        callbacks = [CostTrackingCallback(cost_logger)]
+                        subagent_model = create_model(subagent_model_type, agent_settings, callbacks=callbacks)
+                        logger.info(
+                            f"Sub-agent '{config.name}' model created with cost tracking (model_type={subagent_model_type})"
+                        )
+                    else:
+                        # Fallback: create model without callbacks
+                        subagent_model = create_model(subagent_model_type, agent_settings)
+                        logger.warning(
+                            f"Sub-agent '{config.name}' model created WITHOUT cost tracking (cost_logger not available)"
+                        )
 
                     # Create dynamic sub-agent with orchestrator tools for inheritance
                     # (tools are overridden if config.mcp_gateway_url is set)

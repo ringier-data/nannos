@@ -21,15 +21,21 @@ from ..models.user_group import (
     UserGroupDetailResponse,
     UserGroupWithMembers,
 )
-from ..services.user_group_service import user_group_service
+from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/groups", tags=["groups"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
+def get_user_group_service(request: Request) -> UserGroupService:
+    """Get user group service from app state."""
+    return request.app.state.user_group_service
+
+
 @router.get("")
 async def list_my_groups(
+    request: Request,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> list[UserGroupWithMembers]:
@@ -37,6 +43,7 @@ async def list_my_groups(
 
     Requires groups.read permission.
     """
+    user_group_service = get_user_group_service(request)
     # Check if user has groups.read permission
     has_permission = await user_group_service.check_user_permission(db, user.id, "groups", "read")
     if not has_permission:
@@ -61,6 +68,7 @@ async def get_group(
     Members can see basic group info.
     Group admins can also see member list.
     """
+    user_group_service = get_user_group_service(request)
     # Check if user is a member (or admin)
     await require_group_member(request, group_id, db)
 
@@ -94,6 +102,7 @@ async def list_members(
 
     Requires group admin role or system admin.
     """
+    user_group_service = get_user_group_service(request)
     # Check permission
     await require_group_admin_or_admin(request, group_id, db)
 
@@ -116,8 +125,8 @@ async def list_members(
 @router.post("/{group_id}/members", response_model=GroupMemberListResponse)
 async def add_members(
     group_id: int,
-    request_body: GroupMemberAdd,
     request: Request,
+    request_body: GroupMemberAdd,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> GroupMemberListResponse:
@@ -125,6 +134,7 @@ async def add_members(
 
     Requires group manager role or system admin.
     """
+    user_group_service = get_user_group_service(request)
     # Check permission
     await require_group_member_management_permission(request, group_id, db)
 
@@ -155,8 +165,8 @@ async def add_members(
 async def update_member_role(
     group_id: int,
     user_id: str,
-    request_body: GroupMemberUpdate,
     request: Request,
+    request_body: GroupMemberUpdate,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> MemberInfo:
@@ -164,6 +174,7 @@ async def update_member_role(
 
     Requires group manager role or system admin.
     """
+    user_group_service = get_user_group_service(request)
     # Check permission
     await require_group_member_management_permission(request, group_id, db)
 
@@ -207,6 +218,7 @@ async def remove_member(
     Requires group manager role or system admin.
     Cannot remove the last manager.
     """
+    user_group_service = get_user_group_service(request)
     # Check permission
     await require_group_member_management_permission(request, group_id, db)
 

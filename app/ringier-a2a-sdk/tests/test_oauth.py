@@ -64,16 +64,8 @@ class TestOidcOAuth2Client:
             }
         )
 
-        # Mock AsyncOAuth2Client and metadata discovery
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -104,11 +96,9 @@ class TestOidcOAuth2Client:
             }
         )
         client._token_cache["agent-1"] = mock_token
-        
+
         # Mock metadata to avoid discovery call
-        client._metadata = {
-            "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-        }
+        client._metadata = {"token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"}
 
         with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
             mock_oauth_client = Mock()
@@ -130,15 +120,8 @@ class TestOidcOAuth2Client:
             client_secret="secret123",
         )
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -158,12 +141,12 @@ class TestOidcOAuth2Client:
                 mock_oauth_client_class.return_value = mock_oauth_client
 
                 token1 = await client.get_token(audience="agent-1")
-                token2 = await client.get_token(audience="agent-2")
+            token2 = await client.get_token(audience="agent-2")
 
-                assert token1 == "token-agent-1"
-                assert token2 == "token-agent-2"
-                # Should have both in cache
-                assert len(client._token_cache) == 2
+            assert token1 == "token-agent-1"
+            assert token2 == "token-agent-2"
+            # Should have both in cache
+            assert len(client._token_cache) == 2
 
     @pytest.mark.asyncio
     async def test_get_token_expired_refresh(self):
@@ -196,15 +179,8 @@ class TestOidcOAuth2Client:
             }
         )
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -270,15 +246,8 @@ class TestOidcOAuth2Client:
             client_secret="secret123",
         )
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -306,15 +275,8 @@ class TestOidcOAuth2Client:
             }
         )
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -344,15 +306,8 @@ class TestOidcOAuth2Client:
 
         exchanged_token = OAuth2Token({"access_token": "token", "token_type": "Bearer"})
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -377,15 +332,8 @@ class TestOidcOAuth2Client:
             client_secret="secret123",
         )
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -416,15 +364,8 @@ class TestOidcOAuth2Client:
             }
         )
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()
@@ -447,15 +388,8 @@ class TestOidcOAuth2Client:
             client_secret="secret123",
         )
 
-        with patch("ringier_a2a_sdk.oauth.base.httpx.AsyncClient") as mock_http_client_class:
-            mock_http_client = AsyncMock()
-            mock_http_response = Mock()
-            mock_http_response.json.return_value = {
-                "token_endpoint": "https://login.example.com/realms/test/protocol/openid-connect/token"
-            }
-            mock_http_client.get.return_value = mock_http_response
-            mock_http_client.__aenter__.return_value = mock_http_client
-            mock_http_client_class.return_value = mock_http_client
+        with patch.object(client, "_discover_metadata", new_callable=AsyncMock) as mock_discover:
+            mock_discover.return_value = {"token_endpoint": "https://login.example.com/token"}
 
             with patch("ringier_a2a_sdk.oauth.base.AsyncOAuth2Client") as mock_oauth_client_class:
                 mock_oauth_client = Mock()

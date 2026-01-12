@@ -1,5 +1,9 @@
 # Orchestrator Agent Copilot Instructions
 
+## Maintaining These Instructions
+
+When implementing new features or refactoring existing code, consider if these instructions need updating. Only document design decisions that are non-obvious and would require reading large portions of the codebase to understand them.
+
 ## Tech Stack
 
 - FastAPI with async/await
@@ -29,6 +33,24 @@ The `start-dev.sh` script is the single source of truth for local environment se
 - Type hints are required for all function signatures
 - Use dependency injection via FastAPI's `Depends()`
 - Prefer explicit over implicit error handling
+
+## Python Environment
+
+This project uses `uv` for dependency management:
+
+```bash
+# Install dependencies
+uv sync
+
+# Run Python commands
+uv run python script.py
+
+# Run tests (prefer runTests MCP tool when available)
+uv run pytest tests/ -v
+
+# Run with coverage
+uv run pytest tests/ --cov=app --cov-report=html
+```
 
 ## Architecture Patterns
 
@@ -78,10 +100,30 @@ The orchestrator propagates LangSmith trace context to all A2A sub-agents (agent
 - Verify `LANGSMITH_API_KEY` is configured for all services
 - Ensure sub-agents have `TracingMiddleware` registered
 
+## File Writing Safety
+
+NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incremental edits with proper file writing tools instead.
+
 ## Testing
 
+**Prefer the runTests MCP tool over terminal commands when running tests.**
+
+Fallback to direct pytest commands when needed:
 - Use pytest with pytest-asyncio for async tests
 - Use aiomoto for mocking AWS services
 - Mock external dependencies (OpenAI, etc.)
 - Test LangGraph workflows with mock checkpointers
-- Verify document store operations with test database
+
+## Critical Design Decisions
+
+### Dynamic Trace Header Injection (app/subagents/runnable.py)
+
+LangSmith trace headers MUST be injected dynamically per-request using httpx event hooks, not at client initialization. Use `event_hooks={"request": [self._inject_trace_headers]}` where the hook calls `get_current_run_tree().to_headers()` to get current trace context. Static injection would use stale context.
+
+### Checkpoint Namespace Isolation (app/backends/dynamodb_checkpointer.py)
+
+Orchestrator and sub-agents share the same DynamoDB checkpoint table and the same context_id (conversation_id / thread_id) but use `checkpoint_ns` to isolate conversation histories. Without this, MCP tool calls from sub-agents would appear in orchestrator conversations. Always include `__pregel_checkpointer` in config to prevent LangGraph from misinterpreting the namespace.
+
+### Graph Caching: One Per Model Type (app/core/graph_factory.py)
+
+Create one LangGraph instance per model type (Claude, GPT-4), shared across all users (the model is baked into the graph). Tools (mcp tools and subagents) are injected dynamically via `DynamicToolDispatchMiddleware` which reads from `GraphRuntimeContext`, not baked into graphs. This enables memory-efficient graph reuse while maintaining user isolation via separate thread_ids.

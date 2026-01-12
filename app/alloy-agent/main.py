@@ -21,7 +21,7 @@ from a2a.types import (
 from dotenv import load_dotenv
 from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
-from ringier_a2a_sdk.middleware import UserContextFromMetadataMiddleware
+from ringier_a2a_sdk.middleware import SubAgentIdMiddleware, UserContextFromMetadataMiddleware
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 
@@ -129,7 +129,12 @@ def create_app():
     app = server.build(lifespan=lifespan)
 
     # No authentication middleware needed (VPN-protected)
+    # UserContextFromMetadataMiddleware extracts user context from A2A metadata
     app.add_middleware(UserContextFromMetadataMiddleware)
+
+    # SubAgentIdMiddleware extracts sub_agent_id from A2A metadata for cost tracking
+    # Must run BEFORE UserContextFromMetadataMiddleware so sub_agent_id is available
+    app.add_middleware(SubAgentIdMiddleware)
 
     # TracingMiddleware for LangSmith distributed tracing (receives trace from orchestrator)
     app.add_middleware(TracingMiddleware)

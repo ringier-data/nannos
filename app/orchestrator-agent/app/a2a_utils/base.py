@@ -30,6 +30,10 @@ class SubAgentInput(BaseModel):
     a2a_tracking: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     messages: List[HumanMessage]
     files: Optional[Any] = None  # TODO: Define proper type for files
+    orchestrator_conversation_id: Optional[str] = Field(
+        default=None,
+        description="Orchestrator's conversation ID for unified tracking across all sub-agents",
+    )
 
 
 class BaseA2ARunnable(ABC):
@@ -319,10 +323,18 @@ class BaseA2ARunnable(ABC):
         return json.dumps(raw_content[-1])
 
     def _extract_tracking_ids(self, input_data: SubAgentInput) -> tuple[Optional[str], Optional[str]]:
-        """Extract context_id and task_id from a2a_tracking state.
+        """Extract context_id and task_id from a2a_tracking state with orchestrator fallback.
+
+        Implements waterfall pattern for conversation ID propagation:
+        1. Use sub-agent's persisted context_id from a2a_tracking (for follow-up calls)
+        2. Fallback to orchestrator's conversation_id (for first call to this sub-agent)
+
+        This enables unified conversation tracking across all agents (local and remote).
+        For remote agents, the context_id is propagated via the standard A2A Message.context_id
+        field, ensuring native protocol compliance.
 
         Args:
-            input_data: Input data containing a2a_tracking
+            input_data: Input data containing a2a_tracking and orchestrator_conversation_id
 
         Returns:
             Tuple of (context_id, task_id). task_id is only returned if the task
@@ -333,15 +345,24 @@ class BaseA2ARunnable(ABC):
         agent_name = self.name.replace(" ", "")
         agent_tracking = input_data.a2a_tracking.get(agent_name, {})
 
-        if not agent_tracking:
+        # Waterfall: Try persisted context_id first, fallback to orchestrator's
+        context_id = agent_tracking.get("context_id") if agent_tracking else None
+
+        if not context_id and input_data.orchestrator_conversation_id:
+            # First call to this sub-agent: use orchestrator's conversation ID
+            context_id = input_data.orchestrator_conversation_id
+            logger.info(
+                f"[CONVERSATION_ID] First call to '{agent_name}': using orchestrator conversation_id={context_id}"
+            )
+        elif context_id:
+            logger.debug(f"[CONVERSATION_ID] Follow-up call to '{agent_name}': using persisted context_id={context_id}")
+        else:
             logger.debug(
                 f"No tracking found for agent: {agent_name}. Available: {list(input_data.a2a_tracking.keys())}"
             )
-            return None, None
 
-        context_id = agent_tracking.get("context_id")
-        task_id = agent_tracking.get("task_id")
-        is_complete = agent_tracking.get("is_complete", True)
+        task_id = agent_tracking.get("task_id") if agent_tracking else None
+        is_complete = agent_tracking.get("is_complete", True) if agent_tracking else True
 
         # Always return context_id for conversation continuity
         # Only return task_id if the task is still in progress

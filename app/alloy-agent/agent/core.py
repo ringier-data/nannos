@@ -6,24 +6,13 @@ lifecycle of BYOK (Bring Your Own KPI) campaigns through natural language conver
 
 import logging
 import os
-from collections.abc import AsyncIterable, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-import boto3
-from a2a.types import Task, TaskState
-from botocore.config import Config as BotoConfig
-from deepagents import create_deep_agent
 from langchain.agents.middleware.types import AgentMiddleware
-from langchain.agents.structured_output import AutoStrategy
-from langchain_aws import ChatBedrockConverse
 from langchain_core.tools import BaseTool
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from langgraph.graph.state import CompiledStateGraph
-from langgraph_checkpoint_aws import DynamoDBSaver
-from pydantic import BaseModel, Field
-from ringier_a2a_sdk.agent import BaseAgent
-from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
+from ringier_a2a_sdk.agent import LangGraphBedrockAgent
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +21,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TENANT = "riad"
 
 
-class TenantEnforcementMiddleware(AgentMiddleware[dict[str, Any], None]):
+class TenantEnforcementMiddleware(AgentMiddleware):
     """AgentMiddleware that enforces tenant parameter in all tool calls.
 
     This middleware intercepts tool calls at execution time and automatically
@@ -279,328 +268,49 @@ Remember: You're not just executing commands, you're managing campaigns. Think s
 """
 
 
-class FinalResponseSchema(BaseModel):
-    """Schema for final response from Bedrock models."""
-
-    task_state: str = Field(
-        ...,
-        description="The final state of the task: 'completed', 'failed', 'input_required', or 'working'",
-    )
-    message: str = Field(
-        ...,
-        description="A clear, helpful message to the user about the task outcome",
-    )
-
-
-class NaonousAgent(BaseAgent):
+class NaonousAgent(LangGraphBedrockAgent):
     """Naonous Agent - Manages BYOK campaign lifecycle on Alloy.
 
     This agent uses Claude Sonnet 4.5 via AWS Bedrock and has access to the
     Naonous MCP server for campaign management operations.
 
     Architecture:
+    - Extends LangGraphBedrockAgent base class
     - MCP tools discovered once at initialization (no authentication required)
     - Shared DynamoDB checkpointer for conversation persistence
-    - Single graph instance reused across requests
     - VPN-protected MCP server access
+    - TenantEnforcementMiddleware ensures tenant=riad for all tool calls
     """
 
-    SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
-
     def __init__(self):
-        """Initialize the Naonous Agent.
-
-        Discovers MCP tools from Naonous server and creates the DeepAgent graph.
-        """
+        """Initialize the Naonous Agent."""
+        # Store configuration before calling super().__init__()
+        self.naonous_mcp_url = os.getenv("NAONOUS_MCP_URL", "https://naonous.d.alloy.rcplus.io/mcp")
         super().__init__()
 
-        # Configuration from environment
-        self.naonous_mcp_url = os.getenv("NAONOUS_MCP_URL", "https://naonous.d.alloy.rcplus.io/mcp")
-        self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "eu-central-1")
-        self.bedrock_model_id = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    # Abstract method implementations
 
-        # Checkpointer configuration
-        checkpoint_table = os.getenv(
-            "CHECKPOINT_DYNAMODB_TABLE_NAME", "dev-alloy-infrastructure-agents-langgraph-checkpoints"
-        )
-        checkpoint_region = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
-        checkpoint_ttl_days = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
-        checkpoint_compression = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
-        checkpoint_s3_bucket = os.getenv(
-            "CHECKPOINT_S3_BUCKET_NAME", "dev-alloy-infrastructure-agents-orchestrator-checkpoints"
-        )
-
-        # Create shared checkpointer
-        s3_config = None
-        if checkpoint_s3_bucket:
-            s3_config = {"bucket_name": checkpoint_s3_bucket}
-            logger.info(f"S3 offloading enabled for large checkpoints: {checkpoint_s3_bucket}")
-
-        self._checkpointer = DynamoDBSaver(
-            table_name=checkpoint_table,
-            region_name=checkpoint_region,
-            ttl_seconds=checkpoint_ttl_days * 24 * 60 * 60,
-            enable_checkpoint_compression=checkpoint_compression,
-            s3_offload_config=s3_config,  # type: ignore[arg-type]
-        )
-        logger.info(f"Initialized DynamoDB checkpointer: {checkpoint_table}")
-
-        # MCP tools will be discovered lazily on first request
-        self._mcp_tools: list[BaseTool] | None = None
-        self._mcp_tools_lock = False
-        logger.info("MCP tool discovery will happen on first request")
-
-        # Configure boto3 client with timeouts and retry logic
-        read_timeout = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))
-        connect_timeout = int(os.getenv("BEDROCK_CONNECT_TIMEOUT", "10"))
-        max_attempts = int(os.getenv("BEDROCK_MAX_RETRY_ATTEMPTS", "3"))
-        retry_mode = os.getenv("BEDROCK_RETRY_MODE", "adaptive")
-
-        boto_config = BotoConfig(
-            read_timeout=read_timeout,
-            connect_timeout=connect_timeout,
-            retries={
-                "max_attempts": max_attempts,
-                "mode": retry_mode,
-            },
-        )
-
-        # Create bedrock-runtime client
-        bedrock_client = boto3.client(
-            "bedrock-runtime",
-            region_name=self.bedrock_region,
-            config=boto_config,
-        )
-
-        logger.info(
-            f"Created Bedrock client with read_timeout={read_timeout}s, "
-            f"connect_timeout={connect_timeout}s, max_retry_attempts={max_attempts} ({retry_mode} mode)"
-        )
-
-        # Create the model
-        self._model = ChatBedrockConverse(
-            client=bedrock_client,
-            region_name=self.bedrock_region,
-            model=self.bedrock_model_id,
-            temperature=0,
-        )
-        logger.info(f"Initialized Bedrock model: {self.bedrock_model_id}")
-
-        self._graph: CompiledStateGraph | None = None
-        self._mcp_client: MultiServerMCPClient | None = None
-
-    async def _ensure_mcp_tools_loaded(self):
-        """Ensure MCP tools are discovered and loaded.
-
-        This is called lazily on first request to avoid blocking __init__.
-        Creates a fallback graph without MCP tools if discovery fails.
-        """
-        if self._mcp_tools is not None and self._graph is not None:
-            return
-
-        if self._mcp_tools_lock:
-            import asyncio
-
-            for _ in range(10):
-                await asyncio.sleep(0.1)
-                if self._mcp_tools is not None and self._graph is not None:
-                    return
-            logger.warning("Timeout waiting for MCP tools discovery")
-            # Continue to create fallback graph
-
-        self._mcp_tools_lock = True
-        try:
-            logger.info("Discovering MCP tools from Naonous server...")
-
-            # Create MCP client (no authentication needed - behind VPN)
-            connections = {
-                "naonous": StreamableHttpConnection(
-                    transport="streamable_http",
-                    url=self.naonous_mcp_url,
-                ),
-            }
-
-            self._mcp_client = MultiServerMCPClient(connections=connections)
-
-            # Load tools without authentication
-            from langchain_mcp_adapters.tools import load_mcp_tools
-
-            self._mcp_tools = await load_mcp_tools(
-                session=None,
-                connection=connections["naonous"],
-                server_name="naonous",
+    def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+        """Return MCP server connection for Naonous server (VPN-protected, no auth)."""
+        return {
+            "naonous": StreamableHttpConnection(
+                transport="streamable_http",
+                url=self.naonous_mcp_url,
             )
+        }
 
-            logger.info(f"Discovered {len(self._mcp_tools)} MCP tools")
+    def _get_system_prompt(self) -> str:
+        """Return Naonous agent system prompt."""
+        return NAONOUS_AGENT_SYSTEM_PROMPT
 
-            # Create graph with MCP tools and tenant enforcement middleware
-            logger.info("Creating graph with MCP tools and tenant enforcement middleware...")
-            tools = self._mcp_tools
+    def _get_checkpoint_namespace(self) -> str:
+        """Return checkpoint namespace for alloy-agent."""
+        return "alloy-agent"
 
-            self._graph = create_deep_agent(
-                model=self._model,
-                tools=tools,
-                subagents=[],
-                system_prompt=NAONOUS_AGENT_SYSTEM_PROMPT,
-                checkpointer=self._checkpointer,
-                middleware=[TenantEnforcementMiddleware()],
-                response_format=AutoStrategy(schema=FinalResponseSchema),
-            )
-            logger.info("Graph created with MCP tools")
-        except Exception as e:
-            logger.error(f"Failed to discover MCP tools: {e}", exc_info=True)
-            logger.warning("Creating fallback graph without MCP tools")
+    def _get_bedrock_model_id(self) -> str:
+        """Return Bedrock model ID for Naonous agent."""
+        return os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
-            # Create fallback graph without MCP tools
-            self._mcp_tools = []
-            try:
-                self._graph = create_deep_agent(
-                    model=self._model,
-                    tools=[],
-                    subagents=[],
-                    system_prompt=(
-                        "You are an expert Campaign Manager for Alloy's BYOK platform. "
-                        "However, you are currently unable to access campaign management tools "
-                        "due to a connection issue. Please inform the user that the system is "
-                        "temporarily unavailable and suggest they try again later or contact support."
-                    ),
-                    checkpointer=self._checkpointer,
-                    middleware=[],
-                    response_format=AutoStrategy(schema=FinalResponseSchema),
-                )
-                logger.info("Fallback graph created successfully")
-            except Exception as fallback_error:
-                logger.error(f"Failed to create fallback graph: {fallback_error}", exc_info=True)
-                raise RuntimeError(
-                    "Unable to initialize agent: both MCP tool loading and fallback graph creation failed"
-                ) from fallback_error
-        finally:
-            self._mcp_tools_lock = False
-
-    async def close(self):
-        """Cleanup resources."""
-        logger.info("NaonousAgent closed")
-
-    async def stream(self, query: str, user_config: UserConfig, task: Task) -> AsyncIterable[AgentStreamResponse]:
-        """Stream responses for a user query.
-
-        Args:
-            query: The user's natural language query
-            user_config: User configuration (not used - no auth required)
-            task: The task context for the current interaction
-
-        Yields:
-            AgentStreamResponse objects with state updates and content
-        """
-        try:
-            # Ensure MCP tools are loaded
-            await self._ensure_mcp_tools_loaded()
-
-            # Verify graph was created
-            if self._graph is None:
-                logger.error("Graph is None after _ensure_mcp_tools_loaded()")
-                yield AgentStreamResponse(
-                    state=TaskState.failed,
-                    content="The agent failed to initialize properly. Please contact support or try again later.",
-                    metadata={"error": "graph_initialization_failed"},
-                )
-                return
-
-            logger.info(f"Processing query for user {user_config.user_id}")
-
-            # Execute graph with thread isolation
-            # CRITICAL: Use checkpoint_ns to isolate sub-agent checkpoints from orchestrator.
-            # The orchestrator and sub-agents share the same DynamoDB table, so we namespace
-            # sub-agent checkpoints to prevent internal messages (like MCP tool calls) from
-            # leaking into the orchestrator's conversation history.
-            config = {
-                "configurable": {
-                    "thread_id": task.context_id,
-                    "checkpoint_ns": "alloy-agent",  # Namespace isolation
-                }
-            }
-
-            # Convert query to messages format
-            from langchain_core.messages import AIMessage, HumanMessage
-
-            input_messages = [HumanMessage(content=query)]
-
-            # Stream graph execution
-            chunk_count = 0
-            final_user_content = []
-
-            async for event in self._graph.astream({"messages": input_messages}, config):
-                chunk_count += 1
-                logger.debug(f"Graph event #{chunk_count}: {type(event)}")
-
-                if isinstance(event, dict):
-                    for node_name, node_data in event.items():
-                        if isinstance(node_data, dict) and "messages" in node_data:
-                            messages = node_data["messages"]
-                            if isinstance(messages, list):
-                                for msg in messages:
-                                    if isinstance(msg, AIMessage) and msg.content:
-                                        content = str(msg.content)
-                                        logger.debug(f"Content from {node_name}: {content[:100]}...")
-                                        final_user_content.append(content)
-                                        yield AgentStreamResponse(
-                                            state=TaskState.working,
-                                            content=content,
-                                        )
-
-            logger.debug(f"Stream processing complete. Total chunks: {chunk_count}")
-
-            # Get final state
-            final_state = self._graph.get_state(config)
-
-            # Check for interrupts
-            if final_state.interrupts:
-                yield AgentStreamResponse(
-                    state=TaskState.input_required,
-                    content="Process interrupted. Additional input required.",
-                )
-                return
-
-            # Extract final state from FinalResponseSchema
-            task_state = TaskState.completed
-
-            if final_state.values and "messages" in final_state.values:
-                messages = final_state.values["messages"]
-                for msg in reversed(messages):
-                    if isinstance(msg, AIMessage):
-                        if hasattr(msg, "tool_calls") and msg.tool_calls:
-                            for tool_call in msg.tool_calls:
-                                if tool_call.get("name") == "FinalResponseSchema":
-                                    args = tool_call.get("args", {})
-                                    state_str = args.get("task_state", "completed")
-                                    if state_str == "input_required":
-                                        task_state = TaskState.input_required
-                                    elif state_str == "failed":
-                                        task_state = TaskState.failed
-                                    elif state_str == "working":
-                                        task_state = TaskState.working
-                                    else:
-                                        task_state = TaskState.completed
-                                    logger.info(f"FinalResponseSchema found: state={task_state}")
-                                    break
-
-                        if task_state != TaskState.completed or msg.tool_calls:
-                            break
-
-            # Send final completion
-            final_content = "\n\n".join(final_user_content) if final_user_content else "Request processed successfully."
-
-            logger.info(f"Sending final completion: task_state={task_state}, content_length={len(final_content)}")
-            yield AgentStreamResponse(
-                state=task_state,
-                content=final_content,
-            )
-            logger.info("Final response sent successfully")
-
-        except Exception as e:
-            logger.error(f"Error in NaonousAgent.stream: {e}", exc_info=True)
-            yield AgentStreamResponse(
-                state=TaskState.failed,
-                content=f"An error occurred while processing your request: {str(e)}",
-                metadata={"error": str(e)},
-            )
+    def _get_middleware(self) -> list[AgentMiddleware]:
+        """Return middleware list with tenant enforcement."""
+        return [TenantEnforcementMiddleware()]

@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostErrors, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostResponses, AddMembersApiV1GroupsGroupIdMembersPostData, AddMembersApiV1GroupsGroupIdMembersPostErrors, AddMembersApiV1GroupsGroupIdMembersPostResponses, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostData, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostErrors, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostResponses, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteData, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteErrors, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponses, BulkUpdateUsersApiV1AdminUsersBulkPostData, BulkUpdateUsersApiV1AdminUsersBulkPostErrors, BulkUpdateUsersApiV1AdminUsersBulkPostResponses, CreateGroupApiV1AdminGroupsPostData, CreateGroupApiV1AdminGroupsPostErrors, CreateGroupApiV1AdminGroupsPostResponses, CreateSecretApiV1SecretsPostData, CreateSecretApiV1SecretsPostErrors, CreateSecretApiV1SecretsPostResponses, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostData, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostErrors, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostResponses, DebugSessionApiV1ConversationsDebugSessionGetData, DebugSessionApiV1ConversationsDebugSessionGetResponses, DeleteGroupApiV1AdminGroupsGroupIdDeleteData, DeleteGroupApiV1AdminGroupsGroupIdDeleteErrors, DeleteGroupApiV1AdminGroupsGroupIdDeleteResponses, DeleteSecretApiV1SecretsSecretIdDeleteData, DeleteSecretApiV1SecretsSecretIdDeleteErrors, DeleteSecretApiV1SecretsSecretIdDeleteResponses, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteData, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteErrors, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteResponses, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteData, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteErrors, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteResponses, GetAgentCardApiV1AgentCardPostData, GetAgentCardApiV1AgentCardPostResponses, GetConversationsByUserApiV1ConversationsGetData, GetConversationsByUserApiV1ConversationsGetErrors, GetConversationsByUserApiV1ConversationsGetResponses, GetCurrentUserApiV1AuthMeGetData, GetCurrentUserApiV1AuthMeGetResponses, GetCurrentUserSettingsApiV1AuthMeSettingsGetData, GetCurrentUserSettingsApiV1AuthMeSettingsGetResponses, GetGroupApiV1AdminGroupsGroupIdGetData, GetGroupApiV1AdminGroupsGroupIdGetErrors, GetGroupApiV1AdminGroupsGroupIdGetResponses, GetGroupApiV1GroupsGroupIdGetData, GetGroupApiV1GroupsGroupIdGetErrors, GetGroupApiV1GroupsGroupIdGetResponses, GetMessagesByConversationApiV1MessagesConversationIdGetData, GetMessagesByConversationApiV1MessagesConversationIdGetErrors, GetMessagesByConversationApiV1MessagesConversationIdGetResponses, GetSecretApiV1SecretsSecretIdGetData, GetSecretApiV1SecretsSecretIdGetErrors, GetSecretApiV1SecretsSecretIdGetResponses, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetData, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetErrors, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetResponses, GetSubAgentApiV1SubAgentsSubAgentIdGetData, GetSubAgentApiV1SubAgentsSubAgentIdGetErrors, GetSubAgentApiV1SubAgentsSubAgentIdGetResponses, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetData, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetErrors, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetResponses, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetData, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetErrors, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponses, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetData, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetErrors, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetResponses, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetData, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetErrors, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetResponses, GetUserApiV1AdminUsersUserIdGetData, GetUserApiV1AdminUsersUserIdGetErrors, GetUserApiV1AdminUsersUserIdGetResponses, HealthCheckApiV1HealthGetData, HealthCheckApiV1HealthGetResponses, IndexApiV1GetData, IndexApiV1GetResponses, ListAuditLogsApiV1AdminAuditLogsGetData, ListAuditLogsApiV1AdminAuditLogsGetErrors, ListAuditLogsApiV1AdminAuditLogsGetResponses, ListGroupsApiV1AdminGroupsGetData, ListGroupsApiV1AdminGroupsGetErrors, ListGroupsApiV1AdminGroupsGetResponses, ListMembersApiV1GroupsGroupIdMembersGetData, ListMembersApiV1GroupsGroupIdMembersGetErrors, ListMembersApiV1GroupsGroupIdMembersGetResponses, ListMyGroupsApiV1GroupsGetData, ListMyGroupsApiV1GroupsGetResponses, ListPendingApprovalsApiV1SubAgentsPendingGetData, ListPendingApprovalsApiV1SubAgentsPendingGetResponses, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetData, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponses, ListSecretsApiV1SecretsGetData, ListSecretsApiV1SecretsGetResponses, ListUsersApiV1AdminUsersGetData, ListUsersApiV1AdminUsersGetErrors, ListUsersApiV1AdminUsersGetResponses, LoginApiV1AuthLoginGetData, LoginApiV1AuthLoginGetResponses, LoginCallbackApiV1AuthLoginCallbackGetData, LoginCallbackApiV1AuthLoginCallbackGetResponses, LogoutApiV1AuthLogoutGetData, LogoutApiV1AuthLogoutGetResponses, LogoutCallbackApiV1AuthLogoutCallbackGetData, LogoutCallbackApiV1AuthLogoutCallbackGetResponses, PlaygroundCreateSubAgentData, PlaygroundCreateSubAgentErrors, PlaygroundCreateSubAgentResponses, PlaygroundListMcpToolsData, PlaygroundListMcpToolsResponses, PlaygroundListSubAgentsData, PlaygroundListSubAgentsErrors, PlaygroundListSubAgentsResponses, PlaygroundUpdateSubAgentData, PlaygroundUpdateSubAgentErrors, PlaygroundUpdateSubAgentResponses, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteData, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostData, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostErrors, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostResponses, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostData, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostErrors, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostResponses, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutData, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutErrors, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutResponses, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostData, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostErrors, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostResponses, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostData, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostErrors, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostResponses, ToggleAdminModeApiV1AuthAdminModePostData, ToggleAdminModeApiV1AuthAdminModePostErrors, ToggleAdminModeApiV1AuthAdminModePostResponses, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchData, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchErrors, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses, UpdateGroupApiV1AdminGroupsGroupIdPutData, UpdateGroupApiV1AdminGroupsGroupIdPutErrors, UpdateGroupApiV1AdminGroupsGroupIdPutResponses, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutErrors, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutData, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutErrors, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutData, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutErrors, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutResponses, UpdateUserApiV1AdminUsersUserIdPatchData, UpdateUserApiV1AdminUsersUserIdPatchErrors, UpdateUserApiV1AdminUsersUserIdPatchResponses, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutData, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutErrors, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses, UpdateUserRoleApiV1AdminUsersUserIdRolePutData, UpdateUserRoleApiV1AdminUsersUserIdRolePutErrors, UpdateUserRoleApiV1AdminUsersUserIdRolePutResponses, UpdateUserStatusApiV1AdminUsersUserIdStatusPutData, UpdateUserStatusApiV1AdminUsersUserIdStatusPutErrors, UpdateUserStatusApiV1AdminUsersUserIdStatusPutResponses } from './types.gen';
+import type { ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostErrors, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostResponses, AddMembersApiV1GroupsGroupIdMembersPostData, AddMembersApiV1GroupsGroupIdMembersPostErrors, AddMembersApiV1GroupsGroupIdMembersPostResponses, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostData, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostErrors, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostResponses, BatchLogUsageApiV1UsageBatchLogPostData, BatchLogUsageApiV1UsageBatchLogPostErrors, BatchLogUsageApiV1UsageBatchLogPostResponses, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteData, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteErrors, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponses, BulkUpdateUsersApiV1AdminUsersBulkPostData, BulkUpdateUsersApiV1AdminUsersBulkPostErrors, BulkUpdateUsersApiV1AdminUsersBulkPostResponses, CopyModelRatesApiV1AdminRateCardsCopyPostData, CopyModelRatesApiV1AdminRateCardsCopyPostErrors, CopyModelRatesApiV1AdminRateCardsCopyPostResponses, CreateGroupApiV1AdminGroupsPostData, CreateGroupApiV1AdminGroupsPostErrors, CreateGroupApiV1AdminGroupsPostResponses, CreateModelRateCardApiV1AdminRateCardsModelPostData, CreateModelRateCardApiV1AdminRateCardsModelPostErrors, CreateModelRateCardApiV1AdminRateCardsModelPostResponses, CreateRateCardEntryApiV1AdminRateCardsEntryPostData, CreateRateCardEntryApiV1AdminRateCardsEntryPostErrors, CreateRateCardEntryApiV1AdminRateCardsEntryPostResponses, CreateSecretApiV1SecretsPostData, CreateSecretApiV1SecretsPostErrors, CreateSecretApiV1SecretsPostResponses, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostData, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostErrors, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostResponses, DebugSessionApiV1ConversationsDebugSessionGetData, DebugSessionApiV1ConversationsDebugSessionGetResponses, DeleteGroupApiV1AdminGroupsGroupIdDeleteData, DeleteGroupApiV1AdminGroupsGroupIdDeleteErrors, DeleteGroupApiV1AdminGroupsGroupIdDeleteResponses, DeleteSecretApiV1SecretsSecretIdDeleteData, DeleteSecretApiV1SecretsSecretIdDeleteErrors, DeleteSecretApiV1SecretsSecretIdDeleteResponses, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteData, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteErrors, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteResponses, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteData, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteErrors, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteResponses, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostData, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostErrors, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponses, GetAgentCardApiV1AgentCardPostData, GetAgentCardApiV1AgentCardPostResponses, GetConversationsByUserApiV1ConversationsGetData, GetConversationsByUserApiV1ConversationsGetErrors, GetConversationsByUserApiV1ConversationsGetResponses, GetCurrentUserApiV1AuthMeGetData, GetCurrentUserApiV1AuthMeGetResponses, GetCurrentUserSettingsApiV1AuthMeSettingsGetData, GetCurrentUserSettingsApiV1AuthMeSettingsGetResponses, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetData, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetErrors, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponses, GetGroupApiV1AdminGroupsGroupIdGetData, GetGroupApiV1AdminGroupsGroupIdGetErrors, GetGroupApiV1AdminGroupsGroupIdGetResponses, GetGroupApiV1GroupsGroupIdGetData, GetGroupApiV1GroupsGroupIdGetErrors, GetGroupApiV1GroupsGroupIdGetResponses, GetMessagesByConversationApiV1MessagesConversationIdGetData, GetMessagesByConversationApiV1MessagesConversationIdGetErrors, GetMessagesByConversationApiV1MessagesConversationIdGetResponses, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetData, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetErrors, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses, GetMyDetailedUsageApiV1UsageMyDetailedGetData, GetMyDetailedUsageApiV1UsageMyDetailedGetErrors, GetMyDetailedUsageApiV1UsageMyDetailedGetResponses, GetMyUsageLogsApiV1UsageMyLogsGetData, GetMyUsageLogsApiV1UsageMyLogsGetErrors, GetMyUsageLogsApiV1UsageMyLogsGetResponses, GetMyUsageSummaryApiV1UsageMySummaryGetData, GetMyUsageSummaryApiV1UsageMySummaryGetErrors, GetMyUsageSummaryApiV1UsageMySummaryGetResponses, GetSecretApiV1SecretsSecretIdGetData, GetSecretApiV1SecretsSecretIdGetErrors, GetSecretApiV1SecretsSecretIdGetResponses, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetData, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetErrors, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetResponses, GetSubAgentApiV1SubAgentsSubAgentIdGetData, GetSubAgentApiV1SubAgentsSubAgentIdGetErrors, GetSubAgentApiV1SubAgentsSubAgentIdGetResponses, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetData, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetErrors, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetResponses, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetData, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetErrors, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponses, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetData, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetErrors, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetResponses, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetData, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetErrors, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetResponses, GetUserApiV1AdminUsersUserIdGetData, GetUserApiV1AdminUsersUserIdGetErrors, GetUserApiV1AdminUsersUserIdGetResponses, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetData, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetErrors, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses, HealthCheckApiV1HealthGetData, HealthCheckApiV1HealthGetResponses, IndexApiV1GetData, IndexApiV1GetResponses, ListAuditLogsApiV1AdminAuditLogsGetData, ListAuditLogsApiV1AdminAuditLogsGetErrors, ListAuditLogsApiV1AdminAuditLogsGetResponses, ListGroupsApiV1AdminGroupsGetData, ListGroupsApiV1AdminGroupsGetErrors, ListGroupsApiV1AdminGroupsGetResponses, ListMembersApiV1GroupsGroupIdMembersGetData, ListMembersApiV1GroupsGroupIdMembersGetErrors, ListMembersApiV1GroupsGroupIdMembersGetResponses, ListModelsWithRatesApiV1AdminRateCardsModelsGetData, ListModelsWithRatesApiV1AdminRateCardsModelsGetErrors, ListModelsWithRatesApiV1AdminRateCardsModelsGetResponses, ListMyGroupsApiV1GroupsGetData, ListMyGroupsApiV1GroupsGetResponses, ListPendingApprovalsApiV1SubAgentsPendingGetData, ListPendingApprovalsApiV1SubAgentsPendingGetResponses, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetData, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponses, ListRateCardEntriesApiV1AdminRateCardsGetData, ListRateCardEntriesApiV1AdminRateCardsGetErrors, ListRateCardEntriesApiV1AdminRateCardsGetResponses, ListSecretsApiV1SecretsGetData, ListSecretsApiV1SecretsGetResponses, ListUsersApiV1AdminUsersGetData, ListUsersApiV1AdminUsersGetErrors, ListUsersApiV1AdminUsersGetResponses, LoginApiV1AuthLoginGetData, LoginApiV1AuthLoginGetResponses, LoginCallbackApiV1AuthLoginCallbackGetData, LoginCallbackApiV1AuthLoginCallbackGetResponses, LogoutApiV1AuthLogoutGetData, LogoutApiV1AuthLogoutGetResponses, LogoutCallbackApiV1AuthLogoutCallbackGetData, LogoutCallbackApiV1AuthLogoutCallbackGetResponses, LogUsageApiV1UsageLogPostData, LogUsageApiV1UsageLogPostErrors, LogUsageApiV1UsageLogPostResponses, PlaygroundCreateSubAgentData, PlaygroundCreateSubAgentErrors, PlaygroundCreateSubAgentResponses, PlaygroundListMcpToolsData, PlaygroundListMcpToolsResponses, PlaygroundListSubAgentsData, PlaygroundListSubAgentsErrors, PlaygroundListSubAgentsResponses, PlaygroundUpdateSubAgentData, PlaygroundUpdateSubAgentErrors, PlaygroundUpdateSubAgentResponses, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteData, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors, RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostData, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostErrors, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostResponses, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostData, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostErrors, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostResponses, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutData, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutErrors, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutResponses, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostData, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostErrors, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostResponses, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostData, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostErrors, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostResponses, ToggleAdminModeApiV1AuthAdminModePostData, ToggleAdminModeApiV1AuthAdminModePostErrors, ToggleAdminModeApiV1AuthAdminModePostResponses, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchData, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchErrors, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses, UpdateGroupApiV1AdminGroupsGroupIdPutData, UpdateGroupApiV1AdminGroupsGroupIdPutErrors, UpdateGroupApiV1AdminGroupsGroupIdPutResponses, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutErrors, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutData, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutErrors, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutData, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutErrors, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutResponses, UpdateUserApiV1AdminUsersUserIdPatchData, UpdateUserApiV1AdminUsersUserIdPatchErrors, UpdateUserApiV1AdminUsersUserIdPatchResponses, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutData, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutErrors, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses, UpdateUserRoleApiV1AdminUsersUserIdRolePutData, UpdateUserRoleApiV1AdminUsersUserIdRolePutErrors, UpdateUserRoleApiV1AdminUsersUserIdRolePutResponses, UpdateUserStatusApiV1AdminUsersUserIdStatusPutData, UpdateUserStatusApiV1AdminUsersUserIdStatusPutErrors, UpdateUserStatusApiV1AdminUsersUserIdStatusPutResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -815,6 +815,171 @@ export const updateMemberRoleApiV1GroupsGroupIdMembersUserIdPut = <ThrowOnError 
         ...options.headers
     }
 });
+
+/**
+ * Log Usage
+ *
+ * Log a single usage entry.
+ *
+ * Internal endpoint used by orchestrator for cost tracking.
+ * No authentication required (called from backend service).
+ */
+export const logUsageApiV1UsageLogPost = <ThrowOnError extends boolean = false>(options: Options<LogUsageApiV1UsageLogPostData, ThrowOnError>) => (options.client ?? client).post<LogUsageApiV1UsageLogPostResponses, LogUsageApiV1UsageLogPostErrors, ThrowOnError>({
+    url: '/api/v1/usage/log',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Batch Log Usage
+ *
+ * Batch log multiple usage entries.
+ *
+ * Internal endpoint used by orchestrator for efficient cost tracking.
+ * No authentication required (called from backend service).
+ */
+export const batchLogUsageApiV1UsageBatchLogPost = <ThrowOnError extends boolean = false>(options: Options<BatchLogUsageApiV1UsageBatchLogPostData, ThrowOnError>) => (options.client ?? client).post<BatchLogUsageApiV1UsageBatchLogPostResponses, BatchLogUsageApiV1UsageBatchLogPostErrors, ThrowOnError>({
+    url: '/api/v1/usage/batch-log',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Get My Usage Summary
+ *
+ * Get usage summary for the current user.
+ *
+ * Returns total cost, request count, and breakdowns for the specified period.
+ */
+export const getMyUsageSummaryApiV1UsageMySummaryGet = <ThrowOnError extends boolean = false>(options?: Options<GetMyUsageSummaryApiV1UsageMySummaryGetData, ThrowOnError>) => (options?.client ?? client).get<GetMyUsageSummaryApiV1UsageMySummaryGetResponses, GetMyUsageSummaryApiV1UsageMySummaryGetErrors, ThrowOnError>({ url: '/api/v1/usage/my-summary', ...options });
+
+/**
+ * Get My Detailed Usage
+ *
+ * Get detailed usage report for the current user.
+ *
+ * Includes breakdown by sub-agent, conversation, and billing units.
+ */
+export const getMyDetailedUsageApiV1UsageMyDetailedGet = <ThrowOnError extends boolean = false>(options?: Options<GetMyDetailedUsageApiV1UsageMyDetailedGetData, ThrowOnError>) => (options?.client ?? client).get<GetMyDetailedUsageApiV1UsageMyDetailedGetResponses, GetMyDetailedUsageApiV1UsageMyDetailedGetErrors, ThrowOnError>({ url: '/api/v1/usage/my-detailed', ...options });
+
+/**
+ * Get My Usage Logs
+ *
+ * List usage logs for the current user with pagination.
+ *
+ * Can filter by conversation or sub-agent.
+ */
+export const getMyUsageLogsApiV1UsageMyLogsGet = <ThrowOnError extends boolean = false>(options?: Options<GetMyUsageLogsApiV1UsageMyLogsGetData, ThrowOnError>) => (options?.client ?? client).get<GetMyUsageLogsApiV1UsageMyLogsGetResponses, GetMyUsageLogsApiV1UsageMyLogsGetErrors, ThrowOnError>({ url: '/api/v1/usage/my-logs', ...options });
+
+/**
+ * Get Global Usage Summary
+ *
+ * Get global usage summary (all users).
+ *
+ * Requires admin role.
+ */
+export const getGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGet = <ThrowOnError extends boolean = false>(options?: Options<GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetData, ThrowOnError>) => (options?.client ?? client).get<GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponses, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetErrors, ThrowOnError>({ url: '/api/v1/usage/admin/global-summary', ...options });
+
+/**
+ * Get User Usage Summary
+ *
+ * Get usage summary for a specific user.
+ *
+ * Requires admin role.
+ */
+export const getUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGet = <ThrowOnError extends boolean = false>(options: Options<GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetData, ThrowOnError>) => (options.client ?? client).get<GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetErrors, ThrowOnError>({ url: '/api/v1/usage/admin/user/{user_id}/summary', ...options });
+
+/**
+ * List Models With Rates
+ *
+ * List all models that have rate cards.
+ *
+ * Requires admin role with admin mode enabled.
+ */
+export const listModelsWithRatesApiV1AdminRateCardsModelsGet = <ThrowOnError extends boolean = false>(options?: Options<ListModelsWithRatesApiV1AdminRateCardsModelsGetData, ThrowOnError>) => (options?.client ?? client).get<ListModelsWithRatesApiV1AdminRateCardsModelsGetResponses, ListModelsWithRatesApiV1AdminRateCardsModelsGetErrors, ThrowOnError>({ url: '/api/v1/admin/rate-cards/models', ...options });
+
+/**
+ * List Rate Card Entries
+ *
+ * List rate card entries with optional filters.
+ *
+ * Requires admin role with admin mode enabled.
+ */
+export const listRateCardEntriesApiV1AdminRateCardsGet = <ThrowOnError extends boolean = false>(options?: Options<ListRateCardEntriesApiV1AdminRateCardsGetData, ThrowOnError>) => (options?.client ?? client).get<ListRateCardEntriesApiV1AdminRateCardsGetResponses, ListRateCardEntriesApiV1AdminRateCardsGetErrors, ThrowOnError>({ url: '/api/v1/admin/rate-cards', ...options });
+
+/**
+ * Create Rate Card Entry
+ *
+ * Create a single rate card entry.
+ *
+ * Requires admin role with admin mode enabled.
+ */
+export const createRateCardEntryApiV1AdminRateCardsEntryPost = <ThrowOnError extends boolean = false>(options: Options<CreateRateCardEntryApiV1AdminRateCardsEntryPostData, ThrowOnError>) => (options.client ?? client).post<CreateRateCardEntryApiV1AdminRateCardsEntryPostResponses, CreateRateCardEntryApiV1AdminRateCardsEntryPostErrors, ThrowOnError>({
+    url: '/api/v1/admin/rate-cards/entry',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Create Model Rate Card
+ *
+ * Create all rate card entries for a model at once.
+ *
+ * This is the recommended way to add a new model as it ensures
+ * all token types are configured together.
+ *
+ * Requires admin role with admin mode enabled.
+ */
+export const createModelRateCardApiV1AdminRateCardsModelPost = <ThrowOnError extends boolean = false>(options: Options<CreateModelRateCardApiV1AdminRateCardsModelPostData, ThrowOnError>) => (options.client ?? client).post<CreateModelRateCardApiV1AdminRateCardsModelPostResponses, CreateModelRateCardApiV1AdminRateCardsModelPostErrors, ThrowOnError>({
+    url: '/api/v1/admin/rate-cards/model',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Copy Model Rates
+ *
+ * Copy rate card from one model to another.
+ *
+ * Useful for creating rate cards for similar models or model variants.
+ *
+ * Requires admin role with admin mode enabled.
+ */
+export const copyModelRatesApiV1AdminRateCardsCopyPost = <ThrowOnError extends boolean = false>(options: Options<CopyModelRatesApiV1AdminRateCardsCopyPostData, ThrowOnError>) => (options.client ?? client).post<CopyModelRatesApiV1AdminRateCardsCopyPostResponses, CopyModelRatesApiV1AdminRateCardsCopyPostErrors, ThrowOnError>({ url: '/api/v1/admin/rate-cards/copy', ...options });
+
+/**
+ * Expire Rate Card Entry
+ *
+ * Expire a rate card entry by setting effective_until date.
+ *
+ * This doesn't delete the entry, allowing for accurate historical cost tracking.
+ *
+ * Requires admin role with admin mode enabled.
+ */
+export const expireRateCardEntryApiV1AdminRateCardsExpireRateIdPost = <ThrowOnError extends boolean = false>(options: Options<ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostData, ThrowOnError>) => (options.client ?? client).post<ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponses, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostErrors, ThrowOnError>({ url: '/api/v1/admin/rate-cards/expire/{rate_id}', ...options });
+
+/**
+ * Get Model Rates
+ *
+ * Get all active rates for a specific model.
+ *
+ * Returns a mapping of billing_unit to price_per_million.
+ *
+ * Requires admin role with admin mode enabled.
+ */
+export const getModelRatesApiV1AdminRateCardsModelProviderModelNameGet = <ThrowOnError extends boolean = false>(options: Options<GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetData, ThrowOnError>) => (options.client ?? client).get<GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetErrors, ThrowOnError>({ url: '/api/v1/admin/rate-cards/model/{provider}/{model_name}', ...options });
 
 /**
  * Health Check

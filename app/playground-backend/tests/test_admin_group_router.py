@@ -90,11 +90,11 @@ class TestAdminGroupCreation:
     """Test admin group creation endpoint."""
 
     @pytest.mark.asyncio
-    async def test_create_group_as_admin(self, pg_session, admin_user):
+    async def test_create_group_as_admin(self, mock_request, pg_session, admin_user):
         """Test that admins can create groups and audit log is written."""
-        request = UserGroupCreate(name="Test Group", description="Test Description")
+        create_request = UserGroupCreate(name="Test Group", description="Test Description")
 
-        result = await admin_group_router.create_group(request, pg_session, admin_user)
+        result = await admin_group_router.create_group(mock_request, create_request, pg_session, admin_user)
 
         # Verify group was created
         assert result.data.name == "Test Group"
@@ -114,16 +114,16 @@ class TestAdminGroupCreation:
         assert audit_log["action"] == "create"
 
     @pytest.mark.asyncio
-    async def test_create_group_duplicate_name(self, pg_session, admin_user):
+    async def test_create_group_duplicate_name(self, mock_request, pg_session, admin_user):
         """Test error when creating group with duplicate name."""
         request = UserGroupCreate(name="Duplicate Group", description="Description")
 
         # Create first group
-        await admin_group_router.create_group(request, pg_session, admin_user)
+        await admin_group_router.create_group(mock_request, request, pg_session, admin_user)
 
         # Try to create duplicate
         with pytest.raises(HTTPException) as exc_info:
-            await admin_group_router.create_group(request, pg_session, admin_user)
+            await admin_group_router.create_group(mock_request, request, pg_session, admin_user)
 
         assert exc_info.value.status_code == 409
         assert "already exists" in exc_info.value.detail.lower()
@@ -141,17 +141,19 @@ class TestAdminGroupListing:
     """Test admin group listing."""
 
     @pytest.mark.asyncio
-    async def test_list_groups_as_admin(self, pg_session, admin_user):
+    async def test_list_groups_as_admin(self, mock_request, pg_session, admin_user):
         """Test that admins can list all groups."""
         # Create test groups
         await admin_group_router.create_group(
-            UserGroupCreate(name="List Test Group 1", description="Desc 1"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="List Test Group 1", description="Desc 1"), pg_session, admin_user
         )
         await admin_group_router.create_group(
-            UserGroupCreate(name="List Test Group 2", description="Desc 2"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="List Test Group 2", description="Desc 2"), pg_session, admin_user
         )
 
-        result = await admin_group_router.list_groups(pg_session, admin_user, page=1, limit=20, search=None)
+        result = await admin_group_router.list_groups(
+            mock_request, pg_session, admin_user, page=1, limit=20, search=None
+        )
 
         assert len(result.data) >= 2
         assert result.meta.total >= 2
@@ -165,16 +167,18 @@ class TestAdminGroupListing:
         pass  # Skipped due to test infrastructure limitation
 
     @pytest.mark.asyncio
-    async def test_list_groups_with_search(self, pg_session, admin_user):
+    async def test_list_groups_with_search(self, mock_request, pg_session, admin_user):
         """Test searching groups by name."""
         await admin_group_router.create_group(
-            UserGroupCreate(name="Searchable Group", description="Desc"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Searchable Group", description="Desc"), pg_session, admin_user
         )
         await admin_group_router.create_group(
-            UserGroupCreate(name="Other Group", description="Desc"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Other Group", description="Desc"), pg_session, admin_user
         )
 
-        result = await admin_group_router.list_groups(pg_session, admin_user, page=1, limit=20, search="Searchable")
+        result = await admin_group_router.list_groups(
+            mock_request, pg_session, admin_user, page=1, limit=20, search="Searchable"
+        )
 
         assert len(result.data) >= 1
         assert any("Searchable" in g.name for g in result.data)
@@ -184,22 +188,22 @@ class TestAdminGroupDetail:
     """Test admin group detail endpoint."""
 
     @pytest.mark.asyncio
-    async def test_get_group_as_admin(self, pg_session, admin_user):
+    async def test_get_group_as_admin(self, mock_request, pg_session, admin_user):
         """Test that admins can view any group."""
         created = await admin_group_router.create_group(
-            UserGroupCreate(name="Viewable Group", description="Test Desc"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Viewable Group", description="Test Desc"), pg_session, admin_user
         )
 
-        result = await admin_group_router.get_group(created.data.id, pg_session, admin_user)
+        result = await admin_group_router.get_group(created.data.id, mock_request, pg_session, admin_user)
 
         assert result.data.name == "Viewable Group"
         assert result.data.description == "Test Desc"
 
     @pytest.mark.asyncio
-    async def test_get_group_not_found(self, pg_session, admin_user):
+    async def test_get_group_not_found(self, mock_request, pg_session, admin_user):
         """Test 404 for non-existent group."""
         with pytest.raises(HTTPException) as exc_info:
-            await admin_group_router.get_group(999999, pg_session, admin_user)
+            await admin_group_router.get_group(999999, mock_request, pg_session, admin_user)
 
         assert exc_info.value.status_code == 404
 
@@ -208,15 +212,15 @@ class TestAdminGroupUpdate:
     """Test admin group update endpoint."""
 
     @pytest.mark.asyncio
-    async def test_update_group_as_admin(self, pg_session, admin_user):
+    async def test_update_group_as_admin(self, mock_request, pg_session, admin_user):
         """Test that admins can update any group and audit log is written."""
         created = await admin_group_router.create_group(
-            UserGroupCreate(name="Original Name", description="Original Desc"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Original Name", description="Original Desc"), pg_session, admin_user
         )
         group_id = created.data.id
 
         request = UserGroupUpdate(name="Updated Name", description="Updated Desc")
-        result = await admin_group_router.update_group(group_id, request, pg_session, admin_user)
+        result = await admin_group_router.update_group(group_id, mock_request, request, pg_session, admin_user)
 
         # Verify response
         assert result.data.name == "Updated Name"
@@ -235,16 +239,16 @@ class TestAdminGroupUpdate:
         assert "after" in audit_log["changes"]
 
     @pytest.mark.asyncio
-    async def test_update_group_partial_updates(self, pg_session, admin_user):
+    async def test_update_group_partial_updates(self, mock_request, pg_session, admin_user):
         """Test partial updates (only update provided fields)."""
         created = await admin_group_router.create_group(
-            UserGroupCreate(name="Original", description="Original Desc"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Original", description="Original Desc"), pg_session, admin_user
         )
         group_id = created.data.id
 
         # Update only name
         request = UserGroupUpdate(name="New Name")
-        await admin_group_router.update_group(group_id, request, pg_session, admin_user)
+        await admin_group_router.update_group(group_id, mock_request, request, pg_session, admin_user)
 
         # Verify description unchanged
         group = await get_group_from_db(pg_session, group_id)
@@ -252,12 +256,12 @@ class TestAdminGroupUpdate:
         assert group["description"] == "Original Desc"
 
     @pytest.mark.asyncio
-    async def test_update_group_not_found(self, pg_session, admin_user):
+    async def test_update_group_not_found(self, mock_request, pg_session, admin_user):
         """Test updating non-existent group."""
         request = UserGroupUpdate(name="Updated")
 
         with pytest.raises(HTTPException) as exc_info:
-            await admin_group_router.update_group(999999, request, pg_session, admin_user)
+            await admin_group_router.update_group(999999, mock_request, request, pg_session, admin_user)
 
         assert exc_info.value.status_code == 404
 
@@ -266,14 +270,14 @@ class TestAdminGroupDeletion:
     """Test admin group deletion."""
 
     @pytest.mark.asyncio
-    async def test_delete_group_as_admin(self, pg_session, admin_user):
+    async def test_delete_group_as_admin(self, mock_request, pg_session, admin_user):
         """Test that admins can soft-delete groups and audit log is written."""
         created = await admin_group_router.create_group(
-            UserGroupCreate(name="To Delete", description="Desc"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="To Delete", description="Desc"), pg_session, admin_user
         )
         group_id = created.data.id
 
-        result = await admin_group_router.delete_group(group_id, pg_session, admin_user, force=False)
+        result = await admin_group_router.delete_group(group_id, mock_request, pg_session, admin_user, force=False)
 
         assert result is None  # 204 No Content
 
@@ -287,26 +291,26 @@ class TestAdminGroupDeletion:
         assert audit_log["action"] == "delete"
 
     @pytest.mark.asyncio
-    async def test_delete_group_not_found(self, pg_session, admin_user):
+    async def test_delete_group_not_found(self, mock_request, pg_session, admin_user):
         """Test deleting non-existent group."""
         with pytest.raises(HTTPException) as exc_info:
-            await admin_group_router.delete_group(999999, pg_session, admin_user)
+            await admin_group_router.delete_group(999999, mock_request, pg_session, admin_user)
 
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_bulk_delete_groups(self, pg_session, admin_user):
+    async def test_bulk_delete_groups(self, mock_request, pg_session, admin_user):
         """Test bulk deletion of groups."""
         # Create test groups
         group1 = await admin_group_router.create_group(
-            UserGroupCreate(name="Bulk 1", description="D1"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Bulk 1", description="D1"), pg_session, admin_user
         )
         group2 = await admin_group_router.create_group(
-            UserGroupCreate(name="Bulk 2", description="D2"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Bulk 2", description="D2"), pg_session, admin_user
         )
 
         request = BulkGroupDelete(group_ids=[group1.data.id, group2.data.id], force=False)
-        result = await admin_group_router.bulk_delete_groups(request, pg_session, admin_user)
+        result = await admin_group_router.bulk_delete_groups(mock_request, request, pg_session, admin_user)
 
         # Verify both succeeded
         assert len(result.data) == 2
@@ -320,14 +324,14 @@ class TestAdminGroupDeletion:
         assert group2_db["deleted_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_bulk_delete_with_invalid_id(self, pg_session, admin_user):
+    async def test_bulk_delete_with_invalid_id(self, mock_request, pg_session, admin_user):
         """Test bulk deletion with mix of valid and invalid IDs."""
         group1 = await admin_group_router.create_group(
-            UserGroupCreate(name="Valid Group", description="Desc"), pg_session, admin_user
+            mock_request, UserGroupCreate(name="Valid Group", description="Desc"), pg_session, admin_user
         )
 
         request = BulkGroupDelete(group_ids=[group1.data.id, 999999], force=False)
-        result = await admin_group_router.bulk_delete_groups(request, pg_session, admin_user)
+        result = await admin_group_router.bulk_delete_groups(mock_request, request, pg_session, admin_user)
 
         # One success, one failure
         assert len(result.data) == 2

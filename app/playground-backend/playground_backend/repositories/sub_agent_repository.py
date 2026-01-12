@@ -10,7 +10,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
-from ..services.audit_service import audit_service
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -154,7 +153,7 @@ class SubAgentRepository(AuditedRepository):
             )
 
             # Auto-audit with detailed changes
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=context.admin_sub,
                 entity_type=self.entity_type,
@@ -221,7 +220,7 @@ class SubAgentRepository(AuditedRepository):
             )
 
             # Auto-audit
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=context.admin_sub,
                 entity_type=self.entity_type,
@@ -297,7 +296,7 @@ class SubAgentRepository(AuditedRepository):
                 )
 
             # Custom audit for permission change
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
                 entity_type=self.entity_type,
@@ -347,7 +346,7 @@ class SubAgentRepository(AuditedRepository):
             )
 
             # Auto-audit
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
                 entity_type=self.entity_type,
@@ -394,7 +393,7 @@ class SubAgentRepository(AuditedRepository):
             )
 
             # Auto-audit
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
                 entity_type=self.entity_type,
@@ -461,7 +460,7 @@ class SubAgentRepository(AuditedRepository):
 
         await db.execute(query, {"id": sub_agent_id, "version": version, "now": now})
 
-        await audit_service.log_action(
+        await self.audit_service.log_action(
             db=db,
             actor_sub=actor_sub,
             entity_type=self.entity_type,
@@ -518,7 +517,7 @@ class SubAgentRepository(AuditedRepository):
 
         await db.execute(query, {"sub_agent_id": sub_agent_id, "version": version, "now": now})
 
-        await audit_service.log_action(
+        await self.audit_service.log_action(
             db=db,
             actor_sub=actor_sub,
             entity_type=self.entity_type,
@@ -557,7 +556,7 @@ class SubAgentRepository(AuditedRepository):
 
         await db.execute(query, {"sub_agent_id": sub_agent_id, "now": now})
 
-        await audit_service.log_action(
+        await self.audit_service.log_action(
             db=db,
             actor_sub=actor_sub,
             entity_type=self.entity_type,
@@ -597,7 +596,7 @@ class SubAgentRepository(AuditedRepository):
             {"sub_agent_id": sub_agent_id, "version": version, "change_summary": change_summary},
         )
 
-        await audit_service.log_action(
+        await self.audit_service.log_action(
             db=db,
             actor_sub=actor_sub,
             entity_type=self.entity_type,
@@ -634,7 +633,7 @@ class SubAgentRepository(AuditedRepository):
 
         await db.execute(query, {"id": sub_agent_id, "version": version, "now": now})
 
-        await audit_service.log_action(
+        await self.audit_service.log_action(
             db=db,
             actor_sub=actor_sub,
             entity_type=self.entity_type,
@@ -666,6 +665,7 @@ class SubAgentRepository(AuditedRepository):
         foundry_query_api_name: str | None = None,
         foundry_scopes: list[str] | None = None,
         foundry_version: str | None = None,
+        pricing_config: dict | None = None,
     ) -> int:
         """
         Create a new configuration version with automatic audit logging.
@@ -702,11 +702,11 @@ class SubAgentRepository(AuditedRepository):
             INSERT INTO sub_agent_config_versions
             (sub_agent_id, version, version_hash, description, model, system_prompt, agent_url, mcp_tools, 
              foundry_hostname, foundry_client_id, foundry_client_secret_ref, foundry_ontology_rid, 
-             foundry_query_api_name, foundry_scopes, foundry_version, change_summary, status, created_at)
+             foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, change_summary, status, created_at)
             VALUES (:sub_agent_id, :version, :version_hash, :description, :model, :system_prompt, :agent_url, 
                     CAST(:mcp_tools AS jsonb), :foundry_hostname, :foundry_client_id, :foundry_client_secret_ref, 
                     :foundry_ontology_rid, :foundry_query_api_name, CAST(:foundry_scopes AS text[]), 
-                    :foundry_version, :change_summary, :status, :now)
+                    :foundry_version, CAST(:pricing_config AS jsonb), :change_summary, :status, :now)
             RETURNING id
         """)
         result = await db.execute(
@@ -727,6 +727,7 @@ class SubAgentRepository(AuditedRepository):
                 "foundry_query_api_name": foundry_query_api_name,
                 "foundry_scopes": foundry_scopes,
                 "foundry_version": foundry_version,
+                "pricing_config": json.dumps(pricing_config) if pricing_config else None,
                 "change_summary": change_summary,
                 "status": status,
                 "now": now,
@@ -751,11 +752,12 @@ class SubAgentRepository(AuditedRepository):
             "foundry_query_api_name": foundry_query_api_name,
             "foundry_scopes": foundry_scopes,
             "foundry_version": foundry_version,
+            "pricing_config": pricing_config,
             "change_summary": change_summary,
             "status": status,
         }
 
-        await audit_service.log_action(
+        await self.audit_service.log_action(
             db=db,
             actor_sub=actor_sub,
             entity_type=self.entity_type,
@@ -766,7 +768,3 @@ class SubAgentRepository(AuditedRepository):
 
         logger.info(f"Created config version {version} (ID={version_id}) for sub-agent {sub_agent_id}")
         return version_id
-
-
-# Module-level singleton
-sub_agent_repository = SubAgentRepository()

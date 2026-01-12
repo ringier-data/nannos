@@ -19,6 +19,8 @@ from a2a.types import (
     SecurityScheme,
 )
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
+from ringier_a2a_sdk.cost_tracking import CostLogger
+from ringier_a2a_sdk.cost_tracking.logger import get_request_access_token
 from ringier_a2a_sdk.middleware import (
     OidcUserinfoMiddleware,
     UserContextFromRequestStateMiddleware,
@@ -59,6 +61,13 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
         # Start background polling
         await budget_guard.start_polling()
 
+        # Start cost logger for tracking LLM usage
+        if agent_executor.agent._graph_factory.cost_logger is not None:
+            await agent_executor.agent._graph_factory.cost_logger.start()
+            logger.info(
+                f"Cost logger started with backend: {agent_executor.agent._graph_factory.cost_logger.backend_url}"
+            )
+
         # Setup document store database schema (creates tables if they don't exist)
         logger.info("Setting up document store database schema...")
         await agent_executor.agent._graph_factory.ensure_store_setup()
@@ -68,9 +77,15 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
 
         yield  # Application runs here
 
-        # Shutdown: Stop budget guard polling
+        # Shutdown: Stop budget guard and clean up graph factory resources
         logger.info("Shutting down application...")
         await budget_guard.stop_polling()
+        logger.info("Budget guard shutdown complete")
+        
+        # Close agent (includes cost logger and database connection pool cleanup)
+        await agent_executor.agent.close()
+        logger.info("Agent resources cleaned up")
+        
         logger.info("Application shutdown complete")
 
     return lifespan
@@ -120,12 +135,17 @@ def create_app():
         supports_authenticated_extended_card=False,
     )
 
+    # Initialize cost logger for tracking LLM usage
+    backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
+    cost_logger = CostLogger(backend_url=backend_url, access_token_provider=get_request_access_token)
+    logger.info(f"Cost logger initialized with backend: {backend_url}")
+
     # TODO: do we need a task store?
     # TODO: do we need push notifications?
     # httpx_client = httpx.AsyncClient()
     # push_config_store = InMemoryPushNotificationConfigStore()
     # push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
-    agent_executor = OrchestratorDeepAgentExecutor()
+    agent_executor = OrchestratorDeepAgentExecutor(cost_logger=cost_logger)
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
         task_store=InMemoryTaskStore(),

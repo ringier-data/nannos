@@ -520,9 +520,20 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             )
 
         # Prepare state for subagent (exclude messages, todos)
+        # NOTE: subagent_state is a dict but it will be validated to SubAgentInput in the runnable astream method
         excluded_keys = ("messages", "todos")
         subagent_state = {k: v for k, v in state.items() if k not in excluded_keys}
         subagent_state["messages"] = [HumanMessage(content=description)]
+
+        # Extract orchestrator's conversation_id from config.configurable.thread_id
+        # This is the orchestrator's task.context_id set by the executor
+        orchestrator_conversation_id = None
+        if config and isinstance(config, dict):
+            orchestrator_conversation_id = config.get("configurable", {}).get("thread_id")
+            if orchestrator_conversation_id:
+                logger.debug(f"[CONVERSATION_ID] Extracted from config.thread_id: {orchestrator_conversation_id}")
+
+        subagent_state["orchestrator_conversation_id"] = orchestrator_conversation_id
 
         # Use a traced function for proper LangSmith visibility
         @traceable(name=f"task:{subagent_type}", run_type="tool")
@@ -603,6 +614,16 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         excluded_keys = ("messages", "todos")
         subagent_state = {k: v for k, v in state.items() if k not in excluded_keys}
         subagent_state["messages"] = [HumanMessage(content=description)]
+
+        # Extract orchestrator's conversation_id from config.configurable.thread_id
+        # This is the orchestrator's task.context_id set by the executor
+        orchestrator_conversation_id = None
+        if config and isinstance(config, dict):
+            orchestrator_conversation_id = config.get("configurable", {}).get("thread_id")
+            if orchestrator_conversation_id:
+                logger.debug(f"[CONVERSATION_ID] Extracted from config.thread_id: {orchestrator_conversation_id}")
+
+        subagent_state["orchestrator_conversation_id"] = orchestrator_conversation_id
 
         # Use a traced function for proper LangSmith visibility
         @traceable(name=f"task:{subagent_type}", run_type="tool")

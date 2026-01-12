@@ -74,9 +74,14 @@ class AuthRequestContextBuilder(RequestContextBuilder):
             call_context.state["user_name"] = user_context.get("name")
             call_context.state["user_token"] = user_context.get("token")
             call_context.state["user_scopes"] = user_context.get("scopes", [])
-            call_context.state["sub_agent_config_hash"] = user_context.get("sub_agent_config_hash")
+            call_context.state["sub_agent_config_hash"] = user_context.get("sub_agent_config_hash")  # For playground
+            call_context.state["sub_agent_id"] = user_context.get("sub_agent_id")  # For cost tracking attribution
 
-            logger.info(f"[ZERO-TRUST] Building RequestContext for verified user_id: {user_context['user_id']}")
+            logger.debug(
+                "[ZERO-TRUST] Building RequestContext for verified "
+                f"user_id: {user_context['user_id']}, "
+                f"sub_agent_id: {user_context.get('sub_agent_id')}"
+            )
         else:
             # No authenticated user - mark as anonymous
             logger.warning("[ZERO-TRUST] No user context found - authentication may have been bypassed!")

@@ -2,13 +2,15 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
-from ..services.audit_service import audit_service
+
+if TYPE_CHECKING:
+    from ..services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,9 @@ class AuditedRepository:
     Subclasses should:
     1. Call super().__init__() with entity_type and table_name
     2. Add domain-specific operations
-    3. Use audit_service.log_action() for custom operations
+    3. Use the injected audit_service.log_action() for custom operations
+
+    IMPORTANT: audit_service must be injected via set_audit_service() before use.
     """
 
     def __init__(self, entity_type: AuditEntityType, table_name: str):
@@ -51,6 +55,29 @@ class AuditedRepository:
         """
         self.entity_type = entity_type
         self.table_name = table_name
+        self._audit_service: Optional["AuditService"] = None
+
+    def set_audit_service(self, audit_service: "AuditService") -> None:
+        """
+        Inject the audit service dependency.
+
+        This breaks the circular dependency between repositories and audit_service.
+        Should be called during application initialization.
+
+        Args:
+            audit_service: The audit service instance to use for logging
+        """
+        self._audit_service = audit_service
+
+    @property
+    def audit_service(self) -> "AuditService":
+        """Get the audit service, raising error if not set."""
+        if self._audit_service is None:
+            raise RuntimeError(
+                f"AuditService not injected into {self.__class__.__name__}. "
+                "Call set_audit_service() during initialization."
+            )
+        return self._audit_service
 
     async def create(
         self,
@@ -99,7 +126,7 @@ class AuditedRepository:
             entity_id = row[returning.split(",")[0].strip()]
 
             # Auto-audit
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
                 entity_type=self.entity_type,
@@ -176,7 +203,7 @@ class AuditedRepository:
 
             action = custom_action or AuditAction.UPDATE
 
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
                 entity_type=self.entity_type,
@@ -229,7 +256,7 @@ class AuditedRepository:
                 await db.execute(query, {"id": entity_id})
 
             # Auto-audit
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
                 entity_type=self.entity_type,

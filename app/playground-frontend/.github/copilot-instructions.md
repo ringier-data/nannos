@@ -1,5 +1,9 @@
 # Playground Frontend Copilot Instructions
 
+## Maintaining These Instructions
+
+When implementing new features or refactoring existing code, consider if these instructions need updating. Only document design decisions that are non-obvious and would require reading large portions of the codebase to understand them.
+
 ## Tech Stack
 
 - React with TypeScript
@@ -25,6 +29,10 @@ The `start-dev.sh` script is the single source of truth for local environment se
 - Use functional components with hooks
 - Use the `@/` alias for imports from `src/`
 - Prefer named exports over default exports
+
+## File Writing Safety
+
+NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incremental edits with proper file writing tools instead.
 
 ## Components
 - Do not always use cards for everything. Use them judiciously based on context.

@@ -12,9 +12,21 @@ from typing import TYPE_CHECKING
 from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 
 from .config import config
+from .repositories.rate_card_repository import RateCardRepository
+from .repositories.secrets_repository import SecretsRepository
+from .repositories.sub_agent_repository import SubAgentRepository
+from .repositories.usage_repository import UsageRepository
+from .repositories.user_group_repository import UserGroupRepository
+from .repositories.user_repository import UserRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
+from .services.audit_service import AuditService
 from .services.conversation_service import ConversationService
 from .services.messages_service import MessagesService
+from .services.rate_card_service import RateCardService
+from .services.sub_agent_service import SubAgentService
+from .services.usage_service import UsageService
+from .services.user_group_service import UserGroupService
+from .services.user_settings_service import UserSettingsService
 from .utils.orchestrator_cookie_cache import OrchestratorCookieCache
 
 if TYPE_CHECKING:
@@ -29,17 +41,57 @@ async def initialize_services(app: "FastAPI") -> None:
     Args:
         app: The FastAPI application instance
     """
-    # Initialize auth services
+    # Initialize audit service first (required by repositories)
+    app.state.audit_service = AuditService()
+
+    # Initialize repositories and inject audit service
+    app.state.user_repository = UserRepository()
+    app.state.user_repository.set_audit_service(app.state.audit_service)
+
+    app.state.secrets_repository = SecretsRepository()
+    app.state.secrets_repository.set_audit_service(app.state.audit_service)
+
+    app.state.sub_agent_repository = SubAgentRepository()
+    app.state.sub_agent_repository.set_audit_service(app.state.audit_service)
+
+    app.state.user_group_repository = UserGroupRepository()
+    app.state.user_group_repository.set_audit_service(app.state.audit_service)
+
+    app.state.rate_card_repository = RateCardRepository()
+    app.state.rate_card_repository.set_audit_service(app.state.audit_service)
+
+    app.state.usage_repository = UsageRepository()
+
+    # Initialize services with repositories
+    app.state.user_settings_service = UserSettingsService()
+
+    app.state.user_service = UserService()
+    app.state.user_service.set_repository(app.state.user_repository)
+    app.state.user_service.set_audit_service(app.state.audit_service)
+
+    app.state.secrets_service = SecretsService()
+    app.state.secrets_service.set_repository(app.state.secrets_repository)
+
+    app.state.sub_agent_service = SubAgentService()
+    app.state.sub_agent_service.set_repository(app.state.sub_agent_repository)
+
+    app.state.user_group_service = UserGroupService()
+    app.state.user_group_service.set_repository(app.state.user_group_repository)
+
+    app.state.rate_card_service = RateCardService()
+    app.state.rate_card_service.set_repository(app.state.rate_card_repository)
+
+    app.state.usage_service = UsageService()
+    app.state.usage_service.set_repository(app.state.usage_repository)
+    app.state.usage_service.set_rate_card_service(app.state.rate_card_service)
+
+    # Initialize other services
     app.state.session_service = SessionService()
     app.state.socket_session_service = SocketSessionService()
-    app.state.user_service = UserService()
 
     # Initialize conversation and message services
     app.state.conversation_service = ConversationService()
     app.state.messages_service = MessagesService(conversation_service=app.state.conversation_service)
-
-    # Initialize secrets service
-    app.state.secrets_service = SecretsService()
 
     # Initialize OAuth service
     oidc_config = config.oidc

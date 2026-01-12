@@ -1,5 +1,15 @@
 # Alloy Infrastructure Agents - Copilot Instructions
 
+## Maintaining These Instructions
+
+When implementing new features or refactoring existing code, consider if these instructions need updating. Only document design decisions that are non-obvious and would require reading large portions of the codebase to understand them.
+
+## Common Conventions
+
+- **Python Commands**: Always use `uv` for all Python operations (`uv sync`, `uv run pytest`, `uv run python`)
+- **Testing**: Prefer the runTests MCP tool over terminal commands when running tests
+- **File Writing**: NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incremental edits instead.
+
 ## Repository Overview
 
 This is a monorepo containing multiple services and libraries for the Alloy Infrastructure Agents project:

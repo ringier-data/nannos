@@ -7,14 +7,11 @@ in different authentication scenarios:
 - UserContextFromRequestStateMiddleware: Extracts from request.state.user (OIDC flow)
 """
 
-import json
 import logging
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -24,82 +21,85 @@ logger = logging.getLogger(__name__)
 current_user_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("current_user_context", default=None)
 
 
-class UserContextFromMetadataMiddleware(BaseHTTPMiddleware):
+class UserContextFromMetadataMiddleware:
     """
     Middleware that extracts user context from A2A message metadata.
 
     Parses the JSON-RPC request body and extracts user information from:
     params.metadata.user_context = {user_id, email, name}
 
-    Stores in request.state.user and async context variable for compatibility
+    Stores in scope["state"]["user"] and async context variable for compatibility
     with existing patterns.
 
-    This middleware should run AFTER authentication middleware (OrchestratorJWTMiddleware)
-    but BEFORE A2A request handlers.
+    This middleware should run AFTER SubAgentIdMiddleware but BEFORE A2A request handlers.
+
+    Implemented as pure ASGI middleware (not BaseHTTPMiddleware) to avoid conflicts
+    with long-running SSE streams. BaseHTTPMiddleware crashes with RuntimeError when
+    HTTP client sends additional messages during streaming.
+
+    NOTE: This middleware does NOT extract sub_agent_id. Use SubAgentIdMiddleware
+    for that (separation of concerns).
     """
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """
-        Extract user context from A2A message metadata.
+    def __init__(self, app: ASGIApp):
+        self.app = app
 
-        Args:
-            request: The incoming Starlette request
-            call_next: The next middleware/handler in the chain
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Extract user context from HTTP headers (pure ASGI implementation).
 
-        Returns:
-            Response from downstream handlers
+        Reads user context from HTTP headers: X-User-Id, X-User-Email, X-User-Name.
         """
-        # Initialize with no user context
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Skip user context extraction for health/monitoring endpoints
+        path = scope.get("path", "")
+        if path in ("/.well-known/agent-card.json", "/health", "/readiness", "/liveness", "/api/v1/health"):
+            await self.app(scope, receive, send)
+            return
+
         user_context = None
 
-        # Try to extract user context from request body
-        if request.method in ["POST", "PUT", "PATCH"]:
+        # Extract user context from HTTP headers
+        headers = dict(scope.get("headers", []))
+
+        user_id_header = headers.get(b"x-user-id")
+        email_header = headers.get(b"x-user-email")
+        name_header = headers.get(b"x-user-name")
+
+        # Extract JWT from Authorization header
+        auth_header = headers.get(b"authorization", b"").decode("utf-8")
+        user_jwt = auth_header.replace("Bearer ", "") if auth_header else None
+
+        if user_id_header:
             try:
-                # Read and parse request body
-                body = await request.body()
-                if body:
-                    data = json.loads(body)
-
-                    # Extract user_context from A2A message metadata
-                    # Structure: {jsonrpc, method, params: {metadata: {user_context: {...}}}}
-                    params = data.get("params", {})
-                    metadata = params.get("metadata", {})
-                    user_context_data = metadata.get("user_context", {})
-
-                    if user_context_data:
-                        user_context = {
-                            "user_id": user_context_data.get("user_id"),
-                            "email": user_context_data.get("email"),
-                            "name": user_context_data.get("name"),
-                        }
-                        logger.debug(f"Extracted user context from metadata: user_id={user_context['user_id']}")
-                    else:
-                        logger.debug("No user_context found in message metadata")
-
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse request body as JSON: {e}")
-            except Exception as e:
-                logger.warning(f"Unexpected error extracting user context: {e}")
-
-        # Store in request state and context variable
-        if user_context:
-            request.state.user = user_context
-            current_user_context.set(user_context)
+                user_context = {
+                    "user_id": user_id_header.decode("utf-8"),
+                    "email": email_header.decode("utf-8") if email_header else None,
+                    "name": name_header.decode("utf-8") if name_header else None,
+                    "token": user_jwt,
+                }
+                logger.info(f"[USER_CONTEXT] Extracted from headers: user_id={user_context['user_id']}")
+            except UnicodeDecodeError as e:
+                logger.warning(f"Failed to decode user context headers: {e}")
         else:
-            # No user context found - this is OK for some operations
-            request.state.user = None
-            current_user_context.set(None)
+            logger.debug(f"[USER_CONTEXT] No X-User-Id header found for path: {path}")
 
+        # Store in scope state
+        if "state" not in scope:
+            scope["state"] = {}
+        scope["state"]["user"] = user_context
+        current_user_context.set(user_context)
+
+        # No body consumption - pass through unchanged
         try:
-            # Continue to next handler
-            response = await call_next(request)
-            return response
+            await self.app(scope, receive, send)
         finally:
-            # Clean up context variable after request completes
             current_user_context.set(None)
 
 
-class UserContextFromRequestStateMiddleware(BaseHTTPMiddleware):
+class UserContextFromRequestStateMiddleware:
     """
     Middleware that extracts user context from request.state.user (OIDC flow).
 
@@ -113,34 +113,46 @@ class UserContextFromRequestStateMiddleware(BaseHTTPMiddleware):
     Also extracts the X-Playground-SubAgentConfig-Hash header for playground mode testing.
 
     ARCHITECTURE:
-    OidcUserinfoMiddleware → UserContextFromRequestStateMiddleware → A2A RequestHandler → AgentExecutor
-    (validates JWT)         (stores in contextvars)                 (builds RequestContext)  (uses user_id)
+    OidcUserinfoMiddleware → SubAgentIdMiddleware → UserContextFromRequestStateMiddleware → A2A RequestHandler
+    (validates JWT)         (extracts sub_agent_id) (stores in contextvars)              (builds RequestContext)
 
-    This runs AFTER OidcUserinfoMiddleware which validates JWT tokens and populates request.state.user.
+    This runs AFTER both OidcUserinfoMiddleware and SubAgentIdMiddleware.
+
+    Implemented as pure ASGI middleware (not BaseHTTPMiddleware) for consistency.
     """
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """
-        Transfer authenticated user information to async context.
+    def __init__(self, app: ASGIApp):
+        self.app = app
 
-        Args:
-            request: The incoming Starlette request
-            call_next: The next middleware/handler in the chain
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Transfer authenticated user information to async context (pure ASGI)."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        Returns:
-            Response from downstream handlers
-        """
+        # Skip user context extraction for health/monitoring endpoints
+        path = scope.get("path", "")
+        if path in ("/.well-known/agent-card.json", "/health", "/readiness", "/liveness", "/api/v1/health"):
+            await self.app(scope, receive, send)
+            return
+
         # Extract verified user info from upstream OIDC middleware
-        if hasattr(request.state, "user") and request.state.user:
-            user_data = request.state.user
+        state = scope.get("state", {})
+        user_data = state.get("user")
+
+        if user_data:
             user_id = user_data.get("sub")  # 'sub' claim is the user ID
 
             # Extract playground sub-agent config hash from header if present
             sub_agent_config_hash = None
-            playground_header = request.headers.get("X-Playground-SubAgentConfig-Hash")
+            headers = dict(scope.get("headers", []))
+            playground_header = headers.get(b"x-playground-subagentconfig-hash", b"").decode("utf-8")
             if playground_header:
                 sub_agent_config_hash = playground_header
                 logger.info(f"Playground mode: sub-agent config hash {sub_agent_config_hash}")
+
+            # Extract sub_agent_id from scope state (set by SubAgentIdMiddleware)
+            sub_agent_id = state.get("sub_agent_id")
 
             # Store in context variable (async-safe, request-isolated)
             user_context = {
@@ -150,17 +162,15 @@ class UserContextFromRequestStateMiddleware(BaseHTTPMiddleware):
                 "token": user_data.get("token"),
                 "scopes": user_data.get("scopes", []),
                 "sub_agent_config_hash": sub_agent_config_hash,
+                "sub_agent_id": sub_agent_id,  # For cost tracking attribution
             }
             current_user_context.set(user_context)
-            logger.debug(f"Extracted user context from request.state: user_id={user_id}")
+            logger.debug(f"Extracted user context from scope.state: user_id={user_id}, sub_agent_id={sub_agent_id}")
         else:
             current_user_context.set(None)
-            logger.debug("No user found in request.state")
+            logger.debug("No user found in scope.state")
 
         try:
-            # Continue to next handler
-            response = await call_next(request)
-            return response
+            await self.app(scope, receive, send)
         finally:
-            # Clean up context variable after request completes
             current_user_context.set(None)

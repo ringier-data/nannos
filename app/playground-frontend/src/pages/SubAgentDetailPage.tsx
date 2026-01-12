@@ -66,9 +66,11 @@ import { ApprovalDialog } from '@/components/subagents/ApprovalDialog';
 import { SubAgentPermissionsDialog } from '@/components/subagents/SubAgentPermissionsDialog';
 import { VersionSidebar } from '@/components/subagents/VersionSidebar';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
+import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
+import { MODEL_OPTIONS } from '@/config/models';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
   getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions,
@@ -154,6 +156,12 @@ export function SubAgentDetailPage() {
   const [editFoundryQueryApiName, setEditFoundryQueryApiName] = useState('');
   const [editFoundryScopes, setEditFoundryScopes] = useState<string[]>([]);
   const [editFoundryVersion, setEditFoundryVersion] = useState('');
+
+  // Pricing configuration state (remote and foundry agents only)
+  const [editRateCardEntries, setEditRateCardEntries] = useState<Array<{billing_unit: string; price_per_million: string}>>(
+    [{ billing_unit: 'requests', price_per_million: '' }]
+  );
+  const [pricingExpanded, setPricingExpanded] = useState(false);
 
   // Chat input state
   const [inputValue, setInputValue] = useState('');
@@ -466,6 +474,22 @@ export function SubAgentDetailPage() {
       setEditSystemPrompt(String(sa.config_version?.system_prompt ?? ''));
       setEditMcpTools(Array.isArray(sa.config_version?.mcp_tools) ? sa.config_version.mcp_tools : []);
     }
+    
+    // Initialize pricing config for remote and foundry agents
+    if (sa.type === 'remote' || sa.type === 'foundry') {
+      const pricingConfig = sa.config_version?.pricing_config as any;
+      if (pricingConfig?.rate_card_entries && pricingConfig.rate_card_entries.length > 0) {
+        setEditRateCardEntries(
+          pricingConfig.rate_card_entries.map((e: any) => ({
+            billing_unit: e.billing_unit,
+            price_per_million: e.price_per_million.toString()
+          }))
+        );
+      } else {
+        // Default to requests billing unit
+        setEditRateCardEntries([{ billing_unit: 'requests', price_per_million: '' }]);
+      }
+    }
   };
 
   const handleSave = async () => {
@@ -476,9 +500,19 @@ export function SubAgentDetailPage() {
   const handleSaveWithSummary = async (summary: string) => {
     if (!subAgent || !id) return;
 
-    let typeSpecificConfig = {};
+    let typeSpecificConfig: any = {};
     if (subAgent.type === 'remote') {
       typeSpecificConfig = { agent_url: editAgentUrl };
+      // Add pricing config for remote agents (only detailed format supported)
+      if (editRateCardEntries.length > 0) {
+        typeSpecificConfig.pricing_config = {
+          format: 'detailed',
+          rate_card_entries: editRateCardEntries.map(e => ({
+            billing_unit: e.billing_unit,
+            price_per_million: parseFloat(e.price_per_million)
+          }))
+        };
+      }
     } else if (subAgent.type === 'foundry') {
       typeSpecificConfig = {
         foundry_hostname: editFoundryHostname,
@@ -489,6 +523,16 @@ export function SubAgentDetailPage() {
         foundry_scopes: editFoundryScopes as any,
         ...(editFoundryVersion && { foundry_version: editFoundryVersion }),
       };
+      // Add pricing config for foundry agents (only detailed format supported)
+      if (editRateCardEntries.length > 0) {
+        typeSpecificConfig.pricing_config = {
+          format: 'detailed',
+          rate_card_entries: editRateCardEntries.map(e => ({
+            billing_unit: e.billing_unit,
+            price_per_million: parseFloat(e.price_per_million)
+          }))
+        };
+      }
     } else {
       typeSpecificConfig = {
         system_prompt: editSystemPrompt,
@@ -959,26 +1003,40 @@ export function SubAgentDetailPage() {
 
               {/* Type-specific configuration */}
               {subAgent.type === 'remote' ? (
-                <div className="space-y-2 flex-shrink-0">
-                  <Label htmlFor="agentUrl">Agent URL</Label>
-                  {isEditing ? (
-                    <Input
-                      id="agentUrl"
-                      value={editAgentUrl}
-                      onChange={(e) => {
-                        setEditAgentUrl(e.target.value);
-                        handleFieldChange();
-                      }}
-                      onFocus={() => setActiveFocusArea('config')}
-                      onBlur={() => setActiveFocusArea(null)}
-                      placeholder="https://..."
-                    />
-                  ) : (
-                    <p className="text-sm font-mono break-all bg-muted p-2 rounded">
-                      {displayedAgentUrl}
-                    </p>
-                  )}
-                </div>
+                <>
+                  <div className="space-y-2 flex-shrink-0">
+                    <Label htmlFor="agentUrl">Agent URL</Label>
+                    {isEditing ? (
+                      <Input
+                        id="agentUrl"
+                        value={editAgentUrl}
+                        onChange={(e) => {
+                          setEditAgentUrl(e.target.value);
+                          handleFieldChange();
+                        }}
+                        onFocus={() => setActiveFocusArea('config')}
+                        onBlur={() => setActiveFocusArea(null)}
+                        placeholder="https://..."
+                      />
+                    ) : (
+                      <p className="text-sm font-mono break-all bg-muted p-2 rounded">
+                        {displayedAgentUrl}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Pricing Configuration - For remote agents */}
+                  <PricingConfigurationSection
+                    isEditing={isEditing}
+                    expanded={pricingExpanded}
+                    onExpandedChange={setPricingExpanded}
+                    rateCardEntries={editRateCardEntries}
+                    onRateCardEntriesChange={setEditRateCardEntries}
+                    onFieldChange={handleFieldChange}
+                    onFocusAreaChange={setActiveFocusArea}
+                    pricingConfig={subAgent?.config_version?.pricing_config}
+                  />
+                </>
               ) : subAgent.type === 'foundry' ? (
                 <>
                   {/* Foundry Configuration */}
@@ -1192,6 +1250,18 @@ export function SubAgentDetailPage() {
                       </div>
                     )}
                   </div>
+
+                  {/* Pricing Configuration - For remote and foundry agents */}
+                  <PricingConfigurationSection
+                    isEditing={isEditing}
+                    expanded={pricingExpanded}
+                    onExpandedChange={setPricingExpanded}
+                    rateCardEntries={editRateCardEntries}
+                    onRateCardEntriesChange={setEditRateCardEntries}
+                    onFieldChange={handleFieldChange}
+                    onFocusAreaChange={setActiveFocusArea}
+                    pricingConfig={subAgent?.config_version?.pricing_config}
+                  />
                 </>
               ) : (
                 <>
@@ -1210,8 +1280,11 @@ export function SubAgentDetailPage() {
                           <SelectValue placeholder="Select a model" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="gpt4o">GPT-4o</SelectItem>
-                          <SelectItem value="claude-sonnet-4.5">Claude Sonnet 4.5</SelectItem>
+                          {MODEL_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     ) : (
@@ -1231,7 +1304,9 @@ export function SubAgentDetailPage() {
                         onClick={() => setShowMcpToolsSheet(true)}
                       >
                         <Wrench className="mr-2 h-4 w-4" />
-                        Configure MCP Tools ({editMcpTools.length} selected)
+                        {editMcpTools.length > 0
+                          ? `${editMcpTools.length} MCP tools selected`
+                          : 'Select MCP Tools'}
                       </Button>
                     ) : (
                       <Collapsible open={mcpToolsExpanded} onOpenChange={setMcpToolsExpanded}>
@@ -1240,7 +1315,7 @@ export function SubAgentDetailPage() {
                             <span className="text-sm">
                               {Array.isArray(displayedMcpTools) && displayedMcpTools.length > 0
                                 ? `${displayedMcpTools.length} tools configured`
-                                : 'Inherits orchestrator tools'}
+                                : 'No MCP tools'}
                             </span>
                             <ChevronDown className={`h-4 w-4 transition-transform ${mcpToolsExpanded ? 'rotate-180' : ''}`} />
                           </Button>
@@ -1257,7 +1332,7 @@ export function SubAgentDetailPage() {
                             </div>
                           ) : (
                             <p className="text-xs text-muted-foreground">
-                              This sub-agent will use all MCP tools available to the orchestrator.
+                              No MCP tools selected. Only essential tools (time, docstore) will be available.
                             </p>
                           )}
                         </CollapsibleContent>

@@ -77,10 +77,8 @@ async def require_auth_or_bearer_token(request: Request) -> User:
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
 
-        # Lazy import to avoid circular dependencies
+        # Import JWT validation
         from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
-
-        from .services.user_service import user_service
 
         try:
             # Validate the user's access token against OIDC provider
@@ -101,7 +99,8 @@ async def require_auth_or_bearer_token(request: Request) -> User:
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-            # Look up user in database
+            # Look up user in database using service from app state
+            user_service = request.app.state.user_service
             from .db import get_async_session_factory
 
             async_session_factory = get_async_session_factory()
@@ -329,7 +328,7 @@ class GroupAdminChecker:
         request: Request,
     ) -> User:
         """Check if user is group admin or system admin."""
-        from playground_backend.services.user_group_service import user_group_service
+        user_group_service = request.app.state.user_group_service
 
         user = require_auth(request)
 
@@ -385,7 +384,7 @@ async def require_group_admin_or_admin(
     Raises:
         HTTPException 403 if user is not group admin or system admin
     """
-    from playground_backend.services.user_group_service import user_group_service
+    user_group_service = request.app.state.user_group_service
 
     user = require_auth(request)
 
@@ -426,7 +425,7 @@ async def require_group_member_management_permission(
     Raises:
         HTTPException 403 if user doesn't have permission
     """
-    from playground_backend.services.user_group_service import user_group_service
+    user_group_service = request.app.state.user_group_service
 
     user = require_auth(request)
 
@@ -470,7 +469,7 @@ async def require_group_member(
     Raises:
         HTTPException 403 if user is not a group member
     """
-    from .services.user_group_service import user_group_service
+    user_group_service = request.app.state.user_group_service
 
     user = require_auth(request)
 

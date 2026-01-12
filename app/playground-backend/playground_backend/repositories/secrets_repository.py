@@ -6,7 +6,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
-from ..services.audit_service import audit_service
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -66,7 +65,7 @@ class SecretsRepository(AuditedRepository):
                 )
 
             # Custom audit for permission change
-            await audit_service.log_action(
+            await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
                 entity_type=self.entity_type,
@@ -83,7 +82,3 @@ class SecretsRepository(AuditedRepository):
         except Exception as e:
             logger.error(f"Failed to update permissions for secret {secret_id}: {e}")
             raise
-
-
-# Module-level singleton
-secrets_repository = SecretsRepository()

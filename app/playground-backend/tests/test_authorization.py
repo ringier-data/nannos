@@ -19,14 +19,33 @@ from playground_backend.services.user_service import UserService
 
 @pytest.fixture
 def user_service():
-    """Create UserService instance."""
-    return UserService()
+    """Create UserService instance with injected dependencies."""
+    from playground_backend.repositories.user_repository import UserRepository
+    from playground_backend.services.audit_service import AuditService
+
+    audit_service = AuditService()
+    user_repo = UserRepository()
+    user_repo.set_audit_service(audit_service)
+
+    service = UserService()
+    service.set_repository(user_repo)
+    service.set_audit_service(audit_service)
+    return service
 
 
 @pytest.fixture
 def user_group_service():
-    """Create UserGroupService instance."""
-    return UserGroupService()
+    """Create UserGroupService instance with injected dependencies."""
+    from playground_backend.repositories.user_group_repository import UserGroupRepository
+    from playground_backend.services.audit_service import AuditService
+
+    audit_service = AuditService()
+    user_group_repo = UserGroupRepository()
+    user_group_repo.set_audit_service(audit_service)
+
+    service = UserGroupService()
+    service.set_repository(user_group_repo)
+    return service
 
 
 @pytest_asyncio.fixture

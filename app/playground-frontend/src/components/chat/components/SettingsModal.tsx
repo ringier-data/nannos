@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useChat } from '../contexts';
 import { useSessionId } from '../hooks/useLocalStorage';
 import type { Settings } from '../types';
+import { MODEL_OPTIONS } from '@/config/models';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -21,13 +22,6 @@ const AGENT_URL_OPTIONS = [
     label: 'https://sample-a2a-agent-908687846511.us-central1.run.app',
   },
   { value: 'custom', label: 'Custom URL...' },
-];
-
-const MODEL_OPTIONS = [
-  { value: 'gpt4o', label: 'GPT-4o (Azure OpenAI)' },
-  { value: 'gpt-4o-mini', label: 'GPT-4o Mini (Azure OpenAI)' },
-  { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5 (Bedrock)' },
-  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (Bedrock)' },
 ];
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {

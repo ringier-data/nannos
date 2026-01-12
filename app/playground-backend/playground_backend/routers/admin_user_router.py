@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
@@ -19,15 +19,21 @@ from ..models.user import (
     UserRoleUpdate,
     UserStatusUpdate,
 )
-from ..services.user_service import user_service
+from ..services.user_service import UserService
 
 router = APIRouter(prefix="/api/v1/admin/users", tags=["admin-users"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
+def get_user_service(request: Request) -> UserService:
+    """Get user service from app state."""
+    return request.app.state.user_service
+
+
 @router.get("", response_model=UserListResponse)
 async def list_users(
+    request: Request,
     db: DbSession,
     _: User = Depends(require_admin),
     page: int = Query(1, ge=1, description="Page number"),
@@ -39,6 +45,7 @@ async def list_users(
 
     Admin only endpoint.
     """
+    user_service = get_user_service(request)
     users, total = await user_service.list_users(
         db,
         page=page,
@@ -56,6 +63,7 @@ async def list_users(
 @router.get("/{user_id}", response_model=UserDetailResponse)
 async def get_user(
     user_id: str,
+    request: Request,
     db: DbSession,
     _: User = Depends(require_admin),
 ) -> UserDetailResponse:
@@ -63,6 +71,7 @@ async def get_user(
 
     Admin only endpoint.
     """
+    user_service = get_user_service(request)
     user = await user_service.get_user_with_groups(db, user_id)
 
     if user is None:
@@ -77,7 +86,8 @@ async def get_user(
 @router.patch("/{user_id}", response_model=UserDetailResponse)
 async def update_user(
     user_id: str,
-    request: UserAdminUpdate,
+    request: Request,
+    update_request: UserAdminUpdate,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> UserDetailResponse:
@@ -85,6 +95,7 @@ async def update_user(
 
     Admin only endpoint. Allows updating is_administrator flag.
     """
+    user_service = get_user_service(request)
     # Get current user state for audit
     current_user = await user_service.get_user(db, user_id)
     if current_user is None:
@@ -98,7 +109,7 @@ async def update_user(
         db,
         user_id,
         admin.sub,  # actor_sub for audit
-        is_administrator=request.is_administrator,
+        is_administrator=update_request.is_administrator,
     )
 
     if updated_user is None:
@@ -123,7 +134,8 @@ async def update_user(
 @router.put("/{user_id}/groups", response_model=UserDetailResponse)
 async def update_user_groups(
     user_id: str,
-    request: UserGroupsUpdate,
+    request: Request,
+    update_request: UserGroupsUpdate,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> UserDetailResponse:
@@ -131,6 +143,7 @@ async def update_user_groups(
 
     Admin only endpoint.
     """
+    user_service = get_user_service(request)
     # Get current user state for audit
     current_user = await user_service.get_user_with_groups(db, user_id)
     if current_user is None:
@@ -144,8 +157,8 @@ async def update_user_groups(
         db,
         user_id,
         admin.sub,  # actor_sub for audit
-        request.group_ids,
-        request.operation,
+        update_request.group_ids,
+        update_request.operation,
     )
 
     if updated_user is None:
@@ -162,7 +175,8 @@ async def update_user_groups(
 @router.put("/{user_id}/role", response_model=UserDetailResponse)
 async def update_user_role(
     user_id: str,
-    request: UserRoleUpdate,
+    request: Request,
+    update_request: UserRoleUpdate,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> UserDetailResponse:
@@ -170,6 +184,7 @@ async def update_user_role(
 
     Admin only endpoint. Defines system-wide capabilities.
     """
+    user_service = get_user_service(request)
     # Get current user state for audit
     current_user = await user_service.get_user(db, user_id)
     if current_user is None:
@@ -183,7 +198,7 @@ async def update_user_role(
         db,
         user_id,
         admin.sub,
-        request.role.value,  # actor_sub for audit
+        update_request.role.value,  # actor_sub for audit
     )
 
     if updated_user is None:
@@ -208,7 +223,8 @@ async def update_user_role(
 @router.put("/{user_id}/status", response_model=UserDetailResponse)
 async def update_user_status(
     user_id: str,
-    request: UserStatusUpdate,
+    request: Request,
+    update_request: UserStatusUpdate,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> UserDetailResponse:
@@ -216,6 +232,7 @@ async def update_user_status(
 
     Admin only endpoint.
     """
+    user_service = get_user_service(request)
     # Get current user state for audit
     current_user = await user_service.get_user(db, user_id)
     if current_user is None:
@@ -229,7 +246,7 @@ async def update_user_status(
         db,
         user_id,
         admin.sub,
-        request.status,  # actor_sub for audit
+        update_request.status,  # actor_sub for audit
     )
 
     if updated_user is None:
@@ -253,7 +270,8 @@ async def update_user_status(
 
 @router.post("/bulk", response_model=BulkUserOperationResponse)
 async def bulk_update_users(
-    request: BulkUserOperationRequest,
+    request: Request,
+    bulk_request: BulkUserOperationRequest,
     db: DbSession,
     admin: User = Depends(require_admin),
 ) -> BulkUserOperationResponse:
@@ -261,10 +279,11 @@ async def bulk_update_users(
 
     Admin only endpoint.
     """
+    user_service = get_user_service(request)
     results = await user_service.bulk_update_users(
         db,
         admin.sub,
-        request.operations,  # actor_sub for audit
+        bulk_request.operations,  # actor_sub for audit
     )
     await db.commit()
 

@@ -59,18 +59,21 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         user_token: str,
         oauth2_client: "OidcOAuth2Client",
         user_context: Optional[dict[str, Any]] = None,
+        sub_agent_id: Optional[int] = None,
     ):
         """
         Initialize smart token interceptor.
 
         Args:
             user_token: User's authenticated access token
+            oauth2_client: OAuth2 client for token operations
             user_context: Optional user context dict with user_id, email, name
-            oauth_client: Optional OidcOAuth2Client for both JWT auth and token exchange
+            sub_agent_id: Optional sub-agent ID for cost tracking attribution
         """
         self.user_token = user_token
         self.user_context = user_context or {}
         self.oauth2_client = oauth2_client
+        self.sub_agent_id = sub_agent_id
 
     def _detect_auth_scheme(self, agent_card: AgentCard) -> tuple[str, str, Any]:
         """
@@ -160,32 +163,6 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
         return request_payload, http_kwargs
 
-    def _inject_user_context(self, request_payload: dict[str, Any]) -> None:
-        """
-        Inject user context into A2A message metadata.
-
-        Modifies request_payload in-place to add user_context to metadata.
-        Only includes attribution data (user_id, email, name).
-        The orchestrator's JWT in the Authorization header is used for authentication.
-        """
-        if not self.user_context:
-            return
-
-        # Ensure params and metadata exist
-        if "params" not in request_payload:
-            request_payload["params"] = {}
-        if "metadata" not in request_payload["params"]:
-            request_payload["params"]["metadata"] = {}
-
-        # Inject user context for attribution only (no access token)
-        request_payload["params"]["metadata"]["user_context"] = {
-            "user_id": self.user_context.get("user_id"),
-            "email": self.user_context.get("email"),
-            "name": self.user_context.get("name"),
-        }
-
-        logger.debug(f"Injected user context into message metadata: user_id={self.user_context.get('user_id')}")
-
     async def _handle_jwt_auth(
         self,
         agent_card: AgentCard,
@@ -213,8 +190,20 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             # Add to headers
             http_kwargs["headers"]["Authorization"] = f"Bearer {token}"
 
-            # Inject user context into message metadata
-            self._inject_user_context(request_payload)
+            # Add sub_agent_id as HTTP header for cost tracking
+            if self.sub_agent_id:
+                http_kwargs["headers"]["X-Sub-Agent-Id"] = str(self.sub_agent_id)
+                logger.debug(f"Added X-Sub-Agent-Id header: {self.sub_agent_id}")
+
+            # Add user context as HTTP headers
+            if self.user_context:
+                if user_id := self.user_context.get("user_id"):
+                    http_kwargs["headers"]["X-User-Id"] = str(user_id)
+                if email := self.user_context.get("email"):
+                    http_kwargs["headers"]["X-User-Email"] = str(email)
+                if name := self.user_context.get("name"):
+                    http_kwargs["headers"]["X-User-Name"] = str(name)
+                logger.debug(f"Added user context headers for user_id={user_id}")
 
             logger.info(f"Successfully obtained client credentials token for {agent_card.name}")
 
@@ -276,6 +265,14 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
             # Add to headers
             http_kwargs["headers"]["Authorization"] = f"Bearer {exchanged_token}"
+
+            # Add sub_agent_id as HTTP header for cost tracking
+            if self.sub_agent_id:
+                http_kwargs["headers"]["X-Sub-Agent-Id"] = str(self.sub_agent_id)
+                logger.debug(f"Added X-Sub-Agent-Id header: {self.sub_agent_id}")
+
+            # Note: User context headers NOT added for OIDC flow because
+            # the exchanged token already contains user information in its claims
 
             logger.info(f"Successfully exchanged token for {agent_card.name}")
 

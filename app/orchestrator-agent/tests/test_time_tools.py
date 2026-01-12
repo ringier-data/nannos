@@ -182,7 +182,7 @@ class TestTimeToolCreation:
         result = tool.invoke({"base": "now", "format": "iso8601", "timezone": "UTC"})
 
         assert isinstance(result, str)
-        assert "2025" in result  # Current year
+        assert "2026" in result  # Current year
 
     def test_tool_invoke_today(self):
         """Test invoking tool with 'today' base."""
@@ -191,7 +191,7 @@ class TestTimeToolCreation:
 
         assert isinstance(result, str)
         assert len(result) == 10  # YYYY-MM-DD format
-        assert "2025" in result
+        assert "2026" in result
 
     def test_tool_invoke_tomorrow(self):
         """Test calculating tomorrow."""
@@ -201,7 +201,7 @@ class TestTimeToolCreation:
         )
 
         assert isinstance(result, str)
-        assert "2025" in result
+        assert "2026" in result
 
     def test_tool_invoke_next_week(self):
         """Test calculating next week."""
@@ -247,7 +247,7 @@ class TestTimeToolCreation:
 
         assert isinstance(result, str)
         # Should use default timezone (Europe/Zurich) and format (iso8601)
-        assert "2025" in result
+        assert "2026" in result
 
 
 class TestMonthArithmetic:

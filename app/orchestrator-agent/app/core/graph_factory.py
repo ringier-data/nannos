@@ -30,6 +30,7 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph_checkpoint_aws import DynamoDBSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
 from ..backends import IndexingStoreBackend
 from ..handlers import handle_auth_error, should_retry
@@ -79,6 +80,7 @@ class GraphFactory:
         config: AgentSettings,
         thinking: bool = False,
         a2a_middleware: Optional[A2ATaskTrackingMiddleware] = None,
+        cost_logger: Optional[CostLogger] = None,
     ):
         """Initialize the graph factory.
 
@@ -86,9 +88,11 @@ class GraphFactory:
             config: Agent settings with model config, checkpoint config, etc.
             thinking: Enable thinking mode for Claude models
             a2a_middleware: Optional A2A task tracking middleware (shared with discovery)
+            cost_logger: Optional CostLogger instance for cost tracking callbacks
         """
         self.config = config
         self.thinking = thinking
+        self.cost_logger = cost_logger
 
         # Model and graph caches
         self._models: dict[str, BaseChatModel] = {}
@@ -160,12 +164,13 @@ class GraphFactory:
         """
         if self._store is None:
             # Create connection pool for AsyncPostgresStore (create once and reuse)
-            # Connections will be created asynchronously on first database operation
+            # Pool will be opened explicitly in ensure_store_setup()
             if self._connection_pool is None:
                 self._connection_pool = AsyncConnectionPool(
                     self._postgres_conn,
                     min_size=2,
                     max_size=10,
+                    open=False,  # Don't open in constructor (deprecated)
                     kwargs={
                         "autocommit": True,
                         "prepare_threshold": 0,
@@ -218,6 +223,11 @@ class GraphFactory:
         if not self._store_setup_complete:
             store = self.store  # Access property to ensure store is initialized
 
+            # Open connection pool if not already open
+            if self._connection_pool is not None and not self._connection_pool._opened:
+                await self._connection_pool.open()
+                logger.info("Opened AsyncConnectionPool for document store")
+
             # Check if store table exists with incompatible schema and clean it up
             try:
                 from langgraph.checkpoint.postgres import _ainternal
@@ -267,6 +277,21 @@ class GraphFactory:
         """Get the A2A task tracking middleware (needed by discovery service)."""
         return self._a2a_middleware
 
+    async def close(self) -> None:
+        """Close the connection pool and clean up resources.
+
+        Should be called when the GraphFactory is no longer needed (e.g., on application shutdown).
+        """
+        # Shutdown cost logger if present
+        if self.cost_logger is not None:
+            await self.cost_logger.shutdown()
+            logger.info("Cost logger shutdown complete")
+
+        # Close database connection pool
+        if self._connection_pool is not None and self._connection_pool._opened:
+            await self._connection_pool.close()
+            logger.info("Closed AsyncConnectionPool for document store")
+
     def _create_model(self, model_type: ModelType) -> BaseChatModel:
         """Create a model instance for the given model type.
 
@@ -276,7 +301,12 @@ class GraphFactory:
         Returns:
             BaseChatModel: The created model instance
         """
-        return create_model(model_type, self.config, self.thinking)
+        # Create callbacks list if cost_logger is available
+        callbacks = []
+        if self.cost_logger:
+            callbacks.append(CostTrackingCallback(self.cost_logger))
+
+        return create_model(model_type, self.config, self.thinking, callbacks=callbacks if callbacks else None)
 
     def _get_or_create_model(self, model_type: ModelType) -> BaseChatModel:
         """Get or create a model instance (cached).

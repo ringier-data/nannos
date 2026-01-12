@@ -2,10 +2,9 @@
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
-from uuid import uuid4
 
 import boto3
 import docker
@@ -15,8 +14,10 @@ import pytest_asyncio
 from aiodynamo.client import Client
 from aiodynamo.credentials import Key, StaticCredentials
 from aiodynamo.http.httpx import HTTPX
-from fastapi import FastAPI, Request
-from fastapi.testclient import TestClient
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
+from sqlalchemy import text
 from yarl import URL
 
 from playground_backend.config import (
@@ -26,11 +27,22 @@ from playground_backend.config import (
     OrchestratorConfig,
 )
 from playground_backend.controllers.auth_controller import AuthController
+from playground_backend.db.session import get_db_session
+from playground_backend.dependencies import require_auth, require_auth_or_bearer_token
 from playground_backend.models.session import StoredSession
-from playground_backend.models.user import User
+from playground_backend.models.user import User, UserStatus
+from playground_backend.repositories.secrets_repository import SecretsRepository
+from playground_backend.repositories.sub_agent_repository import SubAgentRepository
+from playground_backend.repositories.user_group_repository import UserGroupRepository
+from playground_backend.repositories.user_repository import UserRepository
+from playground_backend.services.audit_service import AuditService
 from playground_backend.services.oauth_service import OAuthService
+from playground_backend.services.secrets_service import SecretsService
 from playground_backend.services.session_service import SessionService
+from playground_backend.services.sub_agent_service import SubAgentService
+from playground_backend.services.user_group_service import UserGroupService
 from playground_backend.services.user_service import UserService
+from playground_backend.services.user_settings_service import UserSettingsService
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +70,8 @@ def test_config():
         secret_key="test-secret-key",
         session_ttl_seconds=3600,
         oidc=OidcConfig(
-            domain="test.oidc.com",
             client_id="test_client_id",
-            client_secret="test_client_secret",
-            redirect_uri="http://localhost:9999/api/v1/auth/login-callback",
-            logout_redirect_uri="http://localhost:9999/api/v1/auth/logout-callback",
+            client_secret=SecretStr("test_client_secret"),
             scope="openid profile email",
         ),
         dynamodb=DynamoDBConfig(
@@ -74,7 +83,6 @@ def test_config():
         ),
         orchestrator=OrchestratorConfig(
             client_id="orchestrator_client_id",
-            base_url="http://localhost:8080",
         ),
     )
 
@@ -284,8 +292,54 @@ async def session_service(mock_config, dynamodb_tables):
 
 @pytest.fixture
 def user_service():
-    """Create UserService instance for PostgreSQL."""
-    return UserService()
+    """Create UserService instance with injected dependencies."""
+    audit_service = AuditService()
+    user_repo = UserRepository()
+    user_repo.set_audit_service(audit_service)
+    service = UserService()
+    service.set_repository(user_repo)
+    service.set_audit_service(audit_service)
+    return service
+
+
+@pytest.fixture
+def secrets_service():
+    """Create SecretsService instance with injected dependencies."""
+    audit_service = AuditService()
+    secrets_repo = SecretsRepository()
+    secrets_repo.set_audit_service(audit_service)
+    service = SecretsService()
+    service.set_repository(secrets_repo)
+    return service
+
+
+@pytest.fixture
+def sub_agent_service():
+    """Create SubAgentService instance with injected dependencies."""
+    audit_service = AuditService()
+    sub_agent_repo = SubAgentRepository()
+    sub_agent_repo.set_audit_service(audit_service)
+    service = SubAgentService()
+    service.set_repository(sub_agent_repo)
+    return service
+
+
+@pytest.fixture
+def user_group_service():
+    """Create UserGroupService instance with injected dependencies."""
+    service = UserGroupService()
+    user_group_repo = UserGroupRepository()
+    service.set_repository(user_group_repo)
+    audit_service = AuditService()
+    user_group_repo.set_audit_service(audit_service)
+    return service
+
+
+@pytest.fixture
+def user_settings_service():
+    """Create UserSettingsService instance with injected dependencies."""
+    service = UserSettingsService()
+    return service
 
 
 # User fixtures
@@ -305,6 +359,33 @@ def test_user() -> User:
     )
 
 
+@pytest_asyncio.fixture
+async def add_user_to_db(pg_session):
+    """Setup test environment with app and db."""
+
+    async def _add_user(user: User):
+        # add user to db
+        await pg_session.execute(
+            text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+            VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
+            """),
+            {
+                "id": user.id,
+                "sub": user.sub,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "is_administrator": user.is_administrator,
+                "role": user.role,
+                "status": user.status,
+            },
+        )
+        await pg_session.commit()
+
+    return _add_user
+
+
 @pytest.fixture
 def test_admin_user() -> User:
     """Create a test admin user."""
@@ -318,19 +399,6 @@ def test_admin_user() -> User:
         is_administrator=True,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
-    )
-
-
-@pytest.fixture
-def test_session(test_user) -> StoredSession:
-    """Create a test session."""
-    issued_at = datetime.now(timezone.utc)
-    return StoredSession(
-        session_id=str(uuid4()),
-        user_id=test_user.id,
-        refresh_token="test_refresh_token",
-        issued_at=issued_at,
-        ttl=int((issued_at + timedelta(days=30)).timestamp()),
     )
 
 
@@ -434,63 +502,17 @@ async def auth_controller(session_service, user_service, mock_config):
     yield controller
 
 
-# FastAPI test client
-@pytest.fixture
-def app(mock_config):
-    """Create FastAPI test app."""
-    from starlette.middleware.sessions import SessionMiddleware
-
-    from playground_backend.routers import auth_router
-
-    app = FastAPI()
-
-    # Add SessionMiddleware (required for OAuth)
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=mock_config.secret_key,
-        max_age=600,
-        same_site="lax",
-        https_only=False,  # Test environment
-    )
-
-    # Add an index route for testing redirects
-    @app.get("/", name="index")
-    async def index(request: Request):
-        from fastapi.responses import HTMLResponse
-
-        # Check if user is authenticated
-        user = getattr(request.state, "user", None)
-        if not user:
-            # Redirect to login if not authenticated
-            redirect_to = str(request.url_for("index"))
-            login_url = str(request.url_for("login"))
-            if redirect_to:
-                login_url += f"?redirectTo={redirect_to}"
-            return HTMLResponse(status_code=302, headers={"Location": login_url})
-        # Serve a simple response if authenticated
-        return HTMLResponse("<html><body>Authenticated</body></html>")
-
-    app.include_router(auth_router)
-    return app
-
-
-@pytest.fixture
-def client(app):
-    """Create test client."""
-    return TestClient(app)
-
-
 # Helper functions
 @pytest.fixture
 def create_mock_request():
     """Factory to create mock request objects."""
 
     def _create(
-        cookies: dict[str, str] = None,
-        query_params: dict[str, str] = None,
-        user: User = None,
-        session: StoredSession = None,
-        session_id: str = None,
+        cookies: dict[str, str] | None = None,
+        query_params: dict[str, str] | None = None,
+        user: User | None = None,
+        session: StoredSession | None = None,
+        session_id: str | None = None,
     ):
         request = MagicMock()
         request.cookies = MagicMock()
@@ -517,6 +539,10 @@ def create_mock_request():
             return f"https://localhost:9999/{name}"
 
         request.url_for = MagicMock(side_effect=mock_url_for)
+
+        # Mock app.state with services (for dependency injection)
+        app = MagicMock()
+        request.app = app
 
         return request
 
@@ -594,9 +620,9 @@ def postgres_template():
         # Create network
         client.networks.create(network_name, driver="bridge")
 
-        # Start PostgreSQL container
+        # Start PostgreSQL container with pgvector extension
         pg_container = client.containers.run(
-            "docker.rcplus.io/postgres:16",
+            "docker.rcplus.io/pgvector/pgvector:pg16",
             detach=True,
             name=db_container_name,
             network=network_name,
@@ -635,6 +661,13 @@ def postgres_template():
         exit_code, output = pg_container.exec_run(f'psql -U {pg_user} -d {pg_database} -c "CREATE SCHEMA {pg_schema}"')
         if exit_code != 0:
             raise RuntimeError(f"Failed to create schema: {output.decode()}")
+
+        # Install pgvector extension (provisioning step - same as build-db-container.sh)
+        exit_code, output = pg_container.exec_run(
+            f'psql -U {pg_user} -d {pg_database} -c "CREATE EXTENSION IF NOT EXISTS vector"'
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to create vector extension: {output.decode()}")
 
         time.sleep(0.5)
 
@@ -769,6 +802,98 @@ async def pg_session(postgres_with_migrations):
     await engine.dispose()
 
 
+@pytest.fixture
+def test_user_model():
+    """Create a test user model for auth override."""
+    return User(
+        id="test-user-id",
+        sub="test-user-id",
+        email="test@example.com",
+        first_name="Test",
+        last_name="User",
+        is_administrator=False,
+        status=UserStatus.ACTIVE,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest_asyncio.fixture
+async def app(pg_session, test_user_model):
+    """Create FastAPI app with real database and mocked auth."""
+
+    from app import app
+
+    yield app
+
+
+@pytest_asyncio.fixture
+async def app_with_db(app, pg_session, test_user_model):
+    """Create FastAPI app with real database and mocked auth."""
+    from fastapi import Request
+
+    # Override get_db_session to use test database
+    async def override_get_db():
+        yield pg_session
+
+    # Override require_auth to return test user
+    def override_require_auth():
+        return test_user_model
+
+    # Override require_auth_or_bearer_token to return test user
+    async def override_require_auth_or_bearer_token(request: Request):
+        return test_user_model
+
+    app.dependency_overrides[get_db_session] = override_get_db
+    app.dependency_overrides[require_auth] = override_require_auth
+    app.dependency_overrides[require_auth_or_bearer_token] = override_require_auth_or_bearer_token
+
+    yield app
+
+    # Cleanup: Remove the override after the test
+    app.dependency_overrides.pop(get_db_session, None)
+    app.dependency_overrides.pop(require_auth, None)
+    app.dependency_overrides.pop(require_auth_or_bearer_token, None)
+
+
+@pytest_asyncio.fixture()
+async def client(app):
+    """Mock the database using the pg_session."""
+
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            # # Add default authentication headers for tests
+            # client.headers.update(
+            #     {
+            #         "Authorization": "Bearer test-token",
+            #     }
+            # )
+            yield client
+
+
+@pytest_asyncio.fixture()
+async def client_with_db(app_with_db):
+    """Mock the database using the pg_session."""
+
+    async with LifespanManager(app_with_db):
+        transport = ASGITransport(app=app_with_db)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            # # Add default authentication headers for tests
+            # client.headers.update(
+            #     {
+            #         "Authorization": "Bearer test-token",
+            #     }
+            # )
+            yield client
+
+
 @pytest_asyncio.fixture
 async def pg_engine(postgres_with_migrations):
     """Create an async SQLAlchemy engine connected to the test PostgreSQL database."""
@@ -782,3 +907,40 @@ async def pg_engine(postgres_with_migrations):
     yield engine
 
     await engine.dispose()
+
+
+@pytest.fixture
+def mock_request(client):
+    """Create a mock FastAPI Request with app.state for router tests.
+
+    This fixture is used by router tests that call endpoint functions directly,
+    bypassing FastAPI's dependency injection. It provides a mock Request object
+    with app.state containing initialized services.
+    """
+
+    request = MagicMock()
+
+    # Mock app.state with services (for dependency injection)
+    request.app = client._transport.app
+    request.state = client._transport.app.state
+
+    return request
+
+
+# Helper functions
+@pytest.fixture
+def get_mock_request(client):
+    """Factory to create mock request objects."""
+
+    def _create(
+        user: User | None = None,
+    ):
+        request = MagicMock()
+
+        # Mock app.state with services (for dependency injection)
+        request.app = client._transport.app
+        request.state = client._transport.app.state
+        request.state.user = user
+        return request
+
+    return _create

@@ -178,7 +178,3 @@ class AuditService:
         except Exception as e:
             logger.error(f"Failed to list audit logs: {e}")
             raise
-
-
-# Module-level singleton
-audit_service = AuditService()

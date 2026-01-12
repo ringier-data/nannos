@@ -15,8 +15,8 @@ Architecture:
 - Inherits from LocalA2ARunnable for A2A protocol compliance
 - Lazily creates a LangGraph agent on first invocation
 - Always uses Gatana MCP gateway for tool discovery
-- If config.mcp_tools is set, filters discovered tools by that whitelist
-- If config.mcp_tools is None/empty, inherits tools from orchestrator's tool_registry
+- If config.mcp_tools is a non-empty list, filters discovered tools by that whitelist
+- Otherwise (None or empty list), agent has NO MCP tools (only essential orchestrator tools)
 - Uses structured output (SubAgentResponseSchema) for explicit task state
 
 Use Case:
@@ -45,8 +45,8 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..a2a.base import LocalA2ARunnable, SubAgentInput
-from ..a2a.models import LocalLangGraphSubAgentConfig
+from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
+from ..a2a_utils.models import LocalLangGraphSubAgentConfig
 from ..middleware import RepeatedToolCallMiddleware
 from ..utils import get_language_display_name
 
@@ -161,7 +161,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
     Attributes:
         config: LocalLangGraphSubAgentConfig with name, description, system_prompt, mcp_tools
         model: The LangGraph model to use for the agent
-        orchestrator_tools: Tools inherited from orchestrator (used if mcp_tools is None/empty)
+        orchestrator_tools: Essential tools always included (get_current_time, docstore, etc.)
         _agent: Lazily-created LangGraph agent (cached after first creation)
         _discovered_tools: Tools discovered from Gatana MCP gateway (cached after discovery)
     """
@@ -188,7 +188,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         Args:
             config: Configuration with name, description, system_prompt, mcp_tools
             model: The LangGraph model to use for the agent
-            orchestrator_tools: Tools inherited from orchestrator (used if config.mcp_tools is None/empty)
+            orchestrator_tools: Essential tools always included (get_current_time, docstore, etc.)
             oauth2_client: OAuth2 client for token exchange (required for MCP tool discovery)
             user_token: User's access token for token exchange (required for MCP tool discovery)
             checkpointer: Shared checkpointer for multi-turn conversation state (e.g., DynamoDBSaver)
@@ -342,44 +342,49 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
     def _get_effective_tools(self) -> List[BaseTool]:
         """Get the effective tools for this agent.
 
-        If MCP tools were discovered, use those (override).
-        Otherwise, use orchestrator tools (inheritance).
+        Logic:
+        - If mcp_tools is a non-empty list: use discovered tools + essential orchestrator tools
+        - Otherwise (None or empty list): only essential orchestrator tools (NO MCP tools)
+
+        Essential tools always included:
+        - get_current_time: For temporal awareness
+        - docstore_search: For semantic search over indexed documents
+        - read_personal_file: For accessing personal workspace files
+        - docstore_export: For exporting files to S3
+        - create_presigned_url: For creating S3 presigned URLs
 
         All tools are validated to ensure they have proper OpenAI schema format.
 
         Returns:
             List of tools to use for the agent
         """
-        if self._discovered_tools is not None:
-            logger.info(f"orchestrator tools: {self.orchestrator_tools}")
-            # When MCP tools are whitelisted, also include essential orchestrator tools:
-            # - get_current_time: For temporal awareness
-            # - search_documents_rag: For semantic search over indexed documents
-            # - read_personal_file: For accessing personal workspace files
-            # - docstore_export: For exporting files to S3
-            # - create_presigned_url: For creating S3 presigned URLs
-            essential_tool_names = [
-                "get_current_time",
-                "docstore_search",
-                "read_personal_file",
-                "docstore_export",
-                "create_presigned_url",
-            ]
-            essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
+        # Essential orchestrator tools (always included)
+        essential_tool_names = [
+            "get_current_time",
+            "docstore_search",
+            "read_personal_file",
+            "docstore_export",
+            "create_presigned_url",
+        ]
+        essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
+
+        # Check if config.mcp_tools is a non-empty list
+        if self.config.mcp_tools and len(self.config.mcp_tools) > 0:
+            # Non-empty list means use discovered tools + essential orchestrator tools
             essential_tool_names_found = [tool.name for tool in essential_tools]
             logger.info(
                 f"Using MCP tools + essential orchestrator tools for '{self.name}': "
-                f"{len(self._discovered_tools)} MCP tools + {len(essential_tools)} essential tools {essential_tool_names_found}"
+                f"{len(self._discovered_tools or [])} MCP tools + {len(essential_tools)} essential tools {essential_tool_names_found}"
             )
-            return self._discovered_tools + essential_tools
-        # Validate orchestrator tools before returning them
-        # This ensures tools inherited from orchestrator also have valid schemas
-        orchestrator_tool_names = [tool.name for tool in self.orchestrator_tools]
+            return (self._discovered_tools or []) + essential_tools
+
+        # mcp_tools is None or empty list - only essential tools (NO MCP tools)
+        essential_tool_names_found = [tool.name for tool in essential_tools]
         logger.info(
-            f"Using orchestrator tools for '{self.name}': "
-            f"{len(self.orchestrator_tools)} tools {orchestrator_tool_names}"
+            f"No MCP tools configured for '{self.name}' - using only essential orchestrator tools: "
+            f"{len(essential_tools)} tools {essential_tool_names_found}"
         )
-        return [_validate_tool_schema(tool) for tool in self.orchestrator_tools]
+        return [_validate_tool_schema(tool) for tool in essential_tools]
 
     async def _ensure_agent(self) -> Any:
         """Ensure the LangGraph agent is created (lazy initialization).
@@ -399,7 +404,8 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             return self._agent
 
         # Discover MCP tools if whitelist is configured (lazy, first invocation only)
-        if self.config.mcp_tools and self._discovered_tools is None:
+        # Note: Only discover if mcp_tools is a non-empty list
+        if self.config.mcp_tools and len(self.config.mcp_tools) > 0 and self._discovered_tools is None:
             self._discovered_tools = await self._discover_mcp_tools()
 
         tools = self._get_effective_tools()
@@ -493,11 +499,21 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             # The orchestrator and dynamic sub-agents share the same DynamoDB table, so we namespace
             # sub-agent checkpoints to prevent internal messages (like tool calls) from
             # leaking into the orchestrator's conversation history.
-            config = (
+            config: Dict[str, Any] = (
                 {"configurable": {"thread_id": context_id, "checkpoint_ns": f"dynamic-{self.name}"}}
                 if context_id and self.checkpointer
                 else {}
             )
+
+            # Add sub_agent tag for cost tracking if available
+            # Note: Parent tags (user:, conversation:) are automatically propagated by LangGraph
+            if self.sub_agent_id:
+                config["tags"] = [f"sub_agent:{self.sub_agent_id}"]
+                logger.info(f"[COST TRACKING] Sub-agent '{self.name}' added sub_agent:{self.sub_agent_id} tag")
+            else:
+                logger.warning(
+                    f"[COST TRACKING] No sub_agent_id for '{self.name}' - costs won't be tracked by sub-agent"
+                )
 
             # Invoke the agent
             logger.debug(f"Invoking dynamic agent '{self.name}' with content: {content[:100]}...")
@@ -640,7 +656,7 @@ def create_dynamic_local_subagent(
     Args:
         config: LocalLangGraphSubAgentConfig with name, description, system_prompt, mcp_tools
         model: The LangGraph model to use for the agent
-        orchestrator_tools: Tools inherited from orchestrator (used if config.mcp_tools is None/empty)
+        orchestrator_tools: Essential tools always included (get_current_time, docstore, etc.)
         oauth2_client: OAuth2 client for token exchange (required for MCP tool discovery)
         user_token: User's access token for token exchange (required for MCP tool discovery)
         checkpointer: Shared checkpointer for multi-turn conversation state (e.g., DynamoDBSaver)

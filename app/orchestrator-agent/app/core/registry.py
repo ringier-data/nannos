@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
-from ..a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
+from ..a2a_utils.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,9 @@ class User(BaseModel):
     """
 
     id: str  # Primary key (sub from OIDC)
-    agent_urls: list[str] = Field(default_factory=list)  # Remote A2A agent URLs (from sub-agents)
+    agent_metadata: dict[str, dict[str, Any]] = Field(
+        default_factory=dict
+    )  # Maps agent_url -> {sub_agent_id, name, description}
     tool_names: list[str] = Field(default_factory=list)  # MCP tool names enabled for orchestrator
     language: str = "en"  # User's preferred language
     custom_prompt: str | None = None  # User's custom prompt addendum
@@ -215,7 +217,7 @@ class RegistryService:
             sub_agent_config_hash: Optional config version hash for playground mode testing
 
         Returns:
-            User object with populated agent_urls and local_subagents, or None on error
+            User object with populated agent_metadata and local_subagents, or None on error
         """
         if not access_token:
             logger.warning(f"No access token provided for user {user_id}, returning empty user")
@@ -311,9 +313,9 @@ class RegistryService:
             settings: User settings with 'language' and 'custom_prompt' keys
 
         Returns:
-            User object with agent_urls, local_subagents, language, and custom_prompt
+            User object with agent_metadata, local_subagents, language, and custom_prompt
         """
-        agent_urls: list[str] = []
+        agent_metadata: dict[str, dict[str, Any]] = {}  # Maps agent_url -> {sub_agent_id, name, etc.}
         local_subagents: list[LocalSubAgentConfig] = []
 
         for sa in sub_agents:
@@ -326,7 +328,12 @@ class RegistryService:
                 # Remote A2A agents have agent_url at root level
                 agent_url = cv.agent_url
                 if agent_url:
-                    agent_urls.append(agent_url)
+                    # Store metadata for remote agents (sub_agent_id for cost tracking)
+                    agent_metadata[agent_url] = {
+                        "sub_agent_id": sa.id,
+                        "name": sa.name,
+                        "description": cv.description,
+                    }
             elif sa.type == "local":
                 # Local agents have system_prompt and mcp_tools at root level
                 system_prompt = cv.system_prompt or ""
@@ -351,6 +358,7 @@ class RegistryService:
                         LocalFoundrySubAgentConfig(
                             name=sa.name,
                             description=cv.description or f"Foundry agent: {sa.name}",
+                            sub_agent_id=cv.sub_agent_id,  # Include playground backend ID for tracking
                             hostname=cv.foundry_hostname,
                             client_id=cv.foundry_client_id or "",
                             client_secret_ref=cv.foundry_client_secret_ssmkey or "",
@@ -363,11 +371,13 @@ class RegistryService:
                     logger.debug(
                         f"Added Foundry local sub-agent '{local_subagents[-1].model_dump_json()}' for user {user_id}"
                     )
-        logger.debug(f"Converted sub-agents for user {user_id}: {len(agent_urls)} remote, {len(local_subagents)} local")
+        logger.debug(
+            f"Converted sub-agents for user {user_id}: {len(agent_metadata)} remote, {len(local_subagents)} local"
+        )
 
         return User(
             id=user_id,
-            agent_urls=agent_urls,
+            agent_metadata=agent_metadata,  # Include metadata for remote agents
             tool_names=settings.get("mcp_tools", []),  # MCP tools from user settings
             local_subagents=local_subagents,
             language=settings.get("language", "en"),

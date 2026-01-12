@@ -6,4 +6,8 @@ export const config = {
     const protocol = domain.includes('localhost') || domain.includes('127.0.0.1') ? 'http' : 'https';
     return `${protocol}://${domain}`;
   })(),
+  langsmith: {
+    organizationId: import.meta.env.VITE_LANGSMITH_ORGANIZATION_ID || 'eacaca37-6472-40d5-80b4-9206d058caef',
+    projectId: import.meta.env.VITE_LANGSMITH_PROJECT_ID || 'b3d6bc99-afe9-486a-847a-091dff103a46',
+  },
 } as const;

@@ -91,6 +91,8 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 user_email = context.call_context.state["user_email"]
                 # user_token is optional - not available in orchestrator JWT auth flow
                 user_token = context.call_context.state.get("user_token")
+                # sub_agent_id is optional - used for cost tracking attribution
+                sub_agent_id = context.call_context.state.get("sub_agent_id")
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
                 raise ServerError(error=InvalidParamsError()) from e
@@ -98,7 +100,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             logger.error("[ZERO-TRUST] No user context found in call_context - authentication may have failed")
             raise ServerError(error=InvalidParamsError())
 
-        logger.info(f"[ZERO-TRUST] Executing with verified user_id: {user_id}")
+        logger.info(f"[ZERO-TRUST] Executing with verified user_id: {user_id}, sub_agent_id: {sub_agent_id}")
 
         try:
             # Create config for agent execution
@@ -108,6 +110,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 access_token=user_token,  # May be None in JWT auth flow
                 name=user_name,
                 email=user_email,
+                sub_agent_id=sub_agent_id,  # For cost tracking attribution
             )
             async for item in self.agent.stream(query, user_config, task):
                 await self._handle_stream_item(item, updater, task)

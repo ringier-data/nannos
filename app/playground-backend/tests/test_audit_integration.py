@@ -1,5 +1,3 @@
-"""Integration tests for audit logging across all repository operations."""
-
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,6 +11,37 @@ from playground_backend.repositories import (
     UserRepository,
 )
 from playground_backend.repositories.sub_agent_repository import ApprovalContext
+
+
+# Fixtures for repositories with DI
+@pytest.fixture
+def user_repository():
+    from playground_backend.repositories.user_repository import UserRepository
+    from playground_backend.services.audit_service import AuditService
+
+    repo = UserRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
+@pytest.fixture
+def sub_agent_repository():
+    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
+    from playground_backend.services.audit_service import AuditService
+
+    repo = SubAgentRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
+@pytest.fixture
+def secrets_repository():
+    from playground_backend.repositories.secrets_repository import SecretsRepository
+    from playground_backend.services.audit_service import AuditService
+
+    repo = SecretsRepository()
+    repo.set_audit_service(AuditService())
+    return repo
 
 
 async def get_latest_audit_log(pg_session, entity_type: str, entity_id: str, action: Optional[str] = None):
@@ -40,11 +69,9 @@ class TestAuditedRepositoryBase:
     """Tests for base AuditedRepository CRUD operations with automatic audit."""
 
     @pytest.mark.asyncio
-    async def test_create_logs_audit(self, pg_session):
+    async def test_create_logs_audit(self, user_repository, pg_session):
         """Test that create operation automatically logs audit."""
-        repo = UserRepository()
-
-        _entity_id = await repo.create(
+        _entity_id = await user_repository.create(
             db=pg_session,
             actor_sub="test-user-sub",
             fields={
@@ -64,8 +91,6 @@ class TestAuditedRepositoryBase:
         await pg_session.commit()
 
         # Verify audit log was created in database
-        from sqlalchemy import text
-
         result = await pg_session.execute(
             text(
                 "SELECT * FROM audit_logs WHERE entity_type = 'user' AND entity_id = 'test-user-id' ORDER BY created_at DESC LIMIT 1"
@@ -81,12 +106,9 @@ class TestAuditedRepositoryBase:
         assert "after" in audit_log["changes"]
 
     @pytest.mark.asyncio
-    async def test_update_logs_audit_with_before_after(self, pg_session):
+    async def test_update_logs_audit_with_before_after(self, user_repository, pg_session):
         """Test that update operation automatically logs audit with before/after state."""
-        repo = UserRepository()
-
-        # First create a user
-        await repo.create(
+        _entity_id = await user_repository.create(
             db=pg_session,
             actor_sub="test-user-sub",
             fields={
@@ -105,8 +127,7 @@ class TestAuditedRepositoryBase:
         )
         await pg_session.commit()
 
-        # Now update with audit logging
-        await repo.update(
+        await user_repository.update(
             db=pg_session,
             actor_sub="admin-user-sub",
             entity_id="test-user-id-2",
@@ -132,12 +153,9 @@ class TestAuditedRepositoryBase:
         assert audit_log["changes"]["after"]["role"] == "admin"
 
     @pytest.mark.asyncio
-    async def test_delete_logs_audit(self, pg_session):
-        """Test that delete operation logs audit."""
-        repo = UserRepository()
-
-        # First create a user
-        await repo.create(
+    async def test_delete_logs_audit(self, user_repository, pg_session):
+        """Test that delete operation automatically logs audit."""
+        _entity_id = await user_repository.create(
             db=pg_session,
             actor_sub="test-user-sub",
             fields={
@@ -156,12 +174,10 @@ class TestAuditedRepositoryBase:
         )
         await pg_session.commit()
 
-        # Now delete with audit logging
-        await repo.delete(
+        await user_repository.delete(
             db=pg_session,
-            actor_sub="admin-user-sub",
+            actor_sub="deleter-user-sub",
             entity_id="test-user-id-3",
-            soft=True,
         )
         await pg_session.commit()
 
@@ -169,21 +185,22 @@ class TestAuditedRepositoryBase:
         audit_log = await get_latest_audit_log(pg_session, "user", "test-user-id-3")
 
         assert audit_log is not None
-        assert audit_log["actor_sub"] == "admin-user-sub"
+        assert audit_log["actor_sub"] == "deleter-user-sub"
         assert audit_log["entity_type"] == "user"
         assert audit_log["entity_id"] == "test-user-id-3"
         assert audit_log["action"] == "delete"
+        assert audit_log["changes"] == {"soft_delete": True}
 
 
 class TestSubAgentRepositoryAudit:
     """Tests for SubAgentRepository audit logging."""
 
     @pytest.mark.asyncio
-    async def test_approve_version_logs_audit(self, pg_session):
+    async def test_approve_version_logs_audit(self, pg_session, sub_agent_repository, user_repository):
         """Test that approve_version logs approval audit."""
-        repo = SubAgentRepository()
-        user_repo = UserRepository()
 
+        repo = sub_agent_repository
+        user_repo = user_repository
         # Create a user first
         await user_repo.create(
             db=pg_session,
@@ -260,10 +277,10 @@ class TestSubAgentRepositoryAudit:
         assert audit_log["changes"]["release_number"] == 1
 
     @pytest.mark.asyncio
-    async def test_reject_version_logs_audit(self, pg_session):
+    async def test_reject_version_logs_audit(self, pg_session, sub_agent_repository, user_repository):
         """Test that reject_version logs rejection audit."""
-        repo = SubAgentRepository()
-        user_repo = UserRepository()
+        repo = sub_agent_repository
+        user_repo = user_repository
 
         # Create a user first
         await user_repo.create(
@@ -339,11 +356,11 @@ class TestSubAgentRepositoryAudit:
         assert audit_log["changes"]["rejection_reason"] == "Needs more work"
 
     @pytest.mark.asyncio
-    async def test_update_permissions_logs_audit(self, pg_session):
+    async def test_update_permissions_logs_audit(self, pg_session, sub_agent_repository, user_repository):
         """Test that update_permissions logs permission change audit."""
-        repo = SubAgentRepository()
-        user_repo = UserRepository()
 
+        repo = sub_agent_repository
+        user_repo = user_repository
         # Create a user first
         await user_repo.create(
             db=pg_session,
@@ -417,10 +434,11 @@ class TestSubAgentRepositoryAudit:
         assert len(audit_log["changes"]["after"]["permissions"]) == 2
 
     @pytest.mark.asyncio
-    async def test_activate_sub_agent_logs_audit(self, pg_session):
+    async def test_activate_sub_agent_logs_audit(self, pg_session, sub_agent_repository, user_repository):
         """Test that activate_sub_agent logs activation audit."""
-        repo = SubAgentRepository()
-        user_repo = UserRepository()
+
+        repo = sub_agent_repository
+        user_repo = user_repository
 
         # Create a user first
         await user_repo.create(
@@ -476,10 +494,10 @@ class TestSubAgentRepositoryAudit:
         assert audit_log["action"] == AuditAction.ACTIVATE
 
     @pytest.mark.asyncio
-    async def test_deactivate_sub_agent_logs_audit(self, pg_session):
+    async def test_deactivate_sub_agent_logs_audit(self, pg_session, sub_agent_repository, user_repository):
         """Test that deactivate_sub_agent logs deactivation audit."""
-        repo = SubAgentRepository()
-        user_repo = UserRepository()
+        repo = sub_agent_repository
+        user_repo = user_repository
 
         # Create a user first
         await user_repo.create(
@@ -544,12 +562,10 @@ class TestSubAgentRepositoryAudit:
         assert audit_log["action"] == AuditAction.DEACTIVATE
 
     @pytest.mark.asyncio
-    async def test_create_config_version_logs_audit(self, pg_session):
+    async def test_create_config_version_logs_audit(self, pg_session, sub_agent_repository, user_repository):
         """Test that create_config_version logs audit with full config."""
-        repo = SubAgentRepository()
-
-        # First create a user for the actor_sub
-        user_repo = UserRepository()
+        repo = sub_agent_repository
+        user_repo = user_repository
         await user_repo.create(
             db=pg_session,
             actor_sub="test-user-sub",
@@ -636,11 +652,11 @@ class TestSecretsRepositoryAudit:
     """Tests for SecretsRepository audit logging."""
 
     @pytest.mark.asyncio
-    async def test_create_secret_logs_audit(self, pg_session):
+    async def test_create_secret_logs_audit(self, pg_session, secrets_repository, user_repository):
         """Test that secret creation logs audit."""
-        repo = SecretsRepository()
-        user_repo = UserRepository()
 
+        repo = secrets_repository
+        user_repo = user_repository
         # Create a user first
         await user_repo.create(
             db=pg_session,
@@ -685,11 +701,11 @@ class TestSecretsRepositoryAudit:
         assert audit_log["action"] == AuditAction.CREATE
 
     @pytest.mark.asyncio
-    async def test_delete_secret_logs_audit(self, pg_session):
+    async def test_delete_secret_logs_audit(self, pg_session, secrets_repository, user_repository):
         """Test that secret deletion logs audit."""
-        repo = SecretsRepository()
-        user_repo = UserRepository()
 
+        repo = secrets_repository
+        user_repo = user_repository
         # Create a user first
         await user_repo.create(
             db=pg_session,
@@ -743,10 +759,10 @@ class TestSecretsRepositoryAudit:
         assert audit_log["action"] == AuditAction.DELETE
 
     @pytest.mark.asyncio
-    async def test_update_secret_permissions_logs_audit(self, pg_session):
+    async def test_update_secret_permissions_logs_audit(self, pg_session, secrets_repository, user_repository):
         """Test that secret permission updates log audit."""
-        repo = SecretsRepository()
-        user_repo = UserRepository()
+        repo = secrets_repository
+        user_repo = user_repository
 
         # Create a user first
         await user_repo.create(

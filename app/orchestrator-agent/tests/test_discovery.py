@@ -32,7 +32,13 @@ class TestAgentDiscoveryService:
 
         oauth2_client = Mock()
         service = AgentDiscoveryService(config, oauth2_client)
-        agent_urls = ["http://test-agent:8000"]
+        agent_metadata = {
+            "http://test-agent:8000": {
+                "sub_agent_id": "test-id",
+                "name": "Test Agent",
+                "description": "Test description",
+            }
+        }
         token = "valid_token"
 
         with (
@@ -64,7 +70,7 @@ class TestAgentDiscoveryService:
             mock_runnable_instance = Mock()
             mock_runnable.return_value = mock_runnable_instance
 
-            result = await service.register_agents(agent_urls, token)
+            result = await service.register_agents(agent_metadata, token)
 
             assert isinstance(result, list)
             assert len(result) == 1
@@ -81,7 +87,13 @@ class TestAgentDiscoveryService:
 
         oauth2_client = Mock()
         service = AgentDiscoveryService(config, oauth2_client)
-        agent_urls = ["http://unreachable-agent:8000"]
+        agent_metadata = {
+            "http://unreachable-agent:8000": {
+                "sub_agent_id": "test-id",
+                "name": "Unreachable Agent",
+                "description": "Test description",
+            }
+        }
         token = "test_token"
 
         with patch("httpx.AsyncClient") as mock_client:
@@ -90,7 +102,7 @@ class TestAgentDiscoveryService:
             mock_http_client.get.side_effect = httpx.RequestError("Connection failed", request=Mock())
             mock_client.return_value.__aenter__.return_value = mock_http_client
 
-            result = await service.register_agents(agent_urls, token)
+            result = await service.register_agents(agent_metadata, token)
 
             # Should return empty list on error, not crash
             assert result == []
@@ -106,10 +118,10 @@ class TestAgentDiscoveryService:
 
         oauth2_client = Mock()
         service = AgentDiscoveryService(config, oauth2_client)
-        agent_urls = []
+        agent_metadata = {}
         token = "test_token"
 
-        result = await service.register_agents(agent_urls, token)
+        result = await service.register_agents(agent_metadata, token)
 
         assert result == []
 
@@ -124,7 +136,13 @@ class TestAgentDiscoveryService:
 
         oauth2_client = Mock()
         service = AgentDiscoveryService(config, oauth2_client)
-        agent_urls = ["http://test-agent:8000"]
+        agent_metadata = {
+            "http://test-agent:8000": {
+                "sub_agent_id": "test-id",
+                "name": "Test Agent",
+                "description": "Test description",
+            }
+        }
         token = "valid_token"
         middleware = Mock()
         middleware.register_streaming_runnable = Mock()
@@ -159,7 +177,7 @@ class TestAgentDiscoveryService:
             mock_runnable_instance._streaming_runnable = Mock()
             mock_runnable.return_value = mock_runnable_instance
 
-            result = await service.register_agents(agent_urls, token, streaming_middleware=middleware)
+            result = await service.register_agents(agent_metadata, token, streaming_middleware=middleware)
 
             assert len(result) == 1
             middleware.register_streaming_runnable.assert_called_once()
@@ -291,7 +309,7 @@ class TestDiscoveryIntegration:
             import asyncio
 
             agents, tools = await asyncio.gather(
-                agent_service.register_agents([], token),
+                agent_service.register_agents({}, token),
                 tool_service.discover_tools(token),
             )
 

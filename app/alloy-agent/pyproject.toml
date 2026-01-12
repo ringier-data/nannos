@@ -1,6 +1,6 @@
 [project]
 name = "naonous-agent"
-version = "1.0.0"
+version = "0.0.0"
 description = "A2A agent for managing BYOK campaign lifecycle on Alloy"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,7 +14,7 @@ dependencies = [
     "langchain-aws>=1.1.0",
     "langchain-mcp-adapters>=0.1.3",
     # Checkpointing
-    "langgraph>=0.3.1",
+    "langgraph>=1.0.4,<1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
     "aiodynamo>=24.7",
     # HTTP clients

@@ -1,5 +1,9 @@
 # Agent Creator Copilot Instructions
 
+## Maintaining These Instructions
+
+When implementing new features or refactoring existing code, consider if these instructions need updating. Only document design decisions that are non-obvious and would require reading large portions of the codebase to understand them.
+
 ## Tech Stack
 
 - FastAPI with async/await
@@ -28,6 +32,22 @@ The `start-dev.sh` script is the single source of truth for local environment se
 - Type hints are required for all function signatures
 - Use dependency injection via FastAPI's `Depends()`
 - Prefer explicit over implicit error handling
+
+## Python Environment
+
+This project uses `uv` for dependency management:
+
+```bash
+# Install dependencies
+uv sync
+
+# Run tests (prefer runTests MCP tool when available)
+uv run pytest tests/ -v
+```
+
+## File Writing Safety
+
+NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incremental edits with proper file writing tools instead.
 
 ## Architecture Patterns
 
@@ -72,8 +92,15 @@ app.add_middleware(TracingMiddleware)  # Receives trace from orchestrator
 
 **CRITICAL**: `TracingMiddleware` must be registered in the middleware stack. If missing, traces will not be connected to the orchestrator.
 
+## File Writing Safety
+
+NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incremental edits with proper file writing tools instead.
+
 ## Testing
 
+**Prefer the runTests MCP tool over terminal commands when running tests.**
+
+Fallback to direct pytest commands when needed:
 - Use pytest with pytest-asyncio for async tests
 - Use aiomoto for mocking AWS services
 - Mock external dependencies (Playground Backend, etc.)

@@ -95,13 +95,21 @@ class MyAgent(BaseAgent):
         """Cleanup resources."""
         pass
     
-    async def stream(
+    async def _stream_impl(
         self, 
         query: str, 
         user_config: UserConfig, 
         task: Task
     ) -> AsyncIterable[AgentStreamResponse]:
-        """Process query and stream responses."""
+        """Agent-specific streaming implementation.
+        
+        The base class stream() method handles:
+        - Cost tracking setup
+        - Sub-agent ID attribution
+        - Request-scoped credentials
+        
+        This method focuses on agent logic only.
+        """
         # Emit working status
         yield AgentStreamResponse(
             state=TaskState.working,
@@ -222,6 +230,145 @@ await oauth_client.close()
 - `ORCHESTRATOR_CLIENT_SECRET`: Orchestrator's client secret
 - `AGENT_CLIENT_ID`: Agent's client ID in OIDC provider
 - `JWKS_CACHE_TTL_SECONDS`: JWKS cache TTL in seconds (default: 3600)
+
+## Cost Tracking
+
+Track LLM usage and costs for your agent using the `CostTrackingMixin`.
+
+
+### LangGraph with Checkpointing (Recommended)
+
+For agents using LangGraph with checkpointing, use `create_runnable_config()` to automatically include cost tracking tags and callbacks:
+
+```python
+from ringier_a2a_sdk.agent import BaseAgent
+from langgraph.graph.state import CompiledStateGraph
+from langgraph_checkpoint_aws import DynamoDBSaver
+
+class MyAgent(BaseAgent):
+    def __init__(self):
+        super().__init__()
+        self.enable_cost_tracking(backend_url="https://backend.example.com")
+
+        # Create checkpointer
+        self._checkpointer = DynamoDBSaver(
+            table_name="my-agent-checkpoints",
+            region_name="eu-central-1"
+        )
+
+        # Build LangGraph agent
+        self._graph = self._build_graph()
+    
+    async def _stream_impl(self, query, user_config, task):
+        # Create config with cost tracking tags, callbacks, and checkpointer
+        config = self.create_runnable_config(
+            user_id=user_config.user_id,
+            conversation_id=task.context_id,
+            thread_id=task.context_id,
+            checkpoint_ns="my-agent",  # Namespace isolation
+            checkpointer=self._checkpointer,
+        )
+
+        # LangGraph automatically tracks costs via callbacks in config
+        async for event in self._graph.astream({"messages": [query]}, config):
+            # Process events...
+            pass
+```
+
+**What `create_runnable_config()` does:**
+- Automatically adds `user:{user_id}` and `conversation:{conversation_id}` tags
+- Automatically adds `sub_agent:{sub_agent_id}` tag (from ContextVar if available)
+- Includes callbacks from `get_langchain_callbacks()` for cost tracking
+- Configures checkpointer parameters (`thread_id`, `checkpoint_ns`, `__pregel_checkpointer`)
+- Returns `RunnableConfig` object
+
+
+### Manual Instrumentation (Any Framework)
+
+```python
+class MyAgent(BaseAgent):
+    def __init__(self):
+        super().__init__()
+        # Enable cost tracking (creates callbacks and cost logger)
+        # Note: sub_agent_id will be updated from user_config via BaseAgent on first request
+        self.enable_cost_tracking(backend_url="https://cost-tracking-backend.example.com")
+
+    async def _stream_impl(self, query, user_config, task):
+        # Call any LLM (OpenAI, Bedrock, etc.)
+        response = await my_llm_client.invoke(query)
+        
+        # Manually report usage
+        # Cost tracking auto-starts on first request
+        await self.report_llm_usage(
+            user_id=user_config.user_id,
+            provider="openai",
+            model_name="gpt-4",
+            billing_unit_breakdown={
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens
+            },
+            conversation_id=task.context_id
+        )
+        # ... stream results
+```
+
+**Sub-Agent ID Attribution:**
+- **Remote agents**: `sub_agent_id` is automatically read from `current_sub_agent_id` ContextVar (set by `SubAgentIdMiddleware`)
+- **Local agents** (orchestrator dynamic agents): `sub_agent_id` is automatically extracted from LangGraph tags by `CostTrackingCallback`
+- Agents don't need to pass `sub_agent_id` explicitly - the SDK handles it transparently
+
+### Custom Billing Units (Beyond Tokens)
+
+The cost tracking system supports **any billing unit**, not just LLM tokens. Agents can track API calls, searches, computations, or any resource usage by treating them as "billing units" in the `billing_unit_breakdown`.
+
+#### Example: API Call-Based Billing
+
+```python
+class MyAgent(BaseAgent):
+    async def _stream_impl(self, query, user_config, task):
+        # Call external API
+        premium_calls = await self.call_premium_api(query)
+        standard_calls = await self.call_standard_api(query)
+        
+        # Report custom billing units
+        # Cost tracking auto-starts on first request
+        await self.report_llm_usage(
+            user_id=user_config.user_id,
+            provider="my_service",
+            model_name="api-v2",
+            billing_unit_breakdown={
+                "premium_api_calls": premium_calls,
+                "standard_api_calls": standard_calls
+            },
+            conversation_id=task.context_id
+        )
+        # ... stream results
+```
+
+#### Billing Unit Naming Guidelines
+
+Use **snake_case** names (lowercase, underscores) that are descriptive and consistent:
+
+- ✅ **Good**: `premium_api_calls`, `vector_searches`, `gpu_seconds`, `documents_indexed`
+- ✅ **Good**: `requests_tier1`, `requests_tier2`, `storage_gb_hours`
+- ❌ **Bad**: `Premium API Calls` (spaces), `apiCalls` (camelCase), `123_requests` (starts with number)
+- ❌ **Reserved**: `id`, `cost`, `total`, `timestamp`, `count` (system reserved)
+
+**Rules:**
+- 3-64 characters
+- Start and end with letters/numbers
+- Use underscores to separate words
+- Avoid names that conflict with standard token types if they mean different things
+
+#### Pricing Configuration
+
+Pricing for custom billing units is configured per sub-agent via the `pricing_config` field. Admins set pricing when creating or updating sub-agents:
+
+**Cost Calculation:**
+- `premium_api_calls = 1` → Cost = (1 / 1,000,000) × $50,000 = **$0.05**
+- `standard_api_calls = 10` → Cost = (10 / 1,000,000) × $10,000 = **$0.10**
+- **Total**: $0.15
+
 
 ## Documentation
 

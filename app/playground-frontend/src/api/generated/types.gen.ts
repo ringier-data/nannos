@@ -44,7 +44,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card';
 
 /**
  * AuditLog
@@ -89,6 +89,46 @@ export type AuditLogListResponse = {
      */
     data: Array<AuditLog>;
     meta: PaginationMeta;
+};
+
+/**
+ * BillingUnitBreakdown
+ *
+ * Usage breakdown by billing unit type.
+ */
+export type BillingUnitBreakdown = {
+    /**
+     * Billing Unit
+     */
+    billing_unit: string;
+    /**
+     * Total Count
+     */
+    total_count: number;
+    /**
+     * Percentage
+     *
+     * Percentage of total units
+     */
+    percentage: number;
+};
+
+/**
+ * BillingUnitDetail
+ *
+ * Billing unit detail for a specific usage entry.
+ */
+export type BillingUnitDetail = {
+    /**
+     * Billing Unit
+     */
+    billing_unit: string;
+    /**
+     * Unit Count
+     *
+     * Unit count (only non-zero values stored)
+     */
+    unit_count: number;
 };
 
 /**
@@ -194,6 +234,27 @@ export type BulkUserOperationResponse = {
      * Data
      */
     data: Array<BulkOperationResult>;
+};
+
+/**
+ * DetailedUsageReport
+ *
+ * Detailed usage report with billing unit breakdowns.
+ */
+export type DetailedUsageReport = {
+    summary: UsageSummary;
+    /**
+     * By Sub Agent
+     */
+    by_sub_agent?: Array<UsageBySubAgent>;
+    /**
+     * By Conversation
+     */
+    by_conversation?: Array<UsageByConversation>;
+    /**
+     * Billing Unit Breakdown
+     */
+    billing_unit_breakdown?: Array<BillingUnitBreakdown>;
 };
 
 /**
@@ -336,6 +397,169 @@ export type PaginationMeta = {
      * Total
      */
     total: number;
+};
+
+/**
+ * RateCardEntriesList
+ *
+ * List of rate card entries with pagination.
+ */
+export type RateCardEntriesList = {
+    /**
+     * Entries
+     */
+    entries: Array<RateCardEntry>;
+    /**
+     * Total
+     */
+    total: number;
+    /**
+     * Page
+     */
+    page: number;
+    /**
+     * Limit
+     */
+    limit: number;
+};
+
+/**
+ * RateCardEntry
+ *
+ * Rate card entry for a specific billing unit.
+ */
+export type RateCardEntry = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Provider
+     */
+    provider: string;
+    /**
+     * Model Name
+     */
+    model_name: string;
+    /**
+     * Model Name Pattern
+     *
+     * Optional regex pattern for matching model variants
+     */
+    model_name_pattern?: string | null;
+    /**
+     * Billing Unit
+     */
+    billing_unit: string;
+    flow_direction: FlowDirectionEnum;
+    /**
+     * Price Per Million
+     */
+    price_per_million: string;
+    /**
+     * Effective From
+     */
+    effective_from: string;
+    /**
+     * Effective Until
+     */
+    effective_until?: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * RateCardEntryCreate
+ *
+ * Create a new rate card entry.
+ */
+export type RateCardEntryCreate = {
+    /**
+     * Provider
+     *
+     * Provider name (e.g., 'bedrock', 'openai', 'google')
+     */
+    provider: string;
+    /**
+     * Model Name
+     *
+     * Model name (e.g., 'claude-sonnet-4.5', 'gpt-4o')
+     */
+    model_name: string;
+    /**
+     * Billing Unit
+     *
+     * Billing unit (e.g., 'input_tokens', 'cache_read', 'requests')
+     */
+    billing_unit: string;
+    flow_direction: FlowDirectionEnum;
+    /**
+     * Price Per Million
+     *
+     * Price per million units in USD
+     */
+    price_per_million: number | string;
+    /**
+     * Effective From
+     *
+     * When this rate becomes effective
+     */
+    effective_from?: string;
+};
+
+/**
+ * RateCardModelCreate
+ *
+ * Create all rate card entries for a new model at once.
+ */
+export type RateCardModelCreate = {
+    /**
+     * Provider
+     */
+    provider: string;
+    /**
+     * Model Name
+     */
+    model_name: string;
+    /**
+     * Model Name Pattern
+     *
+     * Optional regex pattern for matching model variants (e.g., '^gpt-4o-mini(-\d{4}-\d{2}-\d{2})?$')
+     */
+    model_name_pattern?: string | null;
+    /**
+     * Effective From
+     */
+    effective_from?: string;
+    /**
+     * Pricing
+     *
+     * Mapping of billing_unit to pricing details (price and flow_direction)
+     */
+    pricing: {
+        [key: string]: RateCardPricingEntry;
+    };
+};
+
+/**
+ * RateCardPricingEntry
+ *
+ * Pricing entry for a specific billing unit.
+ */
+export type RateCardPricingEntry = {
+    /**
+     * Price Per Million
+     *
+     * Price per million units in USD
+     */
+    price_per_million: number | string;
+    flow_direction: FlowDirectionEnum;
 };
 
 /**
@@ -624,6 +848,14 @@ export type SubAgentConfigVersion = {
      */
     foundry_version?: string | null;
     /**
+     * Pricing Config
+     *
+     * Agent-specific rate card configuration. Only applicable for remote and foundry agents. Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} or {'price_per_million_requests': 0.05}
+     */
+    pricing_config?: {
+        [key: string]: unknown;
+    } | null;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -713,6 +945,14 @@ export type SubAgentCreate = {
      * Foundry Version
      */
     foundry_version?: string | null;
+    /**
+     * Pricing Config
+     *
+     * Agent-specific rate card configuration. Only applicable for remote and foundry agents. Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} or {'price_per_million_requests': 0.05}
+     */
+    pricing_config?: {
+        [key: string]: unknown;
+    } | null;
 };
 
 /**
@@ -902,6 +1142,14 @@ export type SubAgentUpdate = {
      */
     foundry_version?: string | null;
     /**
+     * Pricing Config
+     *
+     * Agent-specific rate card configuration. Only applicable for remote and foundry agents. Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} or {'price_per_million_requests': 0.05}
+     */
+    pricing_config?: {
+        [key: string]: unknown;
+    } | null;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -921,6 +1169,260 @@ export type SubAgentVersionApproval = {
      * Rejection Reason
      */
     rejection_reason?: string | null;
+};
+
+/**
+ * UsageByConversation
+ *
+ * Usage breakdown by conversation.
+ */
+export type UsageByConversation = {
+    /**
+     * Conversation Id
+     */
+    conversation_id: string;
+    /**
+     * Total Cost Usd
+     */
+    total_cost_usd: string;
+    /**
+     * Total Requests
+     */
+    total_requests: number;
+    /**
+     * First Message At
+     */
+    first_message_at: string;
+    /**
+     * Last Message At
+     */
+    last_message_at: string;
+};
+
+/**
+ * UsageBySubAgent
+ *
+ * Usage breakdown by sub-agent.
+ */
+export type UsageBySubAgent = {
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id: number;
+    /**
+     * Sub Agent Name
+     */
+    sub_agent_name: string;
+    /**
+     * Total Cost Usd
+     */
+    total_cost_usd: string;
+    /**
+     * Total Requests
+     */
+    total_requests: number;
+    /**
+     * Total Input Tokens
+     */
+    total_input_tokens?: number;
+    /**
+     * Total Output Tokens
+     */
+    total_output_tokens?: number;
+};
+
+/**
+ * UsageLog
+ *
+ * Usage log entry for agent invocations (LLM and non-LLM).
+ */
+export type UsageLog = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * User Id
+     */
+    user_id: string;
+    /**
+     * Conversation Id
+     */
+    conversation_id?: string | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Sub Agent Name
+     */
+    sub_agent_name?: string | null;
+    /**
+     * Sub Agent Config Version Id
+     */
+    sub_agent_config_version_id?: number | null;
+    /**
+     * Provider
+     */
+    provider?: string | null;
+    /**
+     * Model Name
+     */
+    model_name?: string | null;
+    /**
+     * Total Cost Usd
+     */
+    total_cost_usd: string;
+    /**
+     * Langsmith Run Id
+     */
+    langsmith_run_id?: string | null;
+    /**
+     * Langsmith Trace Id
+     */
+    langsmith_trace_id?: string | null;
+    /**
+     * Invoked At
+     */
+    invoked_at: string;
+    /**
+     * Logged At
+     */
+    logged_at: string;
+    /**
+     * Billing Unit Details
+     */
+    billing_unit_details?: Array<BillingUnitDetail>;
+};
+
+/**
+ * UsageLogBatchCreate
+ *
+ * Batch create multiple usage logs.
+ */
+export type UsageLogBatchCreate = {
+    /**
+     * Logs
+     *
+     * Up to 100 logs per batch
+     */
+    logs: Array<UsageLogCreate>;
+};
+
+/**
+ * UsageLogCreate
+ *
+ * Create a new usage log.
+ */
+export type UsageLogCreate = {
+    /**
+     * User Id
+     */
+    user_id: string;
+    /**
+     * Conversation Id
+     */
+    conversation_id?: string | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Sub Agent Config Version Id
+     */
+    sub_agent_config_version_id?: number | null;
+    /**
+     * Provider
+     */
+    provider?: string | null;
+    /**
+     * Model Name
+     */
+    model_name?: string | null;
+    /**
+     * Billing Unit Breakdown
+     *
+     * Mapping of billing_unit to count (only non-zero values)
+     */
+    billing_unit_breakdown: {
+        [key: string]: number;
+    };
+    /**
+     * Langsmith Run Id
+     */
+    langsmith_run_id?: string | null;
+    /**
+     * Langsmith Trace Id
+     */
+    langsmith_trace_id?: string | null;
+    /**
+     * Invoked At
+     */
+    invoked_at: string;
+};
+
+/**
+ * UsageLogsList
+ *
+ * Paginated list of usage logs.
+ */
+export type UsageLogsList = {
+    /**
+     * Logs
+     */
+    logs: Array<UsageLog>;
+    /**
+     * Total
+     */
+    total: number;
+    /**
+     * Page
+     */
+    page: number;
+    /**
+     * Limit
+     */
+    limit: number;
+};
+
+/**
+ * UsageSummary
+ *
+ * Summary of usage for a user or time period.
+ */
+export type UsageSummary = {
+    /**
+     * Total Cost Usd
+     */
+    total_cost_usd: string;
+    /**
+     * Total Requests
+     */
+    total_requests: number;
+    /**
+     * Providers
+     *
+     * Request count by provider
+     */
+    providers?: {
+        [key: string]: number;
+    };
+    /**
+     * Models
+     *
+     * Request count by model
+     */
+    models?: {
+        [key: string]: number;
+    };
+    /**
+     * Period Start
+     */
+    period_start: string;
+    /**
+     * Period End
+     */
+    period_end: string;
 };
 
 /**
@@ -1267,6 +1769,11 @@ export type ActionEnum = 'suspend' | 'activate' | 'delete';
  * Role
  */
 export type RoleEnum = 'read' | 'write' | 'manager';
+
+/**
+ * Flow Direction
+ */
+export type FlowDirectionEnum = 'input' | 'output' | 'other';
 
 export type ItemsEnum = 'read' | 'write';
 
@@ -3033,6 +3540,501 @@ export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses = {
 };
 
 export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponse = UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses[keyof UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses];
+
+export type LogUsageApiV1UsageLogPostData = {
+    body: UsageLogCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/usage/log';
+};
+
+export type LogUsageApiV1UsageLogPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type LogUsageApiV1UsageLogPostError = LogUsageApiV1UsageLogPostErrors[keyof LogUsageApiV1UsageLogPostErrors];
+
+export type LogUsageApiV1UsageLogPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type BatchLogUsageApiV1UsageBatchLogPostData = {
+    body: UsageLogBatchCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/usage/batch-log';
+};
+
+export type BatchLogUsageApiV1UsageBatchLogPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type BatchLogUsageApiV1UsageBatchLogPostError = BatchLogUsageApiV1UsageBatchLogPostErrors[keyof BatchLogUsageApiV1UsageBatchLogPostErrors];
+
+export type BatchLogUsageApiV1UsageBatchLogPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type GetMyUsageSummaryApiV1UsageMySummaryGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         *
+         * Number of days to look back
+         */
+        days?: number;
+    };
+    url: '/api/v1/usage/my-summary';
+};
+
+export type GetMyUsageSummaryApiV1UsageMySummaryGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetMyUsageSummaryApiV1UsageMySummaryGetError = GetMyUsageSummaryApiV1UsageMySummaryGetErrors[keyof GetMyUsageSummaryApiV1UsageMySummaryGetErrors];
+
+export type GetMyUsageSummaryApiV1UsageMySummaryGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: UsageSummary;
+};
+
+export type GetMyUsageSummaryApiV1UsageMySummaryGetResponse = GetMyUsageSummaryApiV1UsageMySummaryGetResponses[keyof GetMyUsageSummaryApiV1UsageMySummaryGetResponses];
+
+export type GetMyDetailedUsageApiV1UsageMyDetailedGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         *
+         * Number of days to look back
+         */
+        days?: number;
+    };
+    url: '/api/v1/usage/my-detailed';
+};
+
+export type GetMyDetailedUsageApiV1UsageMyDetailedGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetMyDetailedUsageApiV1UsageMyDetailedGetError = GetMyDetailedUsageApiV1UsageMyDetailedGetErrors[keyof GetMyDetailedUsageApiV1UsageMyDetailedGetErrors];
+
+export type GetMyDetailedUsageApiV1UsageMyDetailedGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: DetailedUsageReport;
+};
+
+export type GetMyDetailedUsageApiV1UsageMyDetailedGetResponse = GetMyDetailedUsageApiV1UsageMyDetailedGetResponses[keyof GetMyDetailedUsageApiV1UsageMyDetailedGetResponses];
+
+export type GetMyUsageLogsApiV1UsageMyLogsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Page
+         */
+        page?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+        /**
+         * Days
+         */
+        days?: number;
+        /**
+         * Conversation Id
+         */
+        conversation_id?: string | null;
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id?: number | null;
+    };
+    url: '/api/v1/usage/my-logs';
+};
+
+export type GetMyUsageLogsApiV1UsageMyLogsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetMyUsageLogsApiV1UsageMyLogsGetError = GetMyUsageLogsApiV1UsageMyLogsGetErrors[keyof GetMyUsageLogsApiV1UsageMyLogsGetErrors];
+
+export type GetMyUsageLogsApiV1UsageMyLogsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: UsageLogsList;
+};
+
+export type GetMyUsageLogsApiV1UsageMyLogsGetResponse = GetMyUsageLogsApiV1UsageMyLogsGetResponses[keyof GetMyUsageLogsApiV1UsageMyLogsGetResponses];
+
+export type GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         */
+        days?: number;
+    };
+    url: '/api/v1/usage/admin/global-summary';
+};
+
+export type GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetError = GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetErrors[keyof GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetErrors];
+
+export type GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: UsageSummary;
+};
+
+export type GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponse = GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponses[keyof GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponses];
+
+export type GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetData = {
+    body?: never;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: {
+        /**
+         * Days
+         */
+        days?: number;
+    };
+    url: '/api/v1/usage/admin/user/{user_id}/summary';
+};
+
+export type GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetError = GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetErrors[keyof GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetErrors];
+
+export type GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: UsageSummary;
+};
+
+export type GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponse = GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses[keyof GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses];
+
+export type ListModelsWithRatesApiV1AdminRateCardsModelsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Provider
+         */
+        provider?: string | null;
+    };
+    url: '/api/v1/admin/rate-cards/models';
+};
+
+export type ListModelsWithRatesApiV1AdminRateCardsModelsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListModelsWithRatesApiV1AdminRateCardsModelsGetError = ListModelsWithRatesApiV1AdminRateCardsModelsGetErrors[keyof ListModelsWithRatesApiV1AdminRateCardsModelsGetErrors];
+
+export type ListModelsWithRatesApiV1AdminRateCardsModelsGetResponses = {
+    /**
+     * Response List Models With Rates Api V1 Admin Rate Cards Models Get
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type ListModelsWithRatesApiV1AdminRateCardsModelsGetResponse = ListModelsWithRatesApiV1AdminRateCardsModelsGetResponses[keyof ListModelsWithRatesApiV1AdminRateCardsModelsGetResponses];
+
+export type ListRateCardEntriesApiV1AdminRateCardsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Provider
+         */
+        provider?: string | null;
+        /**
+         * Model Name
+         */
+        model_name?: string | null;
+        /**
+         * Active Only
+         */
+        active_only?: boolean;
+        /**
+         * Page
+         */
+        page?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+    };
+    url: '/api/v1/admin/rate-cards';
+};
+
+export type ListRateCardEntriesApiV1AdminRateCardsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListRateCardEntriesApiV1AdminRateCardsGetError = ListRateCardEntriesApiV1AdminRateCardsGetErrors[keyof ListRateCardEntriesApiV1AdminRateCardsGetErrors];
+
+export type ListRateCardEntriesApiV1AdminRateCardsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: RateCardEntriesList;
+};
+
+export type ListRateCardEntriesApiV1AdminRateCardsGetResponse = ListRateCardEntriesApiV1AdminRateCardsGetResponses[keyof ListRateCardEntriesApiV1AdminRateCardsGetResponses];
+
+export type CreateRateCardEntryApiV1AdminRateCardsEntryPostData = {
+    body: RateCardEntryCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/rate-cards/entry';
+};
+
+export type CreateRateCardEntryApiV1AdminRateCardsEntryPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateRateCardEntryApiV1AdminRateCardsEntryPostError = CreateRateCardEntryApiV1AdminRateCardsEntryPostErrors[keyof CreateRateCardEntryApiV1AdminRateCardsEntryPostErrors];
+
+export type CreateRateCardEntryApiV1AdminRateCardsEntryPostResponses = {
+    /**
+     * Response Create Rate Card Entry Api V1 Admin Rate Cards Entry Post
+     *
+     * Successful Response
+     */
+    201: {
+        [key: string]: unknown;
+    };
+};
+
+export type CreateRateCardEntryApiV1AdminRateCardsEntryPostResponse = CreateRateCardEntryApiV1AdminRateCardsEntryPostResponses[keyof CreateRateCardEntryApiV1AdminRateCardsEntryPostResponses];
+
+export type CreateModelRateCardApiV1AdminRateCardsModelPostData = {
+    body: RateCardModelCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/rate-cards/model';
+};
+
+export type CreateModelRateCardApiV1AdminRateCardsModelPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateModelRateCardApiV1AdminRateCardsModelPostError = CreateModelRateCardApiV1AdminRateCardsModelPostErrors[keyof CreateModelRateCardApiV1AdminRateCardsModelPostErrors];
+
+export type CreateModelRateCardApiV1AdminRateCardsModelPostResponses = {
+    /**
+     * Response Create Model Rate Card Api V1 Admin Rate Cards Model Post
+     *
+     * Successful Response
+     */
+    201: {
+        [key: string]: unknown;
+    };
+};
+
+export type CreateModelRateCardApiV1AdminRateCardsModelPostResponse = CreateModelRateCardApiV1AdminRateCardsModelPostResponses[keyof CreateModelRateCardApiV1AdminRateCardsModelPostResponses];
+
+export type CopyModelRatesApiV1AdminRateCardsCopyPostData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Source Provider
+         */
+        source_provider: string;
+        /**
+         * Source Model
+         */
+        source_model: string;
+        /**
+         * Target Provider
+         */
+        target_provider: string;
+        /**
+         * Target Model
+         */
+        target_model: string;
+        /**
+         * Target Model Pattern
+         */
+        target_model_pattern?: string | null;
+        /**
+         * Effective From
+         */
+        effective_from?: string | null;
+    };
+    url: '/api/v1/admin/rate-cards/copy';
+};
+
+export type CopyModelRatesApiV1AdminRateCardsCopyPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CopyModelRatesApiV1AdminRateCardsCopyPostError = CopyModelRatesApiV1AdminRateCardsCopyPostErrors[keyof CopyModelRatesApiV1AdminRateCardsCopyPostErrors];
+
+export type CopyModelRatesApiV1AdminRateCardsCopyPostResponses = {
+    /**
+     * Response Copy Model Rates Api V1 Admin Rate Cards Copy Post
+     *
+     * Successful Response
+     */
+    201: {
+        [key: string]: unknown;
+    };
+};
+
+export type CopyModelRatesApiV1AdminRateCardsCopyPostResponse = CopyModelRatesApiV1AdminRateCardsCopyPostResponses[keyof CopyModelRatesApiV1AdminRateCardsCopyPostResponses];
+
+export type ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostData = {
+    body?: never;
+    path: {
+        /**
+         * Rate Id
+         */
+        rate_id: number;
+    };
+    query: {
+        /**
+         * Effective Until
+         */
+        effective_until: string;
+    };
+    url: '/api/v1/admin/rate-cards/expire/{rate_id}';
+};
+
+export type ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostError = ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostErrors[keyof ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostErrors];
+
+export type ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponses = {
+    /**
+     * Response Expire Rate Card Entry Api V1 Admin Rate Cards Expire  Rate Id  Post
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponse = ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponses[keyof ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponses];
+
+export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetData = {
+    body?: never;
+    path: {
+        /**
+         * Provider
+         */
+        provider: string;
+        /**
+         * Model Name
+         */
+        model_name: string;
+    };
+    query?: {
+        /**
+         * As Of
+         */
+        as_of?: string | null;
+    };
+    url: '/api/v1/admin/rate-cards/model/{provider}/{model_name}';
+};
+
+export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetError = GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetErrors[keyof GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetErrors];
+
+export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses = {
+    /**
+     * Response Get Model Rates Api V1 Admin Rate Cards Model  Provider   Model Name  Get
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponse = GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses[keyof GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses];
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;

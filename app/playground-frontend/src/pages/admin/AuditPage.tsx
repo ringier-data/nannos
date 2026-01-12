@@ -46,6 +46,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   sub_agent: 'Sub-Agent',
   session: 'Session',
   secret: 'Secret',
+  rate_card: 'Rate Card',
 };
 
 export function AuditPage() {

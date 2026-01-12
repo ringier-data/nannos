@@ -17,6 +17,7 @@ class AuditEntityType(str, Enum):
     SUB_AGENT = "sub_agent"
     SESSION = "session"  # For session-related events like admin mode activation
     SECRET = "secret"  # For secrets management operations
+    RATE_CARD = "rate_card"  # For LLM pricing rate cards
 
 
 class AuditAction(str, Enum):

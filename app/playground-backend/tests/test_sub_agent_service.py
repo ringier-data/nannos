@@ -29,16 +29,85 @@ from playground_backend.models.sub_agent import (
     SubAgentType,
     SubAgentUpdate,
 )
+from playground_backend.services.secrets_service import SecretsService
 from playground_backend.services.sub_agent_service import SubAgentService
+
+
+# Helper methods for test fixtures
+async def _create_user(
+    session: AsyncSession,
+    email: str,
+    sub: str,
+    first_name: str = "Test",
+    last_name: str = "User",
+    is_admin: bool = False,
+    role: str = "member",
+) -> str:
+    """Create a test user and return their ID.
+
+    Args:
+        session: Database session
+        email: User email
+        sub: User OIDC sub
+        first_name: User first name
+        last_name: User last name
+        is_admin: Whether user is system administrator
+        role: User role (member, approver, admin)
+    """
+    from sqlalchemy import text
+
+    query = text("""
+        INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, created_at, updated_at)
+        VALUES (:sub, :sub, :email, :first_name, :last_name, :is_admin, :role, NOW(), NOW())
+        ON CONFLICT (sub) DO UPDATE SET email = :email, is_administrator = :is_admin, role = :role
+        RETURNING id
+    """)
+    result = await session.execute(
+        query,
+        {
+            "sub": sub,
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "is_admin": is_admin,
+            "role": role,
+        },
+    )
+    user_id = result.scalar_one()
+    await session.commit()
+    return user_id
+
+
+async def _create_sub_agent(
+    session: AsyncSession,
+    user_id: str,
+    name: str,
+    subagent_service: SubAgentService,
+    system_prompt: str = "Default prompt",
+) -> SubAgent:
+    """Create a test sub-agent and return it."""
+    data = SubAgentCreate(
+        name=name,
+        type=SubAgentType.LOCAL,
+        description="Test agent",
+        model="gpt-4",
+        system_prompt=system_prompt,
+        mcp_tools=[],
+    )
+    return await subagent_service.create_sub_agent(session, user_id, data)
 
 
 class TestSubAgentVersionCreation:
     """Test version creation and hash generation."""
 
     @pytest.mark.asyncio
-    async def test_create_sub_agent_creates_version_1(self, pg_session: AsyncSession):
+    async def test_create_sub_agent_creates_version_1(
+        self,
+        sub_agent_service,
+        pg_session: AsyncSession,
+    ):
         """Test that creating a sub-agent creates version 1."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         data = SubAgentCreate(
@@ -64,11 +133,11 @@ class TestSubAgentVersionCreation:
         assert len(agent.config_version.version_hash) == 12  # 12-char hash
 
     @pytest.mark.asyncio
-    async def test_update_sub_agent_creates_new_version(self, pg_session: AsyncSession):
+    async def test_update_sub_agent_creates_new_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that updating configuration creates a new version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Update configuration
         data = SubAgentUpdate(
@@ -88,11 +157,11 @@ class TestSubAgentVersionCreation:
         assert updated.config_version.status == SubAgentStatus.DRAFT
 
     @pytest.mark.asyncio
-    async def test_update_metadata_and_config_creates_new_version(self, pg_session: AsyncSession):
+    async def test_update_metadata_and_config_creates_new_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that updating metadata (name, is_public) along with config creates a new version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Original Name")
+        agent = await _create_sub_agent(pg_session, user_id, "Original Name", sub_agent_service)
 
         # Verify initial state
         assert agent.name == "Original Name"
@@ -127,11 +196,11 @@ class TestSubAgentVersionCreation:
         assert refetched.current_version == 2
 
     @pytest.mark.asyncio
-    async def test_update_is_public_persists_correctly(self, pg_session: AsyncSession):
+    async def test_update_is_public_persists_correctly(self, pg_session: AsyncSession, sub_agent_service):
         """Test that is_public field is properly persisted and returned after update."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Test Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Test Agent", sub_agent_service)
 
         # Initially not public
         assert agent.is_public is False
@@ -161,11 +230,11 @@ class TestSubAgentVersionCreation:
         assert refetched.is_public is False
 
     @pytest.mark.asyncio
-    async def test_version_hash_is_unique_for_different_content(self, pg_session: AsyncSession):
+    async def test_version_hash_is_unique_for_different_content(self, pg_session: AsyncSession, sub_agent_service):
         """Test that different configurations generate different hashes."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         assert agent.config_version is not None
         hash1 = agent.config_version.version_hash
@@ -186,9 +255,9 @@ class TestSubAgentVersionCreation:
         assert hash1 != hash2  # Different content should produce different hashes
 
     @pytest.mark.asyncio
-    async def test_local_agent_has_system_prompt_not_agent_url(self, pg_session: AsyncSession):
+    async def test_local_agent_has_system_prompt_not_agent_url(self, pg_session: AsyncSession, sub_agent_service):
         """Test that local agents use system_prompt, not agent_url."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         data = SubAgentCreate(
@@ -207,9 +276,9 @@ class TestSubAgentVersionCreation:
         assert agent.config_version.agent_url is None
 
     @pytest.mark.asyncio
-    async def test_remote_agent_has_agent_url_not_system_prompt(self, pg_session: AsyncSession):
+    async def test_remote_agent_has_agent_url_not_system_prompt(self, pg_session: AsyncSession, sub_agent_service):
         """Test that remote agents use agent_url, not system_prompt."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         data = SubAgentCreate(
@@ -227,13 +296,14 @@ class TestSubAgentVersionCreation:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_foundry_agent_creates_secret_in_ssm(self, pg_session: AsyncSession):
+    async def test_foundry_agent_creates_secret_in_ssm(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, secrets_service: SecretsService
+    ):
         """Test that creating a Foundry agent stores the client_secret in SSM."""
         from playground_backend.models.secret import SecretCreate, SecretType
-        from playground_backend.services.secrets_service import SecretsService
 
-        service = SubAgentService()
-        secrets_service = SecretsService()
+        service = sub_agent_service
+
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         # Create the secret first
@@ -281,13 +351,13 @@ class TestSubAgentVersionCreation:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_foundry_agent_update_creates_new_secret(self, pg_session: AsyncSession):
+    async def test_foundry_agent_update_creates_new_secret(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, secrets_service: SecretsService
+    ):
         """Test that updating a Foundry agent's client_secret creates a new secret."""
         from playground_backend.models.secret import SecretCreate, SecretType
-        from playground_backend.services.secrets_service import SecretsService
 
-        service = SubAgentService()
-        secrets_service = SecretsService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         # Create initial secret
@@ -349,13 +419,13 @@ class TestSubAgentVersionCreation:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_foundry_agent_update_without_secret_keeps_existing(self, pg_session: AsyncSession):
+    async def test_foundry_agent_update_without_secret_keeps_existing(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, secrets_service: SecretsService
+    ):
         """Test that updating a Foundry agent without providing client_secret keeps the existing one."""
         from playground_backend.models.secret import SecretCreate, SecretType
-        from playground_backend.services.secrets_service import SecretsService
 
-        service = SubAgentService()
-        secrets_service = SecretsService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         # Create secret
@@ -404,13 +474,13 @@ class TestSubAgentVersionCreation:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_foundry_agent_requires_foundry_fields(self, pg_session: AsyncSession):
+    async def test_foundry_agent_requires_foundry_fields(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, secrets_service: SecretsService
+    ):
         """Test that Foundry agents require all Foundry-specific fields including client_secret."""
         from playground_backend.models.secret import SecretCreate, SecretType
-        from playground_backend.services.secrets_service import SecretsService
 
-        service = SubAgentService()
-        secrets_service = SecretsService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         # Create secret
@@ -448,9 +518,9 @@ class TestSubAgentVersionCreation:
         assert agent.config_version.foundry_version == "1.0.0"
 
     @pytest.mark.asyncio
-    async def test_version_hash_with_different_field_combinations(self, pg_session: AsyncSession):
+    async def test_version_hash_with_different_field_combinations(self, pg_session: AsyncSession, sub_agent_service):
         """Test that version hash changes when different fields are modified."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         # Create base agent
@@ -494,9 +564,9 @@ class TestSubAgentVersionCreation:
         assert hash1 != hash4
 
     @pytest.mark.asyncio
-    async def test_mcp_tools_none_inheritance(self, pg_session: AsyncSession):
+    async def test_mcp_tools_none_inheritance(self, pg_session: AsyncSession, sub_agent_service):
         """Test that mcp_tools=None is stored as empty list (uses orchestrator defaults)."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         # Create agent with mcp_tools=None (stored as empty list)
@@ -532,11 +602,11 @@ class TestSubAgentVersionCreation:
         assert agent.config_version.mcp_tools == []
 
     @pytest.mark.asyncio
-    async def test_soft_delete_does_not_affect_versions(self, pg_session: AsyncSession):
+    async def test_soft_delete_does_not_affect_versions(self, pg_session: AsyncSession, sub_agent_service):
         """Test that soft-deleting a sub-agent preserves versions."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Create a second version
         update = SubAgentUpdate(description="Updated desc", system_prompt="Updated", change_summary="Updated version 2")
@@ -556,11 +626,11 @@ class TestVersionSubmissionWorkflow:
     """Test version submission for approval workflow."""
 
     @pytest.mark.asyncio
-    async def test_submit_draft_version_for_approval(self, pg_session: AsyncSession):
+    async def test_submit_draft_version_for_approval(self, pg_session: AsyncSession, sub_agent_service):
         """Test submitting a draft version for approval."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit for approval
         result = await service.submit_for_approval(
@@ -576,12 +646,12 @@ class TestVersionSubmissionWorkflow:
         assert result.config_version.change_summary == "Ready for review"
 
     @pytest.mark.asyncio
-    async def test_submit_rejected_version_for_approval(self, pg_session: AsyncSession):
+    async def test_submit_rejected_version_for_approval(self, pg_session: AsyncSession, sub_agent_service):
         """Test submitting a rejected version for approval again."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit and reject
         await service.submit_for_approval(pg_session, agent.id, user_id, "First submission")
@@ -609,12 +679,12 @@ class TestVersionSubmissionWorkflow:
         assert result.config_version.rejection_reason is None
 
     @pytest.mark.asyncio
-    async def test_cannot_submit_approved_version(self, pg_session: AsyncSession):
+    async def test_cannot_submit_approved_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that approved versions cannot be resubmitted."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit and approve
         await service.submit_for_approval(pg_session, agent.id, user_id, "Submit")
@@ -631,11 +701,11 @@ class TestVersionSubmissionWorkflow:
             )
 
     @pytest.mark.asyncio
-    async def test_cannot_submit_pending_version(self, pg_session: AsyncSession):
+    async def test_cannot_submit_pending_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that pending versions cannot be resubmitted."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, user_id, "First submission")
@@ -650,12 +720,12 @@ class TestVersionSubmissionWorkflow:
             )
 
     @pytest.mark.asyncio
-    async def test_non_owner_cannot_submit_version(self, pg_session: AsyncSession):
+    async def test_non_owner_cannot_submit_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that non-owners cannot submit versions for approval."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         other_id = await _create_user(pg_session, "other@test.com", "sub-other")
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
 
         # Try to submit as non-owner
         with pytest.raises(PermissionError, match="Only the owner can submit"):
@@ -667,11 +737,11 @@ class TestVersionSubmissionWorkflow:
             )
 
     @pytest.mark.asyncio
-    async def test_change_summary_required_for_submission(self, pg_session: AsyncSession):
+    async def test_change_summary_required_for_submission(self, pg_session: AsyncSession, sub_agent_service):
         """Test that change_summary is stored when submitting."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         summary = "Added new features and fixed bugs"
         result = await service.submit_for_approval(pg_session, agent.id, user_id, summary)
@@ -685,12 +755,12 @@ class TestVersionApprovalWorkflow:
     """Test version approval and rejection workflows."""
 
     @pytest.mark.asyncio
-    async def test_approve_pending_version(self, pg_session: AsyncSession):
+    async def test_approve_pending_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test approving a pending version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit and approve
         await service.submit_for_approval(pg_session, agent.id, user_id, "Ready")
@@ -705,11 +775,11 @@ class TestVersionApprovalWorkflow:
         assert result.default_version == 1  # Set as default
 
     @pytest.mark.asyncio
-    async def test_approve_pending_version_for_member(self, pg_session: AsyncSession):
+    async def test_approve_pending_version_for_member(self, pg_session: AsyncSession, sub_agent_service):
         """Test that a regular member even though group admin and owner of the sub-agent can't approve a version"""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, user_id, "Ready")
@@ -719,12 +789,12 @@ class TestVersionApprovalWorkflow:
             await service.approve_version(pg_session, agent.id, 1, user_id, True)
 
     @pytest.mark.asyncio
-    async def test_reject_pending_version(self, pg_session: AsyncSession):
+    async def test_reject_pending_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test rejecting a pending version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit and reject
         await service.submit_for_approval(pg_session, agent.id, user_id, "Ready")
@@ -745,12 +815,12 @@ class TestVersionApprovalWorkflow:
         assert result.default_version is None  # Not set as default
 
     @pytest.mark.asyncio
-    async def test_release_number_increments_per_sub_agent(self, pg_session: AsyncSession):
+    async def test_release_number_increments_per_sub_agent(self, pg_session: AsyncSession, sub_agent_service):
         """Test that release numbers increment for each sub-agent."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Approve version 1
         await service.submit_for_approval(pg_session, agent.id, user_id, "V1")
@@ -774,24 +844,24 @@ class TestVersionApprovalWorkflow:
         assert v2.config_version.release_number == 2
 
     @pytest.mark.asyncio
-    async def test_cannot_approve_draft_version(self, pg_session: AsyncSession):
+    async def test_cannot_approve_draft_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that draft versions cannot be approved directly."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Try to approve without submitting
         with pytest.raises(ValueError, match="Only pending versions can be approved/rejected"):
             await service.approve_version(pg_session, agent.id, 1, admin_id, True)
 
     @pytest.mark.asyncio
-    async def test_cannot_approve_already_approved_version(self, pg_session: AsyncSession):
+    async def test_cannot_approve_already_approved_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that approved versions cannot be approved again."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit and approve
         await service.submit_for_approval(pg_session, agent.id, user_id, "Ready")
@@ -802,12 +872,12 @@ class TestVersionApprovalWorkflow:
             await service.approve_version(pg_session, agent.id, 1, admin_id, True)
 
     @pytest.mark.asyncio
-    async def test_approval_sets_default_version(self, pg_session: AsyncSession):
+    async def test_approval_sets_default_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that approving a version sets it as default."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Before approval
         assert agent.default_version is None
@@ -825,11 +895,11 @@ class TestVersionReversion:
     """Test reverting to previous versions."""
 
     @pytest.mark.asyncio
-    async def test_revert_to_previous_version_creates_new_version(self, pg_session: AsyncSession):
+    async def test_revert_to_previous_version_creates_new_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that reverting creates a new version with old config."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent", "V1 prompt")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service, "V1 prompt")
 
         # Create version 2
         await service.update_sub_agent(
@@ -851,9 +921,9 @@ class TestVersionReversion:
         assert result.config_version.status == SubAgentStatus.DRAFT
 
     @pytest.mark.asyncio
-    async def test_revert_copies_all_configuration(self, pg_session: AsyncSession):
+    async def test_revert_copies_all_configuration(self, pg_session: AsyncSession, sub_agent_service):
         """Test that reversion copies all configuration fields."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
 
         data = SubAgentCreate(
@@ -889,23 +959,23 @@ class TestVersionReversion:
         assert result.config_version.model == "gpt-4"
 
     @pytest.mark.asyncio
-    async def test_non_owner_cannot_revert_version(self, pg_session: AsyncSession):
+    async def test_non_owner_cannot_revert_version(self, pg_session: AsyncSession, sub_agent_service: SubAgentService):
         """Test that non-owners cannot revert versions."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         other_id = await _create_user(pg_session, "other@test.com", "sub-other")
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
 
         # Try to revert as non-owner
         with pytest.raises(PermissionError, match="Only the owner can revert"):
             await service.revert_to_version(pg_session, agent.id, 1, other_id)
 
     @pytest.mark.asyncio
-    async def test_cannot_revert_to_nonexistent_version(self, pg_session: AsyncSession):
+    async def test_cannot_revert_to_nonexistent_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that reverting to a non-existent version fails."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Try to revert to non-existent version
         with pytest.raises(ValueError, match="Version 999 not found"):
@@ -916,12 +986,12 @@ class TestDefaultVersionManagement:
     """Test setting and managing default versions."""
 
     @pytest.mark.asyncio
-    async def test_set_approved_version_as_default(self, pg_session: AsyncSession):
+    async def test_set_approved_version_as_default(self, pg_session: AsyncSession, sub_agent_service):
         """Test setting an approved version as default."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Approve version 1
         await service.submit_for_approval(pg_session, agent.id, user_id, "V1")
@@ -945,22 +1015,22 @@ class TestDefaultVersionManagement:
         assert result.current_version == 2  # Current version unchanged
 
     @pytest.mark.asyncio
-    async def test_cannot_set_draft_version_as_default(self, pg_session: AsyncSession):
+    async def test_cannot_set_draft_version_as_default(self, pg_session: AsyncSession, sub_agent_service):
         """Test that draft versions cannot be set as default."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Try to set draft version as default
         with pytest.raises(ValueError, match="Only approved versions can be set as default"):
             await service.set_default_version(pg_session, agent.id, 1, user_id)
 
     @pytest.mark.asyncio
-    async def test_cannot_set_pending_version_as_default(self, pg_session: AsyncSession):
+    async def test_cannot_set_pending_version_as_default(self, pg_session: AsyncSession, sub_agent_service):
         """Test that pending versions cannot be set as default."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit but don't approve
         await service.submit_for_approval(pg_session, agent.id, user_id, "Submit")
@@ -970,12 +1040,12 @@ class TestDefaultVersionManagement:
             await service.set_default_version(pg_session, agent.id, 1, user_id)
 
     @pytest.mark.asyncio
-    async def test_cannot_set_rejected_version_as_default(self, pg_session: AsyncSession):
+    async def test_cannot_set_rejected_version_as_default(self, pg_session: AsyncSession, sub_agent_service):
         """Test that rejected versions cannot be set as default."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit and reject
         await service.submit_for_approval(pg_session, agent.id, user_id, "Submit")
@@ -986,13 +1056,13 @@ class TestDefaultVersionManagement:
             await service.set_default_version(pg_session, agent.id, 1, user_id)
 
     @pytest.mark.asyncio
-    async def test_non_owner_cannot_set_default_version(self, pg_session: AsyncSession):
+    async def test_non_owner_cannot_set_default_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that non-owners cannot set default version."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         other_id = await _create_user(pg_session, "other@test.com", "sub-other")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
 
         # Approve version 1
         await service.submit_for_approval(pg_session, agent.id, owner_id, "V1")
@@ -1007,11 +1077,11 @@ class TestVersionDeletion:
     """Test version deletion with constraints."""
 
     @pytest.mark.asyncio
-    async def test_delete_draft_version(self, pg_session: AsyncSession):
+    async def test_delete_draft_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test deleting a draft version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Create version 2
         await service.update_sub_agent(
@@ -1032,11 +1102,11 @@ class TestVersionDeletion:
         assert v2.deleted_at is not None
 
     @pytest.mark.asyncio
-    async def test_delete_pending_version(self, pg_session: AsyncSession):
+    async def test_delete_pending_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test deleting a pending version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, user_id, "Submit")
@@ -1046,12 +1116,12 @@ class TestVersionDeletion:
             await service.delete_version(pg_session, agent.id, 1, user_id)
 
     @pytest.mark.asyncio
-    async def test_cannot_delete_approved_version(self, pg_session: AsyncSession):
+    async def test_cannot_delete_approved_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that approved versions cannot be deleted."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Approve version 1
         await service.submit_for_approval(pg_session, agent.id, user_id, "V1")
@@ -1062,11 +1132,11 @@ class TestVersionDeletion:
             await service.delete_version(pg_session, agent.id, 1, user_id)
 
     @pytest.mark.asyncio
-    async def test_delete_current_version_updates_to_previous(self, pg_session: AsyncSession):
+    async def test_delete_current_version_updates_to_previous(self, pg_session: AsyncSession, sub_agent_service):
         """Test that deleting current version updates pointer to previous version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Create version 2
         await service.update_sub_agent(
@@ -1085,23 +1155,23 @@ class TestVersionDeletion:
         assert updated.current_version == 1
 
     @pytest.mark.asyncio
-    async def test_cannot_delete_only_version(self, pg_session: AsyncSession):
+    async def test_cannot_delete_only_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that the only version cannot be deleted."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Try to delete the only version
         with pytest.raises(ValueError, match="Cannot delete the only version"):
             await service.delete_version(pg_session, agent.id, 1, user_id)
 
     @pytest.mark.asyncio
-    async def test_non_owner_cannot_delete_version(self, pg_session: AsyncSession):
+    async def test_non_owner_cannot_delete_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test that non-owners cannot delete versions."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         other_id = await _create_user(pg_session, "other@test.com", "sub-other")
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
 
         # Create version 2
         await service.update_sub_agent(
@@ -1116,12 +1186,12 @@ class TestVersionDeletion:
             await service.delete_version(pg_session, agent.id, 2, other_id)
 
     @pytest.mark.asyncio
-    async def test_delete_rejected_version(self, pg_session: AsyncSession):
+    async def test_delete_rejected_version(self, pg_session: AsyncSession, sub_agent_service):
         """Test deleting a rejected version."""
-        service = SubAgentService()
+        service = sub_agent_service
         user_id = await _create_user(pg_session, "owner@test.com", "sub-123")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, user_id, "Agent")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
 
         # Create version 2, submit and reject it
         await service.update_sub_agent(
@@ -1143,12 +1213,12 @@ class TestPermissionValidation:
     """Test permission checks across all operations."""
 
     @pytest.mark.asyncio
-    async def test_non_owner_cannot_update_sub_agent(self, pg_session: AsyncSession):
+    async def test_non_owner_cannot_update_sub_agent(self, pg_session: AsyncSession, sub_agent_service):
         """Test that non-owners cannot update sub-agents."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         other_id = await _create_user(pg_session, "other@test.com", "sub-other")
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
 
         # Try to update as non-owner
         with pytest.raises(PermissionError, match="Only the owner can update"):
@@ -1160,12 +1230,12 @@ class TestPermissionValidation:
             )
 
     @pytest.mark.asyncio
-    async def test_owner_can_perform_all_owner_operations(self, pg_session: AsyncSession):
+    async def test_owner_can_perform_all_owner_operations(self, pg_session: AsyncSession, sub_agent_service):
         """Test that owner can submit, revert, and set default version."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         admin_id = await _create_user(pg_session, "admin@test.com", "sub-admin", is_admin=True)
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent", "V1")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", service, "V1")
 
         # Owner can submit
         await service.submit_for_approval(pg_session, agent.id, owner_id, "Submit")
@@ -1193,14 +1263,14 @@ class TestPermissionValidation:
         assert final.default_version == 1
 
     @pytest.mark.asyncio
-    async def test_approver_role_can_approve_with_admin_mode(self, pg_session: AsyncSession):
+    async def test_approver_role_can_approve_with_admin_mode(self, pg_session: AsyncSession, sub_agent_service):
         """Test that users with approver role can approve sub-agents when they have group-based access."""
         from sqlalchemy import text
 
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         approver_id = await _create_user(pg_session, "approver@test.com", "sub-approver", role="approver")
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent", "V1")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service, "V1")
 
         # Create a group and add approver to it
         group_result = await pg_session.execute(
@@ -1243,12 +1313,12 @@ class TestPermissionValidation:
         assert result.config_version.approved_by_user_id == approver_id
 
     @pytest.mark.asyncio
-    async def test_approver_role_cannot_approve_without_group_access(self, pg_session: AsyncSession):
+    async def test_approver_role_cannot_approve_without_group_access(self, pg_session: AsyncSession, sub_agent_service):
         """Test that approvers with 'approve' capability cannot approve sub-agents they don't have group access to."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         approver_id = await _create_user(pg_session, "approver@test.com", "sub-approver", role="approver")
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent", "V1")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service, "V1")
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, owner_id, "Ready for review")
@@ -1258,14 +1328,14 @@ class TestPermissionValidation:
             await service.approve_version(pg_session, agent.id, 1, approver_id, True)
 
     @pytest.mark.asyncio
-    async def test_admin_role_can_approve_with_admin_mode(self, pg_session: AsyncSession):
+    async def test_admin_role_can_approve_with_admin_mode(self, pg_session: AsyncSession, sub_agent_service):
         """Test that users with admin role (not is_administrator) can approve when admin-mode enabled."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         admin_role_user = await _create_user(
             pg_session, "admin@test.com", "sub-admin-role", role="admin", is_admin=False
         )
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent", "V1")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service, "V1")
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, owner_id, "Ready for review")
@@ -1279,12 +1349,12 @@ class TestPermissionValidation:
         assert result.config_version.approved_by_user_id == admin_role_user
 
     @pytest.mark.asyncio
-    async def test_member_role_cannot_approve(self, pg_session: AsyncSession):
+    async def test_member_role_cannot_approve(self, pg_session: AsyncSession, sub_agent_service):
         """Test that users with member role cannot approve even at service level."""
-        service = SubAgentService()
+        service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         member_id = await _create_user(pg_session, "member@test.com", "sub-member", role="member")
-        agent = await _create_sub_agent(pg_session, owner_id, "Agent", "V1")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service, "V1")
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, owner_id, "Ready for review")
@@ -1292,67 +1362,3 @@ class TestPermissionValidation:
         # Member cannot approve (should fail at service level even if router is bypassed)
         with pytest.raises(PermissionError, match="Approval requires 'approve' or 'approve.admin' capability"):
             await service.approve_version(pg_session, agent.id, 1, member_id, True)
-
-
-# Helper methods for test fixtures
-async def _create_user(
-    session: AsyncSession,
-    email: str,
-    sub: str,
-    first_name: str = "Test",
-    last_name: str = "User",
-    is_admin: bool = False,
-    role: str = "member",
-) -> str:
-    """Create a test user and return their ID.
-
-    Args:
-        session: Database session
-        email: User email
-        sub: User OIDC sub
-        first_name: User first name
-        last_name: User last name
-        is_admin: Whether user is system administrator
-        role: User role (member, approver, admin)
-    """
-    from sqlalchemy import text
-
-    query = text("""
-        INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, created_at, updated_at)
-        VALUES (:sub, :sub, :email, :first_name, :last_name, :is_admin, :role, NOW(), NOW())
-        ON CONFLICT (sub) DO UPDATE SET email = :email, is_administrator = :is_admin, role = :role
-        RETURNING id
-    """)
-    result = await session.execute(
-        query,
-        {
-            "sub": sub,
-            "email": email,
-            "first_name": first_name,
-            "last_name": last_name,
-            "is_admin": is_admin,
-            "role": role,
-        },
-    )
-    user_id = result.scalar_one()
-    await session.commit()
-    return user_id
-
-
-async def _create_sub_agent(
-    session: AsyncSession,
-    user_id: str,
-    name: str,
-    system_prompt: str = "Default prompt",
-) -> SubAgent:
-    """Create a test sub-agent and return it."""
-    service = SubAgentService()
-    data = SubAgentCreate(
-        name=name,
-        type=SubAgentType.LOCAL,
-        description="Test agent",
-        model="gpt-4",
-        system_prompt=system_prompt,
-        mcp_tools=[],
-    )
-    return await service.create_sub_agent(session, user_id, data)

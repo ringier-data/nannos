@@ -42,7 +42,9 @@ MODEL_CONFIG = {
 logger = logging.getLogger(__name__)
 
 
-def create_model(model_type: ModelType, config: Any, thinking: bool = False) -> BaseChatModel:
+def create_model(
+    model_type: ModelType, config: Any, thinking: bool = False, callbacks: list | None = None
+) -> BaseChatModel:
     """Create a model instance for the given model type.
 
     Utility function that can be used by both GraphFactory and other components
@@ -52,6 +54,7 @@ def create_model(model_type: ModelType, config: Any, thinking: bool = False) -> 
         model_type: The type of model to create ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
         config: Agent settings with model configuration
         thinking: Enable thinking mode for Claude Sonnet models (not supported on Haiku)
+        callbacks: Optional list of LangChain callbacks (e.g., for cost tracking)
 
     Returns:
         BaseChatModel: The created model instance
@@ -106,6 +109,7 @@ def create_model(model_type: ModelType, config: Any, thinking: bool = False) -> 
             additional_model_request_fields={"thinking": thinking_params}
             if thinking_params["type"] == "enabled"
             else {},
+            callbacks=callbacks,
         )
     else:
         # Default to gpt4o/gpt-4o-mini (Azure OpenAI)
@@ -127,4 +131,5 @@ def create_model(model_type: ModelType, config: Any, thinking: bool = False) -> 
             api_version=api_version,
             temperature=0.7,
             model=model_name,
+            callbacks=callbacks,
         )

@@ -1,4 +1,4 @@
-import { MessagesSquare, Settings, Bot, Users, UsersRound, FileText } from 'lucide-react';
+import { MessagesSquare, Settings, Bot, Users, UsersRound, FileText, DollarSign, CreditCard } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -22,6 +22,11 @@ export const mainNavItems: NavItem[] = [
     title: 'Sub-Agents',
     url: '/app/subagents',
     icon: Bot,
+  },
+  {
+    title: 'Usage & Costs',
+    url: '/app/usage',
+    icon: DollarSign,
   },
 ];
 
@@ -48,5 +53,10 @@ export const adminNavItems: NavItem[] = [
     title: 'Audit Logs',
     url: '/app/admin/audit',
     icon: FileText,
+  },
+  {
+    title: 'Rate Cards',
+    url: '/app/admin/rate-cards',
+    icon: CreditCard,
   },
 ];

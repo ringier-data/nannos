@@ -16,7 +16,6 @@ from ..models.user_group import (
     UserGroup,
     UserGroupWithMembers,
 )
-from ..repositories.user_group_repository import user_group_repository
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +23,25 @@ logger = logging.getLogger(__name__)
 class UserGroupService:
     """Service for managing user groups and memberships."""
 
-    def __init__(self):
-        self.repo = user_group_repository
+    def __init__(self, user_group_repository=None):
+        """Initialize user group service.
+
+        Args:
+            user_group_repository: Optional user group repository instance.
+                If None, must be set via set_repository() before use.
+        """
+        self._repo = user_group_repository
+
+    def set_repository(self, user_group_repository):
+        """Set the user group repository (dependency injection)."""
+        self._repo = user_group_repository
+
+    @property
+    def repo(self):
+        """Get the user group repository, raising error if not set."""
+        if self._repo is None:
+            raise RuntimeError("UserGroupRepository not injected. Call set_repository() during initialization.")
+        return self._repo
 
     async def get_group(self, db: AsyncSession, group_id: int) -> UserGroup | None:
         """Get a group by ID.
@@ -853,7 +869,3 @@ class UserGroupService:
         except Exception as e:
             logger.error(f"Failed to check resource permission: {e}")
             return False
-
-
-# Module-level singleton
-user_group_service = UserGroupService()

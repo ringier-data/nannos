@@ -21,14 +21,37 @@ from playground_backend.models.secret import Secret, SecretCreate, SecretType
 from playground_backend.services.secrets_service import SecretsService
 
 
+@mock_aws
+async def _create_secret(
+    secrets_service: SecretsService,
+    session: AsyncSession,
+    user_id: str,
+    name: str,
+    secret_value: str = "test-secret-value",
+) -> Secret:
+    """Create a test secret and return it."""
+    from playground_backend.models.secret import SecretCreate, SecretType
+
+    service = secrets_service
+
+    data = SecretCreate(
+        name=name,
+        description=f"Test secret: {name}",
+        secret_type=SecretType.FOUNDRY_CLIENT_SECRET,
+        secret_value=secret_value,
+    )
+
+    return await service.create_secret(session, user_id, data)
+
+
 class TestSecretCreation:
     """Test secret creation and SSM parameter generation."""
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_create_secret_generates_ssm_parameter(self, pg_session: AsyncSession):
+    async def test_create_secret_generates_ssm_parameter(self, pg_session: AsyncSession, secrets_service):
         """Test that creating a secret generates unique SSM parameter name."""
-        service = SecretsService()
+        service = secrets_service
         user_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
 
         data = SecretCreate(
@@ -49,9 +72,9 @@ class TestSecretCreation:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_create_secret_unique_name_per_owner(self, pg_session: AsyncSession):
+    async def test_create_secret_unique_name_per_owner(self, pg_session: AsyncSession, secrets_service):
         """Test that secret names must be unique per owner."""
-        service = SecretsService()
+        service = secrets_service
         user_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
 
         data = SecretCreate(
@@ -75,9 +98,9 @@ class TestSecretCreation:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_different_users_can_have_same_secret_name(self, pg_session: AsyncSession):
+    async def test_different_users_can_have_same_secret_name(self, pg_session: AsyncSession, secrets_service):
         """Test that different users can create secrets with the same name."""
-        service = SecretsService()
+        service = secrets_service
         user1_id = await _create_user(pg_session, "user1@test.com", "secret-user1")
         user2_id = await _create_user(pg_session, "user2@test.com", "secret-user2")
 
@@ -104,61 +127,73 @@ class TestSecretCreation:
 
 class TestSecretAccessControl:
     @pytest.mark.asyncio
-    async def test_owner_has_access_to_own_secret(self, pg_session: AsyncSession):
+    async def test_owner_has_access_to_own_secret(self, pg_session: AsyncSession, secrets_service):
         """Test that owner always has access to their own secrets (.own)."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
-        secret = await _create_secret(pg_session, owner_id, "Owner Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Owner Secret"
+        )
 
         has_access = await service.check_user_access(pg_session, secret.id, owner_id, "read", False, False)
 
         assert has_access is True
 
     @pytest.mark.asyncio
-    async def test_member_cannot_access_other_user_secret(self, pg_session: AsyncSession):
+    async def test_member_cannot_access_other_user_secret(self, pg_session: AsyncSession, secrets_service):
         """Test that members cannot access other users' secrets."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         member_id = await _create_user(pg_session, "member@test.com", "secret-member", role="member")
-        secret = await _create_secret(pg_session, owner_id, "Owner Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Owner Secret"
+        )
 
         has_access = await service.check_user_access(pg_session, secret.id, member_id, "read", False, False)
 
         assert has_access is False
 
     @pytest.mark.asyncio
-    async def test_admin_with_admin_mode_has_access_to_all_secrets(self, pg_session: AsyncSession):
+    async def test_admin_with_admin_mode_has_access_to_all_secrets(self, pg_session: AsyncSession, secrets_service):
         """Test that admins with admin_mode can access all secrets (.admin)."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         admin_id = await _create_user(pg_session, "admin@test.com", "secret-admin", role="admin")
-        secret = await _create_secret(pg_session, owner_id, "Owner Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Owner Secret"
+        )
 
         has_access = await service.check_user_access(pg_session, secret.id, admin_id, "read", False, True)
 
         assert has_access is True
 
     @pytest.mark.asyncio
-    async def test_admin_without_admin_mode_cannot_access_others_secrets(self, pg_session: AsyncSession):
+    async def test_admin_without_admin_mode_cannot_access_others_secrets(
+        self, pg_session: AsyncSession, secrets_service
+    ):
         """Test that admins without admin_mode enabled cannot access others' secrets."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         admin_id = await _create_user(pg_session, "admin@test.com", "secret-admin", role="admin")
-        secret = await _create_secret(pg_session, owner_id, "Owner Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Owner Secret"
+        )
 
         has_access = await service.check_user_access(pg_session, secret.id, admin_id, "read", False, False)
 
         assert has_access is False
 
     @pytest.mark.asyncio
-    async def test_group_access_with_secret_permissions(self, pg_session: AsyncSession):
+    async def test_group_access_with_secret_permissions(self, pg_session: AsyncSession, secrets_service):
         """Test that users can access secrets granted to their groups."""
         from sqlalchemy import text
 
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         admin_id = await _create_user(pg_session, "admin@test.com", "secret-admin", role="admin")
-        secret = await _create_secret(pg_session, owner_id, "Shared Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Shared Secret"
+        )
 
         # Create a group and add admin to it
         group_result = await pg_session.execute(
@@ -194,14 +229,16 @@ class TestSecretAccessControl:
         assert has_access is True
 
     @pytest.mark.asyncio
-    async def test_group_access_requires_admin_mode(self, pg_session: AsyncSession):
+    async def test_group_access_requires_admin_mode(self, pg_session: AsyncSession, secrets_service):
         """Test that group-based access requires admin_mode to be enabled."""
         from sqlalchemy import text
 
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         admin_id = await _create_user(pg_session, "admin@test.com", "secret-admin", role="admin")
-        secret = await _create_secret(pg_session, owner_id, "Shared Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Shared Secret"
+        )
 
         # Create group, add admin, grant permissions
         group_result = await pg_session.execute(
@@ -236,14 +273,16 @@ class TestSecretAccessControl:
         assert has_access is False
 
     @pytest.mark.asyncio
-    async def test_member_cannot_use_group_access(self, pg_session: AsyncSession):
+    async def test_member_cannot_use_group_access(self, pg_session: AsyncSession, secrets_service):
         """Test that members don't have .group capability even with group membership."""
         from sqlalchemy import text
 
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         member_id = await _create_user(pg_session, "member@test.com", "secret-member", role="member")
-        secret = await _create_secret(pg_session, owner_id, "Shared Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Shared Secret"
+        )
 
         # Create group, add member, grant permissions
         group_result = await pg_session.execute(
@@ -282,11 +321,13 @@ class TestSecretRetrieval:
     """Test secret retrieval and value fetching from SSM."""
 
     @pytest.mark.asyncio
-    async def test_get_secret_returns_metadata(self, pg_session: AsyncSession):
+    async def test_get_secret_returns_metadata(self, pg_session: AsyncSession, secrets_service):
         """Test that get_secret returns secret metadata."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
-        secret = await _create_secret(pg_session, owner_id, "Test Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Test Secret"
+        )
 
         retrieved = await service.get_secret(pg_session, secret.id, owner_id, False, False)
 
@@ -297,12 +338,14 @@ class TestSecretRetrieval:
         assert retrieved.ssm_parameter_name == secret.ssm_parameter_name
 
     @pytest.mark.asyncio
-    async def test_get_secret_checks_access_permission(self, pg_session: AsyncSession):
+    async def test_get_secret_checks_access_permission(self, pg_session: AsyncSession, secrets_service):
         """Test that get_secret validates access permissions."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         other_id = await _create_user(pg_session, "other@test.com", "secret-other")
-        secret = await _create_secret(pg_session, owner_id, "Private Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Private Secret"
+        )
 
         # Other user cannot access (returns None)
         retrieved = await service.get_secret(pg_session, secret.id, other_id, False, False)
@@ -310,23 +353,31 @@ class TestSecretRetrieval:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_get_secret_value_retrieves_from_ssm(self, pg_session: AsyncSession):
+    async def test_get_secret_value_retrieves_from_ssm(self, pg_session: AsyncSession, secrets_service):
         """Test that get_secret_value retrieves value from SSM Parameter Store."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
-        secret = await _create_secret(pg_session, owner_id, "Test Secret", "my-secret-value")
+        secret = await _create_secret(
+            secrets_service=secrets_service,
+            session=pg_session,
+            user_id=owner_id,
+            name="Test Secret",
+            secret_value="my-secret-value",
+        )
 
         value = await service.get_secret_value(pg_session, secret.id, owner_id, False, False)
 
         assert value == "my-secret-value"
 
     @pytest.mark.asyncio
-    async def test_get_secret_value_checks_access_permission(self, pg_session: AsyncSession):
+    async def test_get_secret_value_checks_access_permission(self, pg_session: AsyncSession, secrets_service):
         """Test that get_secret_value validates access permissions."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         other_id = await _create_user(pg_session, "other@test.com", "secret-other")
-        secret = await _create_secret(pg_session, owner_id, "Private Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Private Secret"
+        )
 
         # Other user cannot access
         with pytest.raises(PermissionError, match="permission"):
@@ -342,11 +393,13 @@ class TestSecretDeletion:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_delete_secret_soft_deletes_record(self, pg_session: AsyncSession):
+    async def test_delete_secret_soft_deletes_record(self, pg_session: AsyncSession, secrets_service):
         """Test that delete_secret performs soft delete."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
-        secret = await _create_secret(pg_session, owner_id, "Test Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Test Secret"
+        )
 
         result = await service.delete_secret(pg_session, secret.id, owner_id, False, False)
 
@@ -362,11 +415,13 @@ class TestSecretDeletion:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_delete_secret_removes_ssm_parameter(self, pg_session: AsyncSession):
+    async def test_delete_secret_removes_ssm_parameter(self, pg_session: AsyncSession, secrets_service):
         """Test that delete_secret removes SSM parameter."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
-        secret = await _create_secret(pg_session, owner_id, "Test Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Test Secret"
+        )
 
         await service.delete_secret(pg_session, secret.id, owner_id, False, False)
 
@@ -378,12 +433,14 @@ class TestSecretDeletion:
                 await ssm_client.get_parameter(Name=secret.ssm_parameter_name)
 
     @pytest.mark.asyncio
-    async def test_delete_secret_checks_permission(self, pg_session: AsyncSession):
+    async def test_delete_secret_checks_permission(self, pg_session: AsyncSession, secrets_service):
         """Test that only authorized users can delete secrets."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         other_id = await _create_user(pg_session, "other@test.com", "secret-other")
-        secret = await _create_secret(pg_session, owner_id, "Private Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Private Secret"
+        )
 
         # Other user cannot delete
         with pytest.raises(PermissionError, match="permission"):
@@ -391,12 +448,14 @@ class TestSecretDeletion:
 
     @mock_aws
     @pytest.mark.asyncio
-    async def test_admin_can_delete_any_secret_with_admin_mode(self, pg_session: AsyncSession):
+    async def test_admin_can_delete_any_secret_with_admin_mode(self, pg_session: AsyncSession, secrets_service):
         """Test that admins with admin_mode can delete any secret."""
-        service = SecretsService()
+        service = secrets_service
         owner_id = await _create_user(pg_session, "owner@test.com", "secret-owner")
         admin_id = await _create_user(pg_session, "admin@test.com", "secret-admin", role="admin")
-        secret = await _create_secret(pg_session, owner_id, "Owner Secret")
+        secret = await _create_secret(
+            secrets_service=secrets_service, session=pg_session, user_id=owner_id, name="Owner Secret"
+        )
 
         result = await service.delete_secret(pg_session, secret.id, admin_id, False, True)
 
@@ -440,25 +499,3 @@ async def _create_user(
     user_id = result.scalar_one()
     await session.commit()
     return user_id
-
-
-@mock_aws
-async def _create_secret(
-    session: AsyncSession,
-    user_id: str,
-    name: str,
-    secret_value: str = "test-secret-value",
-) -> Secret:
-    """Create a test secret and return it."""
-    from playground_backend.models.secret import SecretCreate, SecretType
-
-    service = SecretsService()
-
-    data = SecretCreate(
-        name=name,
-        description=f"Test secret: {name}",
-        secret_type=SecretType.FOUNDRY_CLIENT_SECRET,
-        secret_value=secret_value,
-    )
-
-    return await service.create_secret(session, user_id, data)

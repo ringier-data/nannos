@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from deepagents import CompiledSubAgent
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from ..a2a.models import LocalSubAgentConfig
+from ..a2a_utils.models import LocalSubAgentConfig
 
 logger = logging.getLogger(__name__)
 
