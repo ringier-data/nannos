@@ -65,8 +65,8 @@ env = [
   "OIDC_ISSUER=https://login.alloy.ch/realms/a2a",
   # DynamoDB Configuration
   "AWS_REGION=eu-central-1",
-  "DYNAMODB_USERS_TABLE=test-alloy-infrastructure-agents-users",
-  "DYNAMODB_SESSIONS_TABLE=test-alloy-infrastructure-agents-chat-ui-sessions",
+  "DYNAMODB_USERS_TABLE=test-nannos-infrastructure-agents-users",
+  "DYNAMODB_SESSIONS_TABLE=test-nannos-infrastructure-agents-chat-ui-sessions",
   # Orchestrator Configuration
   "ORCHESTRATOR_CLIENT_ID=orchestrator",
   "ORCHESTRATOR_BASE_DOMAIN=localhost:10001",

@@ -19,7 +19,7 @@ Configuration Flow:
 5. Agent uses secret for OAuth2 authentication with Foundry
 
 Environment Variables Required:
-- SSM_VAULT_PREFIX: Prefix for SSM parameter paths (e.g., "/alloy/infrastructure-agents/vault")
+- SSM_VAULT_PREFIX: Prefix for SSM parameter paths (e.g., "/nannos/infrastructure-agents/vault")
 - AWS_REGION: AWS region for SSM (default: "eu-central-1")
 """
 
@@ -83,7 +83,7 @@ class FoundryLocalAgentRunnable(CostTrackingMixin, LocalA2ARunnable):
                 description="Creates Jira tickets in Foundry ontology",
                 hostname="https://blumen.palantirfoundry.de",
                 client_id="my-client-id",
-                client_secret_ref="/alloy/infrastructure-agents/vault/foundry/jira-client-secret",
+                client_secret_ref="/nannos/infrastructure-agents/vault/foundry/jira-client-secret",
                 ontology_rid="ri.ontology.main.ontology.xxx",
                 query_api_name="a2ATicketWriterAgent",
                 scopes=["api:use-ontologies-write"],

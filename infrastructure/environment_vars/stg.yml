@@ -2,7 +2,7 @@
 domain_prefix: 's.'
 langsmith_tracing: true
 log_level: 'INFO'
-langsmith_project: stg-alloy-agent-framework
+langsmith_project: stg-nannos-agent-framework
 budget_monthly_token_limit: 100000000
 rds_backup_retention_in_days: 0
 rds_instance_class: "db.t4g.micro"

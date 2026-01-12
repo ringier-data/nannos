@@ -56,7 +56,7 @@ def dynamodb_table():
 
         # Create the table matching the CloudFormation config
         table = dynamodb.create_table(
-            TableName="dev-alloy-infrastructure-agents-langgraph-checkpoints",
+            TableName="dev-nannos-infrastructure-agents-langgraph-checkpoints",
             BillingMode="PAY_PER_REQUEST",
             AttributeDefinitions=[
                 {"AttributeName": "PK", "AttributeType": "S"},
@@ -67,7 +67,7 @@ def dynamodb_table():
 
         # Wait for table to be ready
         table.meta.client.get_waiter("table_exists").wait(
-            TableName="dev-alloy-infrastructure-agents-langgraph-checkpoints"
+            TableName="dev-nannos-infrastructure-agents-langgraph-checkpoints"
         )
 
         yield table

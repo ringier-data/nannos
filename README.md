@@ -1,7 +1,7 @@
-# rcplus-alloy-infrastructure-agents
+# rcplus-nannos-infrastructure-agents
 
 Current version: **v0.0.0**
 
 ## Description
 
-Infrastructure for Alloy Agents Framework
+Infrastructure for Nannos Agents Framework

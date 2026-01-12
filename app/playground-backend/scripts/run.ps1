@@ -66,7 +66,7 @@ else {
 
 # Set AWS profile for SSO
 if (-not $env:AWS_PROFILE) {
-    $env:AWS_PROFILE = "alloy-dev-developer"
+    $env:AWS_PROFILE = "nannos-dev-developer"
     Write-Host "Using AWS profile: $env:AWS_PROFILE" -ForegroundColor Cyan
 }
 

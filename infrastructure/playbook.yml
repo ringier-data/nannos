@@ -6,7 +6,7 @@
     gather_facts: false
     vars:
       aws_region: 'eu-central-1'
-      project_id: 'alloy'
+      project_id: 'nannos'
       project_version: 0.0.0
       software_component: 'infrastructure-agents'
     pre_tasks:

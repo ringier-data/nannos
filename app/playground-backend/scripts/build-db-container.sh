@@ -16,10 +16,10 @@ export SCRIPTS=../../infrastructure/roles/basis/files/ddl/scripts
 
 ## === PREPARE ===
 SOFTWARE_COMPONENT=infrastructure-agents
-IMAGE_NAME=alloy-$SOFTWARE_COMPONENT-test-database
+IMAGE_NAME=nannos-$SOFTWARE_COMPONENT-test-database
 
 NETWORK_NAME="build-db-container-network$RANDOM"
-DB_CONTAINER_NAME="alloy-$SOFTWARE_COMPONENT-test-db$RANDOM"
+DB_CONTAINER_NAME="nannos-$SOFTWARE_COMPONENT-test-db$RANDOM"
 IMAGE_TAG=$IMAGE_NAME:latest
 CLONES=$1
 
