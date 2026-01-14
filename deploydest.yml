@@ -1,6 +1,6 @@
 ---
 account_groups:
-  - alloy
+  - nannos
 environments:
 
   - dev
