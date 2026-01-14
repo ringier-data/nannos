@@ -23,7 +23,14 @@ if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
 
 # Model type literal for type safety
-ModelType = Literal["gpt4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-haiku-4-5"]
+ModelType = Literal[
+    "gpt4o",
+    "gpt-4o-mini",
+    "claude-sonnet-4.5",
+    "claude-haiku-4-5",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+]
 
 
 @dataclass

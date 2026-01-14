@@ -421,6 +421,7 @@ if [ "$BACKEND_ENV" = "local" ]; then
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
+    
     popd > /dev/null
     
     start_component "backend" "app/playground-backend" "uv run --env-file .env python app.py"
@@ -524,6 +525,12 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
         exit 1
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
+    
+    if ! GCP_KEY=$(aws ssm get-parameter --name /alloy/infrastructure-agents/gcp-key --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch GCP_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "GCP_KEY" "'$GCP_KEY'"
     
     popd > /dev/null
     

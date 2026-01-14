@@ -11,6 +11,7 @@ dependencies = [
     "httpx>=0.28.1",
     "langchain>=1.0.0",
     "langchain-google-genai>=2.0.10",
+    "google-auth>=2.36.0",
     "langchain-openai>=0.1.0",
     "pydantic>=2.10.6",
     "pyjwt>=2.10.1",

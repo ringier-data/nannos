@@ -379,12 +379,24 @@ class GraphFactory:
         """Create a graph for the given model type.
 
         Args:
-            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
+            model_type: The type of model
 
         Returns:
             CompiledStateGraph: The newly created graph
         """
         model = self._get_or_create_model(model_type)
+
+        # Bind built-in tools for Gemini models
+        # Google Search and Code Execution are always enabled for Gemini
+        if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+            logger.info("Binding built-in tools to Gemini model: google_search, code_execution")
+            model = model.bind_tools(
+                [
+                    {"google_search": {}},
+                    {"code_execution": {}},
+                ]
+            )
+
         middleware = self._create_middleware_stack()
 
         # Ensure store is initialized before creating graph (required for longterm memory)
@@ -409,7 +421,7 @@ class GraphFactory:
         static_tools_list = self.get_static_tools()
 
         # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
-        # Use AutoStrategy for Bedrock models (more efficient)
+        # Use AutoStrategy for Bedrock and Gemini models (more efficient, handles structured output natively)
         if model_type in ("gpt4o", "gpt-4o-mini"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
         else:
