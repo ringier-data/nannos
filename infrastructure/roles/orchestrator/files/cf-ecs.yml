@@ -47,6 +47,7 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_jwt_secret_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_docstore_password }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_gcp_key }}'
               - Sid: "GetProjectSsmParams"
                 Effect: "Allow"
                 Action:
@@ -140,6 +141,12 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
                   - 'arn:aws:bedrock:*::foundation-model/*'
+              - Sid: 'MarketplaceModelAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'aws-marketplace:ViewSubscriptions'
+                  - 'aws-marketplace:Subscribe'
+                Resource: '*'
               - Sid: 'DecryptionUsingKmsKey'
                 Effect: 'Allow'
                 Action:
@@ -163,7 +170,7 @@ Resources:
         - { Key: 'Version', Value: 'v{{ project_version }}' }
         - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
 
-  # Task Definition for Orchestrator Agent (single container + logs router)
+  # Task Definition for Orchestrator Agent (single container)
   OrchestratorAgentTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -177,16 +184,11 @@ Resources:
       RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
       ContainerDefinitions:
         - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-agent'
-          DependsOn:
-            - ContainerName: '{{ project_id }}-logs-router'
-              Condition: 'START'
           Image: '{{ orchestrator_agent_docker_image }}'
           Essential: true
           Interactive: true
           PortMappings:
             - { ContainerPort: '{{ orchestrator_agent_public_api_port }}', Protocol: 'tcp' }
-          LogConfiguration:
-            LogDriver: 'awsfirelens'
           Environment:
             - { Name: 'LOG_MODE', Value: 'JSON' }
             - { Name: 'LOG_LEVEL', Value: '{{ log_level }}' }
@@ -231,12 +233,16 @@ Resources:
             - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
             - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
             - { Name: "MAX_RECURSION_LIMIT", Value: '{{ max_recursion_limit }}' }
+            - { Name: "GOOGLE_CLOUD_PROJECT", Value: '{{ gcp_project_id }}' }
+            - { Name: "GOOGLE_CLOUD_LOCATION", Value: '{{ gcp_location }}' }
+            - { Name: "GOOGLE_GENAI_USE_VERTEXAI", Value: 'true' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
             - { Name: 'JWT_SECRET_KEY', ValueFrom: '{{ ssmkey_orchestrator_jwt_secret_key }}' }
             - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_oidc_client_secret }}' }
             - { Name: 'POSTGRES_PASSWORD', ValueFrom: '{{ ssmkey_rds_docstore_password }}' }
+            - { Name: "GCP_KEY", ValueFrom: '{{ ssmkey_gcp_key }}' }
             - {
                 Name: "POSTGRES_SSL_CA",
                 ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",
@@ -246,33 +252,6 @@ Resources:
             Interval: 60
             Retries: 3
             StartPeriod: 60
-            Timeout: 5
-        # Container 2: Logs Router (FluentBit sidecar)
-        - Name: '{{ project_id }}-logs-router'
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
-          Essential: true
-          Environment:
-            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
-            - { Name: 'ENV', Value: '{{ env }}' }
-            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
-            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
-            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
-            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}-agents.ecs.{{ software_component }}.{{ env }}-orchestrator' }
-          FirelensConfiguration:
-            Type: 'fluentbit'
-            Options:
-              enable-ecs-log-metadata: false
-          LogConfiguration:
-            LogDriver: 'awslogs'
-            Options:
-              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
-              awslogs-region: !Sub '${AWS::Region}'
-              awslogs-stream-prefix: '{{ software_component }}-orchestrator'
-          HealthCheck:
-            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
-            Interval: 30
-            Retries: 2
-            StartPeriod: 30
             Timeout: 5
 
   OrchestratorSecurityGroup:

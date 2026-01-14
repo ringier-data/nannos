@@ -28,8 +28,8 @@ class SecretsService:
         """
         self.session = get_session()
         self.region_name = os.environ.get("AWS_REGION", "eu-central-1")
-        self.ssm_vault_prefix = os.environ.get("SSM_VAULT_PREFIX", "/alloy/infrastructure-agents/vault")
-        self.kms_key_id = os.environ.get("KMS_VAULT_KEY_ID", "alias/dev-alloy-sensitive-data-kms-key")
+        self.ssm_vault_prefix = os.environ.get("SSM_VAULT_PREFIX", "/nannos/infrastructure-agents/vault")
+        self.kms_key_id = os.environ.get("KMS_VAULT_KEY_ID", "alias/dev-nannos-sensitive-data-kms-key")
         self._repo = secrets_repository
 
     def set_repository(self, secrets_repository):

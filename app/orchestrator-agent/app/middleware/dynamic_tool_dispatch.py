@@ -172,17 +172,48 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         }
         return enhanced_tool
 
+    def _clean_schema_properties(self, properties: dict[str, Any]) -> dict[str, Any]:
+        """Recursively remove invalid property schemas.
+
+        Gemini rejects schemas with None values, empty dicts, or {default: None}.
+
+        Args:
+            properties: Properties dict from JSON Schema
+
+        Returns:
+            Cleaned properties dict
+        """
+        if not isinstance(properties, dict):
+            return properties
+
+        cleaned = {}
+        for key, value in properties.items():
+            # Skip invalid schemas that Gemini rejects
+            if value is None or (isinstance(value, dict) and (len(value) == 0 or value == {"default": None})):
+                continue
+
+            # Recursively clean nested schemas
+            if isinstance(value, dict):
+                value_copy = dict(value)
+                if "properties" in value_copy:
+                    value_copy["properties"] = self._clean_schema_properties(value_copy["properties"])
+                if (
+                    "items" in value_copy
+                    and isinstance(value_copy["items"], dict)
+                    and "properties" in value_copy["items"]
+                ):
+                    value_copy["items"]["properties"] = self._clean_schema_properties(value_copy["items"]["properties"])
+                cleaned[key] = value_copy
+            else:
+                cleaned[key] = value
+
+        return cleaned
+
     def _validate_tool_schema(self, tool_dict: dict[str, Any]) -> dict[str, Any]:
-        """Validate and fix tool schema for OpenAI API compatibility.
+        """Validate and fix tool schema for OpenAI and Gemini API compatibility.
 
-        OpenAI requires that if a 'parameters' field is present, it must be a valid
-        JSON Schema object with a 'properties' field (even if empty). MCP tools
-        sometimes have missing or invalid parameters schemas.
-
-        This validation is critical for streaming SSE responses. If a tool schema
-        is invalid, OpenAI returns a 400 error before streaming begins, causing
-        the A2A server to return JSON instead of SSE, which breaks A2A clients
-        expecting text/event-stream responses.
+        OpenAI requires valid JSON Schema with 'properties' field. Gemini is stricter
+        and rejects schemas with None values or incomplete definitions.
 
         Args:
             tool_dict: Tool in OpenAI dict format
@@ -190,21 +221,31 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         Returns:
             Tool dict with validated parameters schema
         """
-        function_dict = tool_dict.get("function", {})
+        # Ensure function key exists
+        if "function" not in tool_dict:
+            tool_dict = {"function": tool_dict, "type": "function"}
+
+        function_dict = tool_dict["function"]
         parameters = function_dict.get("parameters")
 
-        # If parameters is missing or not a dict, set it to an empty object schema
+        # Ensure parameters has valid structure
         if parameters is None or not isinstance(parameters, dict):
-            function_dict["parameters"] = {
-                "type": "object",
-                "properties": {},
-            }
-        # If parameters exists but missing 'properties', add it
+            function_dict["parameters"] = {"type": "object", "properties": {}}
         elif "properties" not in parameters:
             parameters["properties"] = {}
 
-        # Ensure the updated function dict is in the tool dict
-        tool_dict["function"] = function_dict
+        # Clean invalid properties and sync required array
+        if "properties" in function_dict["parameters"]:
+            original_props = function_dict["parameters"]["properties"]
+            cleaned_props = self._clean_schema_properties(original_props)
+            function_dict["parameters"]["properties"] = cleaned_props
+
+            # Remove cleaned properties from required array
+            if "required" in function_dict["parameters"]:
+                function_dict["parameters"]["required"] = [
+                    field for field in function_dict["parameters"]["required"] if field in cleaned_props
+                ]
+
         return tool_dict
 
     def _get_tools_as_dicts(
@@ -466,7 +507,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         # Override request with user's tools (dict format bypasses validation)
         # Cast needed because list is invariant in Python typing
-        return await handler(request.override(tools=cast(list[BaseTool | dict], tool_dicts)))
+        return await handler(request.override(tools=tool_dicts))
 
     # =========================================================================
     # Tool Call Interception - Dynamic Dispatch WITHOUT execute()

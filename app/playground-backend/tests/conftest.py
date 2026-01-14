@@ -594,7 +594,7 @@ def postgres_template():
     # Get migrations directory path - now in infrastructure
     # Use absolute path from this file's location
     tests_dir = os.path.dirname(os.path.abspath(__file__))
-    # Go up: tests -> playground-backend -> app -> rcplus-alloy-infrastructure-agents
+    # Go up: tests -> playground-backend -> app -> rcplus-nannos-infrastructure-agents
     repo_root = os.path.abspath(os.path.join(tests_dir, "..", "..", ".."))
     migrations_dir = os.path.join(repo_root, "infrastructure", "roles", "basis", "files", "ddl", "scripts")
     migrations_dir = os.path.normpath(os.path.realpath(migrations_dir))

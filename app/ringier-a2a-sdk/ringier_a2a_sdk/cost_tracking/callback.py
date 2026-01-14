@@ -133,11 +133,17 @@ class CostTrackingCallback(BaseCallbackHandler):
             response_metadata: Response metadata dict
 
         Returns:
-            Provider name ('bedrock_converse', 'openai', 'google', etc.)
+            Provider name ('bedrock_converse', 'openai', 'google_genai', etc.')
         """
         # Check for explicit provider field
         if "model_provider" in response_metadata:
             return response_metadata["model_provider"]
+
+        # Check for Vertex AI Gemini specific fields (before generic checks)
+        if any(
+            key in response_metadata for key in ["prompt_token_count", "candidates_token_count", "thoughts_token_count"]
+        ):
+            return "google_genai"
 
         # Infer from other fields
         if "system_fingerprint" in response_metadata:

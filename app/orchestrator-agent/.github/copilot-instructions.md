@@ -120,9 +120,22 @@ Fallback to direct pytest commands when needed:
 
 LangSmith trace headers MUST be injected dynamically per-request using httpx event hooks, not at client initialization. Use `event_hooks={"request": [self._inject_trace_headers]}` where the hook calls `get_current_run_tree().to_headers()` to get current trace context. Static injection would use stale context.
 
-### Checkpoint Namespace Isolation (app/backends/dynamodb_checkpointer.py)
+### Checkpoint Isolation via Unique thread_id (app/agents/dynamic_agent.py)
 
-Orchestrator and sub-agents share the same DynamoDB checkpoint table and the same context_id (conversation_id / thread_id) but use `checkpoint_ns` to isolate conversation histories. Without this, MCP tool calls from sub-agents would appear in orchestrator conversations. Always include `__pregel_checkpointer` in config to prevent LangGraph from misinterpreting the namespace.
+**ALL sub-agents (dynamic AND remote) MUST use unique configurable thread_id values** to achieve complete checkpoint isolation from the orchestrator. This is the PRIMARY isolation mechanism, not `checkpoint_ns`.
+
+Why thread_id is required:
+- checkpoint_ns alone is insufficient
+- Without unique thread_id, sub-agents could load orchestrator's checkpoint history, causing "missing tool_result" errors
+- **CRITICAL**: All agents share the SAME DynamoDB table (`dev-alloy-infrastructure-agents-langgraph-checkpoints`)
+
+Thread ID patterns:
+- **Dynamic sub-agents**: `{context_id}::dynamic-{agent_name}` (app/agents/dynamic_agent.py)
+- **Remote A2A agents**: `{context_id}::{checkpoint_ns}` (ringier_a2a_sdk/agent/langgraph_bedrock.py)
+  - agent-creator: `{context_id}::agent-creator`
+  - alloy-agent: `{context_id}::alloy-agent`
+
+Always include `__pregel_checkpointer` in config to prevent LangGraph from misinterpreting checkpoint_ns as a subgraph identifier.
 
 ### Graph Caching: One Per Model Type (app/core/graph_factory.py)
 

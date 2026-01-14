@@ -494,13 +494,26 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
             agent_input = {"messages": [HumanMessage(content=content)]}
 
-            # Use context_id as thread_id for conversation continuity when checkpointer is available
-            # CRITICAL: Use checkpoint_ns to isolate dynamic sub-agent checkpoints from orchestrator.
-            # The orchestrator and dynamic sub-agents share the same DynamoDB table, so we namespace
-            # sub-agent checkpoints to prevent internal messages (like tool calls) from
-            # leaking into the orchestrator's conversation history.
+            # CRITICAL: Use unique thread_id for checkpoint isolation from orchestrator.
+            # The orchestrator and dynamic sub-agents share the same DynamoDB checkpointer instance,
+            # so we MUST use different thread_id values to prevent checkpoint pollution, since
+            # for some reason using only checkpoint_ns is insufficient to isolate checkpoints.
+            #
+            # Format: {context_id}::dynamic-{agent_name}
+            # - Maintains relationship to parent conversation via context_id prefix
+            # - Ensures complete isolation via unique partition key
+            # - Enables multi-turn conversations within each sub-agent
+            #
+            # Note: __pregel_checkpointer is required to prevent LangGraph from interpreting
+            # checkpoint_ns as a subgraph identifier (see LangGraph pregel/main.py:1244)
             config: Dict[str, Any] = (
-                {"configurable": {"thread_id": context_id, "checkpoint_ns": f"dynamic-{self.name}"}}
+                {
+                    "configurable": {
+                        "thread_id": f"{context_id}::dynamic-{self.name}",
+                        "checkpoint_ns": f"dynamic-{self.name}",
+                        "__pregel_checkpointer": self.checkpointer,
+                    }
+                }
                 if context_id and self.checkpointer
                 else {}
             )

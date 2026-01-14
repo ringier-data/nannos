@@ -19,19 +19,19 @@ class DynamoDBConfig(BaseModel):
 
     region: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "eu-central-1"))
     users_table: str = Field(
-        default_factory=lambda: os.getenv("DYNAMODB_USERS_TABLE", "dev-alloy-infrastructure-agents-users")
+        default_factory=lambda: os.getenv("DYNAMODB_USERS_TABLE", "dev-nannos-infrastructure-agents-users")
     )
     sessions_table: str = Field(
-        default_factory=lambda: os.getenv("DYNAMODB_SESSIONS_TABLE", "dev-alloy-infrastructure-agents-chat-ui-sessions")
+        default_factory=lambda: os.getenv("DYNAMODB_SESSIONS_TABLE", "dev-nannos-infrastructure-agents-chat-ui-sessions")
     )
     conversations_table: str = Field(
         default_factory=lambda: os.getenv(
-            "DYNAMODB_UI_CONVERSATIONS_TABLE", "dev-alloy-infrastructure-agents-chat-ui-conversations"
+            "DYNAMODB_UI_CONVERSATIONS_TABLE", "dev-nannos-infrastructure-agents-chat-ui-conversations"
         )
     )
     messages_table: str = Field(
         default_factory=lambda: os.getenv(
-            "DYNAMODB_UI_MESSAGES_TABLE", "dev-alloy-infrastructure-agents-chat-ui-messages"
+            "DYNAMODB_UI_MESSAGES_TABLE", "dev-nannos-infrastructure-agents-chat-ui-messages"
         )
     )
 

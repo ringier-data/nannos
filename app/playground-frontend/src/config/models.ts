@@ -21,6 +21,8 @@ export const MODEL_OPTIONS: ModelOption[] = [
   { value: 'gpt-4o-mini', label: 'GPT-4o Mini', provider: 'Azure OpenAI' },
   { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5', provider: 'AWS Bedrock' },
   { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'AWS Bedrock' },
+  { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview', provider: 'Google Vertex AI' },
+  { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview', provider: 'Google Vertex AI' },
 ] as const;
 
 /**

@@ -23,7 +23,14 @@ if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
 
 # Model type literal for type safety
-ModelType = Literal["gpt4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-haiku-4-5"]
+ModelType = Literal[
+    "gpt4o",
+    "gpt-4o-mini",
+    "claude-sonnet-4.5",
+    "claude-haiku-4-5",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+]
 
 
 @dataclass
@@ -173,7 +180,7 @@ class DynamoDBConfig(BaseModel):
 
     region: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "eu-central-1"))
     users_table: str = Field(
-        default_factory=lambda: os.getenv("DYNAMODB_USERS_TABLE", "dev-alloy-infrastructure-agents-users")
+        default_factory=lambda: os.getenv("DYNAMODB_USERS_TABLE", "dev-nannos-infrastructure-agents-users")
     )
 
 
@@ -195,7 +202,7 @@ class AgentSettings:
 
     # DynamoDB checkpoint configuration
     CHECKPOINT_DYNAMODB_TABLE_NAME = os.getenv(
-        "CHECKPOINT_DYNAMODB_TABLE_NAME", "dev-alloy-infrastructure-agents-langgraph-checkpoints"
+        "CHECKPOINT_DYNAMODB_TABLE_NAME", "dev-nannos-infrastructure-agents-langgraph-checkpoints"
     )
     CHECKPOINT_TTL_DAYS = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
     CHECKPOINT_AWS_REGION = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
@@ -206,7 +213,7 @@ class AgentSettings:
     CHECKPOINT_COMPRESSION_ENABLED = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
 
     # file store configuration
-    DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "dev-alloy-infrastructure-agents-files")
+    DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "dev-nannos-infrastructure-agents-files")
 
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -426,4 +433,4 @@ class AgentSettings:
     @classmethod
     def get_langsmith_project(cls) -> str:
         """Get LangSmith project name for budget tracking."""
-        return os.environ.get("LANGSMITH_PROJECT", "dev-alloy-agent-framework")
+        return os.environ.get("LANGSMITH_PROJECT", "dev-nannos-agent-framework")

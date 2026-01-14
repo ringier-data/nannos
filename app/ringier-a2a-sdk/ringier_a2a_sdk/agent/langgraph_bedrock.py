@@ -367,17 +367,27 @@ class LangGraphBedrockAgent(BaseAgent):
             logger.info(f"Processing query for user {user_config.user_id}")
 
             # Execute graph with thread isolation
-            # CRITICAL: Use checkpoint_ns to isolate sub-agent checkpoints from orchestrator.
-            # The orchestrator and sub-agents share the same DynamoDB table, so we namespace
-            # sub-agent checkpoints to prevent internal messages (like MCP tool calls) from
-            # leaking into the orchestrator's conversation history.
+            # CRITICAL: Use UNIQUE thread_id to isolate sub-agent checkpoints from orchestrator.
+            # All agents (orchestrator, dynamic sub-agents, remote A2A agents) share the SAME
+            # DynamoDB table, so we MUST use different thread_id values to prevent checkpoint
+            # pollution and "missing tool_result" errors.
+            #
+            # For some reason the checkpoint_ns alone is no longer sufficient - the configurable thread_id must also be
+            # unique to ensure complete isolation.
+            #
+            # Format: {context_id}::{checkpoint_ns}
+            # - Maintains relationship to conversation via context_id prefix
+            # - Ensures complete isolation via unique partition key
+            # - Consistent with dynamic sub-agent pattern
+            #
             # IMPORTANT: Must include __pregel_checkpointer in config to prevent LangGraph from
             # interpreting checkpoint_ns as a subgraph identifier (see LangGraph pregel/main.py:1244)
+            checkpoint_ns = self._get_checkpoint_namespace()
             config = self.create_runnable_config(
                 user_id=user_config.user_id,
                 conversation_id=task.context_id,
-                thread_id=task.context_id,
-                checkpoint_ns=self._get_checkpoint_namespace(),
+                thread_id=f"{task.context_id}::{checkpoint_ns}",  # Unique thread_id for isolation
+                checkpoint_ns=checkpoint_ns,
                 checkpointer=self._checkpointer,
             )
 

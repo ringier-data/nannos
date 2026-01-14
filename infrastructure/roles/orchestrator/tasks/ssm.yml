@@ -63,3 +63,25 @@
       Environment: '{{ env }}'
       Repository: '{{ git_info.repo_name }}'
       Version: '{{ project_version }}'
+
+
+- name: 'get the GCP key from vault'
+  set_fact:
+    gcp_key_obj: '{{ gcp_key }}'
+
+- name: 'upsert the GCP credentials into SSM parameter store'
+  no_log: '{{ ansible_verbosity < 3 }}'
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: 'changed'
+    region: '{{ aws_region }}'
+    name: '{{ ssmkey_gcp_key }}'
+    description: 'Gemini API credentials for {{ project_id }}'
+    string_type: 'SecureString'
+    key_id: 'alias/gov-rcplus-devops-secrets'
+    value: '{{ gcp_key_obj | to_json }}'
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{ software_component }}-gcp-key'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
