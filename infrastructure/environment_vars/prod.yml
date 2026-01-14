@@ -1,1 +1,8 @@
 ---
+domain_prefix: 'p.'
+langsmith_tracing: true
+log_level: 'INFO'
+langsmith_project: prod-nannos-agent-framework
+budget_monthly_token_limit: 100000000
+rds_backup_retention_in_days: 7
+rds_instance_class: "db.t4g.micro"

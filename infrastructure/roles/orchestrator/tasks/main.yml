@@ -1,0 +1,6 @@
+---
+
+- import_tasks: 'ssm.yml'
+- import_tasks: 'storage.yml'
+- import_tasks: 'dynamodb.yml'
+- import_tasks: 'ecs-service.yml'

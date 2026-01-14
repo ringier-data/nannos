@@ -1,0 +1,61 @@
+---
+
+
+- name: Get Cloudfront SSL certificate
+  command: aws cloudformation list-exports --region us-east-1 --query 'Exports[?Name==`{{ project_id }}-certificate-domain-wildcard`].Value' --output text
+  register: r_ssl_certificate
+  failed_when: r_ssl_certificate.stdout == ""
+
+- name: 'gather shared alb stack outputs'
+  ringier.aws_cicd.gather_stack_outputs:
+    stack_name: '{{ env }}-{{ project_id }}-shared-alb-v2'
+  register: shared_alb_stack
+
+- set_fact:
+    cloudfront_ssl_certificate: '{{ r_ssl_certificate.stdout }}'
+    cloudformation_template: '{{ role_path }}/files/cf-cloudfront.yml'
+    # Add seconds so the backend app connection keep-alive is longer than the ALB
+    alb_http_keepalive_timeout_seconds: '{{ shared_alb_stack.outputs.PublicAlbConnectionTimeout | int + 2 }}'
+
+- name: 'set cloudformation template'
+  set_fact:
+    cloudformation_template: '{{ role_path }}/files/cf-cloudfront.yml'
+
+- name: 'deploy CloudFront'
+  include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-playground-cloudfront'
+    template: '{{ cloudformation_template }}'
+
+- name: get cloudfront distribution id
+  command: aws cloudformation describe-stacks --region eu-central-1 --stack-name '{{ env }}-{{ project_id }}-{{ software_component }}-playground-cloudfront' --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' --output text
+  register: r_cloudfront_distribution_id  
+
+- name: set cloudfront distribution id fact
+  set_fact:
+    cloudfront_distribution_id: '{{ r_cloudfront_distribution_id.stdout }}'
+    bucket_name: '{{ env }}-{{ project_id }}-nannos-frontend'
+
+- name: 'install playground-frontend deps'
+  no_log: "{{ ansible_verbosity < 3 }}"
+  args:
+    chdir: "{{ playbook_dir }}/../app/playground-frontend"
+  command: npm ci
+
+- name: 'build playground-frontend'
+  no_log: "{{ ansible_verbosity < 3 }}"
+  args:
+    chdir: "{{ playbook_dir }}/../app/playground-frontend"
+  environment:
+    VITE_LANGSMITH_ORGANIZATION_ID: "eacaca37-6472-40d5-80b4-9206d058caef"
+    VITE_LANGSMITH_PROJECT_ID: "052ac0c2-787f-44e2-810a-34d8b7845a09"
+  command: npm run build
+
+- name: 'sync playground-frontend build to S3'
+  args:
+    chdir: "{{ playbook_dir }}/../app/playground-frontend"
+  command: aws s3 sync --quiet ./dist s3://{{ bucket_name }} --delete
+
+- name: 'Invalidate CloudFront'
+  shell: aws cloudfront create-invalidation --distribution-id {{ cloudfront_distribution_id }} --paths "/*"

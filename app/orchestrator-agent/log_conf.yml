@@ -1,0 +1,37 @@
+version: 1
+disable_existing_loggers: False
+formatters:
+  default:
+    "()": "rcplus_alloy_common.logging.CustomJsonFormatter"
+    fmt: "%(asctime)s %(levelname)s %(name)s %(message)s"
+    rename_fields:
+      levelname: level
+      asctime: time
+  access:
+    "()": "rcplus_alloy_common.logging.CustomJsonFormatter"
+    fmt: "%(asctime)s %(levelname)s %(name)s %(message)s"
+    rename_fields:
+      levelname: level
+      asctime: time
+handlers:
+  default:
+    formatter: default
+    class: logging.StreamHandler
+    stream: ext://sys.stderr
+  access:
+    formatter: access
+    class: logging.StreamHandler
+    stream: ext://sys.stdout
+loggers:
+  uvicorn:
+    handlers:
+      - default
+    level: INFO
+    propagate: False
+  uvicorn.error:
+    level: INFO
+  uvicorn.access:
+    handlers:
+      - access
+    level: INFO
+    propagate: False

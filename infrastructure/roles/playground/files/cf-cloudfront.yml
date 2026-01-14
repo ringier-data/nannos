@@ -1,0 +1,219 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Nannos - Playground CloudFront (v{{ project_version }})'
+
+Resources:
+    
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        HttpVersion: 'http2and3'
+        IPV6Enabled: true
+        Origins:
+          - Id: 'backend'
+            DomainName: !ImportValue '{{ project_id }}-public-alb-v2-dns'
+            CustomOriginConfig:
+              OriginProtocolPolicy: 'https-only'
+              OriginKeepaliveTimeout: '{{ [60, ((alb_http_keepalive_timeout_seconds | int) - 2 )] | min }}'
+          - Id: 'frontend'
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}'
+        Enabled: true
+        Comment: 'Nannos FE and BE'
+        Aliases:
+          - '{{ chat_ui_fqdn }}'
+        CacheBehaviors:
+          - TargetOriginId: 'backend'
+            PathPattern: '/api/*'
+            Compress: true
+            CachePolicyId: !ImportValue '{{ project_id }}-common-no-cache-policy-id'
+            OriginRequestPolicyId: !ImportValue  '{{ project_id }}-common-forward-all-origin-request-policy-id'
+            ViewerProtocolPolicy: 'redirect-to-https'
+            AllowedMethods:
+              - 'HEAD'
+              - 'GET'
+              - 'OPTIONS'
+              - 'PUT'
+              - 'PATCH'
+              - 'POST'
+              - 'DELETE'
+          - TargetOriginId: 'backend'
+            PathPattern: '/mcp'
+            Compress: true
+            CachePolicyId: !ImportValue '{{ project_id }}-common-no-cache-policy-id'
+            OriginRequestPolicyId: !ImportValue  '{{ project_id }}-common-forward-all-origin-request-policy-id'
+            ViewerProtocolPolicy: 'redirect-to-https'
+            AllowedMethods:
+              - 'HEAD'
+              - 'GET'
+              - 'OPTIONS'
+              - 'PUT'
+              - 'PATCH'
+              - 'POST'
+              - 'DELETE'
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          TargetOriginId: 'frontend'
+          Compress: true
+          CachePolicyId: !ImportValue '{{ project_id }}-common-static-fe-app-cache-policy-id'
+          OriginRequestPolicyId: !ImportValue '{{ project_id }}-common-static-fe-app-origin-request-policy-id'
+          ViewerProtocolPolicy: 'redirect-to-https'
+          ResponseHeadersPolicyId: !Ref FrontendResponseHeaderPolicy
+          AllowedMethods:
+            - 'GET'
+            - 'HEAD'
+          FunctionAssociations:
+          - EventType: viewer-request
+            FunctionARN: !GetAtt SpaIndexRewrite.FunctionMetadata.FunctionARN
+
+        PriceClass: 'PriceClass_100'
+        ViewerCertificate:
+          AcmCertificateArn: '{{ cloudfront_ssl_certificate }}'
+          SslSupportMethod: 'sni-only'
+          MinimumProtocolVersion: 'TLSv1.2_2021'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-nannos-cf' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: '@static@' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  Route53RecordSet:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      Name: '{{ chat_ui_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id'
+      Type: 'A'
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+  
+  PublicRoute53RecordSetIpv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: '{{ chat_ui_fqdn }}'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id'
+      Type: 'AAAA'
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: 'Z2FDTNDATAQYW2'
+
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: 'Used by CloudFront to access the Nannos Playground frontend S3 bucket'
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: '{{ env }}-{{ project_id }}-nannos-frontend'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'Delete Pull Request Builds'
+            Prefix: .pr-builds/
+            Status: 'Enabled'
+            ExpirationInDays: 90
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-s3-nannos-frontend' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: '{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  CloudFrontS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 's3:GetObject'
+              - 's3:ListBucket'
+            Effect: 'Allow'
+            Resource:
+              - !Sub '${FrontendBucket.Arn}/*'
+              - !Sub '${FrontendBucket.Arn}'
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+
+  FrontendResponseHeaderPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: '{{env}}-{{ project_id }}-{{software_component}}-nannos-cf-response-headers'
+        Comment: 'Add HTTP security headers for the Nannos FE app'
+        CustomHeadersConfig: 
+          Items:
+          - Header: Document-Policy
+            Value: js-profiling
+            Override: false
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            Override: true
+            AccessControlMaxAgeSec: 63072000
+            IncludeSubdomains: true
+            Preload: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            Override: true
+            FrameOption: 'DENY'
+          XSSProtection:
+            Override: true
+            ModeBlock: true
+            Protection: true
+          ReferrerPolicy:
+            Override: true
+            ReferrerPolicy: 'same-origin'
+            
+  SpaIndexRewrite:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: '{{env}}-{{ project_id }}-{{software_component}}-cloudfront-fn-spa-rewrite'
+      AutoPublish: true
+      FunctionCode: |
+        function handler(event) {
+          const request = event.request;
+          const uri = request.uri;
+          
+          // Don't rewrite paths that should be handled by backend cache behaviors
+          // These paths are explicitly routed to backend in CacheBehaviors
+          if (uri.startsWith('/api/') || uri.startsWith('/mcp/')) {
+            return request;
+          }
+          
+          const lastSegment = uri.split('/').pop()
+          
+          // Check whether the final path segment URI is missing a file extension.
+          if (!lastSegment.includes('.')) {
+            request.uri = '/index.html';
+          }
+          
+          return request;
+        }
+      FunctionConfig: 
+        Comment: Rewrites request to /index.html if final path segment is missing a file extension
+        Runtime: cloudfront-js-2.0
+
+Outputs:
+
+  CloudFrontDistributionId:
+    Description: 'Id of the CloudFront Distribution for the Nannos FE and BE'
+    Value: !Ref Distribution
+    Export:
+      Name: '{{ project_id }}-nannos-cloudfront-distribution-id'
+
+  FrontendBucket:
+    Description: 'Name of the bucket for the Nannos frontend'
+    Value: !Ref FrontendBucket
+    Export:
+      Name: '{{ project_id }}-nannos-frontend-bucket'

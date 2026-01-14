@@ -1,0 +1,79 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Shared Infrastructure - S3 storage (v{{ project_version }})'
+
+Resources:
+
+  FilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: '{{ env }}-{{ project_id }}-{{ software_component }}-files'
+      AccelerateConfiguration:
+        AccelerationStatus: 'Suspended'
+      AccessControl: 'Private'
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - 'GET'
+              - 'PUT'
+              - 'POST'
+            AllowedOrigins:
+              - '*'
+            ExposedHeaders:
+              - 'ETag'
+            MaxAge: 3600
+      IntelligentTieringConfigurations:
+        - Id: 'IntelligentTiering'
+          Status: 'Enabled'
+          Tierings:
+            - AccessTier: 'ARCHIVE_ACCESS'
+              Days: 90
+            - AccessTier: 'DEEP_ARCHIVE_ACCESS'
+              Days: 365
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'AbortIncompleteUploadAfterOneDay'
+            Status: 'Enabled'
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: 'DeleteAfterNinetyDays'
+            Status: 'Enabled'
+            ExpirationInDays: 90
+          - Id: 'IntelligentTieringByDefault'
+            Status: 'Enabled'
+            Transitions:
+              - StorageClass: 'INTELLIGENT_TIERING'
+                TransitionInDays: 0
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: 'BucketOwnerEnforced'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+      VersioningConfiguration:
+        Status: 'Suspended'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-files' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+#============================== Outputs ==============================
+Outputs:
+
+  FilesBucketArn:
+    Description: 'Bucket ARN for A2A files'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+    Value: !GetAtt FilesBucket.Arn
+
+  FilesBucketName:
+    Description: 'Bucket name for A2A files'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-files-bucket-name'
+    Value: !Ref FilesBucket

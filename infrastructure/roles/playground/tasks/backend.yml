@@ -1,0 +1,56 @@
+---
+- name: 'copy ringier-a2a-sdk into playground-backend directory'
+  block:
+    # NOTE: necessary until we will distribute ringier-a2a-sdk via a package index
+    - name: 'clean Python cache from source before copying'
+      shell: |
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -name "*.pyc" -delete 2>/dev/null || true
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -name "*.pyo" -delete 2>/dev/null || true
+      changed_when: false
+
+    - name: 'copy ringier-a2a-sdk'
+      synchronize:
+        src: '{{ playbook_dir }}/../app/ringier-a2a-sdk/'
+        dest: '{{ playbook_dir }}/../app/playground-backend/ringier-a2a-sdk/'
+        rsync_opts:
+          - '--exclude=__pycache__'
+          - '--exclude=*.pyc'
+          - '--exclude=*.pyo'
+          - '--exclude=.venv'
+          - '--exclude=.git'
+          - '--exclude=.pytest_cache'
+          - '--exclude=tests'
+          - '--exclude=.mypy_cache'
+          - '--exclude=.ruff_cache'
+          - '--delete'
+
+    - name: 'build and push the Chat UI Docker image to ECR'
+      include_role:
+        name: 'ringier.aws_cicd.build_push_docker_image'
+      vars:
+        ecr_repository_name: '{{ chat_ui_ecr_repository_name }}'
+        code_path: '{{ playbook_dir }}/../app/playground-backend'
+        adhoc_deploy: true
+        docker_build_args:
+          API_PORT: '{{ chat_ui_public_api_port }}'
+  always:
+    - name: 'clean up copied ringier-a2a-sdk'
+      file:
+        path: '{{ playbook_dir }}/../app/playground-backend/ringier-a2a-sdk'
+        state: absent
+
+- name: 'set chat ui docker image fact'
+  set_fact:
+    chat_ui_docker_image: '{{ docker_image_full_name_and_tag }}'
+
+- name: 'set cloudformation template'
+  set_fact:
+    cloudformation_template: '{{ role_path }}/files/cf-ecs.yml'
+
+- name: 'deploy the ECS and adjacent resources'
+  include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-ecs'
+    template: '{{ cloudformation_template }}'

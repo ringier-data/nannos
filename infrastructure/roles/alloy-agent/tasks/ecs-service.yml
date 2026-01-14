@@ -1,0 +1,55 @@
+---
+- name: 'copy ringier-a2a-sdk into alloy-agent directory'
+  block:
+    # NOTE: necessary until we will distribute ringier-a2a-sdk via a package index
+    - name: 'clean Python cache from source before copying'
+      shell: |
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -name "*.pyc" -delete 2>/dev/null || true
+        find {{ playbook_dir }}/../app/ringier-a2a-sdk -name "*.pyo" -delete 2>/dev/null || true
+      changed_when: false
+
+    - name: 'copy ringier-a2a-sdk'
+      synchronize:
+        src: '{{ playbook_dir }}/../app/ringier-a2a-sdk/'
+        dest: '{{ playbook_dir }}/../app/alloy-agent/ringier-a2a-sdk/'
+        rsync_opts:
+          - '--exclude=__pycache__'
+          - '--exclude=*.pyc'
+          - '--exclude=*.pyo'
+          - '--exclude=.venv'
+          - '--exclude=.git'
+          - '--exclude=.pytest_cache'
+          - '--exclude=tests'
+          - '--exclude=.mypy_cache'
+          - '--exclude=.ruff_cache'
+          - '--delete'
+
+    - name: 'build and push the Alloy Agent Docker image to ECR'
+      include_role:
+        name: 'ringier.aws_cicd.build_push_docker_image'
+      vars:
+        ecr_repository_name: '{{ alloy_agent_ecr_repository_name }}'
+        code_path: '{{ playbook_dir }}/../app/alloy-agent'
+        docker_build_args:
+          API_PORT: '{{ alloy_agent_public_api_port }}'
+  always:
+    - name: 'clean up copied ringier-a2a-sdk'
+      file:
+        path: '{{ playbook_dir }}/../app/alloy-agent/ringier-a2a-sdk'
+        state: absent
+
+- name: 'set Alloy Agent docker image fact'
+  set_fact:
+    alloy_agent_docker_image: '{{ docker_image_full_name_and_tag }}'
+
+- name: 'set cloudformation template'
+  set_fact:
+    cloudformation_template: '{{ role_path }}/files/cf-ecs.yml'
+
+- name: 'deploy the ECS and adjacent resources'
+  include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent-ecs'
+    template: '{{ cloudformation_template }}'

@@ -1,0 +1,1570 @@
+"""Service for sub-agent CRUD operations using PostgreSQL."""
+
+import hashlib
+import json
+import logging
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
+from ..models.sub_agent import (
+    SubAgent,
+    SubAgentConfigVersion,
+    SubAgentCreate,
+    SubAgentOwner,
+    SubAgentStatus,
+    SubAgentType,
+    SubAgentUpdate,
+)
+from ..repositories.sub_agent_repository import ApprovalContext
+
+if TYPE_CHECKING:
+    from ..repositories.sub_agent_repository import SubAgentRepository
+
+logger = logging.getLogger(__name__)
+
+
+class SubAgentService:
+    """Service for managing sub-agents in PostgreSQL.
+
+    The data model is normalized:
+    - sub_agents table: metadata only (id, name, owner, type, current_version, default_version)
+    - sub_agent_config_versions table: all configuration data (description, model, config, status)
+
+    When fetching sub-agents, we join with the appropriate version:
+    - For list views: join with current_version to show latest state
+    - For orchestrator: join with default_version to get approved config
+    - For specific version: join with the requested version
+    """
+
+    def __init__(self, sub_agent_repository=None):
+        """Initialize sub-agent service.
+
+        Args:
+            sub_agent_repository: Optional sub-agent repository instance.
+                If None, must be set via set_repository() before use.
+        """
+        self._repo: "SubAgentRepository | None" = sub_agent_repository
+
+    def set_repository(self, sub_agent_repository: "SubAgentRepository") -> None:
+        """Set the sub-agent repository (dependency injection)."""
+        self._repo = sub_agent_repository
+
+    @property
+    def repo(self):
+        """Get the sub-agent repository, raising error if not set."""
+        if self._repo is None:
+            raise RuntimeError("SubAgentRepository not injected. Call set_repository() during initialization.")
+        return self._repo
+
+    async def get_accessible_sub_agents(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        is_admin: bool = False,
+        status_filter: SubAgentStatus | None = None,
+        include_owned: bool = True,
+        activated_only: bool = False,
+    ) -> list[SubAgent]:
+        """Get sub-agents accessible to the user.
+
+        Returns sub-agents that are:
+        - Owned by the user (if include_owned=True)
+        - Public sub-agents (is_public=true)
+        - Assigned to user's groups
+        - All sub-agents if user is admin
+
+        Always joins with current_version to show the latest state.
+        Includes is_activated field showing if user has activated the sub-agent.
+        If activated_only=True, only returns activated sub-agents.
+        """
+        base_select = """
+            SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
+                   sa.created_at, sa.updated_at,
+                   u.email as owner_email, u.first_name, u.last_name,
+                   cv.id as cv_id, cv.version as cv_version,
+                   cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
+                   cv.description as cv_description,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url,
+                   cv.mcp_tools as cv_mcp_tools,
+                   cv.foundry_hostname as cv_foundry_hostname,
+                   cv.foundry_client_id as cv_foundry_client_id,
+                   cv.foundry_client_secret_ref as cv_foundry_client_secret_ref,
+                   s.ssm_parameter_name as cv_foundry_client_secret_ssmkey,  -- needed for the orchestrator
+                   cv.foundry_ontology_rid as cv_foundry_ontology_rid,
+                   cv.foundry_query_api_name as cv_foundry_query_api_name,
+                   cv.foundry_scopes as cv_foundry_scopes,
+                   cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
+                   cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.approved_by_user_id as cv_approved_by_user_id,
+                   cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
+                   cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at,
+                   (usa.sub_agent_id IS NOT NULL) as is_activated
+            FROM sub_agents sa
+            JOIN users u ON sa.owner_user_id = u.id
+            LEFT JOIN sub_agent_config_versions cv 
+                ON sa.id = cv.sub_agent_id AND sa.default_version = cv.version
+            LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
+            LEFT JOIN user_sub_agent_activations usa 
+                ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
+        """
+
+        activation_filter = "AND (usa.sub_agent_id IS NOT NULL)" if activated_only else ""
+
+        if is_admin and status_filter is None:
+            # Admins see all sub-agents
+            query = text(f"""
+                {base_select}
+                WHERE sa.deleted_at IS NULL {activation_filter}
+                ORDER BY sa.updated_at DESC
+            """)
+            result = await db.execute(query, {"user_id": user_id})
+        elif is_admin and status_filter:
+            query = text(f"""
+                {base_select}
+                WHERE cv.status = :status AND sa.deleted_at IS NULL {activation_filter}
+                ORDER BY sa.updated_at DESC
+            """)
+            result = await db.execute(query, {"status": status_filter.value, "user_id": user_id})
+        else:
+            # Non-admins see owned + public + group-assigned sub-agents
+            query_str = f"""
+                SELECT DISTINCT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                       sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
+                       sa.created_at, sa.updated_at,
+                       u.email as owner_email, u.first_name, u.last_name,
+                       cv.id as cv_id, cv.version as cv_version,
+                       cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
+                       cv.description as cv_description,
+                       cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url,
+                       cv.mcp_tools as cv_mcp_tools,
+                       cv.foundry_hostname as cv_foundry_hostname,
+                       cv.foundry_client_id as cv_foundry_client_id,
+                       cv.foundry_client_secret_ref as cv_foundry_client_secret_ref,
+                       s.ssm_parameter_name as cv_foundry_client_secret_ssmkey,  -- needed for the orchestrator
+                       cv.foundry_ontology_rid as cv_foundry_ontology_rid,
+                       cv.foundry_query_api_name as cv_foundry_query_api_name,
+                       cv.foundry_scopes as cv_foundry_scopes,
+                       cv.foundry_version as cv_foundry_version,
+                       cv.pricing_config as cv_pricing_config,
+                       cv.change_summary as cv_change_summary, cv.status as cv_status,
+                       cv.approved_by_user_id as cv_approved_by_user_id,
+                       cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
+                       cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at,
+                       (usa.sub_agent_id IS NOT NULL) as is_activated
+                FROM sub_agents sa
+                JOIN users u ON sa.owner_user_id = u.id
+                LEFT JOIN sub_agent_config_versions cv 
+                    ON sa.id = cv.sub_agent_id AND sa.default_version = cv.version
+                LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
+                LEFT JOIN sub_agent_permissions sap ON sa.id = sap.sub_agent_id
+                LEFT JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
+                LEFT JOIN user_sub_agent_activations usa 
+                    ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
+                WHERE sa.deleted_at IS NULL AND (
+                    (:include_owned AND sa.owner_user_id = :user_id)
+                    OR sa.is_public = TRUE
+                    OR ugm.user_id = :user_id
+                ) {activation_filter}
+            """
+            if status_filter:
+                query_str += "AND cv.status = :status "
+                query_str += "ORDER BY sa.updated_at DESC"
+                query = text(query_str)
+                result = await db.execute(
+                    query,
+                    {"user_id": user_id, "include_owned": include_owned, "status": status_filter.value},
+                )
+            else:
+                query_str += "ORDER BY sa.updated_at DESC"
+                query = text(query_str)
+                result = await db.execute(query, {"user_id": user_id, "include_owned": include_owned})
+
+        rows = result.mappings().all()
+        return [self._row_to_sub_agent_with_version(row) for row in rows]
+
+    async def get_pending_approvals(self, db: AsyncSession) -> list[SubAgent]:
+        """Get all sub-agents with versions pending approval (admin only)."""
+        query = text("""
+            SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
+                   sa.created_at, sa.updated_at,
+                   u.email as owner_email, u.first_name, u.last_name,
+                   cv.id as cv_id, cv.version as cv_version,
+                   cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
+                   cv.description as cv_description,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url,
+                   cv.mcp_tools as cv_mcp_tools,
+                   cv.foundry_hostname as cv_foundry_hostname,
+                   cv.foundry_client_id as cv_foundry_client_id,
+                   cv.foundry_client_secret_ref as cv_foundry_client_secret_ref,
+                   cv.foundry_ontology_rid as cv_foundry_ontology_rid,
+                   cv.foundry_query_api_name as cv_foundry_query_api_name,
+                   cv.foundry_scopes as cv_foundry_scopes,
+                   cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
+                   cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.approved_by_user_id as cv_approved_by_user_id,
+                   cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
+                   cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
+            FROM sub_agents sa
+            JOIN users u ON sa.owner_user_id = u.id
+            JOIN sub_agent_config_versions cv 
+                ON sa.id = cv.sub_agent_id AND sa.current_version = cv.version
+            WHERE cv.status = 'pending_approval' AND sa.deleted_at IS NULL
+            ORDER BY cv.created_at ASC
+        """)
+        result = await db.execute(query)
+        rows = result.mappings().all()
+        return [self._row_to_sub_agent_with_version(row) for row in rows]
+
+    async def get_sub_agent_by_id(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        version: int | None = None,
+    ) -> SubAgent | None:
+        """Get a sub-agent by ID.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID
+            version: If provided, join with this specific version.
+                     Otherwise join with current_version.
+        """
+        query = text("""
+            SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
+                   sa.created_at, sa.updated_at,
+                   u.email as owner_email, u.first_name, u.last_name,
+                   cv.id as cv_id, cv.version as cv_version,
+                   cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
+                   cv.description as cv_description,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
+                   cv.foundry_hostname as cv_foundry_hostname,
+                   cv.foundry_client_id as cv_foundry_client_id,
+                   cv.foundry_client_secret_ref as cv_foundry_client_secret_ref,
+                   cv.foundry_ontology_rid as cv_foundry_ontology_rid,
+                   cv.foundry_query_api_name as cv_foundry_query_api_name,
+                   cv.foundry_scopes as cv_foundry_scopes,
+                   cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
+                   cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.approved_by_user_id as cv_approved_by_user_id,
+                   cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
+                   cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
+            FROM sub_agents sa
+            JOIN users u ON sa.owner_user_id = u.id
+            LEFT JOIN sub_agent_config_versions cv 
+                ON sa.id = cv.sub_agent_id 
+                AND cv.version = COALESCE(:version, sa.current_version)
+            WHERE sa.id = :id
+        """)
+        result = await db.execute(query, {"id": sub_agent_id, "version": version})
+        row = result.mappings().first()
+
+        if not row:
+            return None
+
+        return self._row_to_sub_agent_with_version(row)
+
+    async def get_sub_agent_by_config_version_id(
+        self,
+        db: AsyncSession,
+        config_version_id: int,
+    ) -> SubAgent | None:
+        """Get a sub-agent by config version ID.
+
+        Used by the orchestrator to fetch a specific version for testing.
+        Returns the sub-agent with the specified version's data in config_version.
+        """
+        query = text("""
+            SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
+                   sa.created_at, sa.updated_at,
+                   u.email as owner_email, u.first_name, u.last_name,
+                   cv.id as cv_id, cv.version as cv_version,
+                   cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
+                   cv.description as cv_description,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
+                   cv.foundry_hostname as cv_foundry_hostname,
+                   cv.foundry_client_id as cv_foundry_client_id,
+                   cv.foundry_client_secret_ref as cv_foundry_client_secret_ref,
+                   cv.foundry_ontology_rid as cv_foundry_ontology_rid,
+                   cv.foundry_query_api_name as cv_foundry_query_api_name,
+                   cv.foundry_scopes as cv_foundry_scopes,
+                   cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
+                   cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.approved_by_user_id as cv_approved_by_user_id,
+                   cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
+                   cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
+            FROM sub_agent_config_versions cv
+            JOIN sub_agents sa ON cv.sub_agent_id = sa.id
+            JOIN users u ON sa.owner_user_id = u.id
+            WHERE cv.id = :config_version_id
+        """)
+        result = await db.execute(query, {"config_version_id": config_version_id})
+        row = result.mappings().first()
+
+        if not row:
+            return None
+
+        return self._row_to_sub_agent_with_version(row)
+
+    async def get_sub_agent_by_version_hash(
+        self,
+        db: AsyncSession,
+        version_hash: str,
+    ) -> SubAgent | None:
+        """Get a sub-agent by config version hash.
+
+        Used for playground mode to fetch a specific version by its hash.
+        Returns the sub-agent with the specified version's data.
+        """
+        query = text("""
+            SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
+                   sa.created_at, sa.updated_at,
+                   u.email as owner_email, u.first_name, u.last_name,
+                   cv.id as cv_id, cv.version as cv_version,
+                   cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
+                   cv.description as cv_description,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
+                   cv.foundry_hostname as cv_foundry_hostname,
+                   cv.foundry_client_id as cv_foundry_client_id,
+                   s.ssm_parameter_name as cv_foundry_client_secret_ssmkey,  -- needed for the orchestrator
+                   cv.foundry_ontology_rid as cv_foundry_ontology_rid,
+                   cv.foundry_query_api_name as cv_foundry_query_api_name,
+                   cv.foundry_scopes as cv_foundry_scopes,
+                   cv.foundry_version as cv_foundry_version,
+                   cv.pricing_config as cv_pricing_config,
+                   cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.approved_by_user_id as cv_approved_by_user_id,
+                   cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
+                   cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
+            FROM sub_agent_config_versions cv
+            JOIN sub_agents sa ON cv.sub_agent_id = sa.id
+            JOIN users u ON sa.owner_user_id = u.id
+            LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
+            WHERE cv.version_hash = :version_hash AND cv.deleted_at IS NULL
+        """)
+        result = await db.execute(query, {"version_hash": version_hash})
+        row = result.mappings().first()
+
+        if not row:
+            return None
+
+        return self._row_to_sub_agent_with_version(row)
+
+    async def get_config_versions(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        include_deleted: bool = False,
+    ) -> list[SubAgentConfigVersion]:
+        """Get all configuration versions for a sub-agent.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID
+            include_deleted: If True, include soft-deleted versions
+        """
+        if include_deleted:
+            query = text("""
+                SELECT cv.id, cv.sub_agent_id, cv.version, cv.version_hash, cv.release_number,
+                       cv.description, cv.model, cv.system_prompt, cv.agent_url, cv.mcp_tools, 
+                       cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
+                       s.ssm_parameter_name as foundry_client_secret_ssmkey,
+                       cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
+                       cv.change_summary, cv.status, 
+                       cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
+                FROM sub_agent_config_versions cv
+                LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
+                WHERE cv.sub_agent_id = :sub_agent_id
+                ORDER BY cv.version DESC
+            """)
+        else:
+            query = text("""
+                SELECT cv.id, cv.sub_agent_id, cv.version, cv.version_hash, cv.release_number,
+                       cv.description, cv.model, cv.system_prompt, cv.agent_url, cv.mcp_tools, 
+                       cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
+                       s.ssm_parameter_name as foundry_client_secret_ssmkey,
+                       cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
+                       cv.change_summary, cv.status, 
+                       cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
+                FROM sub_agent_config_versions cv
+                LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
+                WHERE cv.sub_agent_id = :sub_agent_id AND cv.deleted_at IS NULL
+                ORDER BY cv.version DESC
+            """)
+        result = await db.execute(query, {"sub_agent_id": sub_agent_id})
+        rows = result.mappings().all()
+        return [self._row_to_config_version(row) for row in rows]
+
+    async def create_sub_agent(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        data: SubAgentCreate,
+    ) -> SubAgent:
+        """Create a new sub-agent with initial version."""
+        now = datetime.now(timezone.utc)
+
+        # For Foundry agents, validate that all required fields are provided
+        if data.type == SubAgentType.FOUNDRY:
+            missing_fields = []
+            if not data.foundry_hostname:
+                missing_fields.append("foundry_hostname")
+            if not data.foundry_client_id:
+                missing_fields.append("foundry_client_id")
+            if not data.foundry_client_secret_ref:
+                missing_fields.append("foundry_client_secret_ref")
+            if not data.foundry_ontology_rid:
+                missing_fields.append("foundry_ontology_rid")
+            if not data.foundry_query_api_name:
+                missing_fields.append("foundry_query_api_name")
+            if not data.foundry_scopes:
+                missing_fields.append("foundry_scopes")
+
+            if missing_fields:
+                raise ValueError(
+                    f"Missing required Foundry fields: {', '.join(missing_fields)}. "
+                    "All Foundry configuration fields must be provided."
+                )
+
+        # Get actor_sub for audit
+        user_query = text("SELECT sub FROM users WHERE id = :user_id")
+        result = await db.execute(user_query, {"user_id": user_id})
+        actor_sub = result.scalar_one()
+
+        # Insert sub-agent with automatic audit
+        sub_agent_id = await self.repo.create(
+            db=db,
+            actor_sub=actor_sub,
+            fields={
+                "name": data.name,
+                "owner_user_id": user_id,
+                "type": data.type.value,
+                "is_public": data.is_public,
+                "current_version": 1,
+                "created_at": now,
+                "updated_at": now,
+            },
+            returning="id",
+        )
+
+        # Create initial version with all configuration data
+        await self._create_config_version(
+            db,
+            actor_sub,
+            sub_agent_id,
+            1,
+            "Initial version",
+            description=data.description,
+            model=data.model,
+            system_prompt=data.system_prompt,
+            agent_url=data.agent_url,
+            mcp_tools=data.mcp_tools,
+            foundry_hostname=data.foundry_hostname,
+            foundry_client_id=data.foundry_client_id,
+            foundry_client_secret_ref=data.foundry_client_secret_ref,
+            foundry_ontology_rid=data.foundry_ontology_rid,
+            foundry_query_api_name=data.foundry_query_api_name,
+            foundry_scopes=[s.value for s in data.foundry_scopes] if data.foundry_scopes else None,
+            foundry_version=data.foundry_version,
+            pricing_config=data.pricing_config,
+        )
+
+        await db.commit()
+
+        return await self.get_sub_agent_by_id(db, sub_agent_id)  # type: ignore
+
+    async def update_sub_agent(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        data: SubAgentUpdate,
+        user_id: str,
+    ) -> SubAgent | None:
+        """Update a sub-agent. Only owner can update.
+
+        - Name updates go to sub_agents table
+        - Configuration changes (description, model, config) create a new version
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing:
+            return None
+
+        if existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner can update this sub-agent")
+
+        now = datetime.now(timezone.utc)
+
+        # Update name and/or is_public on sub_agents table if provided
+        updates = {}
+
+        if data.name is not None:
+            updates["name"] = data.name
+
+        if data.is_public is not None:
+            updates["is_public"] = data.is_public
+
+        if updates:
+            updates["updated_at"] = now
+            await self.repo.update_sub_agent(
+                db=db,
+                actor_sub=user_id,
+                sub_agent_id=sub_agent_id,
+                fields=updates,
+            )
+
+        # Check if we need a new version (any config-related changes)
+        needs_new_version = (
+            data.system_prompt is not None
+            or data.agent_url is not None
+            or data.description is not None
+            or data.model is not None
+            or data.mcp_tools is not None
+            or data.foundry_hostname is not None
+            or data.foundry_client_id is not None
+            or data.foundry_client_secret_ref is not None
+            or data.foundry_ontology_rid is not None
+            or data.foundry_query_api_name is not None
+            or data.foundry_scopes is not None
+            or data.pricing_config is not None
+        )
+
+        if needs_new_version:
+            # For Foundry agents, ensure secret reference is available
+            if existing.type == SubAgentType.FOUNDRY:
+                if data.foundry_client_secret_ref is not None:
+                    # User is updating the secret reference, use the new one
+                    foundry_client_secret_ref = data.foundry_client_secret_ref
+                elif existing.config_version and existing.config_version.foundry_client_secret_ref is not None:
+                    # Keep the existing secret reference
+                    foundry_client_secret_ref = existing.config_version.foundry_client_secret_ref
+                else:
+                    # No secret reference available - this is an error
+                    raise ValueError(
+                        "foundry_client_secret_ref is required for Foundry agents. "
+                        "Please provide a valid secret reference."
+                    )
+            else:
+                foundry_client_secret_ref = None
+
+            # Get the actual maximum version from database to avoid conflicts
+            max_version_result = await db.execute(
+                text("""
+                    SELECT COALESCE(MAX(version), 0) FROM sub_agent_config_versions
+                    WHERE sub_agent_id = :sub_agent_id
+                """),
+                {"sub_agent_id": sub_agent_id},
+            )
+            new_version = max_version_result.scalar_one() + 1
+
+            # Get current version values to use as defaults
+            current_config = existing.config_version
+
+            # For local agents, only use system_prompt. For remote agents, only use agent_url. For Foundry agents, use foundry_* fields.
+            # This ensures we don't violate the CHECK constraint.
+            if existing.type == SubAgentType.LOCAL:
+                version_system_prompt = (
+                    data.system_prompt
+                    if data.system_prompt is not None
+                    else (current_config.system_prompt if current_config else None)
+                )
+                version_agent_url = None
+                version_foundry_hostname = None
+                version_foundry_client_id = None
+                version_foundry_client_secret_ref = None
+                version_foundry_ontology_rid = None
+                version_foundry_query_api_name = None
+                version_foundry_scopes = None
+                version_foundry_version = None
+            elif existing.type == SubAgentType.REMOTE:
+                version_agent_url = (
+                    data.agent_url
+                    if data.agent_url is not None
+                    else (current_config.agent_url if current_config else None)
+                )
+                version_system_prompt = None
+                version_foundry_hostname = None
+                version_foundry_client_id = None
+                version_foundry_client_secret_ref = None
+                version_foundry_ontology_rid = None
+                version_foundry_query_api_name = None
+                version_foundry_scopes = None
+                version_foundry_version = None
+            else:  # foundry
+                version_system_prompt = None
+                version_agent_url = None
+
+                # For Foundry agents, gather all required fields with fallback to current config
+                version_foundry_hostname = (
+                    data.foundry_hostname
+                    if data.foundry_hostname is not None
+                    else (current_config.foundry_hostname if current_config else None)
+                )
+                version_foundry_client_id = (
+                    data.foundry_client_id
+                    if data.foundry_client_id is not None
+                    else (current_config.foundry_client_id if current_config else None)
+                )
+                # foundry_client_secret_ref was already set above with proper validation
+                version_foundry_client_secret_ref = foundry_client_secret_ref
+
+                version_foundry_ontology_rid = (
+                    data.foundry_ontology_rid
+                    if data.foundry_ontology_rid is not None
+                    else (current_config.foundry_ontology_rid if current_config else None)
+                )
+                version_foundry_query_api_name = (
+                    data.foundry_query_api_name
+                    if data.foundry_query_api_name is not None
+                    else (current_config.foundry_query_api_name if current_config else None)
+                )
+                version_foundry_scopes = (
+                    [s.value for s in data.foundry_scopes]
+                    if data.foundry_scopes is not None
+                    else (current_config.foundry_scopes if current_config else None)
+                )
+                version_foundry_version = (
+                    data.foundry_version
+                    if data.foundry_version is not None
+                    else (current_config.foundry_version if current_config else None)
+                )
+
+                # Validate all required Foundry fields are present (per DB constraint)
+                missing_fields = []
+                if version_foundry_hostname is None:
+                    missing_fields.append("foundry_hostname")
+                if version_foundry_client_id is None:
+                    missing_fields.append("foundry_client_id")
+                if version_foundry_client_secret_ref is None:
+                    missing_fields.append("foundry_client_secret_ref")
+                if version_foundry_ontology_rid is None:
+                    missing_fields.append("foundry_ontology_rid")
+                if version_foundry_query_api_name is None:
+                    missing_fields.append("foundry_query_api_name")
+                if version_foundry_scopes is None:
+                    missing_fields.append("foundry_scopes")
+
+                if missing_fields:
+                    raise ValueError(
+                        f"Missing required Foundry fields: {', '.join(missing_fields)}. "
+                        "All Foundry configuration fields must be provided."
+                    )
+
+            version_description = (
+                data.description
+                if data.description is not None
+                else (current_config.description if current_config else "")
+            )
+            version_model = data.model if data.model is not None else (current_config.model if current_config else None)
+            version_mcp_tools = (
+                data.mcp_tools if data.mcp_tools is not None else (current_config.mcp_tools if current_config else [])
+            )
+
+            # Handle pricing_config (for remote and foundry agents)
+            version_pricing_config = (
+                data.pricing_config
+                if data.pricing_config is not None
+                else (current_config.pricing_config if current_config else None)
+            )
+            # Create new version
+            await self._create_config_version(
+                db,
+                user_id,
+                sub_agent_id,
+                new_version,
+                data.change_summary or f"Updated to version {new_version}",
+                description=version_description,
+                model=version_model,
+                system_prompt=version_system_prompt,
+                agent_url=version_agent_url,
+                mcp_tools=version_mcp_tools,
+                foundry_hostname=version_foundry_hostname,
+                foundry_client_id=version_foundry_client_id,
+                foundry_client_secret_ref=version_foundry_client_secret_ref,
+                foundry_ontology_rid=version_foundry_ontology_rid,
+                foundry_query_api_name=version_foundry_query_api_name,
+                foundry_scopes=version_foundry_scopes,
+                foundry_version=version_foundry_version,
+                pricing_config=version_pricing_config,
+            )
+
+            # Update current_version pointer
+            await self.repo.update_current_version(
+                db=db,
+                actor_sub=user_id,
+                sub_agent_id=sub_agent_id,
+                version=new_version,
+            )
+
+        await db.commit()
+        return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def delete_sub_agent(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        user_id: str,
+        is_admin: bool = False,
+    ) -> bool:
+        """Delete a sub-agent. Only owner or admin can delete."""
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing:
+            return False
+
+        if not is_admin and existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner or an admin can delete this sub-agent")
+
+        # Get actor_sub for audit
+        user_query = text("SELECT sub FROM users WHERE id = :user_id")
+        result = await db.execute(user_query, {"user_id": user_id})
+        actor_sub = result.scalar_one()
+
+        # Soft delete with automatic audit
+        await self.repo.delete(db=db, actor_sub=actor_sub, entity_id=sub_agent_id, soft=True)
+        await db.commit()
+        return True
+
+    async def delete_version(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        version: int,
+        user_id: str,
+    ) -> bool:
+        """Soft-delete a specific version.
+
+        Only draft, pending_approval, or rejected versions can be deleted.
+        Approved versions cannot be deleted to preserve history.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID
+            version: The version number to delete
+            user_id: The user requesting deletion
+
+        Returns:
+            True if deleted, False if version not found
+
+        Raises:
+            PermissionError: If user is not the owner
+            ValueError: If version is approved (cannot delete approved versions)
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
+        if not existing:
+            return False
+
+        if existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner can delete versions")
+
+        if not existing.config_version:
+            return False
+
+        if existing.config_version.status == SubAgentStatus.APPROVED:
+            raise ValueError("Cannot delete approved versions - they are part of the release history")
+
+        # Check if this is the current version - need to handle this case
+        if existing.current_version == version:
+            # Find the previous non-deleted version to set as current
+            prev_result = await db.execute(
+                text("""
+                    SELECT MAX(version) FROM sub_agent_config_versions
+                    WHERE sub_agent_id = :sub_agent_id 
+                    AND version < :version 
+                    AND deleted_at IS NULL
+                """),
+                {"sub_agent_id": sub_agent_id, "version": version},
+            )
+            prev_version = prev_result.scalar()
+
+            if prev_version is None:
+                raise ValueError("Cannot delete the only version - delete the entire sub-agent instead")
+
+        # Soft delete the version using repository
+        await self.repo.delete_version(
+            db=db,
+            actor_sub=user_id,
+            sub_agent_id=sub_agent_id,
+            version=version,
+        )
+
+        # If this was the current version, update to previous version
+        if existing.current_version == version:
+            await self.repo.update_current_version_to_previous(
+                db=db,
+                actor_sub=user_id,
+                sub_agent_id=sub_agent_id,
+            )
+        else:
+            await self.repo.update_sub_agent_timestamp(
+                db=db,
+                actor_sub=user_id,
+                sub_agent_id=sub_agent_id,
+            )
+
+        await db.commit()
+        return True
+
+    async def submit_for_approval(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        user_id: str,
+        change_summary: str,
+    ) -> SubAgent | None:
+        """Submit the current version for approval.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID
+            user_id: The user submitting
+            change_summary: Required description of changes in this version
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing:
+            return None
+
+        if existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner can submit for approval")
+
+        if not existing.config_version:
+            raise ValueError("No version to submit")
+
+        current_status = existing.config_version.status
+        if current_status not in (SubAgentStatus.DRAFT, SubAgentStatus.REJECTED):
+            raise ValueError("Only draft or rejected versions can be submitted for approval")
+
+        # Update the current version status and change_summary
+        await self.repo.submit_version_for_approval(
+            db=db,
+            actor_sub=user_id,
+            sub_agent_id=sub_agent_id,
+            version=existing.current_version,
+            change_summary=change_summary,
+        )
+
+        # Update sub_agents.updated_at
+        await self.repo.update_sub_agent_timestamp(
+            db=db,
+            actor_sub=user_id,
+            sub_agent_id=sub_agent_id,
+        )
+
+        await db.commit()
+        return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def approve_sub_agent(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        admin_user_id: str,
+        approve: bool,
+        rejection_reason: str | None = None,
+    ) -> SubAgent | None:
+        """Approve or reject a sub-agent's current version.
+
+        Security: This method validates that the user has approval capabilities
+        per SYSTEM_ROLE_CAPABILITIES at the service level, providing defense-in-depth
+        beyond router-level checks.
+        """
+        # Defense in depth: Verify approval capabilities at service level
+        admin_check = await db.execute(
+            text("SELECT is_administrator, sub, role FROM users WHERE id = :user_id"), {"user_id": admin_user_id}
+        )
+        admin_row = admin_check.first()
+
+        if not admin_row:
+            logger.error(f"SECURITY: approve_sub_agent called with non-existent user {admin_user_id}")
+            raise PermissionError("User not found")
+
+        is_administrator = admin_row[0]
+        user_role = admin_row[2]
+
+        # Check if user has approval capabilities per SYSTEM_ROLE_CAPABILITIES
+        # System admins have all capabilities
+        # Role-based: check if 'approve' or 'approve.admin' is in their role's sub_agents capabilities
+
+        can_approve = is_administrator
+        has_approve_admin = False
+        if not can_approve and user_role in SYSTEM_ROLE_CAPABILITIES:
+            sub_agents_capabilities = SYSTEM_ROLE_CAPABILITIES.get(user_role, {}).get("sub_agents", set())
+            has_approve_admin = "approve.admin" in sub_agents_capabilities
+            can_approve = "approve" in sub_agents_capabilities or has_approve_admin
+
+        if not can_approve:
+            logger.error(
+                f"SECURITY: approve_sub_agent called with user {admin_user_id} without approval capabilities (is_admin={is_administrator}, role={user_role})"
+            )
+            raise PermissionError(
+                "Approval requires 'approve' or 'approve.admin' capability per SYSTEM_ROLE_CAPABILITIES"
+            )
+
+        # Defense in depth: For non-admin 'approve' action, verify user has group-based access to the resource
+        # 'approve.admin' bypasses intersection check, but plain 'approve' requires group access
+        if not is_administrator and not has_approve_admin:
+            has_access = await self.check_user_permission(db, sub_agent_id, admin_user_id, "read")
+            if not has_access:
+                logger.error(
+                    f"SECURITY: approve_sub_agent called by user {admin_user_id} without group access to sub_agent {sub_agent_id}"
+                )
+                raise PermissionError("Approval with 'approve' capability requires group-based access to the sub-agent")
+
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing:
+            return None
+
+        if not existing.config_version:
+            raise ValueError("No version to approve")
+
+        if existing.config_version.status != SubAgentStatus.PENDING_APPROVAL:
+            raise ValueError("Only pending versions can be approved/rejected")
+
+        result = await self.approve_version(
+            db=db,
+            sub_agent_id=sub_agent_id,
+            version=existing.current_version,
+            admin_user_id=admin_user_id,
+            approve=approve,
+            rejection_reason=rejection_reason,
+        )
+
+        # Audit logging is handled in approve_version
+        return result
+
+    async def approve_version(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        version: int,
+        admin_user_id: str,
+        approve: bool,
+        rejection_reason: str | None = None,
+    ) -> SubAgent | None:
+        """Approve or reject a specific version.
+
+        Security: This method validates that the user has approval capabilities
+        per SYSTEM_ROLE_CAPABILITIES at the service level, providing defense-in-depth
+        beyond router-level checks. All approval/rejection operations are logged in the audit system.
+        """
+        # Defense in depth: Verify approval capabilities at service level
+        admin_check = await db.execute(
+            text("SELECT is_administrator, sub, role FROM users WHERE id = :user_id"), {"user_id": admin_user_id}
+        )
+        admin_row = admin_check.first()
+
+        if not admin_row:
+            logger.error(f"SECURITY: approve_version called with non-existent user {admin_user_id}")
+            raise PermissionError("User not found")
+
+        is_administrator = admin_row[0]
+        admin_sub = admin_row[1]
+        user_role = admin_row[2]
+
+        # Check if user has approval capabilities per SYSTEM_ROLE_CAPABILITIES
+        # System admins have all capabilities
+        # Role-based: check if 'approve' or 'approve.admin' is in their role's sub_agents capabilities
+        can_approve = is_administrator
+        has_approve_admin = False
+        if not can_approve and user_role in SYSTEM_ROLE_CAPABILITIES:
+            sub_agents_capabilities = SYSTEM_ROLE_CAPABILITIES.get(user_role, {}).get("sub_agents", set())
+            has_approve_admin = "approve.admin" in sub_agents_capabilities
+            can_approve = "approve" in sub_agents_capabilities or has_approve_admin
+
+        if not can_approve:
+            logger.error(
+                f"SECURITY: approve_version called with user {admin_user_id} without approval capabilities (is_admin={is_administrator}, role={user_role})"
+            )
+            raise PermissionError(
+                "Approval requires 'approve' or 'approve.admin' capability per SYSTEM_ROLE_CAPABILITIES"
+            )
+
+        # Defense in depth: For non-admin 'approve' action, verify user has group-based access to the resource
+        # 'approve.admin' bypasses intersection check, but plain 'approve' requires group access
+        if not is_administrator and not has_approve_admin:
+            has_access = await self.check_user_permission(db, sub_agent_id, admin_user_id, "read")
+            if not has_access:
+                logger.error(
+                    f"SECURITY: approve_version called by user {admin_user_id} without group access to sub_agent {sub_agent_id}"
+                )
+                raise PermissionError("Approval with 'approve' capability requires group-based access to the sub-agent")
+
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
+        if not existing:
+            return None
+
+        if not existing.config_version:
+            raise ValueError(f"Version {version} not found")
+
+        if existing.config_version.status != SubAgentStatus.PENDING_APPROVAL:
+            raise ValueError("Only pending versions can be approved/rejected")
+
+        # === VALIDATION LAYER ===
+        # Verify version exists and is in correct state
+        status, owner_id = await self.repo.get_version_status(db, sub_agent_id, version)
+
+        if status != SubAgentStatus.PENDING_APPROVAL.value:
+            raise ValueError("Only pending versions can be approved/rejected")
+
+        # === DATA LAYER ===
+        # Build approval context
+        context = ApprovalContext(
+            sub_agent_id=sub_agent_id,
+            version=version,
+            admin_user_id=admin_user_id,
+            admin_sub=admin_sub,
+            action="approve" if approve else "reject",
+            rejection_reason=rejection_reason,
+        )
+
+        if approve:
+            # Get next release number
+            context.release_number = await self.repo.get_next_release_number(db, sub_agent_id)
+            # Execute approval (includes audit)
+            await self.repo.approve_version(db, context)
+        else:
+            # Execute rejection (includes audit)
+            await self.repo.reject_version(db, context)
+
+        await db.commit()
+        return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def submit_version_for_approval(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        version: int,
+        user_id: str,
+        change_summary: str,
+    ) -> SubAgent | None:
+        """Submit a specific version for approval.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID
+            version: The version number to submit
+            user_id: The user submitting
+            change_summary: Required description of changes in this version
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
+        if not existing:
+            return None
+
+        if existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner can submit for approval")
+
+        if not existing.config_version:
+            raise ValueError(f"Version {version} not found")
+
+        if existing.config_version.status not in (SubAgentStatus.DRAFT, SubAgentStatus.REJECTED):
+            raise ValueError("Only draft or rejected versions can be submitted for approval")
+
+        await self.repo.submit_version_for_approval(
+            db=db,
+            actor_sub=user_id,
+            sub_agent_id=sub_agent_id,
+            version=version,
+            change_summary=change_summary,
+        )
+
+        await self.repo.update_sub_agent_timestamp(
+            db=db,
+            actor_sub=user_id,
+            sub_agent_id=sub_agent_id,
+        )
+
+        await db.commit()
+        return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def set_default_version(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        version: int,
+        user_id: str,
+    ) -> SubAgent | None:
+        """Set an approved version as the default version."""
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
+        if not existing:
+            return None
+
+        if existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner can set the default version")
+
+        if not existing.config_version:
+            raise ValueError(f"Version {version} not found")
+
+        if existing.config_version.status != SubAgentStatus.APPROVED:
+            raise ValueError("Only approved versions can be set as default")
+
+        await self.repo.set_default_version(
+            db=db,
+            actor_sub=user_id,
+            sub_agent_id=sub_agent_id,
+            version=version,
+        )
+
+        await db.commit()
+        return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def revert_to_version(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        version: int,
+        user_id: str,
+    ) -> SubAgent | None:
+        """Revert to a previous version by creating a new version with its config."""
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing:
+            return None
+
+        if existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner can revert versions")
+
+        # Fetch the target version
+        target = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
+        if not target or not target.config_version:
+            raise ValueError(f"Version {version} not found")
+
+        # Create a new version with the reverted configuration
+        new_version = existing.current_version + 1
+
+        await self._create_config_version(
+            db,
+            user_id,
+            sub_agent_id,
+            new_version,
+            f"Reverted to version {version}",
+            description=target.config_version.description,
+            model=target.config_version.model,
+            system_prompt=target.config_version.system_prompt,
+            agent_url=target.config_version.agent_url,
+            mcp_tools=target.config_version.mcp_tools,
+            foundry_hostname=target.config_version.foundry_hostname,
+            foundry_client_id=target.config_version.foundry_client_id,
+            foundry_client_secret_ref=target.config_version.foundry_client_secret_ref,
+            foundry_ontology_rid=target.config_version.foundry_ontology_rid,
+            foundry_query_api_name=target.config_version.foundry_query_api_name,
+            foundry_scopes=target.config_version.foundry_scopes,
+            foundry_version=target.config_version.foundry_version,
+            pricing_config=target.config_version.pricing_config,
+        )
+
+        await self.repo.update_current_version(
+            db=db,
+            actor_sub=user_id,
+            sub_agent_id=sub_agent_id,
+            version=new_version,
+        )
+
+        await db.commit()
+        return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def update_permissions(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        group_permissions: list[dict[str, Any]],
+        user_id: str,
+        is_admin: bool = False,
+    ) -> bool:
+        """Update group permissions with read/write granularity.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID
+            group_permissions: List of dicts with user_group_id and permissions array
+            user_id: User making the change
+            is_admin: Whether user is admin
+
+        Returns:
+            True if successful, False if sub-agent not found
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing:
+            return False
+
+        if not is_admin and existing.owner_user_id != user_id:
+            raise PermissionError("Only the owner or an admin can update permissions")
+
+        # Get actor_sub for audit
+        user_query = text("SELECT sub FROM users WHERE id = :user_id")
+        result = await db.execute(user_query, {"user_id": user_id})
+        actor_sub = result.scalar_one()
+
+        # Use repository for update with automatic audit logging
+        await self.repo.update_permissions(
+            db=db,
+            actor_sub=actor_sub,
+            sub_agent_id=sub_agent_id,
+            group_permissions=group_permissions,
+        )
+        await db.commit()
+        return True
+
+    async def get_permissions(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+    ) -> list[dict[str, Any]]:
+        """Get group permissions with read/write details for a sub-agent."""
+        query = text("""
+            SELECT sap.user_group_id, ug.name as user_group_name, sap.permissions
+            FROM sub_agent_permissions sap
+            JOIN user_groups ug ON sap.user_group_id = ug.id
+            WHERE sap.sub_agent_id = :id
+            ORDER BY ug.name
+        """)
+        result = await db.execute(query, {"id": sub_agent_id})
+        rows = result.mappings().all()
+        return [
+            {
+                "user_group_id": row["user_group_id"],
+                "user_group_name": row["user_group_name"],
+                "permissions": row["permissions"],
+            }
+            for row in rows
+        ]
+
+    async def check_user_permission(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        user_id: str,
+        required_permission: str,  # "read" or "write"
+    ) -> bool:
+        """Check if user has specific permission on a sub-agent.
+
+        Authorization model: effective_permissions = resource_permissions ∩ role_capabilities
+
+        User has permission if:
+        - User owns the sub-agent (owner has all permissions)
+        - Sub-agent is public AND permission is "read" (public allows read-only access)
+        - User's group role allows the action AND the group has the permission on the resource
+
+        Args:
+            db: Database session
+            sub_agent_id: Sub-agent ID
+            user_id: User ID
+            required_permission: Permission to check ("read" or "write")
+
+        Returns:
+            True if user has the required permission
+        """
+        # Check if user owns the sub-agent
+        sub_agent = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not sub_agent:
+            return False
+
+        if sub_agent.owner_user_id == user_id:
+            return True
+
+        # Check if public and requesting read permission
+        if sub_agent.is_public and required_permission == "read":
+            return True
+
+        # Check group permissions with role-based access control
+        query = text("""
+            SELECT sap.permissions, ugm.group_role
+            FROM sub_agent_permissions sap
+            JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
+            WHERE sap.sub_agent_id = :sub_agent_id 
+              AND ugm.user_id = :user_id
+        """)
+        result = await db.execute(query, {"sub_agent_id": sub_agent_id, "user_id": user_id})
+
+        for row in result.fetchall():
+            resource_permissions = row[0]  # PostgreSQL array: what the group can do on this sub-agent
+            user_group_role = row[1]  # User's role in this group
+
+            # Check if the resource has the required permission
+            if required_permission not in resource_permissions:
+                continue
+
+            # Check if user's role allows this action (intersection)
+            if check_action_allowed(user_group_role, "sub_agents", required_permission):
+                return True
+
+        return False
+
+    async def get_pending_version_approvals(self, db: AsyncSession) -> list[dict[str, Any]]:
+        """Get all versions pending approval with sub-agent info (admin only)."""
+        query = text("""
+            SELECT 
+                sa.id as sub_agent_id, sa.name, sa.type, sa.default_version, sa.owner_user_id,
+                u.email as owner_email, u.first_name, u.last_name,
+                v.id as version_id, v.version, v.description, v.model, 
+                v.system_prompt, v.agent_url, v.mcp_tools, 
+                v.foundry_hostname, v.foundry_client_id, v.foundry_client_secret_ref,
+                v.foundry_ontology_rid, v.foundry_query_api_name, v.foundry_scopes, v.foundry_version,
+                v.change_summary, v.created_at as version_created_at
+            FROM sub_agent_config_versions v
+            JOIN sub_agents sa ON v.sub_agent_id = sa.id
+            JOIN users u ON sa.owner_user_id = u.id
+            WHERE v.status = 'pending_approval' AND sa.deleted_at IS NULL
+            ORDER BY v.created_at ASC
+        """)
+        result = await db.execute(query)
+        rows = result.mappings().all()
+
+        return [
+            {
+                "sub_agent_id": row["sub_agent_id"],
+                "name": row["name"],
+                "type": row["type"],
+                "default_version": row["default_version"],
+                "owner": {
+                    "id": row["owner_user_id"],
+                    "name": f"{row['first_name']} {row['last_name']}",
+                    "email": row["owner_email"],
+                },
+                "version_id": row["version_id"],
+                "version": row["version"],
+                "description": row["description"],
+                "model": row["model"],
+                "system_prompt": row["system_prompt"],
+                "agent_url": row["agent_url"],
+                "mcp_tools": row["mcp_tools"],
+                "change_summary": row["change_summary"],
+                "version_created_at": row["version_created_at"],
+            }
+            for row in rows
+        ]
+
+    def _generate_version_hash(
+        self, system_prompt: str | None, agent_url: str | None, mcp_tools: list[str], timestamp: datetime
+    ) -> str:
+        """Generate a 12-character hash for a version based on content and timestamp."""
+        content_dict = {"system_prompt": system_prompt, "agent_url": agent_url, "mcp_tools": mcp_tools}
+        content = json.dumps(content_dict, sort_keys=True) + timestamp.isoformat()
+        return hashlib.sha256(content.encode()).hexdigest()[:12]
+
+    async def _create_config_version(
+        self,
+        db: AsyncSession,
+        actor_sub: str,
+        sub_agent_id: int,
+        version: int,
+        change_summary: str,
+        status: SubAgentStatus = SubAgentStatus.DRAFT,
+        description: str | None = None,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        agent_url: str | None = None,
+        mcp_tools: list[str] | None = None,
+        foundry_hostname: str | None = None,
+        foundry_client_id: str | None = None,
+        foundry_client_secret_ref: int | None = None,
+        foundry_ontology_rid: str | None = None,
+        foundry_query_api_name: str | None = None,
+        foundry_scopes: list[str] | None = None,
+        foundry_version: str | None = None,
+        pricing_config: dict | None = None,
+    ) -> int:
+        """Create a new configuration version entry. Returns the new version ID."""
+        now = datetime.now(timezone.utc)
+        mcp_tools_list = mcp_tools if mcp_tools is not None else []
+        version_hash = self._generate_version_hash(system_prompt, agent_url, mcp_tools_list, now)
+
+        return await self.repo.create_config_version(
+            db=db,
+            actor_sub=actor_sub,
+            sub_agent_id=sub_agent_id,
+            version=version,
+            version_hash=version_hash,
+            change_summary=change_summary,
+            status=status.value,
+            description=description,
+            model=model,
+            system_prompt=system_prompt,
+            agent_url=agent_url,
+            mcp_tools=mcp_tools_list,
+            foundry_hostname=foundry_hostname,
+            foundry_client_id=foundry_client_id,
+            foundry_client_secret_ref=foundry_client_secret_ref,
+            foundry_ontology_rid=foundry_ontology_rid,
+            foundry_query_api_name=foundry_query_api_name,
+            foundry_scopes=foundry_scopes,
+            foundry_version=foundry_version,
+            pricing_config=pricing_config,
+        )
+
+    def _row_to_sub_agent_with_version(self, row: Any) -> SubAgent:
+        """Convert a database row (with joined version info) to a SubAgent model."""
+        owner = SubAgentOwner(
+            id=row["owner_user_id"],
+            name=f"{row['first_name']} {row['last_name']}",
+            email=row["owner_email"],
+        )
+
+        # Build config_version if version data is present
+        config_version = None
+        if row.get("cv_id") is not None:
+            config_version = SubAgentConfigVersion(
+                id=row["cv_id"],
+                sub_agent_id=row["id"],  # sa.id from sub_agents table (equals cv.sub_agent_id)
+                version=row["cv_version"],
+                version_hash=row.get("cv_version_hash"),
+                release_number=row.get("cv_release_number"),
+                description=row["cv_description"],
+                model=row["cv_model"],
+                system_prompt=row.get("cv_system_prompt"),
+                agent_url=row.get("cv_agent_url"),
+                mcp_tools=row.get("cv_mcp_tools", []),
+                foundry_hostname=row.get("cv_foundry_hostname"),
+                foundry_client_id=row.get("cv_foundry_client_id"),
+                foundry_client_secret_ref=row.get("cv_foundry_client_secret_ref"),
+                foundry_client_secret_ssmkey=row.get("cv_foundry_client_secret_ssmkey"),
+                foundry_ontology_rid=row.get("cv_foundry_ontology_rid"),
+                foundry_query_api_name=row.get("cv_foundry_query_api_name"),
+                foundry_scopes=row.get("cv_foundry_scopes"),
+                foundry_version=row.get("cv_foundry_version"),
+                pricing_config=row.get("cv_pricing_config"),
+                change_summary=row["cv_change_summary"],
+                status=row["cv_status"],
+                approved_by_user_id=row["cv_approved_by_user_id"],
+                approved_at=row["cv_approved_at"],
+                rejection_reason=row["cv_rejection_reason"],
+                deleted_at=row.get("cv_deleted_at"),
+                created_at=row["cv_created_at"],
+            )
+
+        return SubAgent(
+            id=row["id"],
+            name=row["name"],
+            owner_user_id=row["owner_user_id"],
+            owner=owner,
+            owner_status=row.get("owner_status", "active"),
+            type=row["type"],
+            current_version=row["current_version"],
+            default_version=row.get("default_version"),
+            config_version=config_version,
+            is_public=row.get("is_public", False),
+            is_activated=row.get("is_activated", False),
+            deleted_at=row.get("deleted_at"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _row_to_config_version(self, row: Any) -> SubAgentConfigVersion:
+        """Convert a database row to a SubAgentConfigVersion model."""
+        return SubAgentConfigVersion(
+            id=row["id"],
+            sub_agent_id=row["sub_agent_id"],
+            version=row["version"],
+            version_hash=row.get("version_hash"),
+            release_number=row.get("release_number"),
+            description=row["description"],
+            model=row["model"],
+            system_prompt=row.get("system_prompt"),
+            agent_url=row.get("agent_url"),
+            mcp_tools=row.get("mcp_tools", []),
+            foundry_hostname=row.get("foundry_hostname"),
+            foundry_client_id=row.get("foundry_client_id"),
+            foundry_client_secret_ref=row.get("foundry_client_secret_ref"),
+            foundry_client_secret_ssmkey=row.get("foundry_client_secret_ssmkey"),
+            foundry_ontology_rid=row.get("foundry_ontology_rid"),
+            foundry_query_api_name=row.get("foundry_query_api_name"),
+            foundry_scopes=row.get("foundry_scopes"),
+            foundry_version=row.get("foundry_version"),
+            pricing_config=row.get("pricing_config"),
+            change_summary=row["change_summary"],
+            status=row["status"],
+            approved_by_user_id=row["approved_by_user_id"],
+            approved_at=row["approved_at"],
+            rejection_reason=row["rejection_reason"],
+            deleted_at=row.get("deleted_at"),
+            created_at=row["created_at"],
+        )
+
+    async def activate_sub_agent(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        user_id: str,
+        is_admin: bool = False,
+    ) -> bool:
+        """Activate a sub-agent for a user.
+
+        User must have read permission on the sub-agent (owner, public, or group member with read).
+        Sub-agent must be approved (default_version must be set).
+
+        Returns:
+            True if activated successfully, False if already activated
+
+        Raises:
+            PermissionError: If user doesn't have read permission
+            ValueError: If sub-agent is not approved
+        """
+        # Check if sub-agent exists and is approved
+        sub_agent = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not sub_agent:
+            raise ValueError("Sub-agent not found")
+
+        if sub_agent.default_version is None:
+            raise ValueError("Sub-agent must be approved before activation")
+
+        # Check if user has read permission (unless admin)
+        if not is_admin:
+            has_read = await self.check_user_permission(db, sub_agent_id, user_id, "read")
+            if not has_read:
+                raise PermissionError("You don't have read permission for this sub-agent")
+
+        # Check if already activated
+        check_query = text("""
+            SELECT 1 FROM user_sub_agent_activations
+            WHERE user_id = :user_id AND sub_agent_id = :sub_agent_id
+        """)
+        result = await db.execute(check_query, {"user_id": user_id, "sub_agent_id": sub_agent_id})
+        if result.scalar_one_or_none():
+            return False  # Already activated
+
+        # Get actor_sub for audit
+        user_query = text("SELECT sub FROM users WHERE id = :user_id")
+        result = await db.execute(user_query, {"user_id": user_id})
+        actor_sub = result.scalar_one()
+
+        # Insert activation record with automatic audit
+        await self.repo.activate_sub_agent(db=db, actor_sub=actor_sub, user_id=user_id, sub_agent_id=sub_agent_id)
+        await db.commit()
+        return True
+
+    async def deactivate_sub_agent(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        user_id: str,
+    ) -> bool:
+        """Deactivate a sub-agent for a user.
+
+        Returns:
+            True if deactivated successfully, False if not activated
+        """
+        # Check if activated first
+        check_query = text("""
+            SELECT 1 FROM user_sub_agent_activations
+            WHERE user_id = :user_id AND sub_agent_id = :sub_agent_id
+        """)
+        result = await db.execute(check_query, {"user_id": user_id, "sub_agent_id": sub_agent_id})
+        if not result.scalar_one_or_none():
+            return False  # Not activated
+
+        # Get actor_sub for audit
+        user_query = text("SELECT sub FROM users WHERE id = :user_id")
+        result = await db.execute(user_query, {"user_id": user_id})
+        actor_sub = result.scalar_one()
+
+        # Delete activation record with automatic audit
+        await self.repo.deactivate_sub_agent(db=db, actor_sub=actor_sub, user_id=user_id, sub_agent_id=sub_agent_id)
+        await db.commit()
+        return True

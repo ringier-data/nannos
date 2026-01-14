@@ -1,0 +1,11 @@
+---
+alloy_agent_client_id: 'alloy-agent'
+alloy_agent_public_api_port: 8080
+alloy_agent_fqdn: 'alloy-agent.{{ base_domain }}'
+alloy_agent_task_cpu: 512
+alloy_agent_task_memory: 1024
+alloy_agent_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent'
+naonous_mcp_url: 'https://naonous.{{ domain_prefix }}alloy.rcplus.io/mcp'
+
+cost_tracking_batch_size: 10
+cost_tracking_flush_interval: 30  # seconds

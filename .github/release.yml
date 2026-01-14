@@ -28,6 +28,9 @@ changelog:
       labels:
         - "documentation"
         - "docs"
+    - title: "🔗 Dependencies"
+      labels:
+        - "dependencies"
     - title: "🔨 Maintenance "
       labels:
         - "tech-debt"
@@ -40,3 +43,6 @@ changelog:
     - title: Other Changes
       labels:
         - "*"
+      exclude:
+        labels:
+        - "do-not-merge"
