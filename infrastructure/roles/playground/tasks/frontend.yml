@@ -49,7 +49,7 @@
     chdir: "{{ playbook_dir }}/../app/playground-frontend"
   environment:
     VITE_LANGSMITH_ORGANIZATION_ID: "eacaca37-6472-40d5-80b4-9206d058caef"
-    VITE_LANGSMITH_PROJECT_ID: "b3d6bc99-afe9-486a-847a-091dff103a46"
+    VITE_LANGSMITH_PROJECT_ID: "052ac0c2-787f-44e2-810a-34d8b7845a09"
   command: npm run build
 
 - name: 'sync playground-frontend build to S3'

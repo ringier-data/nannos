@@ -47,6 +47,7 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_jwt_secret_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_docstore_password }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_gcp_key }}'
               - Sid: "GetProjectSsmParams"
                 Effect: "Allow"
                 Action:
@@ -140,6 +141,12 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
                   - 'arn:aws:bedrock:*::foundation-model/*'
+              - Sid: 'MarketplaceModelAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'aws-marketplace:ViewSubscriptions'
+                  - 'aws-marketplace:Subscribe'
+                Resource: '*'
               - Sid: 'DecryptionUsingKmsKey'
                 Effect: 'Allow'
                 Action:
