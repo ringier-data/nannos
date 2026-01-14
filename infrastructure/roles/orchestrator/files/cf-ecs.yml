@@ -13,7 +13,7 @@ Resources:
   OrchestratorEcsExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role'
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-er'
       Description: 'Alloy Orchestrator Infrastructure ECS task execution role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -58,7 +58,7 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/{{ software_component }}/*"
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca"
       Tags:
-        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-execution-role' }
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-ecs-er' }
         - { Key: 'Project', Value: '{{ project_id }}' }
         - { Key: 'Environment', Value: '{{ env }}' }
         - { Key: 'Version', Value: 'v{{ project_version }}' }
