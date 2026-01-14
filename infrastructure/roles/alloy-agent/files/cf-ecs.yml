@@ -113,8 +113,22 @@ Resources:
         - { Key: 'Version', Value: 'v{{ project_version }}' }
         - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
 
+  # CloudWatch Logs Group for Alloy Agent
+  AlloyAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent'
+      RetentionInDays: !If [IsProd, 30, 7]
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent-logs' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
   AlloyAgentTaskDefinition:
     Type: AWS::ECS::TaskDefinition
+    DependsOn: AlloyAgentLogGroup
     Properties:
       Family: '{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent'
       TaskRoleArn: !GetAtt AlloyAgentEcsTaskRole.Arn
@@ -160,6 +174,12 @@ Resources:
             - { Name: 'COST_TRACKING_FLUSH_INTERVAL', Value: '{{ cost_tracking_flush_interval }}' }
           Secrets:
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '/ecs/{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'ecs'
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ alloy_agent_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
             Interval: 60

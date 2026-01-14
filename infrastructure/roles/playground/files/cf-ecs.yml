@@ -155,8 +155,22 @@ Resources:
         - { Key: 'Version', Value: 'v{{ project_version }}' }
         - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
 
+  # CloudWatch Logs Group for Chat UI
+  ChatUILogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+      RetentionInDays: !If [IsProd, 30, 7]
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui-logs' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
   ChatUITaskDefinition:
     Type: AWS::ECS::TaskDefinition
+    DependsOn: ChatUILogGroup
     Properties:
       Family: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
       TaskRoleArn: !GetAtt ChatUIEcsTaskRole.Arn
@@ -209,6 +223,12 @@ Resources:
                 Name: "POSTGRES_SSL_CA",
                 ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",
               }
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '/ecs/{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'ecs'
           HealthCheck:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8080/api/v1/health\").read()" || exit 1']
             Interval: 60
