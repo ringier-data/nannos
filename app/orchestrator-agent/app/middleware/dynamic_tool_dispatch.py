@@ -47,6 +47,7 @@ from langgraph.types import Command
 from langsmith import traceable
 
 from ..models.config import GraphRuntimeContext
+from ..utils import clean_tool_schema, validate_and_clean_tool_dict
 
 logger = logging.getLogger(__name__)
 
@@ -172,82 +173,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         }
         return enhanced_tool
 
-    def _clean_schema_properties(self, properties: dict[str, Any]) -> dict[str, Any]:
-        """Recursively remove invalid property schemas.
-
-        Gemini rejects schemas with None values, empty dicts, or {default: None}.
-
-        Args:
-            properties: Properties dict from JSON Schema
-
-        Returns:
-            Cleaned properties dict
-        """
-        if not isinstance(properties, dict):
-            return properties
-
-        cleaned = {}
-        for key, value in properties.items():
-            # Skip invalid schemas that Gemini rejects
-            if value is None or (isinstance(value, dict) and (len(value) == 0 or value == {"default": None})):
-                continue
-
-            # Recursively clean nested schemas
-            if isinstance(value, dict):
-                value_copy = dict(value)
-                if "properties" in value_copy:
-                    value_copy["properties"] = self._clean_schema_properties(value_copy["properties"])
-                if (
-                    "items" in value_copy
-                    and isinstance(value_copy["items"], dict)
-                    and "properties" in value_copy["items"]
-                ):
-                    value_copy["items"]["properties"] = self._clean_schema_properties(value_copy["items"]["properties"])
-                cleaned[key] = value_copy
-            else:
-                cleaned[key] = value
-
-        return cleaned
-
-    def _validate_tool_schema(self, tool_dict: dict[str, Any]) -> dict[str, Any]:
-        """Validate and fix tool schema for OpenAI and Gemini API compatibility.
-
-        OpenAI requires valid JSON Schema with 'properties' field. Gemini is stricter
-        and rejects schemas with None values or incomplete definitions.
-
-        Args:
-            tool_dict: Tool in OpenAI dict format
-
-        Returns:
-            Tool dict with validated parameters schema
-        """
-        # Ensure function key exists
-        if "function" not in tool_dict:
-            tool_dict = {"function": tool_dict, "type": "function"}
-
-        function_dict = tool_dict["function"]
-        parameters = function_dict.get("parameters")
-
-        # Ensure parameters has valid structure
-        if parameters is None or not isinstance(parameters, dict):
-            function_dict["parameters"] = {"type": "object", "properties": {}}
-        elif "properties" not in parameters:
-            parameters["properties"] = {}
-
-        # Clean invalid properties and sync required array
-        if "properties" in function_dict["parameters"]:
-            original_props = function_dict["parameters"]["properties"]
-            cleaned_props = self._clean_schema_properties(original_props)
-            function_dict["parameters"]["properties"] = cleaned_props
-
-            # Remove cleaned properties from required array
-            if "required" in function_dict["parameters"]:
-                function_dict["parameters"]["required"] = [
-                    field for field in function_dict["parameters"]["required"] if field in cleaned_props
-                ]
-
-        return tool_dict
-
     def _get_tools_as_dicts(
         self, user_context: GraphRuntimeContext, original_tools: list[Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -277,9 +202,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         for tool in original_tools or []:
             if isinstance(tool, BaseTool):
                 if tool.name not in seen_names:
+                    # Clean tool schema for Gemini compatibility (two-stage cleaning)
+                    tool = clean_tool_schema(tool)
                     tool_dict = convert_to_openai_tool(tool)
-                    # Validate schema for OpenAI API compatibility
-                    tool_dict = self._validate_tool_schema(tool_dict)
+                    tool_dict = validate_and_clean_tool_dict(tool_dict)
                     # Enhance task tool with A2A agents (description + enum)
                     if tool.name == "task":
                         tool_dict = self._enhance_task_tool_schema(tool_dict, user_context)
@@ -288,8 +214,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             elif isinstance(tool, dict):
                 name = tool.get("function", {}).get("name") or tool.get("name")
                 if name and name not in seen_names:
-                    # Validate schema for OpenAI API compatibility
-                    tool = self._validate_tool_schema(tool)
+                    # Validate and clean schema
+                    tool = validate_and_clean_tool_dict(tool)
                     # Enhance task tool with A2A agents (description + enum)
                     if name == "task":
                         tool = self._enhance_task_tool_schema(tool, user_context)
@@ -299,9 +225,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # 2. Add static tools from middleware (e.g., FinalResponseSchema)
         for tool in self.static_tools.values():
             if tool.name not in seen_names:
+                # Clean tool schema for Gemini compatibility (two-stage cleaning)
+                tool = clean_tool_schema(tool)
                 tool_dict = convert_to_openai_tool(tool)
-                # Validate schema for OpenAI API compatibility
-                tool_dict = self._validate_tool_schema(tool_dict)
+                tool_dict = validate_and_clean_tool_dict(tool_dict)
                 tool_dicts.append(tool_dict)
                 seen_names.add(tool.name)
 
@@ -311,13 +238,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 # User tool overrides existing tool - remove old and add user's
                 tool_dicts = [t for t in tool_dicts if t.get("function", {}).get("name") != name]
             if isinstance(tool, BaseTool):
+                # Clean tool schema for Gemini compatibility (two-stage cleaning)
+                tool = clean_tool_schema(tool)
                 tool_dict = convert_to_openai_tool(tool)
-                # Ensure parameters schema is valid for OpenAI API
-                tool_dict = self._validate_tool_schema(tool_dict)
+                tool_dict = validate_and_clean_tool_dict(tool_dict)
                 tool_dicts.append(tool_dict)
             elif isinstance(tool, dict):
-                # Already in dict format, but still validate
-                tool_dict = self._validate_tool_schema(tool)
+                # Already in dict format, but still validate and clean
+                tool_dict = validate_and_clean_tool_dict(tool)
                 tool_dicts.append(tool_dict)
             seen_names.add(name)
 

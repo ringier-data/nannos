@@ -48,7 +48,7 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
 from ..a2a_utils.models import LocalLangGraphSubAgentConfig
 from ..middleware import RepeatedToolCallMiddleware
-from ..utils import get_language_display_name
+from ..utils import clean_tools_for_gemini, get_language_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -410,6 +410,12 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
         tools = self._get_effective_tools()
         logger.info(f"Creating LangGraph agent '{self.name}' with {len(tools)} tools")
+
+        # WORKAROUND: LangChain bug - Some tools (particularly deepagents FilesystemMiddleware)
+        # have parameters with None annotations/defaults that Gemini's strict validation rejects.
+        # OpenAI and Claude accept these schemas, but Gemini does not.
+        # See app/utils.py (Tool Schema Cleaning section) for detailed explanation and solution.
+        tools = clean_tools_for_gemini(tools)
 
         # Build system prompt with A2A protocol addendum and user preferences
         system_prompt = self.config.system_prompt + A2A_PROTOCOL_ADDENDUM
