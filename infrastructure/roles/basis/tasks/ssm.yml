@@ -1,0 +1,17 @@
+
+- name: 'upsert the OpenAI key'
+  no_log: '{{ ansible_verbosity < 3 }}'
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: 'changed'
+    region: '{{ aws_region }}'
+    name: '{{ ssmkey_openai_api_key }}'
+    description: 'OpenAI API Key'
+    string_type: 'SecureString'
+    key_id: 'alias/gov-rcplus-devops-secrets'
+    value: '{{ openai_api_key }}'
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{ software_component }}-openai-api-key'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
