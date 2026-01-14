@@ -1,4 +1,5 @@
 ---
 
+- import_tasks: 'ssm.yml'
 - import_tasks: 'rds.yml'
 - import_tasks: 'storage.yml'

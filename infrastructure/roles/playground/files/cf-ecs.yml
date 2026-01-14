@@ -168,16 +168,11 @@ Resources:
       RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
       ContainerDefinitions:
         - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-chat-ui'
-          DependsOn:
-            - ContainerName: '{{ project_id }}-logs-router'
-              Condition: 'START'
           Image: '{{ chat_ui_docker_image }}'
           Essential: true
           Interactive: true
           PortMappings:
             - { ContainerPort: '{{ chat_ui_public_api_port }}', Protocol: 'tcp' }
-          LogConfiguration:
-            LogDriver: 'awsfirelens'
           Environment:
             - { Name: "ENVIRONMENT", Value: "{{ env }}" }
             - { Name: "VERSION", Value: "{{ project_version }}" }
@@ -218,32 +213,6 @@ Resources:
             Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8080/api/v1/health\").read()" || exit 1']
             Interval: 60
             Retries: 3
-            StartPeriod: 30
-            Timeout: 5
-        - Name: '{{ project_id }}-logs-router'
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
-          Essential: true
-          Environment:
-            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
-            - { Name: 'ENV', Value: '{{ env }}' }
-            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
-            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
-            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
-            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}-agents.ecs.{{ software_component }}.{{ env }}-chat-ui' }
-          FirelensConfiguration:
-            Type: 'fluentbit'
-            Options:
-              enable-ecs-log-metadata: false
-          LogConfiguration:
-            LogDriver: 'awslogs'
-            Options:
-              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
-              awslogs-region: !Sub '${AWS::Region}'
-              awslogs-stream-prefix: '{{ software_component }}-chat-ui'
-          HealthCheck:
-            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
-            Interval: 30
-            Retries: 2
             StartPeriod: 30
             Timeout: 5
 

@@ -2,8 +2,9 @@
 
 
 - name: Get Cloudfront SSL certificate
-  command: aws cloudformation list-exports --region us-east-1 --query 'Exports[?Name==`{{ project_id }}-certificate-nannos-domain-wildcard`].Value' --output text
+  command: aws cloudformation list-exports --region us-east-1 --query 'Exports[?Name==`{{ project_id }}-certificate-domain-wildcard`].Value' --output text
   register: r_ssl_certificate
+  failed_when: r_ssl_certificate.stdout == ""
 
 - name: 'gather shared alb stack outputs'
   ringier.aws_cicd.gather_stack_outputs:
@@ -35,6 +36,12 @@
   set_fact:
     cloudfront_distribution_id: '{{ r_cloudfront_distribution_id.stdout }}'
     bucket_name: '{{ env }}-{{ project_id }}-nannos-frontend'
+
+- name: 'install playground-frontend deps'
+  no_log: "{{ ansible_verbosity < 3 }}"
+  args:
+    chdir: "{{ playbook_dir }}/../app/playground-frontend"
+  command: npm ci
 
 - name: 'build playground-frontend'
   no_log: "{{ ansible_verbosity < 3 }}"

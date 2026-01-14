@@ -15,8 +15,8 @@
       - include_vars: 'environment_vars/{{ env }}.yml'
     roles:
       - 'ringier.aws_cicd.init_workspace'
-      - 'basis'
-      - 'orchestrator'
+      # - 'basis'
+      # - 'orchestrator'
       - 'playground'
       - 'agent-creator'
       - 'alloy-agent'

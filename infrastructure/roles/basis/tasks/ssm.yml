@@ -1,0 +1,61 @@
+
+- name: 'upsert the OpenAI key'
+  no_log: '{{ ansible_verbosity < 3 }}'
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: 'changed'
+    region: '{{ aws_region }}'
+    name: '{{ ssmkey_openai_api_key }}'
+    description: 'OpenAI API Key'
+    string_type: 'SecureString'
+    key_id: 'alias/gov-rcplus-devops-secrets'
+    value: '{{ openai_api_key }}'
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{ software_component }}-openai-api-key'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
+
+- name: 'check if secret key already exists in SSM'
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    orchestrator_jwt_secret_key_from_ssm: "{{ lookup('amazon.aws.aws_ssm', ssmkey_orchestrator_jwt_secret_key, region=aws_region, on_missing='skip') }}"
+
+- name: 'generate and upload Orchestrator JWT secret key to SSM if needed'
+  when: orchestrator_jwt_secret_key_from_ssm == ''
+  block:
+    - name: 'generate random password if needed'
+      no_log: '{{ ansible_verbosity < 3 }}'
+      set_fact:
+        orchestrator_jwt_secret_key: "{{ lookup('password', '/dev/null', length=32, chars=['ascii_letters', 'digits', 'punctuation']) }}"
+
+    - name: 'upload Orchestrator JWT secret key to SSM'
+      ringier.aws_cicd.ssm_parameter:
+        region: '{{ aws_region }}'
+        overwrite_value: 'never'
+        name: '{{ ssmkey_orchestrator_jwt_secret_key }}'
+        description: 'Secret key for the Orchestrator component of RC+/Alloy'
+        string_type: 'SecureString'
+        key_id: 'alias/gov-rcplus-devops-secrets'
+        value: '{{ orchestrator_jwt_secret_key }}'
+        tags:
+          Name: '{{ env }}-{{ project_id }}-orchestrator-jwt-secret-key'
+          Project: '{{ project_id }}'
+          Environment: '{{ env }}'
+          Repository: '{{ git_info.repo_name }}'
+          Version: '{{ project_version }}'
+
+
+- name: 'upload Orchestrator OIDC client secret to SSM'
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: 'changed'
+    name: '{{ ssmkey_orchestrator_oidc_client_secret }}'
+    description: 'The OIDC client secret for the Orchestrator component of RC+/Alloy'
+    string_type: 'SecureString'
+    value: '{{ orchestrator_oidc_client_secret }}'
+    tags:
+      Name: '{{ env }}-{{ project_id }}-orchestrator-oidc-client-secret'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'

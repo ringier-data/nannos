@@ -84,7 +84,7 @@ Resources:
     Type: 'AWS::Route53::RecordSet'
     Properties:
       Name: '{{ chat_ui_fqdn }}'
-      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-nannos'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id'
       Type: 'A'
       AliasTarget:
         DNSName: !GetAtt Distribution.DomainName
@@ -94,7 +94,7 @@ Resources:
     Type: AWS::Route53::RecordSet
     Properties:
       Name: '{{ chat_ui_fqdn }}'
-      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id-nannos'
+      HostedZoneId: !ImportValue '{{ project_id }}-public-hosted-zone-id'
       Type: 'AAAA'
       AliasTarget:
         DNSName: !GetAtt Distribution.DomainName

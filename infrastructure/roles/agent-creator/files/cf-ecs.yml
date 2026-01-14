@@ -126,16 +126,11 @@ Resources:
       RuntimePlatform: { CpuArchitecture : 'ARM64', OperatingSystemFamily: 'LINUX' }
       ContainerDefinitions:
         - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-creator'
-          DependsOn:
-            - ContainerName: '{{ project_id }}-logs-router'
-              Condition: 'START'
           Image: '{{ agent_creator_docker_image }}'
           Essential: true
           Interactive: true
           PortMappings:
             - { ContainerPort: '{{ agent_creator_public_api_port }}', Protocol: 'tcp' }
-          LogConfiguration:
-            LogDriver: 'awsfirelens'
           Environment:
             - { Name: 'LOG_MODE', Value: 'JSON' }
             - { Name: 'LOG_LEVEL', Value: '{{ log_level }}' }
@@ -169,33 +164,6 @@ Resources:
             Interval: 60
             Retries: 3
             StartPeriod: 60
-            Timeout: 5
-        # Container 2: Logs Router (FluentBit sidecar)
-        - Name: '{{ project_id }}-logs-router'
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/{{ env }}-{{ project_id }}-devops-fluent-bit-sidecar-v2:latest'
-          Essential: true
-          Environment:
-            - { Name: '_CHANGE_THE_VALUE_TO_FORCE_UPDATE_TASK_', Value: 1 }
-            - { Name: 'ENV', Value: '{{ env }}' }
-            - { Name: 'SOFTWARE_COMPONENT', Value: '{{ software_component }}' }
-            - { Name: 'PROJECT_VERSION', Value: '{{ project_version }}' }
-            - { Name: 'REPOSITORY', Value: '{{ git_info.repo_name }}' }
-            - { Name: 'ALLOY_TAG', Value: '{{ project_id }}-agents.ecs.{{ software_component }}.{{ env }}-agent-creator' }
-          FirelensConfiguration:
-            Type: 'fluentbit'
-            Options:
-              enable-ecs-log-metadata: false
-          LogConfiguration:
-            LogDriver: 'awslogs'
-            Options:
-              awslogs-group: !ImportValue '{{ project_id }}-firelens-fluentbit-loggroup-name'
-              awslogs-region: !Sub '${AWS::Region}'
-              awslogs-stream-prefix: '{{ software_component }}-agent-creator'
-          HealthCheck:
-            Command: ['CMD-SHELL', 'curl -f http://localhost:2020 || exit 1']
-            Interval: 30
-            Retries: 2
-            StartPeriod: 30
             Timeout: 5
 
   AgentCreatorSecurityGroup:
