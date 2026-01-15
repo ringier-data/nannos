@@ -492,7 +492,9 @@ class SubAgentService:
         data: SubAgentUpdate,
         user_id: str,
     ) -> SubAgent | None:
-        """Update a sub-agent. Only owner can update.
+        """Update a sub-agent.
+
+        Users with write access can update (owner or group members with write/manager role).
 
         - Name updates go to sub_agents table
         - Configuration changes (description, model, config) create a new version
@@ -501,8 +503,10 @@ class SubAgentService:
         if not existing:
             return None
 
-        if existing.owner_user_id != user_id:
-            raise PermissionError("Only the owner can update this sub-agent")
+        # Check if user has write permission (owner or group write access)
+        has_write_permission = await self.check_user_permission(db, sub_agent_id, user_id, "write")
+        if not has_write_permission:
+            raise PermissionError("You don't have permission to update this sub-agent")
 
         now = datetime.now(timezone.utc)
 
