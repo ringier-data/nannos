@@ -9,6 +9,7 @@ import { useChat } from '../contexts';
 import { useSessionId } from '../hooks/useLocalStorage';
 import type { Settings } from '../types';
 import { MODEL_OPTIONS } from '@/config/models';
+import { config } from '@/config';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -16,7 +17,7 @@ interface SettingsModalProps {
 }
 
 const AGENT_URL_OPTIONS = [
-  { value: 'https://orchestrator.d.nannos.rcplus.io', label: 'https://orchestrator.d.nannos.rcplus.io' },
+  { value: config.orchestratorUrl, label: config.orchestratorUrl },
   {
     value: 'https://sample-a2a-agent-908687846511.us-central1.run.app',
     label: 'https://sample-a2a-agent-908687846511.us-central1.run.app',
