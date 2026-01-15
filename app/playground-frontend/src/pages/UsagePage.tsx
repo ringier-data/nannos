@@ -168,16 +168,36 @@ export function UsagePage() {
     })) || [];
   }, [detailed]);
 
-  // Calculate total tokens from sub-agent data
+  // Calculate total tokens from billing unit breakdown
   const totalInputTokens = useMemo(() => {
-    return detailed?.by_sub_agent?.reduce((sum: number, item: UsageBySubAgent) => sum + (item.total_input_tokens || 0), 0) || 0;
+    return detailed?.billing_unit_breakdown?.reduce((sum: number, item: BillingUnitBreakdown) => {
+      if (isTokenType(item.billing_unit) && categorizeTokenType(item.billing_unit) === 'input') {
+        return sum + (item.total_count || 0);
+      }
+      return sum;
+    }, 0) || 0;
   }, [detailed]);
 
   const totalOutputTokens = useMemo(() => {
-    return detailed?.by_sub_agent?.reduce((sum: number, item: UsageBySubAgent) => sum + (item.total_output_tokens || 0), 0) || 0;
+    return detailed?.billing_unit_breakdown?.reduce((sum: number, item: BillingUnitBreakdown) => {
+      if (isTokenType(item.billing_unit) && categorizeTokenType(item.billing_unit) === 'output') {
+        return sum + (item.total_count || 0);
+      }
+      return sum;
+    }, 0) || 0;
   }, [detailed]);
 
   const totalTokens = totalInputTokens + totalOutputTokens;
+
+  // Calculate total custom billing units (non-token resources)
+  const totalCustomUnits = useMemo(() => {
+    return detailed?.billing_unit_breakdown?.reduce((sum: number, item: BillingUnitBreakdown) => {
+      if (!isTokenType(item.billing_unit)) {
+        return sum + (item.total_count || 0);
+      }
+      return sum;
+    }, 0) || 0;
+  }, [detailed]);
 
   if (summaryLoading || detailedLoading || logsLoading) {
     return <div className="flex justify-center items-center h-screen">Loading...</div>;
@@ -219,13 +239,18 @@ export function UsagePage() {
         
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Total Tokens</CardDescription>
+            <CardDescription>Total Units</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{totalTokens.toLocaleString()}</div>
+            <div className="text-2xl font-bold">{(totalTokens + totalCustomUnits).toLocaleString()}</div>
             <p className="text-xs text-muted-foreground mt-1">
-              {totalInputTokens.toLocaleString()} input • {totalOutputTokens.toLocaleString()} output
+              {totalTokens.toLocaleString()} tokens ({totalInputTokens.toLocaleString()} in • {totalOutputTokens.toLocaleString()} out)
             </p>
+            {totalCustomUnits > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {totalCustomUnits.toLocaleString()} custom units
+              </p>
+            )}
           </CardContent>
         </Card>
 
