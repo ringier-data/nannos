@@ -47,7 +47,7 @@ from langgraph.types import Command
 from langsmith import traceable
 
 from ..models.config import GraphRuntimeContext
-from ..utils import clean_tool_schema, validate_and_clean_tool_dict
+from ..utils import validate_and_clean_tool_dict
 
 logger = logging.getLogger(__name__)
 
@@ -202,8 +202,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         for tool in original_tools or []:
             if isinstance(tool, BaseTool):
                 if tool.name not in seen_names:
-                    # Clean tool schema for Gemini compatibility (two-stage cleaning)
-                    tool = clean_tool_schema(tool)
+                    # Create a cleaned COPY for model binding (don't modify original)
+                    # NOTE: clean_tool_schema modifies in-place, so we don't use it for registry tools
                     tool_dict = convert_to_openai_tool(tool)
                     tool_dict = validate_and_clean_tool_dict(tool_dict)
                     # Enhance task tool with A2A agents (description + enum)
@@ -225,21 +225,21 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # 2. Add static tools from middleware (e.g., FinalResponseSchema)
         for tool in self.static_tools.values():
             if tool.name not in seen_names:
-                # Clean tool schema for Gemini compatibility (two-stage cleaning)
-                tool = clean_tool_schema(tool)
+                # Create a cleaned COPY for model binding (don't modify original)
                 tool_dict = convert_to_openai_tool(tool)
                 tool_dict = validate_and_clean_tool_dict(tool_dict)
                 tool_dicts.append(tool_dict)
                 seen_names.add(tool.name)
 
         # 3. Add user's dynamic tools (may override previous tools by name)
+        # CRITICAL: Do NOT modify the original tools in the registry
+        # They need to remain intact for tool execution in wrap_tool_call
         for name, tool in user_context.tool_registry.items():
             if name in seen_names:
                 # User tool overrides existing tool - remove old and add user's
                 tool_dicts = [t for t in tool_dicts if t.get("function", {}).get("name") != name]
             if isinstance(tool, BaseTool):
-                # Clean tool schema for Gemini compatibility (two-stage cleaning)
-                tool = clean_tool_schema(tool)
+                # Convert to dict for model binding (creates a copy, doesn't modify original)
                 tool_dict = convert_to_openai_tool(tool)
                 tool_dict = validate_and_clean_tool_dict(tool_dict)
                 tool_dicts.append(tool_dict)
@@ -654,6 +654,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 f"DynamicToolDispatchMiddleware: No GraphRuntimeContext for tool '{tool_name}', passing to handler"
             )
             return handler(request)
+
+        # Debug logging
+        logger.debug(
+            f"DynamicToolDispatchMiddleware.wrap_tool_call: "
+            f"tool_name='{tool_name}', request.tool={'present' if request.tool else 'None'}, "
+            f"in_registry={tool_name in user_context.tool_registry}, "
+            f"registry_tools={list(user_context.tool_registry.keys())}"
+        )
 
         # Special handling for "task" tool (subagent dispatch)
         # Try dynamic registry first, fall back to handler (SubAgentMiddleware) for general-purpose

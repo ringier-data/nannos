@@ -28,6 +28,7 @@ from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState
 from .dynamic_tool_dispatch import DynamicToolDispatchMiddleware
 from .loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware
 from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
+from .tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from .user_preferences_middleware import UserPreferencesMiddleware
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "AuthErrorState",
     "TodoStatusMiddleware",
     "TodoStatusState",
+    "ToolSchemaCleaningMiddleware",
     "UserPreferencesMiddleware",
     "RepeatedToolCallMiddleware",
     "LoopDetectionState",

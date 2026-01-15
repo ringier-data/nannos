@@ -85,37 +85,33 @@ OpenAI and Claude models accept these schemas, but Gemini does not.
 
 THE SOLUTION:
 -------------
-Two-stage cleaning process:
-
-Stage 1 - Clean Pydantic Models (before dict conversion):
-  - Remove fields with annotation=None
-  - Remove fields with default=None
-  - Use arbitrary_types_allowed=True to handle complex types like BaseStore
-  - This prevents these fields from appearing in the converted dict schema
-
-Stage 2 - Clean Dict Schemas (after conversion):
-  - Remove properties with None values that slipped through
+Clean dict schemas at model-binding time (not at tool creation time):
+  - Remove properties with None values
   - Remove empty dicts and {"default": None}
   - Remove properties containing any None values
-  - This catches anything Stage 1 missed
+  - Sync required array with cleaned properties
 
-WHY BOTH STAGES:
-----------------
-- Stage 1 (Pydantic) is needed because it modifies the tool's args_schema BEFORE
-  conversion, ensuring the tool execution matches the schema sent to the model
-- Stage 2 (Dict) is needed because convert_to_openai_tool() can still produce
-  schemas with None values even after Stage 1 cleaning
-- Together they prevent schema mismatches that cause orphaned tool_call_ids
+This is handled by middleware (DynamicToolDispatchMiddleware and ToolSchemaCleaningMiddleware)
+which intercepts model calls and cleans the dict representations of tools before sending
+them to the model, while keeping the original BaseTool instances intact for execution.
+
+WHY AT MODEL-BINDING TIME:
+--------------------------
+- Cleaning at tool creation breaks tool execution (tools need their full schema)
+- Cleaning at model-binding time allows us to send clean schemas to the model
+  while keeping the original tools intact for ToolNode execution
+- Prevents "tool not found" errors that occur when tool schemas are modified in-place
 
 USAGE:
 ------
-For orchestrator middleware (DynamicToolDispatchMiddleware):
-    tool = clean_tool_schema(tool)  # Stage 1
+For orchestrator:
+    # Handled automatically by DynamicToolDispatchMiddleware
     tool_dict = convert_to_openai_tool(tool)
-    tool_dict = validate_and_clean_tool_dict(tool_dict)  # Stage 2
+    tool_dict = validate_and_clean_tool_dict(tool_dict)
 
-For sub-agents (DynamicLocalAgentRunnable):
-    tools = clean_tools_for_gemini(tools)  # Both stages
+For sub-agents:
+    # Handled automatically by ToolSchemaCleaningMiddleware
+    tools = [tool1, tool2, ...]  # Keep as BaseTool instances
 
 TODO: This should be fixed upstream in langchain-google-genai or langchain-core
 """
@@ -123,71 +119,14 @@ TODO: This should be fixed upstream in langchain-google-genai or langchain-core
 import logging
 from typing import Any
 
-from langchain_core.tools import BaseTool
-from langchain_core.utils.function_calling import convert_to_openai_tool
-from pydantic import ConfigDict, create_model
-
 logger = logging.getLogger(__name__)
 
 
-def clean_tool_schema(tool: BaseTool) -> BaseTool:
-    """Clean tool's args_schema by removing fields with None values (Stage 1).
-
-    Removes fields with None annotations or None default values from the
-    Pydantic model BEFORE conversion to dict format. Uses arbitrary_types_allowed
-    to handle complex types like BaseStore.
-
-    This is Stage 1 of the cleaning process - modifies the source Pydantic model
-    so that both the model schema AND tool execution are consistent.
-
-    Args:
-        tool: BaseTool to clean
-
-    Returns:
-        Same tool with cleaned args_schema
-    """
-    if not hasattr(tool, "args_schema") or tool.args_schema is None:
-        return tool
-
-    # Check if it's a Pydantic model (has model_fields)
-    if not hasattr(tool.args_schema, "model_fields"):
-        return tool
-
-    # Get the current schema fields
-    schema_fields = tool.args_schema.model_fields
-    fields_to_remove = []
-
-    # Remove fields with None annotation OR None default value
-    for field_name, field_info in schema_fields.items():
-        if field_info.annotation is None or field_info.default is None:
-            fields_to_remove.append(field_name)
-
-    # If we have fields to remove, create a new schema without them
-    if fields_to_remove:
-        remaining_fields = {
-            name: (field_info.annotation, field_info)
-            for name, field_info in schema_fields.items()
-            if name not in fields_to_remove
-        }
-
-        # Use arbitrary_types_allowed to handle complex types like BaseStore
-        tool.args_schema = create_model(
-            f"{tool.name}Args",
-            __config__=ConfigDict(arbitrary_types_allowed=True),
-            **remaining_fields,
-        )
-
-    return tool
-
-
 def clean_schema_properties(properties: dict[str, Any]) -> dict[str, Any]:
-    """Recursively remove invalid property schemas (Stage 2).
+    """Recursively remove invalid property schemas.
 
     Removes properties with None values, empty dicts, or None in their values
-    from dict schemas AFTER conversion. This catches anything Stage 1 missed.
-
-    This is Stage 2 of the cleaning process - cleans the dict schema that will
-    be sent to Gemini.
+    from dict schemas. This ensures Gemini compatibility.
 
     Args:
         properties: Properties dict from JSON Schema
@@ -235,7 +174,7 @@ def clean_schema_properties(properties: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_and_clean_tool_dict(tool_dict: dict[str, Any]) -> dict[str, Any]:
-    """Validate and clean tool dict schema (Stage 2 helper).
+    """Validate and clean tool dict schema for Gemini compatibility.
 
     Ensures parameters has valid JSON Schema structure and cleans properties
     with None values.
@@ -272,39 +211,3 @@ def validate_and_clean_tool_dict(tool_dict: dict[str, Any]) -> dict[str, Any]:
             ]
 
     return tool_dict
-
-
-def clean_tools_for_gemini(tools: list[Any]) -> list[dict[str, Any]]:
-    """Clean tools for Gemini compatibility (both stages).
-
-    This is a convenience function that applies both Stage 1 (Pydantic cleaning)
-    and Stage 2 (dict cleaning) to a list of tools.
-
-    Use this in sub-agents or anywhere you need to convert BaseTool instances
-    to clean dict format for Gemini.
-
-    Args:
-        tools: List of BaseTool instances
-
-    Returns:
-        List of cleaned tool dicts in OpenAI format
-    """
-    cleaned_tools = []
-
-    for tool in tools:
-        if isinstance(tool, BaseTool):
-            # Stage 1: Clean Pydantic model
-            tool = clean_tool_schema(tool)
-
-            # Convert to dict
-            tool_dict = convert_to_openai_tool(tool)
-
-            # Stage 2: Clean dict schema
-            tool_dict = validate_and_clean_tool_dict(tool_dict)
-
-            cleaned_tools.append(tool_dict)
-        else:
-            # Already a dict, just validate and clean
-            cleaned_tools.append(validate_and_clean_tool_dict(tool))
-
-    return cleaned_tools
