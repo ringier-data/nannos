@@ -5,7 +5,14 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..db.session import DbSession
-from ..dependencies import is_admin_mode, require_admin, require_approver, require_auth, require_auth_or_bearer_token
+from ..dependencies import (
+    has_capability,
+    is_admin_mode,
+    require_admin,
+    require_approver,
+    require_auth,
+    require_auth_or_bearer_token,
+)
 from ..models.sub_agent import (
     SubAgent,
     SubAgentApproval,
@@ -610,9 +617,13 @@ async def review_version(
     version: int,
     data: SubAgentVersionApproval,
     db: DbSession,
-    user: User = Depends(require_approver),
+    user: User = Depends(require_auth),
 ) -> SubAgent:
-    """Approve or reject a specific version (approver/admin only).
+    """Approve or reject a specific version.
+
+    Requires approver or admin system role.
+    Permission intersection ensures approvers can only approve resources they have access to
+    (owned sub-agents or sub-agents in groups where they have write permission).
 
     - action: 'approve' or 'reject'
     - rejection_reason: Required when action is 'reject'
@@ -621,6 +632,14 @@ async def review_version(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
+        # Check if user has approval capabilities
+        can_approve = has_capability(user, "sub_agents", "approve") or has_capability(
+            user, "sub_agents", "approve.admin"
+        )
+
+        if not can_approve:
+            raise HTTPException(status_code=403, detail="Approval requires approver or admin role")
+
         if data.action == "reject" and not data.rejection_reason:
             raise HTTPException(status_code=400, detail="Rejection reason is required when rejecting")
 
