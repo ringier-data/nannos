@@ -1221,7 +1221,7 @@ class TestPermissionValidation:
         agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
 
         # Try to update as non-owner
-        with pytest.raises(PermissionError, match="Only the owner can update"):
+        with pytest.raises(PermissionError, match="You don't have permission to update this sub-agent"):
             await service.update_sub_agent(
                 pg_session,
                 agent.id,
@@ -1263,8 +1263,8 @@ class TestPermissionValidation:
         assert final.default_version == 1
 
     @pytest.mark.asyncio
-    async def test_approver_role_can_approve_with_admin_mode(self, pg_session: AsyncSession, sub_agent_service):
-        """Test that users with approver role can approve sub-agents when they have group-based access."""
+    async def test_approver_role_can_approve_with_group_access(self, pg_session: AsyncSession, sub_agent_service):
+        """Test that users with approver role can approve sub-agents when they have group-based write access."""
         from sqlalchemy import text
 
         service = sub_agent_service
@@ -1313,8 +1313,10 @@ class TestPermissionValidation:
         assert result.config_version.approved_by_user_id == approver_id
 
     @pytest.mark.asyncio
-    async def test_approver_role_cannot_approve_without_group_access(self, pg_session: AsyncSession, sub_agent_service):
-        """Test that approvers with 'approve' capability cannot approve sub-agents they don't have group access to."""
+    async def test_approver_role_cannot_approve_without_ownership_or_group_access(
+        self, pg_session: AsyncSession, sub_agent_service
+    ):
+        """Test that approvers cannot approve sub-agents they don't own and don't have group access to."""
         service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         approver_id = await _create_user(pg_session, "approver@test.com", "sub-approver", role="approver")
@@ -1323,13 +1325,32 @@ class TestPermissionValidation:
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, owner_id, "Ready for review")
 
-        # Approver cannot approve without group-based access (defense-in-depth validation)
+        # Approver cannot approve without ownership or group-based access (defense-in-depth validation)
         with pytest.raises(PermissionError, match="requires group-based access"):
             await service.approve_version(pg_session, agent.id, 1, approver_id, True)
 
     @pytest.mark.asyncio
-    async def test_admin_role_can_approve_with_admin_mode(self, pg_session: AsyncSession, sub_agent_service):
-        """Test that users with admin role (not is_administrator) can approve when admin-mode enabled."""
+    async def test_approver_owner_can_approve_own_sub_agent(self, pg_session: AsyncSession, sub_agent_service):
+        """Test that approvers who own a sub-agent can approve it without group membership."""
+        service = sub_agent_service
+        # User has approver role and owns the sub-agent
+        approver_owner_id = await _create_user(pg_session, "approver@test.com", "sub-approver-owner", role="approver")
+        agent = await _create_sub_agent(pg_session, approver_owner_id, "Agent", sub_agent_service, "V1")
+
+        # Submit for approval
+        await service.submit_for_approval(pg_session, agent.id, approver_owner_id, "Ready for review")
+
+        # Owner with approver role can approve their own sub-agent
+        result = await service.approve_version(pg_session, agent.id, 1, approver_owner_id, True)
+
+        assert result is not None
+        assert result.config_version is not None
+        assert result.config_version.status == SubAgentStatus.APPROVED
+        assert result.config_version.approved_by_user_id == approver_owner_id
+
+    @pytest.mark.asyncio
+    async def test_admin_role_can_approve(self, pg_session: AsyncSession, sub_agent_service):
+        """Test that users with admin role (not is_administrator) can approve sub-agents."""
         service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         admin_role_user = await _create_user(
@@ -1340,7 +1361,7 @@ class TestPermissionValidation:
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, owner_id, "Ready for review")
 
-        # Admin role user can approve (router ensures admin-mode is enabled)
+        # Admin role user can approve (has approve capability)
         result = await service.approve_version(pg_session, agent.id, 1, admin_role_user, True)
 
         assert result is not None
