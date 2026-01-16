@@ -303,7 +303,8 @@ export function SubAgentDetailPage() {
   const currentUserId = user?.id ?? '';
   const isOwner = subAgent?.owner_user_id === currentUserId;
   const isAdministrator = user?.is_administrator ?? false;
-  const canApprove = adminMode;
+  const isApproverRole = user?.role === 'approver' || user?.role === 'admin' || isAdministrator;
+  const canApprove = isApproverRole;
   
   // Sub-agent overall status (from config_version)
   const subAgentStatus = (subAgent?.config_version?.status ?? 'draft') as SubAgentStatus;

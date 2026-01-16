@@ -48,8 +48,9 @@
   args:
     chdir: "{{ playbook_dir }}/../app/playground-frontend"
   environment:
+    VITE_ORCHESTRATOR_BASE_DOMAIN: "{{ orchestrator_agent_fqdn }}"
     VITE_LANGSMITH_ORGANIZATION_ID: "eacaca37-6472-40d5-80b4-9206d058caef"
-    VITE_LANGSMITH_PROJECT_ID: "052ac0c2-787f-44e2-810a-34d8b7845a09"
+    VITE_LANGSMITH_PROJECT_ID: "{{ langsmith_project_id }}"
   command: npm run build
 
 - name: 'sync playground-frontend build to S3'

@@ -67,7 +67,7 @@ const PERMISSION_DEFINITIONS = {
     descriptions: {
       read: 'View sub-agents in your groups',
       write: 'Create and edit sub-agents',
-      approve: 'Approve sub-agents (requires system approver role + group write access)',
+      approve: 'Approve sub-agents you own OR sub-agents in groups where you have write/manager role (requires approver/admin system role)',
     },
     source: 'combined' as const, // Requires both system and group roles
   },
@@ -139,15 +139,19 @@ export function UserPermissionsTable() {
       const hasSystemApprove = hasSystemCapability(resource, action);
       const groupCheck = hasGroupCapability(resource, 'write'); // Need write access in group
       
-      const has = hasSystemApprove && groupCheck.has;
+      // Approvers/admins can approve resources they own, OR resources in groups with write access
+      const canApproveOwned = hasSystemApprove;
+      const canApproveInGroups = hasSystemApprove && groupCheck.has;
+      
+      const has = canApproveOwned || canApproveInGroups;
       let reason = '';
       
       if (!hasSystemApprove) {
         reason = 'Requires system approver or admin role';
-      } else if (!groupCheck.has) {
-        reason = 'Requires group write or manager role';
+      } else if (canApproveInGroups) {
+        reason = `Granted for resources you own + resources in groups with write access`;
       } else {
-        reason = `System role: ${systemRole}, Group roles with write access`;
+        reason = 'Granted for resources you own';
       }
       
       return { has, reason, groups: groupCheck.groups };
@@ -183,7 +187,8 @@ export function UserPermissionsTable() {
         <ul className="list-disc list-inside space-y-1 text-xs">
           <li><strong>System Role</strong> ({systemRole}): Defines what actions you can perform system-wide</li>
           <li><strong>Group Roles</strong> (read/write/manager): Define which resources you can access within each group</li>
-          <li>Some actions require both (e.g., approval requires system approver role + group write access)</li>
+          <li><strong>Resource Ownership</strong>: You have full access (read/write/approve) to resources you own, regardless of group memberships</li>
+          <li>Some actions have multiple paths (e.g., approval works for owned resources OR for resources in groups with write access)</li>
         </ul>
       </div>
 
@@ -255,7 +260,7 @@ export function UserPermissionsTable() {
 
       {!isAdmin && userGroups.length === 0 && (
         <div className="text-center py-4 text-sm text-muted-foreground">
-          You are not a member of any groups. Contact an administrator to get access to resources.
+          You are not a member of any groups. Without group membership, you can only access resources you own. Contact an administrator to get access to shared resources.
         </div>
       )}
 
