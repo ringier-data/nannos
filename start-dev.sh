@@ -421,6 +421,16 @@ if [ "$BACKEND_ENV" = "local" ]; then
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
+    # Keycloak Admin credentials for group sync (with environment prefix)
+    if ! KEYCLOAK_ADMIN_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/keycloak-admin-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${YELLOW}Warning: Could not fetch KEYCLOAK_ADMIN_CLIENT_SECRET (Keycloak sync disabled)${NC}"
+    else
+        update_env_var ".env" "KEYCLOAK_ADMIN_CLIENT_SECRET" "$KEYCLOAK_ADMIN_CLIENT_SECRET"
+        update_env_var ".env" "KEYCLOAK_ADMIN_CLIENT_ID" "nannos-admin"
+        # Set environment prefix for group names (local-, dev-, stg-, empty for prod)
+        update_env_var ".env" "KEYCLOAK_GROUP_NAME_PREFIX" "local-"
+    fi
+    
     
     popd > /dev/null
     

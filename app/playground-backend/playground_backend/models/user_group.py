@@ -14,6 +14,7 @@ class UserGroup(BaseModel):
     id: int
     name: str
     description: str | None = None
+    keycloak_group_id: str | None = None  # Keycloak group ID for one-way sync
     deleted_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -80,6 +81,12 @@ class GroupMemberUpdate(BaseModel):
     """Request to update a member's role."""
 
     role: Literal["read", "write", "manager"]
+
+
+class GroupMemberRemove(BaseModel):
+    """Request to remove members from a group (bulk operation)."""
+
+    user_ids: list[str]
 
 
 class BulkGroupDelete(BaseModel):

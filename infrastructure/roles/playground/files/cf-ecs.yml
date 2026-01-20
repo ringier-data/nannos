@@ -45,6 +45,7 @@ Resources:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_secret_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_service_password }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_keycloak_admin_client_secret }}'
               - Sid: "GetProjectSsmParams"
                 Effect: "Allow"
                 Action:
@@ -215,10 +216,13 @@ Resources:
             - { Name: POSTGRES_VERIFY_SSL, Value: "true" }
             - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
             - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
+            - { Name: "KEYCLOAK_ADMIN_CLIENT_ID", Value: '{{ keycloak_admin_client_id }}' }
+            - { Name: "KEYCLOAK_GROUP_NAME_PREFIX", Value: '{{ keycloak_group_name_prefix }}' }
           Secrets:
             - { Name: "OIDC_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_oidc_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
             - { Name: "POSTGRES_PASSWORD", ValueFrom: '{{ ssmkey_rds_service_password }}' }
+            - { Name: "KEYCLOAK_ADMIN_CLIENT_SECRET", ValueFrom: '{{ ssmkey_keycloak_admin_client_secret }}' }
             - {
                 Name: "POSTGRES_SSL_CA",
                 ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",

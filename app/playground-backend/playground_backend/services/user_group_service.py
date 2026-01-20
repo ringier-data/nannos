@@ -1,5 +1,6 @@
 """User group service for managing groups and memberships."""
 
+import asyncio
 import logging
 from typing import Any, Literal
 
@@ -16,6 +17,8 @@ from ..models.user_group import (
     UserGroup,
     UserGroupWithMembers,
 )
+from ..repositories.user_group_repository import UserGroupRepository
+from ..services.keycloak_admin_service import KeycloakAdminService
 
 logger = logging.getLogger(__name__)
 
@@ -23,18 +26,29 @@ logger = logging.getLogger(__name__)
 class UserGroupService:
     """Service for managing user groups and memberships."""
 
-    def __init__(self, user_group_repository=None):
+    def __init__(
+        self,
+        user_group_repository: UserGroupRepository | None = None,
+        keycloak_admin_service: KeycloakAdminService | None = None,
+    ):
         """Initialize user group service.
 
         Args:
             user_group_repository: Optional user group repository instance.
                 If None, must be set via set_repository() before use.
+            keycloak_admin_service: Optional Keycloak admin service for group sync.
+                If None, Keycloak sync will be skipped.
         """
         self._repo = user_group_repository
+        self._keycloak_service = keycloak_admin_service
 
     def set_repository(self, user_group_repository):
         """Set the user group repository (dependency injection)."""
         self._repo = user_group_repository
+
+    def set_keycloak_service(self, keycloak_admin_service: KeycloakAdminService | None):
+        """Set the Keycloak admin service (dependency injection)."""
+        self._keycloak_service = keycloak_admin_service
 
     @property
     def repo(self):
@@ -42,6 +56,11 @@ class UserGroupService:
         if self._repo is None:
             raise RuntimeError("UserGroupRepository not injected. Call set_repository() during initialization.")
         return self._repo
+
+    @property
+    def keycloak_service(self) -> KeycloakAdminService | None:
+        """Get the Keycloak admin service (optional)."""
+        return self._keycloak_service
 
     async def get_group(self, db: AsyncSession, group_id: int) -> UserGroup | None:
         """Get a group by ID.
@@ -54,7 +73,7 @@ class UserGroupService:
             Group or None if not found
         """
         query = text("""
-            SELECT id, name, description, deleted_at, created_at, updated_at
+            SELECT id, name, description, keycloak_group_id, deleted_at, created_at, updated_at
             FROM user_groups
             WHERE id = :group_id AND deleted_at IS NULL
         """)
@@ -70,6 +89,7 @@ class UserGroupService:
                 id=row["id"],
                 name=row["name"],
                 description=row["description"],
+                keycloak_group_id=row["keycloak_group_id"],
                 deleted_at=row["deleted_at"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
@@ -157,7 +177,7 @@ class UserGroupService:
         """)
 
         data_query = text(f"""
-            SELECT id, name, description, deleted_at, created_at, updated_at
+            SELECT id, name, description, keycloak_group_id, deleted_at, created_at, updated_at
             FROM user_groups
             {where_clause}
             ORDER BY created_at DESC
@@ -179,6 +199,7 @@ class UserGroupService:
                     id=row["id"],
                     name=row["name"],
                     description=row["description"],
+                    keycloak_group_id=row["keycloak_group_id"],
                     deleted_at=row["deleted_at"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
@@ -207,7 +228,7 @@ class UserGroupService:
             List of groups the user belongs to
         """
         query = text("""
-            SELECT ug.id, ug.name, ug.description,
+            SELECT ug.id, ug.name, ug.description, ug.keycloak_group_id,
                    ug.deleted_at, ug.created_at, ug.updated_at
             FROM user_groups ug
             JOIN user_group_members ugm ON ugm.user_group_id = ug.id
@@ -289,6 +310,7 @@ class UserGroupService:
             Created group
         """
         try:
+            # First, create group in database (within transaction, not yet committed)
             group_id = await self.repo.create(
                 db=db,
                 actor_sub=actor_sub,
@@ -298,6 +320,25 @@ class UserGroupService:
                 },
                 returning="id",
             )
+
+            # Then sync to Keycloak if service is configured
+            # If this fails, exception will cause DB transaction to rollback
+            keycloak_group_id = None
+            if self.keycloak_service:
+                try:
+                    keycloak_group_id = await self.keycloak_service.create_group(name, description)
+                    await self.repo.update(
+                        db=db,
+                        actor_sub=actor_sub,
+                        entity_id=group_id,
+                        fields={"keycloak_group_id": keycloak_group_id},
+                        fetch_before=False,
+                    )
+                    logger.info(f"Synced group '{name}' to Keycloak (ID: {keycloak_group_id})")
+                except Exception as e:
+                    logger.error(f"Failed to sync group to Keycloak: {e}")
+                    # Re-raise to trigger DB transaction rollback
+                    raise
 
             # Fetch and return the created group
             group = await self.get_group(db, group_id)
@@ -356,6 +397,22 @@ class UserGroupService:
                 fetch_before=True,
             )
 
+            if self.keycloak_service:
+                keycloak_group_id = existing.keycloak_group_id
+
+                if keycloak_group_id:
+                    try:
+                        # Use existing name/description if not provided
+                        update_name = name if name is not None else existing.name
+                        update_description = description if description is not None else existing.description
+                        await self.keycloak_service.update_group(keycloak_group_id, update_name, update_description)
+                        logger.info(f"Synced group update to Keycloak (ID: {keycloak_group_id})")
+                    except Exception as e:
+                        logger.error(f"Failed to sync group update to Keycloak: {e}")
+                        raise
+                else:
+                    logger.warning(f"Group {group_id} has no Keycloak ID; skipping Keycloak update")
+
             # Fetch and return updated group
             group = await self.get_group(db, group_id)
             logger.info(f"Updated group: {group_id}")
@@ -397,6 +454,20 @@ class UserGroupService:
                 )
 
         try:
+            # Get Keycloak group ID before soft delete
+            keycloak_group_id = existing.keycloak_group_id
+            if self.keycloak_service:
+                # Delete from Keycloak first (fail-fast)
+                if keycloak_group_id:
+                    try:
+                        await self.keycloak_service.delete_group(keycloak_group_id)
+                        logger.info(f"Deleted Keycloak group (ID: {keycloak_group_id})")
+                    except Exception as e:
+                        logger.error(f"Failed to delete Keycloak group: {e}")
+                        raise
+                else:
+                    logger.warning(f"Group {group_id} has no Keycloak ID; skipping Keycloak deletion")
+
             # Soft delete with automatic audit (returns None)
             await self.repo.delete(
                 db=db,
@@ -531,16 +602,40 @@ class UserGroupService:
             Updated member list
         """
         try:
+            existing = await self.get_group(db, group_id)
+            if existing is None:
+                raise ValueError("Group not found")
+
             # Prepare member additions
             member_additions = [{"user_id": user_id, "role": role} for user_id in user_ids]
 
-            # Add members with automatic audit
+            # First, add members to database (within transaction, not yet committed)
             await self.repo.add_members(
                 db=db,
                 actor_sub=actor_sub,
                 group_id=group_id,
                 member_additions=member_additions,
             )
+
+            # Then sync to Keycloak sequentially
+            # If this fails, exception will cause DB transaction to rollback
+            if self.keycloak_service:
+                if existing.keycloak_group_id:
+                    tasks = []
+                    # TODO: this is not 100% transaction-safe if adding multiple users and one fails
+                    #       we could end up with partial additions in Keycloak vs DB
+                    try:
+                        for user_id in user_ids:
+                            user_sub = user_id  # in this context, user_id is the Keycloak user ID (sub)
+                            tasks.append(self.keycloak_service.add_user_to_group(user_sub, existing.keycloak_group_id))
+                            logger.info(f"Added user {user_id} to Keycloak group {existing.keycloak_group_id}")
+                        await asyncio.gather(*tasks)
+                    except Exception as e:
+                        logger.error(f"Failed to add users to Keycloak group: {e}")
+                        # Re-raise to trigger DB transaction rollback
+                        raise
+                else:
+                    logger.warning(f"Group {group_id} has no Keycloak ID; skipping Keycloak member additions")
 
             logger.info(f"Added {len(user_ids)} members to group {group_id}")
 
@@ -620,62 +715,81 @@ class UserGroupService:
             logger.error(f"Failed to update member role: {e}")
             raise
 
-    async def remove_member(self, db: AsyncSession, actor_sub: str, group_id: int, user_id: str) -> bool:
-        """Remove a member from a group.
+    async def remove_members(
+        self,
+        db: AsyncSession,
+        actor_sub: str,
+        group_id: int,
+        user_ids: list[str],
+    ) -> list[MemberInfo]:
+        """Remove multiple members from a group (bulk operation).
 
-        Cannot remove the last admin.
+        Cannot remove the last manager.
 
         Args:
             db: Database session
             actor_sub: The sub of the user performing the action
             group_id: Group ID
-            user_id: User ID to remove
+            user_ids: List of user IDs to remove
 
         Returns:
-            True if removed, False if not found
+            Updated list of members
         """
-        # Check if this is the last manager
+        existing = await self.get_group(db, group_id)
+        if existing is None:
+            raise ValueError("Group not found")
+
+        # Check manager count before starting removals
         admin_count_query = text("""
             SELECT COUNT(*) as count
             FROM user_group_members
             WHERE user_group_id = :group_id AND group_role = 'manager'
         """)
+        count_result = await db.execute(admin_count_query, {"group_id": group_id})
+        manager_count = count_result.scalar() or 0
 
-        check_role_query = text("""
-            SELECT group_role FROM user_group_members
-            WHERE user_group_id = :group_id AND user_id = :user_id
+        # Count how many managers we're trying to remove
+        check_roles_query = text("""
+            SELECT user_id FROM user_group_members
+            WHERE user_group_id = :group_id
+            AND user_id = ANY(:user_ids)
+            AND group_role = 'manager'
         """)
+        roles_result = await db.execute(check_roles_query, {"group_id": group_id, "user_ids": user_ids})
+        managers_to_remove = [row[0] for row in roles_result.fetchall()]
+
+        # Check if we're removing all managers
+        if managers_to_remove and len(managers_to_remove) >= manager_count:
+            raise ValueError("Cannot remove all managers from a group")
 
         try:
-            # Check if user is manager
-            role_result = await db.execute(check_role_query, {"group_id": group_id, "user_id": user_id})
-            role_row = role_result.mappings().first()
-
-            if role_row is None:
-                return False
-
-            if role_row["group_role"] == "manager":
-                # Check manager count
-                admin_result = await db.execute(admin_count_query, {"group_id": group_id})
-                admin_count = admin_result.scalar() or 0
-
-                if admin_count <= 1:
-                    raise ValueError("Cannot remove the last manager from a group")
-
-            # Remove member with automatic audit
-            await self.repo.remove_member(
+            # Remove from database first (within transaction, not yet committed)
+            # Repository returns which members were actually removed
+            removed = await self.repo.remove_members(
                 db=db,
                 actor_sub=actor_sub,
                 group_id=group_id,
-                user_id=user_id,
+                user_ids=user_ids,
             )
 
-            logger.info(f"Removed member {user_id} from group {group_id}")
-            return True
-        except ValueError:
-            raise
+            # Then sync to Keycloak sequentially
+            # If this fails, exception will cause DB transaction to rollback
+            if self.keycloak_service:
+                if existing.keycloak_group_id:
+                    tasks = []
+                    for user_id in removed:
+                        tasks.append(self.keycloak_service.remove_user_from_group(user_id, existing.keycloak_group_id))
+                        logger.info(f"Removed user {user_id} from Keycloak group {existing.keycloak_group_id}")
+                    await asyncio.gather(*tasks)
+                else:
+                    logger.warning(f"Group {group_id} has no Keycloak ID; skipping Keycloak member removals")
+
+            logger.info(f"Removed {len(removed)} members from group {group_id}")
+            # Return updated member list
+            members, _ = await self.list_members(db, group_id, page=1, limit=1000)
+            return members
         except Exception as e:
-            logger.error(f"Failed to remove member: {e}")
+            logger.error(f"Failed to remove members: {e}")
             raise
 
     async def is_group_manager(self, db: AsyncSession, group_id: int, user_id: str) -> bool:

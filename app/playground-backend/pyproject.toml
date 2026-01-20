@@ -28,6 +28,7 @@ dependencies = [
     "ringier-a2a-sdk>=0.1.0",
     "uuid6>=2024.7.10",
     "fastapi-mcp>=0.4.0",
+    "python-keycloak>=7.0.2",
 ]
 
 [tool.setuptools.packages.find]

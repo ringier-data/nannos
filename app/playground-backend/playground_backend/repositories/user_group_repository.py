@@ -23,7 +23,7 @@ class UserGroupRepository(AuditedRepository):
         actor_sub: str,
         group_id: int,
         member_additions: list[dict[str, str]],
-    ) -> None:
+    ) -> list[str]:
         """
         Add members to a group with audit logging.
 
@@ -32,6 +32,9 @@ class UserGroupRepository(AuditedRepository):
             actor_sub: The sub of the user performing the action
             group_id: Group ID
             member_additions: List of dicts with user_id and role
+
+        Returns:
+            List of user IDs that were added (or on conflict updated)
         """
         try:
             # Insert members
@@ -62,53 +65,63 @@ class UserGroupRepository(AuditedRepository):
             )
 
             logger.info(f"Added {len(member_additions)} members to group {group_id} by {actor_sub}")
-
+            return [member["user_id"] for member in member_additions]
         except Exception as e:
             logger.error(f"Failed to add members to group {group_id}: {e}")
             raise
 
-    async def remove_member(
+    async def remove_members(
         self,
         db: AsyncSession,
         actor_sub: str,
         group_id: int,
-        user_id: str,
-    ) -> None:
+        user_ids: list[str],
+    ) -> list[str]:
         """
-        Remove a member from a group with audit logging.
+        Remove multiple members from a group with audit logging.
 
         Args:
             db: Database session
             actor_sub: The sub of the user performing the action
             group_id: Group ID
-            user_id: User ID to remove
+            user_ids: List of user IDs to remove
+
+        Returns:
+            List of user IDs that were actually removed
         """
         try:
-            # Remove member
-            await db.execute(
-                text("""
-                    DELETE FROM user_group_members
-                    WHERE user_group_id = :group_id AND user_id = :user_id
-                """),
-                {"group_id": group_id, "user_id": user_id},
-            )
+            removed: list[str] = []
 
-            # Log audit
-            await self.audit_service.log_action(
-                db=db,
-                actor_sub=actor_sub,
-                entity_type=self.entity_type,
-                entity_id=str(group_id),
-                action=AuditAction.UNASSIGN,
-                changes={
-                    "member_removed": user_id,
-                },
-            )
+            # Remove members and track which ones existed
+            for user_id in user_ids:
+                result = await db.execute(
+                    text("""
+                        DELETE FROM user_group_members
+                        WHERE user_group_id = :group_id AND user_id = :user_id
+                    """),
+                    {"group_id": group_id, "user_id": user_id},
+                )
+                if result.rowcount > 0:  # type: ignore
+                    removed.append(user_id)
 
-            logger.info(f"Removed member {user_id} from group {group_id} by {actor_sub}")
+            # Log audit only for successfully removed members
+            if removed:
+                await self.audit_service.log_action(
+                    db=db,
+                    actor_sub=actor_sub,
+                    entity_type=self.entity_type,
+                    entity_id=str(group_id),
+                    action=AuditAction.UNASSIGN,
+                    changes={
+                        "members_removed": removed,
+                    },
+                )
+
+            logger.info(f"Removed {len(removed)} members from group {group_id} by {actor_sub}")
+            return removed
 
         except Exception as e:
-            logger.error(f"Failed to remove member from group {group_id}: {e}")
+            logger.error(f"Failed to remove members from group {group_id}: {e}")
             raise
 
     async def update_member_role(

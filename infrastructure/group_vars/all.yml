@@ -35,6 +35,17 @@ chat_ui_oidc_client_secret: !vault |
 
 ssmkey_vault_prefix: '/{{ project_id }}/{{ software_component }}/vault'
 ssmkey_chat_ui_oidc_client_secret: '/{{ project_id }}/{{ software_component }}/oidc-chat-ui-client-secret'
+ssmkey_keycloak_admin_client_secret: '/{{ project_id }}/{{ software_component }}/keycloak-admin-client-secret'
+keycloak_admin_client_id: 'nannos-admin'
+keycloak_admin_client_secret: !vault |
+          $ANSIBLE_VAULT;1.1;AES256
+          61313130636666643966333130643264366461343333646530346532366136343434613236613638
+          3235623832333332343439626136333430393766356634660a303261353862666364373337376336
+          39643834613534303437343439343532623434666363656565383061643130396337653031316430
+          3832366665353937320a663337376533393863653338313265646231626431336135333063333435
+          37613562643663316336306562396335346666396336323266633030633339633638626535646330
+          3939373033613865336139323634633337316331366363393835
+
 ## Orchestrator
 orchestrator_oidc_client_id: 'orchestrator'
 orchestrator_oidc_client_secret: !vault |
