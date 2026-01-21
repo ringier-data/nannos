@@ -86,6 +86,8 @@ async def require_auth_or_bearer_token(request: Request) -> User:
                 issuer=config.oidc.issuer,
                 # Don't validate azp/aud - accept any valid token from the issuer
                 # The token could be issued to the frontend, orchestrator, or other clients
+                # TODO: we do not validate the audience here. Consider tightening this in the future.
+                # this requires the sub-agent to exchange the token with web-client as target audience.
             )
 
             payload = await validator.validate(token)

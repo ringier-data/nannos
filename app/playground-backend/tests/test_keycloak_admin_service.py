@@ -136,8 +136,8 @@ class TestEnsureGroupMapperConfigured:
         mock_keycloak_admin.a_add_mapper_to_client.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_raises_on_keycloak_error(self, mock_keycloak_admin):
-        """Test raises KeycloakSyncError on Keycloak API errors."""
+    async def test_warns_on_keycloak_error(self, mock_keycloak_admin, caplog):
+        """Test warning when client cannot be configured due to Keycloak error."""
         mock_keycloak_admin.a_get_clients.side_effect = KeycloakError("Permission denied", response_code=403)
 
         service = KeycloakAdminService(
@@ -148,8 +148,9 @@ class TestEnsureGroupMapperConfigured:
             group_name_prefix="",
         )
 
-        with pytest.raises(KeycloakSyncError, match="Failed to configure group mapper"):
+        with caplog.at_level("WARNING"):
             await service.ensure_group_mapper_configured()
+            assert "Failed to configure group mapper on" in caplog.text
 
 
 class TestCreateGroup:

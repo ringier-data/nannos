@@ -57,8 +57,6 @@ orchestrator_oidc_client_secret: !vault |
   35333732336339323765316333346233343864333635663634306364376135663835323630616530
   3632303431356335666431323131343762366562346637373164
 ssmkey_orchestrator_oidc_client_secret: '/{{ project_id }}/{{ software_component }}/oidc-orchestrator-client-secret'
-ssmkey_orchestrator_jwt_secret_key: '/{{ project_id }}/{{ software_component }}/orchestrator-jwt-secret-key'
-orchestrator_jwt_session_expiry_minutes: 15
 azure_openai_chat_deployment: 'chatgpt-4o'
 azure_openai_chat_model_name: 'gpt-4o'
 azure_openai_endpoint: 'https://rcplus-alloy-eu-prod.openai.azure.com'

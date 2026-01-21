@@ -57,7 +57,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
         - Only authenticated requests with valid orchestrator JWTs can reach this point
         - User info is available in request.state.user (set by middleware) but not directly
           accessible here since A2A SDK abstracts the request layer
-        - User context is extracted from message metadata by UserContextFromMetadataMiddleware
+        - User context is extracted from request.state.user by UserContextFromRequestStateMiddleware
 
         Args:
             context: Request context with user information

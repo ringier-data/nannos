@@ -573,6 +573,10 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     update_env_var ".env" "PLAYGROUND_BACKEND_URL" "${BACKEND_URLS[$BACKEND_ENV]}"
     update_env_var ".env" "PLAYGROUND_FRONTEND_URL" "http://localhost:5173"
     
+    # OIDC Authentication
+    update_env_var ".env" "OIDC_ISSUER" "https://login.alloy.ch/realms/a2a"
+    update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
+    
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-nannos-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
@@ -619,6 +623,10 @@ if [ "$ALLOY_ENV" = "local" ]; then
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-nannos-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
+    
+    # OIDC Authentication
+    update_env_var ".env" "OIDC_ISSUER" "https://login.alloy.ch/realms/a2a"
+    update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
     
     # Set MCP URLs based on ALLOY_ENV (defaults to dev for local)
     update_env_var ".env" "NAONOUS_MCP_URL" "${NAONOUS_MCP_URLS[$ALLOY_ENV]}"

@@ -21,6 +21,8 @@ from sqlalchemy import text
 
 from playground_backend.models.user import User, UserRole, UserStatus
 from playground_backend.models.user_group import (
+    GroupMemberAdd,
+    GroupMemberRemove,
     MemberInfo,
     UserGroupWithMembers,
 )
@@ -467,7 +469,7 @@ class TestAddMembersEndpoint:
         assert exc_info.value.status_code == 404
 
 
-class TestRemoveMemberEndpoint:
+class TestRemoveMembersEndpoint:
     """Test remove_member endpoint."""
 
     @pytest.mark.asyncio
@@ -497,30 +499,33 @@ class TestRemoveMemberEndpoint:
                 "status": "active",
             },
         )
+        await pg_session.execute(
+            text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
+            VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
+            """),
+            {
+                "id": "user-6",
+                "sub": "user-6",
+                "email": "user6@test.com",
+                "first_name": "User",
+                "last_name": "Six",
+                "is_administrator": False,
+                "role": "member",
+                "status": "active",
+            },
+        )
         await pg_session.commit()
-        from playground_backend.models.user_group import GroupMemberAdd
 
         mock_request = get_mock_request(user=mock_user)
-        add_body = GroupMemberAdd(user_ids=["user-5"], role="write")
+        add_body = GroupMemberAdd(user_ids=["user-5", "user-6"], role="write")
         await group_router.add_members(1, mock_request, add_body, pg_session, mock_user)
-        # Now remove user-5
-        result = await group_router.remove_member(1, "user-5", mock_request, pg_session, mock_user)
-        assert result is None  # 204 No Content
-
-    @pytest.mark.asyncio
-    async def test_remove_member_not_found(
-        self,
-        get_mock_request,
-        mock_user,
-        db_test_user,
-        db_test_user_groups,
-        pg_session,
-    ):
-        """Test error when member doesn't exist."""
-        mock_request = get_mock_request(user=mock_user)
-        with pytest.raises(HTTPException) as exc_info:
-            await group_router.remove_member(1, "user-999", mock_request, pg_session, mock_user)
-        assert exc_info.value.status_code == 404
+        # Now remove them
+        remove_body = GroupMemberRemove(user_ids=["user-5", "user-6"])
+        result = await group_router.remove_members(1, mock_request, remove_body, pg_session, mock_user)
+        # remaining members should only be mock_user
+        assert len(result.data) == 1
+        assert result.data[0].user_id == mock_user.id
 
     @pytest.mark.asyncio
     async def test_remove_last_manager_prevented(
@@ -535,6 +540,8 @@ class TestRemoveMemberEndpoint:
         mock_request = get_mock_request(user=mock_user)
         # mock_user is the only manager in group 1
         with pytest.raises(HTTPException) as exc_info:
-            await group_router.remove_member(1, mock_user.id, mock_request, pg_session, mock_user)
+            await group_router.remove_members(
+                1, mock_request, GroupMemberRemove(user_ids=[mock_user.id]), pg_session, mock_user
+            )
         assert exc_info.value.status_code == 409
-        assert "last manager" in exc_info.value.detail.lower()
+        assert "Cannot remove all managers from a group" in exc_info.value.detail

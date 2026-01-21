@@ -48,7 +48,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
         Build RequestContext with verified user information from authentication middleware.
 
         ZERO-TRUST: The authenticated user_id is extracted from async context variable
-        (set by UserContextFromMetadataMiddleware after JWT validation) and stored in call_context.state.
+        (set by JWTValidatorMiddleware after JWT validation) and stored in call_context.state.
 
         Args:
             params: The A2A message send parameters
@@ -64,7 +64,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
         call_context = context if context is not None else ServerCallContext()
 
         # ZERO-TRUST: Extract verified user information from context variable
-        # This was set by UserContextFromMetadataMiddleware after JWT validation
+        # This was set by JWTValidatorMiddleware after JWT validation
         user_context = current_user_context.get()
 
         if user_context and "user_id" in user_context:
@@ -74,18 +74,22 @@ class AuthRequestContextBuilder(RequestContextBuilder):
             call_context.state["user_name"] = user_context.get("name")
             call_context.state["user_token"] = user_context.get("token")
             call_context.state["user_scopes"] = user_context.get("scopes", [])
+            call_context.state["user_groups"] = user_context.get("groups", [])  # Groups for authorization
             call_context.state["sub_agent_config_hash"] = user_context.get("sub_agent_config_hash")  # For playground
             call_context.state["sub_agent_id"] = user_context.get("sub_agent_id")  # For cost tracking attribution
 
             logger.debug(
                 "[ZERO-TRUST] Building RequestContext for verified "
                 f"user_id: {user_context['user_id']}, "
-                f"sub_agent_id: {user_context.get('sub_agent_id')}"
+                f"sub_agent_id: {user_context.get('sub_agent_id')}, "
+                f"groups: {user_context.get('groups', [])}"
             )
         else:
             # No authenticated user - mark as anonymous
             logger.warning("[ZERO-TRUST] No user context found - authentication may have been bypassed!")
-            logger.warning("Ensure JWT authentication and UserContextFromMetadataMiddleware are properly configured")
+            logger.warning(
+                "Ensure JWT authentication and UserContextFromRequestStateMiddleware are properly configured"
+            )
             call_context.state["user_id"] = "anonymous"  # Fallback (should trigger auth errors)
 
         # Create and return the request context

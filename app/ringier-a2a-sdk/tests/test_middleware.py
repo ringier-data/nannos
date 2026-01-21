@@ -14,14 +14,10 @@ from ringier_a2a_sdk.auth.jwt_validator import (
     InvalidIssuerError,
     InvalidSignatureError,
 )
-from ringier_a2a_sdk.middleware.oidc_userinfo_middleware import (
-    OidcUserinfoMiddleware,
-)
 from ringier_a2a_sdk.middleware.orchestrator_jwt_middleware import (
     OrchestratorJWTMiddleware,
 )
 from ringier_a2a_sdk.middleware.user_context_middleware import (
-    UserContextFromMetadataMiddleware,
     UserContextFromRequestStateMiddleware,
     current_user_context,
 )
@@ -282,161 +278,11 @@ class TestOrchestratorJWTMiddleware:
             assert response.status_code == 200, f"Path {path} should be public"
 
 
-class TestUserContextFromMetadataMiddleware:
-    """Tests for UserContextFromMetadataMiddleware."""
-
-    def test_extracts_user_context_from_metadata(self, mock_a2a_request_body):
-        """Test that user context is extracted from HTTP headers."""
-
-        def endpoint(request):
-            # Verify user context was extracted
-            assert hasattr(request.state, "user")
-            assert request.state.user["user_id"] == "user-123"
-            assert request.state.user["email"] == "test@example.com"
-            assert request.state.user["name"] == "Test User"
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/test", endpoint, methods=["POST"])],
-            middleware=[Middleware(UserContextFromMetadataMiddleware)],
-        )
-
-        client = TestClient(app)
-        response = client.post(
-            "/test",
-            json=mock_a2a_request_body,
-            headers={
-                "Content-Type": "application/json",
-                "X-User-Id": "user-123",
-                "X-User-Email": "test@example.com",
-                "X-User-Name": "Test User",
-            },
-        )
-
-        assert response.status_code == 200
-
-    def test_missing_user_context_continues_processing(self):
-        """Test that missing user context logs warning but allows request through."""
-
-        def endpoint(request):
-            # Should still reach endpoint even without user context
-            assert not hasattr(request.state, "user") or request.state.user is None
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/test", endpoint, methods=["POST"])],
-            middleware=[Middleware(UserContextFromMetadataMiddleware)],
-        )
-
-        client = TestClient(app)
-
-        # Request without user_context in metadata
-        body = {
-            "jsonrpc": "2.0",
-            "method": "test_method",
-            "params": {
-                "metadata": {}  # No user_context
-            },
-            "id": 1,
-        }
-
-        response = client.post("/test", json=body, headers={"Content-Type": "application/json"})
-
-        assert response.status_code == 200
-
-    def test_missing_metadata_continues_processing(self):
-        """Test that missing metadata allows request through."""
-
-        def endpoint(request):
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/test", endpoint, methods=["POST"])],
-            middleware=[Middleware(UserContextFromMetadataMiddleware)],
-        )
-
-        client = TestClient(app)
-
-        # Request without metadata
-        body = {
-            "jsonrpc": "2.0",
-            "method": "test_method",
-            "params": {},  # No metadata
-            "id": 1,
-        }
-
-        response = client.post("/test", json=body, headers={"Content-Type": "application/json"})
-
-        assert response.status_code == 200
-
-    def test_malformed_json_continues_processing(self):
-        """Test that malformed JSON allows request through (logged but not blocked)."""
-
-        def endpoint(request):
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/test", endpoint, methods=["POST"])],
-            middleware=[Middleware(UserContextFromMetadataMiddleware)],
-        )
-
-        client = TestClient(app)
-
-        # Non-JSON content
-        response = client.post("/test", content="not json", headers={"Content-Type": "text/plain"})
-
-        # Middleware should not block non-JSON requests
-        assert response.status_code == 200
-
-    def test_partial_user_context_extracted(self):
-        """Test that partial user context (missing some fields) is still extracted."""
-
-        def endpoint(request):
-            assert hasattr(request.state, "user")
-            assert request.state.user["user_id"] == "user-123"
-            # email and name might be missing but that's ok
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/test", endpoint, methods=["POST"])],
-            middleware=[Middleware(UserContextFromMetadataMiddleware)],
-        )
-
-        client = TestClient(app)
-
-        # Request with partial user context (only user_id in headers)
-        body = {
-            "jsonrpc": "2.0",
-            "method": "test_method",
-            "params": {
-                "metadata": {
-                    "user_context": {
-                        "user_id": "user-123"
-                        # Missing email and name
-                    }
-                }
-            },
-            "id": 1,
-        }
-
-        response = client.post(
-            "/test",
-            json=body,
-            headers={
-                "Content-Type": "application/json",
-                "X-User-Id": "user-123",
-                # Missing X-User-Email and X-User-Name
-            },
-        )
-
-        assert response.status_code == 200
-
-
 class TestMiddlewareChain:
     """Tests for middleware chain execution order."""
 
     def test_middleware_chain_execution_order(self, valid_jwt_token, mock_a2a_request_body):
-        """Test that OrchestratorJWTMiddleware runs before UserContextFromMetadataMiddleware."""
+        """Test that OrchestratorJWTMiddleware runs before UserContextFromRequestStateMiddleware."""
         # Mock validator
         mock_validator = Mock()
         mock_validator.validate = AsyncMock(
@@ -454,18 +300,20 @@ class TestMiddlewareChain:
             mock_validator_class.return_value = mock_validator
 
             def endpoint(request):
-                # Both middlewares should have run
+                # JWT middleware should have run and set orchestrator info
                 assert hasattr(request.state, "orchestrator")
-                assert hasattr(request.state, "user")
                 assert request.state.orchestrator["client_id"] == "orchestrator"
-                assert request.state.user["user_id"] == "user-123"
+                # Without upstream OIDC middleware, request.state.user won't be set
+                # UserContextFromRequestStateMiddleware will set context to None
+                ctx = current_user_context.get()
+                assert ctx is None
                 return PlainTextResponse("OK")
 
             app = Starlette(
                 routes=[Route("/test", endpoint, methods=["POST"])],
                 middleware=[
                     # Middleware runs in reverse order (bottom-to-top for requests)
-                    Middleware(UserContextFromMetadataMiddleware),
+                    Middleware(UserContextFromRequestStateMiddleware),
                     Middleware(
                         OrchestratorJWTMiddleware,
                         issuer="https://login.example.com/realms/test",
@@ -482,9 +330,6 @@ class TestMiddlewareChain:
                 headers={
                     "Authorization": f"Bearer {valid_jwt_token}",
                     "Content-Type": "application/json",
-                    "X-User-Id": "user-123",
-                    "X-User-Email": "test@example.com",
-                    "X-User-Name": "Test User",
                 },
             )
 
@@ -505,7 +350,7 @@ class TestMiddlewareChain:
             app = Starlette(
                 routes=[Route("/test", endpoint, methods=["POST"])],
                 middleware=[
-                    Middleware(UserContextFromMetadataMiddleware),
+                    Middleware(UserContextFromRequestStateMiddleware),
                     Middleware(
                         OrchestratorJWTMiddleware,
                         issuer="https://login.example.com/realms/test",
@@ -527,143 +372,6 @@ class TestMiddlewareChain:
             data = response.json()
             message = data.get("detail") or data.get("message")
             assert "signature" in message.lower()
-
-
-class TestOidcUserinfoMiddleware:
-    """Tests for OidcUserinfoMiddleware."""
-
-    def test_middleware_initialization(self):
-        """Test middleware initialization with required values."""
-        app = Mock()
-        middleware = OidcUserinfoMiddleware(
-            app,
-            issuer="https://login.alloy.ch/realms/a2a",
-            jwt_secret_key="test-secret-key",
-            client_id="test-client-id",
-        )
-
-        assert middleware.issuer == "https://login.alloy.ch/realms/a2a"
-        assert middleware.client_id == "test-client-id"
-        assert middleware.jwt_secret_key == "test-secret-key"
-
-    def test_middleware_initialization_with_custom_values(self):
-        """Test middleware initialization with custom issuer and client_id."""
-        app = Mock()
-        middleware = OidcUserinfoMiddleware(
-            app,
-            issuer="https://custom.oidc.com/oauth2/default",
-            jwt_secret_key="custom-secret",
-            client_id="custom-client-id",
-            client_secret="custom-secret",
-        )
-
-        assert middleware.issuer == "https://custom.oidc.com/oauth2/default"
-        assert middleware.client_id == "custom-client-id"
-        assert middleware.client_secret == "custom-secret"
-
-    def test_public_paths_defined(self):
-        """Test that public paths are properly defined."""
-        app = Mock()
-        middleware = OidcUserinfoMiddleware(
-            app, issuer="https://login.alloy.ch/realms/a2a", jwt_secret_key="test-secret"
-        )
-
-        assert "/.well-known/agent-card.json" in middleware.PUBLIC_PATHS
-        assert "/health" in middleware.PUBLIC_PATHS
-        assert "/docs" in middleware.PUBLIC_PATHS
-        assert "/openapi.json" in middleware.PUBLIC_PATHS
-
-
-class TestOidcUserinfoMiddlewareDispatch:
-    """Tests for OidcUserinfoMiddleware request dispatch."""
-
-    def test_public_path_allows_access(self):
-        """Test that public paths don't require authentication."""
-
-        def endpoint(request):
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/.well-known/agent-card.json", endpoint)],
-            middleware=[
-                Middleware(
-                    OidcUserinfoMiddleware, issuer="https://login.alloy.ch/realms/a2a", jwt_secret_key="test-secret"
-                )
-            ],
-        )
-
-        client = TestClient(app)
-        response = client.get("/.well-known/agent-card.json")
-
-        # Should pass through without authentication
-        assert response.status_code == 200
-        assert response.text == "OK"
-
-    def test_missing_authorization_header(self):
-        """Test that missing Authorization header returns 401."""
-
-        def endpoint(request):
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/api/test", endpoint, methods=["POST"])],
-            middleware=[
-                Middleware(
-                    OidcUserinfoMiddleware, issuer="https://login.alloy.ch/realms/a2a", jwt_secret_key="test-secret"
-                )
-            ],
-        )
-
-        client = TestClient(app)
-        response = client.post("/api/test")
-
-        # Should return 401
-        assert response.status_code == 401
-        data = response.json()
-        message = data.get("detail") or data.get("message")
-        assert "Authorization" in message or "Missing" in message
-
-    def test_invalid_authorization_format(self):
-        """Test that invalid Authorization format returns 401."""
-
-        def endpoint(request):
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/api/test", endpoint, methods=["POST"])],
-            middleware=[
-                Middleware(
-                    OidcUserinfoMiddleware, issuer="https://login.alloy.ch/realms/a2a", jwt_secret_key="test-secret"
-                )
-            ],
-        )
-
-        client = TestClient(app)
-        response = client.post("/api/test", headers={"Authorization": "InvalidFormat"})
-
-        # Should return 401
-        assert response.status_code == 401
-
-    def test_single_word_authorization_header(self):
-        """Test that single-word Authorization header returns 401."""
-
-        def endpoint(request):
-            return PlainTextResponse("OK")
-
-        app = Starlette(
-            routes=[Route("/api/test", endpoint, methods=["POST"])],
-            middleware=[
-                Middleware(
-                    OidcUserinfoMiddleware, issuer="https://login.alloy.ch/realms/a2a", jwt_secret_key="test-secret"
-                )
-            ],
-        )
-
-        client = TestClient(app)
-        response = client.post("/api/test", headers={"Authorization": "Bearer"})
-
-        # Should return 401
-        assert response.status_code == 401
 
 
 class TestUserContextFromRequestStateMiddleware:

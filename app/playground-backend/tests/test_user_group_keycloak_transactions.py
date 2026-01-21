@@ -359,31 +359,39 @@ class TestRemoveMemberWithKeycloakTransaction:
         )
         await pg_session.execute(
             text("""
+                INSERT INTO users (id, sub, email, first_name, last_name, role, status, created_at, updated_at)
+                VALUES ('sub-2', 'sub-2', 'user2@test.com', 'User', 'Two', 'member', 'active', NOW(), NOW())
+            """)
+        )
+        await pg_session.execute(
+            text("""
                 INSERT INTO user_group_members (id, user_id, user_group_id, group_role, created_at)
                 VALUES (1, 'sub-1', 1, 'read', NOW())
+            """)
+        )
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (id, user_id, user_group_id, group_role, created_at)
+                VALUES (2, 'sub-2', 1, 'read', NOW())
             """)
         )
         await pg_session.commit()
 
         # Remove member
-        success = await service.remove_member(
+        members = await service.remove_members(
             db=pg_session,
             actor_sub="actor-123",
             group_id=1,
-            user_id="sub-1",
+            user_ids=["sub-1"],
         )
         await pg_session.commit()
 
         # Verify Keycloak was called
         mock_keycloak_service.remove_user_from_group.assert_called_once_with("sub-1", "kc-group-123")
 
-        # Verify database removed member
-        assert success is True
-        result = await pg_session.execute(
-            text("SELECT COUNT(*) as count FROM user_group_members WHERE user_id = 'sub-1'")
-        )
-        count = result.scalar()
-        assert count == 0
+        # Verify 1 member left in the database
+        assert len(members) == 1
+        assert members[0].user_id == "sub-2"
 
     @pytest.mark.asyncio
     async def test_remove_member_keycloak_failure_rolls_back_db(
@@ -418,11 +426,11 @@ class TestRemoveMemberWithKeycloakTransaction:
 
         # Attempt to remove member - should raise exception and NOT commit
         with pytest.raises(KeycloakSyncError):
-            await service.remove_member(
+            await service.remove_members(
                 db=pg_session,
                 actor_sub="actor-123",
                 group_id=1,
-                user_id="sub-1",
+                user_ids=["sub-1"],
             )
 
         # Explicitly rollback the transaction (in real code, controller would do this)

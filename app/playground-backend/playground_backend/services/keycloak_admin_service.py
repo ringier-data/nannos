@@ -129,22 +129,22 @@ class KeycloakAdminService:
         """
         return f"{self.group_name_prefix}{name}" if self.group_name_prefix else name
 
-    async def ensure_group_mapper_configured(self) -> None:
-        """Ensure OIDC client has Group Membership mapper configured.
+    async def _configure_group_mapper_for_client(self, client_id_str: str) -> None:
+        """Configure group mapper for a specific client.
 
-        This automatically configures the client to include 'groups' claim in tokens.
-        The mapper is created only if it doesn't already exist.
+        Args:
+            client_id_str: The clientId string (e.g., "web-client", "mcp-gateway")
 
         Raises:
             KeycloakSyncError: If mapper configuration fails
         """
         try:
-            # Find the OIDC client
+            # Find the client
             clients = await self.admin.a_get_clients()
-            client = next((c for c in clients if c.get("clientId") == self.oidc_client_id), None)
+            client = next((c for c in clients if c.get("clientId") == client_id_str), None)
 
             if not client:
-                logger.warning(f"OIDC client '{self.oidc_client_id}' not found in realm '{self.realm}'")
+                logger.warning(f"Client '{client_id_str}' not found in realm '{self.realm}'")
                 return
 
             client_id = client["id"]
@@ -156,7 +156,7 @@ class KeycloakAdminService:
             )
 
             if group_mapper:
-                logger.info(f"Group mapper already configured on client '{self.oidc_client_id}'")
+                logger.info(f"Group mapper already configured on client '{client_id_str}'")
                 return
 
             # Create group membership mapper
@@ -168,20 +168,51 @@ class KeycloakAdminService:
                     "full.path": "false",  # Flat structure (group names only)
                     "id.token.claim": "true",
                     "access.token.claim": "true",
+                    "lightweight.claim": "true",  # CRITICAL: Include in lightweight tokens (token exchange)
                     "userinfo.token.claim": "true",
                     "claim.name": "groups",
                 },
             }
 
             await self.admin.a_add_mapper_to_client(client_id, mapper_config)
-            logger.info(f"Successfully configured group mapper on client '{self.oidc_client_id}'")
+            logger.info(f"Successfully configured group mapper on client '{client_id_str}'")
 
         except KeycloakError as e:
-            logger.error(f"Failed to configure group mapper: {e}")
-            raise KeycloakSyncError(f"Failed to configure group mapper: {e}") from e
+            logger.error(f"Failed to configure group mapper on '{client_id_str}': {e}")
+            raise KeycloakSyncError(f"Failed to configure group mapper on '{client_id_str}': {e}") from e
         except Exception as e:
-            logger.error(f"Unexpected error configuring group mapper: {e}")
-            raise KeycloakSyncError(f"Unexpected error configuring group mapper: {e}") from e
+            logger.error(f"Unexpected error configuring group mapper on '{client_id_str}': {e}")
+            raise KeycloakSyncError(f"Unexpected error configuring group mapper on '{client_id_str}': {e}") from e
+
+    async def ensure_group_mapper_configured(self) -> None:
+        """Ensure group mapper is configured on all relevant clients.
+
+        Configures the Group Membership mapper on:
+        1. The OIDC client (web-client) - for user login tokens
+        2. The mcp-gateway client - for token exchange (critical!)
+        3. The orchestrator client - for token exchange
+        4. The agent-creator client - for token exchange
+
+        Token exchange copies claims from target client mappers, not source client.
+        So all clients that receive tokens (via login or exchange) need the mapper.
+
+        Raises:
+            KeycloakSyncError: If mapper configuration fails
+        """
+        # List of clients that need group mapper
+        clients_to_configure = [
+            self.oidc_client_id,  # Web client (user login)
+            "mcp-gateway",  # MCP gateway (token exchange target)
+            "orchestrator",  # Orchestrator (token exchange target)
+            "agent-creator",  # Agent creator (token exchange target)
+        ]
+
+        for client_id in clients_to_configure:
+            try:
+                await self._configure_group_mapper_for_client(client_id)
+            except Exception as e:
+                # Log but don't fail if a client doesn't exist
+                logger.warning(f"Failed to configure group mapper for '{client_id}': {e}")
 
     async def create_group(self, name: str, description: str | None = None) -> str:
         """Create a group in Keycloak.
