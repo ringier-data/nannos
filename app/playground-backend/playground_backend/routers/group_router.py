@@ -249,17 +249,18 @@ async def remove_members(
         )
 
 
-@router.get("/{group_id}/default-agents", response_model=list[SubAgentRefWithStatus])
-async def get_group_default_agents(
+@router.get("/{group_id}/accessible-agents", response_model=list[SubAgentRefWithStatus])
+async def get_group_accessible_agents(
     group_id: int,
     request: Request,
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> list[SubAgentRefWithStatus]:
-    """Get default agents for a group with approval and activation status.
+    """Get all accessible approved agents for a group with default flags and status.
 
-    Returns agents with status indicators for UI:
-    - approval_status: draft | pending_approval | approved | rejected
+    Returns ALL approved agents that the group has permission to access, with indicators:
+    - approval_status: approval status of the agent
+    - is_default: whether this agent is set as a default for automatic activation
     - is_activated: whether the agent is currently activated for the user
     - activated_by_groups: list of group IDs that activated this agent
 
@@ -276,7 +277,7 @@ async def get_group_default_agents(
             detail="Group not found",
         )
 
-    sub_agents = await user_group_service.get_group_default_agents_with_status(
+    sub_agents = await user_group_service.get_group_accessible_agents(
         db=db,
         group_id=group_id,
         user_id=user.id,

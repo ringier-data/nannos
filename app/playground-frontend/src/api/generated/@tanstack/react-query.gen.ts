@@ -1642,23 +1642,24 @@ export const removeMembersApiV1GroupsGroupIdMembersRemovePostMutation = (options
     return mutationOptions;
 };
 
-export const getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetQueryKey = (options: Options<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData>) => createQueryKey('getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGet', options);
+export const getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetQueryKey = (options: Options<GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetData>) => createQueryKey('getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGet', options);
 
 /**
- * Get Group Default Agents
+ * Get Group Accessible Agents
  *
- * Get default agents for a group with approval and activation status.
+ * Get all accessible approved agents for a group with default flags and status.
  *
- * Returns agents with status indicators for UI:
- * - approval_status: draft | pending_approval | approved | rejected
+ * Returns ALL approved agents that the group has permission to access, with indicators:
+ * - approval_status: approval status of the agent
+ * - is_default: whether this agent is set as a default for automatic activation
  * - is_activated: whether the agent is currently activated for the user
  * - activated_by_groups: list of group IDs that activated this agent
  *
  * Requires group member role.
  */
-export const getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions = (options: Options<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData>) => queryOptions<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponse, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetError, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponse, ReturnType<typeof getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetQueryKey>>({
+export const getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions = (options: Options<GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetData>) => queryOptions<GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponse, GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetError, GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponse, ReturnType<typeof getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
-        const { data } = await getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGet({
+        const { data } = await getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGet({
             ...options,
             ...queryKey[0],
             signal,
@@ -1666,7 +1667,7 @@ export const getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions = (o
         });
         return data;
     },
-    queryKey: getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetQueryKey(options)
+    queryKey: getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetQueryKey(options)
 });
 
 /**

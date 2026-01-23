@@ -68,7 +68,7 @@ async def list_sub_agents(
         # Admin privileges are for operations, not for seeing everything the user sees
         is_impersonating = hasattr(request.state, "original_user") and request.state.original_user
         effective_admin = is_admin_mode(request, user) and not is_impersonating
-        
+
         if owned_only:
             # Only show owned sub-agents
             sub_agents = await sub_agent_service.get_accessible_sub_agents(

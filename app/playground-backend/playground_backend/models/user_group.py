@@ -147,6 +147,7 @@ class SubAgentRefWithStatus(SubAgentRef):
     approval_status: SubAgentStatus  # draft, pending_approval, approved, rejected
     is_activated: bool  # Whether currently activated for the user
     activated_by_groups: list[int] | None = None  # Which groups activated it
+    is_default: bool = False  # Whether this agent is a default for the group
 
 
 class SubAgentAdd(BaseModel):

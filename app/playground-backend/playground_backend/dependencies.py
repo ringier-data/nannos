@@ -176,7 +176,7 @@ def require_admin(request: Request) -> User:
     3. X-Admin-Mode header must be set to 'true'
 
     This allows admin users to operate as regular users when admin mode is disabled.
-    
+
     NOTE: When impersonating, this returns the ORIGINAL ADMIN user, not the impersonated user.
     This ensures admin-only endpoints remain accessible during impersonation.
 
@@ -196,7 +196,7 @@ def require_admin(request: Request) -> User:
         user = request.state.original_user
     else:
         user = require_auth(request)
-    
+
     admin_mode = get_admin_mode(request)
 
     # Detect privilege escalation attempt: non-admin trying to use admin mode header
@@ -235,8 +235,10 @@ def is_admin_mode(request: Request, user: User) -> bool:
             return await service.list(is_admin=effective_admin)
     """
     # Check if currently impersonating - if so, use the original admin user for admin checks
-    effective_user = request.state.original_user if hasattr(request.state, "original_user") and request.state.original_user else user
-    
+    effective_user = (
+        request.state.original_user if hasattr(request.state, "original_user") and request.state.original_user else user
+    )
+
     admin_mode = get_admin_mode(request)
 
     # Detect privilege escalation attempt
@@ -310,7 +312,7 @@ def require_approver(request: Request) -> User:
         user = request.state.original_user
     else:
         user = require_auth(request)
-    
+
     admin_mode = get_admin_mode(request)
 
     # Check if user has approval capabilities (either regular approve or approve.admin)

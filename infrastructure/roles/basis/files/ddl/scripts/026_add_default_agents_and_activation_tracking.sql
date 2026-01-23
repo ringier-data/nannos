@@ -58,12 +58,13 @@ CREATE TYPE notification_type AS ENUM (
     'approval_rejected',
     'agent_shared',
     'agent_access_revoked',
-    'agent_permission_changed'
+    'agent_permission_changed',
     'secret_shared',
     'secret_access_revoked',
     'secret_permission_changed',
     'system_announcement'
 );
+
 
 CREATE TABLE user_notifications (
     id SERIAL PRIMARY KEY,

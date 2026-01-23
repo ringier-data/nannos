@@ -1467,7 +1467,12 @@ class SubAgentService:
             group_permissions=group_permissions,
         )
 
-        # Notify affected users
+        # Commit the permission changes BEFORE notification processing
+        # This ensures permissions are persisted even if notifications fail
+        await db.commit()
+        logger.info(f"Successfully committed permission changes for sub-agent {sub_agent_id}")
+
+        # Notify affected users (after commit, so failures don't rollback permissions)
         if self.notification_service and (added_groups or removed_groups):
             try:
                 agent_name = existing.name
@@ -1525,11 +1530,13 @@ class SubAgentService:
                             if member_id != user_id  # Don't notify the actor
                         ]
                         await self.notification_service.bulk_create_notifications(db, notifications)
+                        # Commit notifications separately
+                        await db.commit()
 
             except Exception as e:
                 logger.error(f"Failed to create permission change notifications: {e}")
+                # Don't re-raise - permissions are already committed
 
-        await db.commit()
         return True
 
     async def get_permissions(

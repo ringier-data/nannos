@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Plus, X, Save, UserPlus, Trash } from 'lucide-react';
+import { ArrowLeft, Plus, X, Save, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import {
@@ -13,9 +13,8 @@ import {
   removeMembersApiV1GroupsGroupIdMembersRemovePostMutation,
   updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation,
   listUsersApiV1AdminUsersGetOptions,
-  getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions,
+  getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
   setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation,
-  playgroundListSubAgentsOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { RoleEnum } from '@/api/generated';
 import { Button } from '@/components/ui/button';
@@ -69,10 +68,6 @@ export function GroupDetailPage() {
 
   const [selectedMembersToRemove, setSelectedMembersToRemove] = useState<Set<string>>(new Set());
 
-  const [addDefaultAgentDialogOpen, setAddDefaultAgentDialogOpen] = useState(false);
-  const [selectedAgentsToAdd, setSelectedAgentsToAdd] = useState<Set<number>>(new Set());
-  const [selectedDefaultsToRemove, setSelectedDefaultsToRemove] = useState<Set<number>>(new Set());
-
   const [membersPage, setMembersPage] = useState(1);
 
   // Admin endpoint - full access
@@ -109,17 +104,12 @@ export function GroupDetailPage() {
     enabled: addMemberDialogOpen,
   });
 
-  // Default agents queries
+  // Accessible agents queries
   const { data: defaultAgentsData, isLoading: defaultAgentsLoading } = useQuery({
-    ...getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions({
+    ...getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
       path: { group_id: groupId },
     }),
     enabled: !isNaN(groupId),
-  });
-
-  const { data: subAgentsData } = useQuery({
-    ...playgroundListSubAgentsOptions(),
-    enabled: addDefaultAgentDialogOpen,
   });
 
   const updateMutation = useMutation({
@@ -216,34 +206,15 @@ export function GroupDetailPage() {
   const addDefaultAgentsMutation = useMutation({
     ...setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation(),
     onSuccess: () => {
-      toast.success('Default agents updated');
-      setAddDefaultAgentDialogOpen(false);
-      setSelectedAgentsToAdd(new Set());
+      toast.success('Default agent status updated');
       queryClient.invalidateQueries({
-        queryKey: getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions({
+        queryKey: getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
           path: { group_id: groupId },
         }).queryKey,
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to update default agents';
-      toast.error(message);
-    },
-  });
-
-  const removeDefaultAgentsMutation = useMutation({
-    ...setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation(),
-    onSuccess: () => {
-      toast.success(`Removed ${selectedDefaultsToRemove.size} default agent(s)`);
-      setSelectedDefaultsToRemove(new Set());
-      queryClient.invalidateQueries({
-        queryKey: getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions({
-          path: { group_id: groupId },
-        }).queryKey,
-      });
-    },
-    onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to remove default agents';
+      const message = error?.response?.data?.detail || 'Failed to update default agent';
       toast.error(message);
     },
   });
@@ -255,10 +226,8 @@ export function GroupDetailPage() {
   const memberUserIds = new Set(members.map((m) => m.user_id));
   const availableUsers = allUsers.filter((u) => !memberUserIds.has(u.id));
 
-  const defaultAgents = defaultAgentsData ?? [];
-  const defaultAgentIds = new Set(defaultAgents.map((a: any) => a.id));
-  const allSubAgents = Array.isArray(subAgentsData) ? subAgentsData : (subAgentsData?.items ?? []);
-  const availableSubAgents = allSubAgents.filter((a: any) => !defaultAgentIds.has(a.id));
+  const accessibleAgents = defaultAgentsData ?? [];
+  const defaultAgents = accessibleAgents.filter((a: any) => a.is_default);
 
   const startEditing = () => {
     if (!group) return;
@@ -305,32 +274,16 @@ export function GroupDetailPage() {
     });
   };
 
-  const handleAddDefaultAgents = () => {
-    if (selectedAgentsToAdd.size === 0) return;
-    // Combine existing and new agents
-    const currentIds = defaultAgents.map((a: any) => a.id);
-    const newIds = Array.from(selectedAgentsToAdd);
-    const allIds = [...new Set([...currentIds, ...newIds])];
+  const handleToggleDefault = (agentId: number, currentlyDefault: boolean) => {
+    const currentDefaultIds = defaultAgents.map((a: any) => a.id);
+    const newDefaultIds = currentlyDefault
+      ? currentDefaultIds.filter((id) => id !== agentId)  // Remove from defaults
+      : [...currentDefaultIds, agentId];  // Add to defaults
     
     addDefaultAgentsMutation.mutate({
       path: { group_id: groupId },
       body: {
-        sub_agent_ids: allIds,
-      },
-    });
-  };
-
-  const handleRemoveSelectedDefaults = () => {
-    if (selectedDefaultsToRemove.size === 0) return;
-    // Keep only agents that are not selected for removal
-    const remainingIds = defaultAgents
-      .filter((a: any) => !selectedDefaultsToRemove.has(a.id))
-      .map((a: any) => a.id);
-    
-    removeDefaultAgentsMutation.mutate({
-      path: { group_id: groupId },
-      body: {
-        sub_agent_ids: remainingIds,
+        sub_agent_ids: newDefaultIds,
       },
     });
   };
@@ -446,30 +399,12 @@ export function GroupDetailPage() {
       )}
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader>
           <div>
-            <CardTitle>Default Agents</CardTitle>
+            <CardTitle>Accessible Agents</CardTitle>
             <CardDescription>
-              Agents that are automatically enabled for new group members
+              All approved agents this group can access. Toggle to set as default for new members.
             </CardDescription>
-          </div>
-          <div className="flex gap-2">
-            {selectedDefaultsToRemove.size > 0 && (
-              <Button
-                variant="destructive"
-                onClick={handleRemoveSelectedDefaults}
-                disabled={removeDefaultAgentsMutation.isPending}
-              >
-                <Trash className="h-4 w-4 mr-2" />
-                {removeDefaultAgentsMutation.isPending
-                  ? 'Removing...'
-                  : `Remove ${selectedDefaultsToRemove.size} Selected`}
-              </Button>
-            )}
-            <Button onClick={() => setAddDefaultAgentDialogOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add Default Agents
-            </Button>
           </div>
         </CardHeader>
         <CardContent>
@@ -477,60 +412,47 @@ export function GroupDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-12">
-                    <Checkbox
-                      checked={
-                        defaultAgents.length > 0 &&
-                        selectedDefaultsToRemove.size === defaultAgents.length
-                      }
-                      onCheckedChange={(checked) => {
-                        if (checked) {
-                          setSelectedDefaultsToRemove(new Set(defaultAgents.map((a) => a.id)));
-                        } else {
-                          setSelectedDefaultsToRemove(new Set());
-                        }
-                      }}
-                    />
-                  </TableHead>
+                  <TableHead className="w-16">Default</TableHead>
                   <TableHead>Agent Name</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Owner</TableHead>
+                  <TableHead className="w-20">Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {defaultAgentsLoading ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center py-8">
+                    <TableCell colSpan={5} className="text-center py-8">
                       Loading...
                     </TableCell>
                   </TableRow>
-                ) : defaultAgents.length === 0 ? (
+                ) : accessibleAgents.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={4} className="text-center py-8 text-muted-foreground">
-                      No default agents configured
+                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                      No accessible agents. Add permissions first.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  defaultAgents.map((agent) => (
+                  accessibleAgents.map((agent: any) => (
                     <TableRow key={agent.id}>
                       <TableCell>
                         <Checkbox
-                          checked={selectedDefaultsToRemove.has(agent.id)}
-                          onCheckedChange={(checked) => {
-                            const newSet = new Set(selectedDefaultsToRemove);
-                            if (checked) {
-                              newSet.add(agent.id);
-                            } else {
-                              newSet.delete(agent.id);
-                            }
-                            setSelectedDefaultsToRemove(newSet);
-                          }}
+                          checked={agent.is_default}
+                          onCheckedChange={() => handleToggleDefault(agent.id, agent.is_default)}
+                          disabled={addDefaultAgentsMutation.isPending}
                         />
                       </TableCell>
                       <TableCell className="font-medium">{agent.name}</TableCell>
                       <TableCell className="capitalize">{(agent as any).agent_type || '-'}</TableCell>
                       <TableCell>
                         {(agent as any).owner_email || '-'}
+                      </TableCell>
+                      <TableCell>
+                        {agent.is_activated ? (
+                          <span className="text-green-600 text-sm">Active</span>
+                        ) : (
+                          <span className="text-muted-foreground text-sm">Inactive</span>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))
@@ -722,73 +644,6 @@ export function GroupDetailPage() {
             >
               <Plus className="h-4 w-4 mr-1" />
               {addMembersMutation.isPending ? 'Adding...' : `Add ${selectedUsersToAdd.size} User(s)`}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Add Default Agents Dialog */}
-      <Dialog open={addDefaultAgentDialogOpen} onOpenChange={setAddDefaultAgentDialogOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Add Default Agents</DialogTitle>
-            <DialogDescription>
-              Select agents to automatically enable for group members
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>Available Agents</Label>
-              <div className="border rounded-lg max-h-64 overflow-y-auto">
-                {availableSubAgents.length === 0 ? (
-                  <div className="p-4 text-center text-muted-foreground">
-                    No available agents to add
-                  </div>
-                ) : (
-                  availableSubAgents.map((agent: any) => (
-                    <div
-                      key={agent.id}
-                      className="flex items-center gap-3 p-3 border-b last:border-b-0"
-                    >
-                      <Checkbox
-                        checked={selectedAgentsToAdd.has(agent.id)}
-                        onCheckedChange={(checked) => {
-                          const newSet = new Set(selectedAgentsToAdd);
-                          if (checked) {
-                            newSet.add(agent.id);
-                          } else {
-                            newSet.delete(agent.id);
-                          }
-                          setSelectedAgentsToAdd(newSet);
-                        }}
-                      />
-                      <div className="flex-1">
-                        <p className="font-medium">{agent.name}</p>
-                        <p className="text-sm text-muted-foreground capitalize">
-                          {agent.type} {agent.owner ? `• by ${agent.owner.name}` : ''}
-                        </p>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setAddDefaultAgentDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleAddDefaultAgents}
-              disabled={selectedAgentsToAdd.size === 0 || addDefaultAgentsMutation.isPending}
-            >
-              <Plus className="h-4 w-4 mr-1" />
-              {addDefaultAgentsMutation.isPending
-                ? 'Adding...'
-                : `Add ${selectedAgentsToAdd.size} Agent(s)`}
             </Button>
           </DialogFooter>
         </DialogContent>

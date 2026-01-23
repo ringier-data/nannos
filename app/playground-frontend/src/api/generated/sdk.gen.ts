@@ -876,18 +876,19 @@ export const removeMembersApiV1GroupsGroupIdMembersRemovePost = <ThrowOnError ex
 });
 
 /**
- * Get Group Default Agents
+ * Get Group Accessible Agents
  *
- * Get default agents for a group with approval and activation status.
+ * Get all accessible approved agents for a group with default flags and status.
  *
- * Returns agents with status indicators for UI:
- * - approval_status: draft | pending_approval | approved | rejected
+ * Returns ALL approved agents that the group has permission to access, with indicators:
+ * - approval_status: approval status of the agent
+ * - is_default: whether this agent is set as a default for automatic activation
  * - is_activated: whether the agent is currently activated for the user
  * - activated_by_groups: list of group IDs that activated this agent
  *
  * Requires group member role.
  */
-export const getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGet = <ThrowOnError extends boolean = false>(options: Options<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData, ThrowOnError>) => (options.client ?? client).get<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponses, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetErrors, ThrowOnError>({ url: '/api/v1/groups/{group_id}/default-agents', ...options });
+export const getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGet = <ThrowOnError extends boolean = false>(options: Options<GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetData, ThrowOnError>) => (options.client ?? client).get<GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses, GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetErrors, ThrowOnError>({ url: '/api/v1/groups/{group_id}/accessible-agents', ...options });
 
 /**
  * Set Group Default Agents

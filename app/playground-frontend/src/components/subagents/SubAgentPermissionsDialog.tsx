@@ -37,7 +37,7 @@ import {
   getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions,
   updateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutMutation,
   listMyGroupsApiV1GroupsGetOptions,
-  getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions,
+  getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
   addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostMutation,
   removeGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
@@ -129,7 +129,7 @@ export function SubAgentPermissionsDialog({
       for (const group of availableGroups) {
         try {
           const result = await queryClient.fetchQuery(
-            getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions({
+            getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
               path: { group_id: group.id },
             })
           );

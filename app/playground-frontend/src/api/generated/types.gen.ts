@@ -1137,6 +1137,10 @@ export type SubAgentRefWithStatus = {
      * Activated By Groups
      */
     activated_by_groups?: Array<number> | null;
+    /**
+     * Is Default
+     */
+    is_default?: boolean;
 };
 
 /**
@@ -3729,7 +3733,7 @@ export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses = {
 
 export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponse = RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses[keyof RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses];
 
-export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData = {
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetData = {
     body?: never;
     path: {
         /**
@@ -3738,28 +3742,28 @@ export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData = {
         group_id: number;
     };
     query?: never;
-    url: '/api/v1/groups/{group_id}/default-agents';
+    url: '/api/v1/groups/{group_id}/accessible-agents';
 };
 
-export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetErrors = {
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetError = GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetErrors[keyof GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetErrors];
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetError = GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetErrors[keyof GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetErrors];
 
-export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponses = {
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses = {
     /**
-     * Response Get Group Default Agents Api V1 Groups  Group Id  Default Agents Get
+     * Response Get Group Accessible Agents Api V1 Groups  Group Id  Accessible Agents Get
      *
      * Successful Response
      */
     200: Array<SubAgentRefWithStatus>;
 };
 
-export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponse = GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponses[keyof GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponses];
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponse = GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses[keyof GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses];
 
 export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData = {
     body: SubAgentAdd;

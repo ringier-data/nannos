@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @pytest.mark.asyncio
-async def test_get_group_default_agents_empty(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
-    """Test getting default agents when there are none."""
+async def test_get_group_accessible_agents_empty(
+    client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
+):
+    """Test getting accessible agents when there are none."""
     # Create group
     await pg_session.execute(
         text("""
@@ -25,15 +27,15 @@ async def test_get_group_default_agents_empty(client_with_db: AsyncClient, pg_se
     )
     await pg_session.commit()
 
-    response = await client_with_db.get("/api/v1/groups/1/default-agents")
+    response = await client_with_db.get("/api/v1/groups/1/accessible-agents")
 
     assert response.status_code == 200
     assert response.json() == []
 
 
 @pytest.mark.asyncio
-async def test_get_group_default_agents(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
-    """Test getting default agents for a group with status indicators."""
+async def test_get_group_accessible_agents(client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model):
+    """Test getting accessible agents for a group with default status indicators."""
     # Create group
     await pg_session.execute(
         text("""
@@ -55,7 +57,8 @@ async def test_get_group_default_agents(client_with_db: AsyncClient, pg_session:
             INSERT INTO sub_agents (id, name, type, owner_status, owner_user_id, default_version, current_version)
             VALUES 
                 (123, 'Agent 1', 'remote', 'active', :owner_user_id, 1, 1),
-                (456, 'Agent 2', 'remote', 'active', :owner_user_id, 1, 1)
+                (456, 'Agent 2', 'remote', 'active', :owner_user_id, 1, 1),
+                (789, 'Agent 3', 'remote', 'active', :owner_user_id, 1, 1)
         """),
         {"owner_user_id": test_user_model.id},
     )
@@ -67,11 +70,23 @@ async def test_get_group_default_agents(client_with_db: AsyncClient, pg_session:
                 (sub_agent_id, version, description, status, created_at, release_number, agent_url)
             VALUES 
                 (123, 1, 'Agent 1 description', 'approved', NOW(), 1, 'http://agent1.url'),
-                (456, 1, 'Agent 2 description', 'approved', NOW(), 1, 'http://agent2.url')
+                (456, 1, 'Agent 2 description', 'approved', NOW(), 1, 'http://agent2.url'),
+                (789, 1, 'Agent 3 description', 'approved', NOW(), 1, 'http://agent3.url')
         """)
     )
 
-    # Set as default agents
+    # Grant group permissions to all three agents
+    await pg_session.execute(
+        text("""
+            INSERT INTO sub_agent_permissions (user_group_id, sub_agent_id, permissions)
+            VALUES 
+                (1, 123, ARRAY['read', 'write']),
+                (1, 456, ARRAY['read', 'write']),
+                (1, 789, ARRAY['read', 'write'])
+        """)
+    )
+
+    # Set only agents 123 and 456 as defaults
     await pg_session.execute(
         text("""
             INSERT INTO user_group_default_agents (user_group_id, sub_agent_id, created_by_user_id)
@@ -81,25 +96,34 @@ async def test_get_group_default_agents(client_with_db: AsyncClient, pg_session:
     )
     await pg_session.commit()
 
-    response = await client_with_db.get("/api/v1/groups/1/default-agents")
+    response = await client_with_db.get("/api/v1/groups/1/accessible-agents")
 
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
-    assert {agent["id"] for agent in data} == {123, 456}
-    # Verify new status fields
+    # Should return ALL 3 accessible agents
+    assert len(data) == 3
+    assert {agent["id"] for agent in data} == {123, 456, 789}
+
+    # Verify status fields for all agents
     for agent in data:
         assert "approval_status" in agent
         assert agent["approval_status"] == "approved"
         assert "is_activated" in agent
         assert "activated_by_groups" in agent
+        assert "is_default" in agent
+
+    # Verify is_default flag correctly indicates which are defaults
+    agents_by_id = {agent["id"]: agent for agent in data}
+    assert agents_by_id[123]["is_default"] is True  # Default
+    assert agents_by_id[456]["is_default"] is True  # Default
+    assert agents_by_id[789]["is_default"] is False  # Not default
 
 
 @pytest.mark.asyncio
-async def test_get_group_default_agents_requires_membership(
+async def test_get_group_accessible_agents_requires_membership(
     client_with_db: AsyncClient, pg_session: AsyncSession, test_user_model
 ):
-    """Test that getting default agents requires group membership."""
+    """Test that getting accessible agents requires group membership."""
     # Create group without adding current user
     await pg_session.execute(
         text("""
@@ -109,7 +133,7 @@ async def test_get_group_default_agents_requires_membership(
     )
     await pg_session.commit()
 
-    response = await client_with_db.get("/api/v1/groups/1/default-agents")
+    response = await client_with_db.get("/api/v1/groups/1/accessible-agents")
 
     assert response.status_code == 403
 
@@ -523,8 +547,8 @@ async def test_remove_default_agents_preserves_multi_group_activations(
 @pytest.mark.asyncio
 async def test_default_agent_endpoints_require_authentication(client: AsyncClient):
     """Test that all default agent endpoints require authentication."""
-    # Get default agents
-    response = await client.get("/api/v1/groups/1/default-agents")
+    # Get accessible agents
+    response = await client.get("/api/v1/groups/1/accessible-agents")
     assert response.status_code == 401
 
     # Set default agents

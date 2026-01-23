@@ -532,7 +532,7 @@ class SecretsService:
         }
 
         # Get secret name for notifications
-        secret = await self.get_secret_metadata(db, secret_id, user_id, is_admin, is_admin)
+        secret = await self.get_secret(db, secret_id, user_id, is_admin, is_admin)
         secret_name = secret.name if secret else f"Secret {secret_id}"
 
         # Use repository for update with automatic audit logging
@@ -543,7 +543,12 @@ class SecretsService:
             group_permissions=group_permissions,
         )
 
-        # Notify affected users
+        # Commit the permission changes BEFORE notification processing
+        # This ensures permissions are persisted even if notifications fail
+        await db.commit()
+        logger.info(f"Successfully committed permission changes for secret {secret_id}")
+
+        # Notify affected users (after commit, so failures don't rollback permissions)
         if self.notification_service and (added_groups or removed_groups or changed_groups):
             try:
                 # Notify members of groups gaining access
@@ -613,11 +618,10 @@ class SecretsService:
                             for member_id in member_ids
                         ]
                         await self.notification_service.bulk_create_notifications(db, notifications)
-
-                # Commit all notifications together
-                await db.commit()
+                        # Commit notifications separately
+                        await db.commit()
             except Exception as e:
                 logger.error(f"Failed to create permission change notifications: {e}")
+                # Don't re-raise - permissions are already committed
 
-        await db.commit()
         return True

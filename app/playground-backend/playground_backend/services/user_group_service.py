@@ -1356,14 +1356,17 @@ class UserGroupService:
             logger.error(f"Failed to get default agents for group {group_id}: {e}")
             raise
 
-    async def get_group_default_agents_with_status(
+    async def get_group_accessible_agents(
         self,
         db: AsyncSession,
         group_id: int,
         user_id: str,
     ) -> list[SubAgentRefWithStatus]:
         """
-        Get default agents for a group with full status indicators for UI.
+        Get all accessible approved agents for a group with default flags and status indicators.
+
+        This method returns ALL approved agents that the group has permission to access,
+        with a flag indicating which ones are set as defaults for automatic activation.
 
         Args:
             db: Database session
@@ -1371,26 +1374,30 @@ class UserGroupService:
             user_id: User ID to check activation status
 
         Returns:
-            List of sub-agents with approval and activation status
+            List of accessible approved sub-agents with default flag, approval status, and activation status
         """
         query = text("""
             SELECT 
                 sa.id, 
                 sa.name,
                 COALESCE(cv_default.status, cv_current.status, 'draft') as approval_status,
+                (ugda.sub_agent_id IS NOT NULL) as is_default,
                 (uaa.user_id IS NOT NULL) as is_activated,
                 uaa.activated_by_groups
-            FROM user_group_default_agents ugda
-            JOIN sub_agents sa ON ugda.sub_agent_id = sa.id
+            FROM sub_agent_permissions sap
+            JOIN sub_agents sa ON sap.sub_agent_id = sa.id
+            LEFT JOIN user_group_default_agents ugda 
+                ON sa.id = ugda.sub_agent_id AND ugda.user_group_id = :group_id
             LEFT JOIN sub_agent_config_versions cv_default
                 ON sa.id = cv_default.sub_agent_id AND sa.default_version = cv_default.version
             LEFT JOIN sub_agent_config_versions cv_current
                 ON sa.id = cv_current.sub_agent_id AND sa.current_version = cv_current.version
             LEFT JOIN user_sub_agent_activations uaa
                 ON sa.id = uaa.sub_agent_id AND uaa.user_id = :user_id
-            WHERE ugda.user_group_id = :group_id
-            AND sa.deleted_at IS NULL
-            ORDER BY ugda.created_at DESC
+            WHERE sap.user_group_id = :group_id
+                AND sa.deleted_at IS NULL
+                AND sa.default_version IS NOT NULL
+            ORDER BY is_default DESC, sa.name ASC
         """)
 
         try:
@@ -1404,11 +1411,12 @@ class UserGroupService:
                     approval_status=row["approval_status"],
                     is_activated=row["is_activated"],
                     activated_by_groups=row["activated_by_groups"],
+                    is_default=row["is_default"],
                 )
                 for row in rows
             ]
         except Exception as e:
-            logger.error(f"Failed to get default agents with status for group {group_id}: {e}")
+            logger.error(f"Failed to get accessible agents with defaults for group {group_id}: {e}")
             raise
 
     async def _activate_default_agent(
