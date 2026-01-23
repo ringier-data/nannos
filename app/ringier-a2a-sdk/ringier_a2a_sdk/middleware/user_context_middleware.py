@@ -1,10 +1,8 @@
 """
 User Context Extraction Middleware.
 
-This module provides middleware components for extracting and managing user context
-in different authentication scenarios:
-- UserContextFromMetadataMiddleware: Extracts from A2A message metadata
-- UserContextFromRequestStateMiddleware: Extracts from request.state.user (OIDC flow)
+This module provides middleware for extracting and managing user context
+from JWT authentication in request.state.user (populated by JWTValidatorMiddleware).
 """
 
 import logging
@@ -21,90 +19,12 @@ logger = logging.getLogger(__name__)
 current_user_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("current_user_context", default=None)
 
 
-class UserContextFromMetadataMiddleware:
-    """
-    Middleware that extracts user context from A2A message metadata.
-
-    Parses the JSON-RPC request body and extracts user information from:
-    params.metadata.user_context = {user_id, email, name}
-
-    Stores in scope["state"]["user"] and async context variable for compatibility
-    with existing patterns.
-
-    This middleware should run AFTER SubAgentIdMiddleware but BEFORE A2A request handlers.
-
-    Implemented as pure ASGI middleware (not BaseHTTPMiddleware) to avoid conflicts
-    with long-running SSE streams. BaseHTTPMiddleware crashes with RuntimeError when
-    HTTP client sends additional messages during streaming.
-
-    NOTE: This middleware does NOT extract sub_agent_id. Use SubAgentIdMiddleware
-    for that (separation of concerns).
-    """
-
-    def __init__(self, app: ASGIApp):
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Extract user context from HTTP headers (pure ASGI implementation).
-
-        Reads user context from HTTP headers: X-User-Id, X-User-Email, X-User-Name.
-        """
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        # Skip user context extraction for health/monitoring endpoints
-        path = scope.get("path", "")
-        if path in ("/.well-known/agent-card.json", "/health", "/readiness", "/liveness", "/api/v1/health"):
-            await self.app(scope, receive, send)
-            return
-
-        user_context = None
-
-        # Extract user context from HTTP headers
-        headers = dict(scope.get("headers", []))
-
-        user_id_header = headers.get(b"x-user-id")
-        email_header = headers.get(b"x-user-email")
-        name_header = headers.get(b"x-user-name")
-
-        # Extract JWT from Authorization header
-        auth_header = headers.get(b"authorization", b"").decode("utf-8")
-        user_jwt = auth_header.replace("Bearer ", "") if auth_header else None
-
-        if user_id_header:
-            try:
-                user_context = {
-                    "user_id": user_id_header.decode("utf-8"),
-                    "email": email_header.decode("utf-8") if email_header else None,
-                    "name": name_header.decode("utf-8") if name_header else None,
-                    "token": user_jwt,
-                }
-                logger.info(f"[USER_CONTEXT] Extracted from headers: user_id={user_context['user_id']}")
-            except UnicodeDecodeError as e:
-                logger.warning(f"Failed to decode user context headers: {e}")
-        else:
-            logger.debug(f"[USER_CONTEXT] No X-User-Id header found for path: {path}")
-
-        # Store in scope state
-        if "state" not in scope:
-            scope["state"] = {}
-        scope["state"]["user"] = user_context
-        current_user_context.set(user_context)
-
-        # No body consumption - pass through unchanged
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            current_user_context.set(None)
-
-
 class UserContextFromRequestStateMiddleware:
     """
     Middleware that extracts user context from request.state.user (OIDC flow).
 
     This middleware is designed for OIDC authentication flows where an upstream
-    middleware (like OidcUserinfoMiddleware) validates JWT tokens and populates
+    middleware (like JWTValidatorMiddleware) validates JWT tokens and populates
     request.state.user with verified user information.
 
     Extracts user information and stores it in the shared current_user_context
@@ -113,10 +33,10 @@ class UserContextFromRequestStateMiddleware:
     Also extracts the X-Playground-SubAgentConfig-Hash header for playground mode testing.
 
     ARCHITECTURE:
-    OidcUserinfoMiddleware → SubAgentIdMiddleware → UserContextFromRequestStateMiddleware → A2A RequestHandler
+    JWTValidatorMiddleware → SubAgentIdMiddleware → UserContextFromRequestStateMiddleware → A2A RequestHandler
     (validates JWT)         (extracts sub_agent_id) (stores in contextvars)              (builds RequestContext)
 
-    This runs AFTER both OidcUserinfoMiddleware and SubAgentIdMiddleware.
+    This runs AFTER both JWTValidatorMiddleware and SubAgentIdMiddleware.
 
     Implemented as pure ASGI middleware (not BaseHTTPMiddleware) for consistency.
     """
@@ -161,11 +81,15 @@ class UserContextFromRequestStateMiddleware:
                 "name": user_data.get("name"),
                 "token": user_data.get("token"),
                 "scopes": user_data.get("scopes", []),
+                "groups": user_data.get("groups", []),  # Groups from OIDC middleware
                 "sub_agent_config_hash": sub_agent_config_hash,
                 "sub_agent_id": sub_agent_id,  # For cost tracking attribution
             }
             current_user_context.set(user_context)
-            logger.debug(f"Extracted user context from scope.state: user_id={user_id}, sub_agent_id={sub_agent_id}")
+            logger.info(
+                f"[USER_CONTEXT] Extracted from scope.state: user_id={user_id}, "
+                f"sub_agent_id={sub_agent_id}, groups={user_context.get('groups', [])}"
+            )
         else:
             current_user_context.set(None)
             logger.debug("No user found in scope.state")

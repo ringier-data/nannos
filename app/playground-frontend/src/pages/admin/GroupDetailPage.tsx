@@ -10,7 +10,7 @@ import {
   updateGroupApiV1AdminGroupsGroupIdPutMutation,
   listMembersApiV1GroupsGroupIdMembersGetOptions,
   addMembersApiV1GroupsGroupIdMembersPostMutation,
-  removeMemberApiV1GroupsGroupIdMembersUserIdDeleteMutation,
+  removeMembersApiV1GroupsGroupIdMembersRemovePostMutation,
   updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation,
   listUsersApiV1AdminUsersGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
@@ -45,7 +45,6 @@ import {
 } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { Pagination } from '@/components/admin/Pagination';
 
 export function GroupDetailPage() {
@@ -65,11 +64,7 @@ export function GroupDetailPage() {
   const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<Set<string>>(new Set());
   const [newMemberRole, setNewMemberRole] = useState<RoleEnum>('read');
 
-  const [removeMemberDialog, setRemoveMemberDialog] = useState<{
-    open: boolean;
-    userId: string;
-    userName: string;
-  } | null>(null);
+  const [selectedMembersToRemove, setSelectedMembersToRemove] = useState<Set<string>>(new Set());
 
   const [membersPage, setMembersPage] = useState(1);
 
@@ -152,10 +147,11 @@ export function GroupDetailPage() {
     },
   });
 
-  const removeMemberMutation = useMutation({
-    ...removeMemberApiV1GroupsGroupIdMembersUserIdDeleteMutation(),
+  const removeMembersMutation = useMutation({
+    ...removeMembersApiV1GroupsGroupIdMembersRemovePostMutation(),
     onSuccess: () => {
-      toast.success('Member removed successfully');
+      toast.success(`Removed ${selectedMembersToRemove.size} member(s)`);
+      setSelectedMembersToRemove(new Set());
       queryClient.invalidateQueries({ 
         queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({
           path: { group_id: groupId },
@@ -169,7 +165,13 @@ export function GroupDetailPage() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to remove member';
+      const detail = error?.response?.data?.detail || error?.detail || error?.message;
+      let message = 'Failed to remove members';
+      
+      if (detail) {
+        message = detail;
+      }
+      
       toast.error(message);
     },
   });
@@ -226,12 +228,14 @@ export function GroupDetailPage() {
     });
   };
 
-  const handleRemoveMember = () => {
-    if (!removeMemberDialog) return;
-    removeMemberMutation.mutate({
-      path: { group_id: groupId, user_id: removeMemberDialog.userId },
+  const handleRemoveSelectedMembers = () => {
+    if (selectedMembersToRemove.size === 0) return;
+    removeMembersMutation.mutate({
+      path: { group_id: groupId },
+      body: {
+        user_ids: Array.from(selectedMembersToRemove),
+      },
     });
-    setRemoveMemberDialog(null);
   };
 
   const handleRoleChange = (userId: string, role: RoleEnum) => {
@@ -357,20 +361,45 @@ export function GroupDetailPage() {
             <CardTitle>Members</CardTitle>
             <CardDescription>Manage group membership</CardDescription>
           </div>
-          <Button onClick={() => setAddMemberDialogOpen(true)}>
-            <UserPlus className="h-4 w-4 mr-2" />
-            Add Members
-          </Button>
+          <div className="flex gap-2">
+            {selectedMembersToRemove.size > 0 && (
+              <Button
+                variant="destructive"
+                onClick={handleRemoveSelectedMembers}
+                disabled={removeMembersMutation.isPending}
+              >
+                <X className="h-4 w-4 mr-2" />
+                {removeMembersMutation.isPending
+                  ? 'Removing...'
+                  : `Remove ${selectedMembersToRemove.size} Selected`}
+              </Button>
+            )}
+            <Button onClick={() => setAddMemberDialogOpen(true)}>
+              <UserPlus className="h-4 w-4 mr-2" />
+              Add Members
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="border rounded-lg">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-12">
+                    <Checkbox
+                      checked={members.length > 0 && selectedMembersToRemove.size === members.length}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          setSelectedMembersToRemove(new Set(members.map(m => m.user_id)));
+                        } else {
+                          setSelectedMembersToRemove(new Set());
+                        }
+                      }}
+                    />
+                  </TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead>Role</TableHead>
-                  <TableHead className="w-12"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -389,6 +418,20 @@ export function GroupDetailPage() {
                 ) : (
                   members.map((member) => (
                     <TableRow key={member.user_id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={selectedMembersToRemove.has(member.user_id)}
+                          onCheckedChange={(checked) => {
+                            const newSet = new Set(selectedMembersToRemove);
+                            if (checked) {
+                              newSet.add(member.user_id);
+                            } else {
+                              newSet.delete(member.user_id);
+                            }
+                            setSelectedMembersToRemove(newSet);
+                          }}
+                        />
+                      </TableCell>
                       <TableCell className="font-medium">
                         {member.first_name} {member.last_name}
                       </TableCell>
@@ -409,21 +452,6 @@ export function GroupDetailPage() {
                             <SelectItem value="manager">Manager</SelectItem>
                           </SelectContent>
                         </Select>
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() =>
-                            setRemoveMemberDialog({
-                              open: true,
-                              userId: member.user_id,
-                              userName: `${member.first_name} ${member.last_name}`,
-                            })
-                          }
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
                       </TableCell>
                     </TableRow>
                   ))
@@ -512,20 +540,6 @@ export function GroupDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Remove Member Dialog */}
-      {removeMemberDialog && (
-        <ConfirmDialog
-          open={removeMemberDialog.open}
-          onOpenChange={(open) => !open && setRemoveMemberDialog(null)}
-          title="Remove Member"
-          description={`Are you sure you want to remove ${removeMemberDialog.userName} from this group?`}
-          confirmLabel="Remove"
-          variant="destructive"
-          onConfirm={handleRemoveMember}
-          isLoading={removeMemberMutation.isPending}
-        />
-      )}
     </div>
   );
 }

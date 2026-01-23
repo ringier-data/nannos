@@ -7,3 +7,6 @@ langsmith_project_id: 052ac0c2-787f-44e2-810a-34d8b7845a09
 budget_monthly_token_limit: 100000000
 rds_backup_retention_in_days: 0
 rds_instance_class: "db.t4g.micro"
+
+# Keycloak settings for user/group sync
+keycloak_group_name_prefix: 'dev-'

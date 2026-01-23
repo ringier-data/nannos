@@ -21,6 +21,7 @@ from .repositories.user_repository import UserRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
 from .services.audit_service import AuditService
 from .services.conversation_service import ConversationService
+from .services.keycloak_admin_service import KeycloakAdminService
 from .services.messages_service import MessagesService
 from .services.rate_card_service import RateCardService
 from .services.sub_agent_service import SubAgentService
@@ -77,6 +78,19 @@ async def initialize_services(app: "FastAPI") -> None:
 
     app.state.user_group_service = UserGroupService()
     app.state.user_group_service.set_repository(app.state.user_group_repository)
+
+    # Initialize Keycloak Admin service for group synchronization
+    app.state.keycloak_admin_service = KeycloakAdminService(
+        issuer=config.oidc.issuer,
+        admin_client_id=config.keycloak_admin.admin_client_id,
+        admin_client_secret=config.keycloak_admin.admin_client_secret.get_secret_value(),
+        oidc_client_id=config.oidc.client_id,
+        group_name_prefix=config.keycloak_admin.group_name_prefix,
+    )
+    # Automatically configure group mapper on startup
+    await app.state.keycloak_admin_service.ensure_group_mapper_configured()
+    # Inject Keycloak service into user group service
+    app.state.user_group_service.set_keycloak_service(app.state.keycloak_admin_service)
 
     app.state.rate_card_service = RateCardService()
     app.state.rate_card_service.set_repository(app.state.rate_card_repository)

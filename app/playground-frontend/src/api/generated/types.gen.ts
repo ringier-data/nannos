@@ -291,6 +291,18 @@ export type GroupMemberListResponse = {
 };
 
 /**
+ * GroupMemberRemove
+ *
+ * Request to remove members from a group (bulk operation).
+ */
+export type GroupMemberRemove = {
+    /**
+     * User Ids
+     */
+    user_ids: Array<string>;
+};
+
+/**
  * GroupMemberUpdate
  *
  * Request to update a member's role.
@@ -1535,6 +1547,10 @@ export type UserGroupWithMembers = {
      * Description
      */
     description?: string | null;
+    /**
+     * Keycloak Group Id
+     */
+    keycloak_group_id?: string | null;
     /**
      * Deleted At
      */
@@ -3473,40 +3489,6 @@ export type AddMembersApiV1GroupsGroupIdMembersPostResponses = {
 
 export type AddMembersApiV1GroupsGroupIdMembersPostResponse = AddMembersApiV1GroupsGroupIdMembersPostResponses[keyof AddMembersApiV1GroupsGroupIdMembersPostResponses];
 
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteData = {
-    body?: never;
-    path: {
-        /**
-         * Group Id
-         */
-        group_id: number;
-        /**
-         * User Id
-         */
-        user_id: string;
-    };
-    query?: never;
-    url: '/api/v1/groups/{group_id}/members/{user_id}';
-};
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteError = RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors[keyof RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors];
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses = {
-    /**
-     * Successful Response
-     */
-    204: void;
-};
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponse = RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses[keyof RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses];
-
 export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData = {
     body: GroupMemberUpdate;
     path: {
@@ -3540,6 +3522,36 @@ export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses = {
 };
 
 export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponse = UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses[keyof UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses];
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostData = {
+    body: GroupMemberRemove;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/members/remove';
+};
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostError = RemoveMembersApiV1GroupsGroupIdMembersRemovePostErrors[keyof RemoveMembersApiV1GroupsGroupIdMembersRemovePostErrors];
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: GroupMemberListResponse;
+};
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponse = RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses[keyof RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses];
 
 export type LogUsageApiV1UsageLogPostData = {
     body: UsageLogCreate;

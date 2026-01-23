@@ -421,6 +421,16 @@ if [ "$BACKEND_ENV" = "local" ]; then
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
+    # Keycloak Admin credentials for group sync (with environment prefix)
+    if ! KEYCLOAK_ADMIN_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/keycloak-admin-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${YELLOW}Warning: Could not fetch KEYCLOAK_ADMIN_CLIENT_SECRET (Keycloak sync disabled)${NC}"
+    else
+        update_env_var ".env" "KEYCLOAK_ADMIN_CLIENT_SECRET" "$KEYCLOAK_ADMIN_CLIENT_SECRET"
+        update_env_var ".env" "KEYCLOAK_ADMIN_CLIENT_ID" "nannos-admin"
+        # Set environment prefix for group names (local-, dev-, stg-, empty for prod)
+        update_env_var ".env" "KEYCLOAK_GROUP_NAME_PREFIX" "local-"
+    fi
+    
     
     popd > /dev/null
     
@@ -563,6 +573,10 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     update_env_var ".env" "PLAYGROUND_BACKEND_URL" "${BACKEND_URLS[$BACKEND_ENV]}"
     update_env_var ".env" "PLAYGROUND_FRONTEND_URL" "http://localhost:5173"
     
+    # OIDC Authentication
+    update_env_var ".env" "OIDC_ISSUER" "https://login.alloy.ch/realms/a2a"
+    update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
+    
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-nannos-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
@@ -609,6 +623,10 @@ if [ "$ALLOY_ENV" = "local" ]; then
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-nannos-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
+    
+    # OIDC Authentication
+    update_env_var ".env" "OIDC_ISSUER" "https://login.alloy.ch/realms/a2a"
+    update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
     
     # Set MCP URLs based on ALLOY_ENV (defaults to dev for local)
     update_env_var ".env" "NAONOUS_MCP_URL" "${NAONOUS_MCP_URLS[$ALLOY_ENV]}"

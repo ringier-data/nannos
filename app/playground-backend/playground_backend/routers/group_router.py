@@ -1,11 +1,8 @@
 """Group management router for non-admin users."""
 
-from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.session import get_db_session
+from ..db.session import DbSession
 from ..dependencies import (
     require_auth,
     require_group_admin_or_admin,
@@ -16,6 +13,7 @@ from ..models.user import PaginationMeta, User
 from ..models.user_group import (
     GroupMemberAdd,
     GroupMemberListResponse,
+    GroupMemberRemove,
     GroupMemberUpdate,
     MemberInfo,
     UserGroupDetailResponse,
@@ -24,8 +22,6 @@ from ..models.user_group import (
 from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/groups", tags=["groups"])
-
-DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 def get_user_group_service(request: Request) -> UserGroupService:
@@ -205,18 +201,19 @@ async def update_member_role(
     return member
 
 
-@router.delete("/{group_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_member(
+@router.post("/{group_id}/members/remove", response_model=GroupMemberListResponse)
+async def remove_members(
     group_id: int,
-    user_id: str,
     request: Request,
+    request_body: GroupMemberRemove,
     db: DbSession,
     user: User = Depends(require_auth),
-) -> None:
-    """Remove a member from a group.
+) -> GroupMemberListResponse:
+    """Remove multiple members from a group (bulk operation).
 
     Requires group manager role or system admin.
-    Cannot remove the last manager.
+    Cannot remove all managers.
+    All members must exist or operation fails.
     """
     user_group_service = get_user_group_service(request)
     # Check permission
@@ -231,20 +228,18 @@ async def remove_member(
         )
 
     try:
-        success = await user_group_service.remove_member(
+        members = await user_group_service.remove_members(
             db,
             actor_sub=user.sub,
             group_id=group_id,
-            user_id=user_id,
+            user_ids=request_body.user_ids,
         )
-
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Member not found in group",
-            )
-
         await db.commit()
+
+        return GroupMemberListResponse(
+            data=members,
+            meta=PaginationMeta(page=1, limit=len(members), total=len(members)),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

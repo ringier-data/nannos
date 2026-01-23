@@ -141,6 +141,7 @@ class UserConfig(BaseModel):
     access_token: SecretStr = Field(..., description="User authentication token")
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
+    groups: list[str] = Field(default_factory=list, description="User's group memberships (from Keycloak groups claim)")
     language: str = Field(default="en", description="User's preferred language")
     timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
     model: Optional[ModelType] = Field(

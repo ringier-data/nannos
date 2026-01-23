@@ -41,9 +41,8 @@ A Python SDK for building authenticated agent-to-agent communication systems usi
 ### Middleware (`ringier_a2a_sdk.middleware`)
 
 - `OrchestratorJWTMiddleware`: Validate orchestrator JWT tokens (fail-fast)
-- `UserContextFromMetadataMiddleware`: Extract user context from A2A message metadata
-- `OidcUserinfoMiddleware`: Alternative user token validation via userinfo endpoint
-- `session_jwt`: Session JWT utilities
+- `UserContextFromRequestStateMiddleware`: Extract user context from request.state.user (set by JWTValidatorMiddleware)
+- `JWTValidatorMiddleware`: User token validation via local JWKS-based JWT validation
 
 ### Agent (`ringier_a2a_sdk.agent`)
 
@@ -133,7 +132,7 @@ from a2a.server.starlette import A2AServer
 from a2a.types import HTTPAuthSecurityScheme
 from ringier_a2a_sdk.middleware import (
     OrchestratorJWTMiddleware,
-    UserContextFromMetadataMiddleware,
+    UserContextFromRequestStateMiddleware,
 )
 from ringier_a2a_sdk.server import AuthRequestContextBuilder, BaseAgentExecutor
 import os
@@ -163,7 +162,7 @@ server = A2AServer(
 app = server.build()
 
 # Add middleware (order matters: bottom-to-top for requests)
-app.add_middleware(UserContextFromMetadataMiddleware)
+app.add_middleware(UserContextFromRequestStateMiddleware)
 app.add_middleware(
     OrchestratorJWTMiddleware,
     issuer=os.getenv("OIDC_ISSUER"),
@@ -175,13 +174,13 @@ app.add_middleware(
 ### Agent with Orchestrator JWT Authentication (Legacy)
 
 ```python
-from ringier_a2a_sdk.middleware import OrchestratorJWTMiddleware, UserContextFromMetadataMiddleware
+from ringier_a2a_sdk.middleware import OrchestratorJWTMiddleware, UserContextFromRequestStateMiddleware
 from a2a.server.apps import A2AFastAPIApplication
 import os
 
 # Configure middleware
 app = server.build()
-app.add_middleware(UserContextFromMetadataMiddleware)
+app.add_middleware(UserContextFromRequestStateMiddleware)
 app.add_middleware(
     OrchestratorJWTMiddleware,
     issuer=os.getenv("OIDC_ISSUER"),

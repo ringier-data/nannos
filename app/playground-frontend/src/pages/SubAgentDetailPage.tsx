@@ -483,7 +483,7 @@ export function SubAgentDetailPage() {
         setEditRateCardEntries(
           pricingConfig.rate_card_entries.map((e: any) => ({
             billing_unit: e.billing_unit,
-            price_per_million: e.price_per_million.toString()
+            price_per_million: e.price_per_million != null ? e.price_per_million.toString() : ''
           }))
         );
       } else {

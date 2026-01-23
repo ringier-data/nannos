@@ -6,14 +6,13 @@ This document describes the complete authentication and authorization architectu
 
 1. [Overview](#overview)
 2. [Inbound Authentication (User → Orchestrator)](#inbound-authentication-user--orchestrator)
-   - [OidcUserinfoMiddleware](#oidcuserinfomiddleware)
+   - [JWTValidatorMiddleware](#jwtvalidatormiddleware)
    - [UserContextFromRequestStateMiddleware](#usercontextfromrequeststatemiddleware)
    - [AuthRequestContextBuilder](#authrequestcontextbuilder)
 3. [Internal Flow (RequestContext → Agent Execution)](#internal-flow-requestcontext--agent-execution)
 4. [Outbound Authentication (Orchestrator → Sub-agents)](#outbound-authentication-orchestrator--sub-agents)
    - [SmartTokenInterceptor](#smarttokeninterceptor)
    - [Token Exchange (RFC 8693)](#token-exchange-rfc-8693)
-   - [Client Credentials Flow (JWT)](#client-credentials-flow-jwt)
 5. [MCP Tools Authentication](#mcp-tools-authentication)
 6. [Graph Construction, Checkpointing & Caching](#graph-construction-checkpointing--caching)
    - [Graph Caching Strategy](#graph-caching-strategy)
@@ -28,7 +27,7 @@ This document describes the complete authentication and authorization architectu
 
 The Orchestrator Agent implements a **Zero-Trust Authentication Architecture** where:
 
-- User identity is validated at the edge via OIDC
+- User identity is validated at the edge via local JWT validation (JWKS-based)
 - Verified credentials are propagated through context variables
 - Each downstream call (sub-agents, MCP tools) uses service-specific tokens via token exchange
 - Credentials are **never** persisted in checkpoints
@@ -43,14 +42,14 @@ The Orchestrator Agent implements a **Zero-Trust Authentication Architecture** w
 │           │                                                                  │
 │           ▼                                                                  │
 │  ┌─────────────────────────────┐                                             │
-│  │  OidcUserinfoMiddleware     │  ← Validates JWT via OIDC userinfo endpoint │
-│  │  (Session JWT caching)      │  ← Issues session JWT cookie for caching    │
+│  │  JWTValidatorMiddleware     │  ← Validates JWT locally via JWKS           │
+│  │  (No network calls)         │  ← Verifies signature, issuer, audience     │
 │  └─────────────────────────────┘                                             │
 │           │                                                                  │
 │           ▼                                                                  │
-│  ┌─────────────────────────────────────┐                                     │
+│  ┌──────────────────────────────────────┐                                    │
 │  │ UserContextFromRequestStateMiddleware│ ← Transfers user to ContextVar     │
-│  └─────────────────────────────────────┘                                     │
+│  └──────────────────────────────────────┘                                    │
 │           │                                                                  │
 │           ▼                                                                  │
 │  ┌─────────────────────────────┐                                             │
@@ -68,7 +67,7 @@ The Orchestrator Agent implements a **Zero-Trust Authentication Architecture** w
 │           ▼                    ▼                       ▼                     │
 │  ┌────────────────┐   ┌────────────────┐   ┌─────────────────────┐           │
 │  │  Sub-Agent A   │   │  Sub-Agent B   │   │  MCP Tools (Gatana) │           │
-│  │(Token Exchange)│   │(Client Creds)  │   │  (Token Exchange)   │           │
+│  │(Token Exchange)│   │(Token Exchange)│   │  (Token Exchange)   │           │
 │  └────────────────┘   └────────────────┘   └─────────────────────┘           │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -78,43 +77,42 @@ The Orchestrator Agent implements a **Zero-Trust Authentication Architecture** w
 
 ## Inbound Authentication (User → Orchestrator)
 
-### OidcUserinfoMiddleware
+### JWTValidatorMiddleware
 
-**Location:** `ringier_a2a_sdk/middleware/oidc_userinfo_middleware.py`
+**Location:** `ringier_a2a_sdk/middleware/jwt_validator_middleware.py`
 
-**Purpose:** Validates incoming bearer tokens and caches user information in session JWTs.
+**Purpose:** Validates incoming bearer tokens locally using JWKS-based JWT validation.
 
 **Flow:**
 
 ```
 1. Request arrives with Authorization: Bearer <user_token>
-2. Check for valid session JWT cookie (fast path - no network call)
-3. If no valid session JWT:
-   a. Call OIDC userinfo endpoint with bearer token
-   b. Extract user info (sub, email, name)
-   c. Create session JWT and set as HttpOnly cookie
-4. Store user info in request.state.user
+2. Extract JWT token from Authorization header
+3. Fetch JWKS from OIDC provider (cached after first fetch)
+4. Validate JWT signature using JWKS public key
+5. Verify issuer, audience (aud=orchestrator), authorized party (azp=web-client)
+6. Check expiration with 30s leeway
+7. Extract claims (sub, email, name, groups) and store in request.state.user
 ```
 
-**Session JWT Caching:**
+**Local Validation Benefits:**
 
 ```python
-# Session JWT contains cached user info from OIDC validation
-payload = {
-    "iss": "agent-session",
-    "sub": userinfo.get("sub"),        # User ID
-    "iat": now,                         # Issued at
-    "exp": expiry,                      # Expires in 15 minutes (configurable)
-    "email": userinfo.get("email"),
-    "name": userinfo.get("name"),
-    "session_type": "oidc_cached",
-}
+# No network calls to validate tokens after JWKS is cached
+# JWKS is cached and refreshed automatically
+# Validation includes:
+# - Signature verification using RS256
+# - Issuer check (https://login.alloy.ch/realms/a2a)
+# - Audience check (aud=orchestrator)
+# - Authorized party check (azp=web-client)
+# - Expiration with leeway
 ```
 
 **Benefits:**
-- Eliminates repeated OIDC userinfo calls during session
-- Session JWT expires in 15 minutes (configurable via `JWT_SESSION_EXPIRY_MINUTES`)
-- HttpOnly + Secure + SameSite cookies for XSS/CSRF protection
+- No network calls after JWKS is cached (fast validation)
+- Cryptographic signature verification
+- Validates all critical JWT claims
+- JWKS automatically refreshed when needed
 
 **Public Endpoints (no authentication required):**
 - `/.well-known/agent-card.json`
@@ -224,11 +222,6 @@ async for event in agent.stream(query, user_config, context_id):
 ```python
 def _detect_auth_scheme(self, agent_card: AgentCard) -> tuple[str, str, Any]:
     for scheme_name, scheme in (agent_card.security_schemes or {}).items():
-        # Check for JWT bearer authentication
-        if scheme.root.type == "http":
-            if scheme.scheme == "bearer" and scheme.bearer_format == "JWT":
-                return ("jwt", scheme_name, scheme)
-        
         # Check for OpenID Connect (requires token exchange)
         if scheme.root.type == "openIdConnect":
             return ("oidc", scheme_name, scheme.root)
@@ -238,7 +231,7 @@ def _detect_auth_scheme(self, agent_card: AgentCard) -> tuple[str, str, Any]:
 
 ### Token Exchange (RFC 8693)
 
-**Used when:** Target agent's `AgentCard` specifies `openIdConnect` security scheme.
+**Used when:** Target agent's `AgentCard` specifies `openIdConnect` security scheme (all sub-agents now use OIDC).
 
 ```python
 async def _handle_oidc_auth(self, agent_card, scheme_name, ...):
@@ -267,30 +260,6 @@ params = {
     "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
     "audience": target_client_id,  # Target service's OAuth2 client ID
     "scope": "openid profile email",  # Requested scopes
-}
-```
-
-### Client Credentials Flow (JWT)
-
-**Used when:** Target agent's `AgentCard` specifies HTTP bearer with JWT format.
-
-```python
-async def _handle_jwt_auth(self, agent_card, scheme_name, ...):
-    # Get token using orchestrator's client credentials
-    token = await self.oauth2_client.get_token(audience=target_client_id)
-    
-    http_kwargs["headers"]["Authorization"] = f"Bearer {token}"
-    
-    # Inject user context into message metadata (for attribution)
-    self._inject_user_context(request_payload)
-```
-
-**User Context Injection:**
-```python
-request_payload["params"]["metadata"]["user_context"] = {
-    "user_id": self.user_context.get("user_id"),
-    "email": self.user_context.get("email"),
-    "name": self.user_context.get("name"),
 }
 ```
 
@@ -495,32 +464,33 @@ class OidcOAuth2Client:
         │ POST /tasks with Authorization: Bearer <OIDC_TOKEN>
         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ OidcUserinfoMiddleware                                                           │
+│ JWTValidatorMiddleware                                                           │
 │ ┌─────────────────────────────────────────────────────────────────────────────┐ │
-│ │ 1. Check for session JWT cookie (a2a_session)                               │ │
-│ │    ├─ Valid → Use cached user info (no network call)                        │ │
-│ │    └─ Invalid/Missing → Call OIDC userinfo endpoint                         │ │
-│ │ 2. Store in request.state.user: {sub, email, name, token}                   │ │
-│ │ 3. Create/refresh session JWT cookie (15 min TTL)                           │ │
+│ │ 1. Extract JWT from Authorization: Bearer <token>                           │ │
+│ │ 2. Fetch JWKS from OIDC issuer (cached after first fetch)                   │ │
+│ │ 3. Validate JWT signature using JWKS public key (RS256)                     │ │
+│ │ 4. Verify issuer, audience (orchestrator)                                   │ │
+│ │ 5. Check expiration with 30s leeway                                         │ │
+│ │ 6. Store in request.state.user: {sub, email, name, token, groups}           │ │
 │ └─────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ UserContextFromRequestStateMiddleware                                            │
+│ UserContextFromRequestStateMiddleware                                           │
 │ ┌─────────────────────────────────────────────────────────────────────────────┐ │
 │ │ 1. Read request.state.user                                                  │ │
-│ │ 2. Set current_user_context ContextVar                                       │ │
-│ │    {user_id, email, name, token, scopes}                                    │ │
+│ │ 2. Set current_user_context ContextVar                                      │ │
+│ │    {user_id, email, name, token, scopes, groups}                            │ │
 │ └─────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
         │
         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ A2A DefaultRequestHandler                                                        │
+│ A2A DefaultRequestHandler                                                       │
 │ ┌─────────────────────────────────────────────────────────────────────────────┐ │
 │ │ AuthRequestContextBuilder.build()                                           │ │
-│ │ 1. Read current_user_context ContextVar                                      │ │
+│ │ 1. Read current_user_context ContextVar                                     │ │
 │ │ 2. Store in call_context.state:                                             │ │
 │ │    - user_id (from 'sub')                                                   │ │
 │ │    - user_token (original OIDC token)                                       │ │
@@ -530,7 +500,7 @@ class OidcOAuth2Client:
         │
         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ OrchestratorDeepAgentExecutor                                                    │
+│ OrchestratorDeepAgentExecutor                                                   │
 │ ┌─────────────────────────────────────────────────────────────────────────────┐ │
 │ │ 1. Extract from context.call_context.state:                                 │ │
 │ │    user_id, user_token, user_name, user_email                               │ │
@@ -610,12 +580,6 @@ class OidcOAuth2Client:
 │ │     requested_scopes=["openid", "profile"]                                │ │
 │ │   )                                                                       │ │
 │ │   headers["Authorization"] = f"Bearer {exchanged}"                        │ │
-│ │                                                                           │ │
-│ │ ELIF AgentCard.security_schemes has http/bearer/JWT:                      │ │
-│ │   → Client Credentials Flow                                               │ │
-│ │   token = oauth2_client.get_token(audience="subagent-client-id")          │ │
-│ │   headers["Authorization"] = f"Bearer {token}"                            │ │
-│ │   metadata["user_context"] = {user_id, email, name}  # Attribution        │ │
 │ │                                                                           │ │
 │ │ ELSE:                                                                     │ │
 │ │   → No authentication                                                     │ │
@@ -809,7 +773,7 @@ For true multi-party conversation support:
 
 | Component | Purpose | Credential Handling |
 |-----------|---------|---------------------|
-| `OidcUserinfoMiddleware` | Validate OIDC tokens | Caches in session JWT (15 min) |
+| `JWTValidatorMiddleware` | Validate JWTs locally via JWKS | No caching needed (fast local validation) |
 | `UserContextFromRequestStateMiddleware` | Transfer to ContextVar | In-memory per request |
 | `AuthRequestContextBuilder` | Build A2A RequestContext | Passes to call_context.state |
 | `OrchestratorDeepAgentExecutor` | Extract & use credentials | Creates UserConfig |
@@ -823,7 +787,8 @@ For true multi-party conversation support:
 - ✅ Zero-trust: Identity from validated JWT only
 - ✅ No credentials in checkpoints
 - ✅ Service-specific tokens via RFC 8693 exchange
-- ✅ Session JWT caching reduces OIDC calls
+- ✅ Local JWT validation via JWKS (no network calls)
+- ✅ Cryptographic signature verification (RS256)
 - ✅ Token expiry checking with leeway
 - ✅ Per-request credential injection handles multi-user capability differences
 - ✅ Dynamic tool binding via `GraphRuntimeContext` (not baked into graphs)

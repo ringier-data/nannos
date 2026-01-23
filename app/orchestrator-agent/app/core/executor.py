@@ -88,6 +88,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 user_token = context.call_context.state["user_token"]
                 user_name = context.call_context.state["user_name"]
                 user_email = context.call_context.state["user_email"]
+                user_groups = context.call_context.state.get("user_groups", [])
                 # Optional: playground mode sub-agent config hash for isolated testing
                 sub_agent_config_hash = context.call_context.state.get("sub_agent_config_hash")
             except KeyError as e:
@@ -177,6 +178,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 access_token=user_token,
                 name=user_name,
                 email=user_email,
+                groups=user_groups,  # Pass groups for authorization
                 model=model_choice,
                 message_formatting=message_formatting,
                 slack_user_handle=slack_user_handle,

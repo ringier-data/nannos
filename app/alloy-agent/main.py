@@ -15,13 +15,17 @@ from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentSkill,
-    HTTPAuthSecurityScheme,
+    OpenIdConnectSecurityScheme,
     SecurityScheme,
 )
 from dotenv import load_dotenv
 from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
-from ringier_a2a_sdk.middleware import SubAgentIdMiddleware, UserContextFromMetadataMiddleware
+from ringier_a2a_sdk.middleware import (
+    JWTValidatorMiddleware,
+    SubAgentIdMiddleware,
+    UserContextFromRequestStateMiddleware,
+)
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 
@@ -89,7 +93,14 @@ def create_app():
     # Agent base URL
     agent_base_url = os.getenv("AGENT_BASE_URL", "http://localhost:5004")
 
-    # Agent card - No authentication required (VPN-protected)
+    # Configure OIDC authentication (token exchange preserves user identity)
+    oidc_scheme = OpenIdConnectSecurityScheme(
+        type="openIdConnect",
+        open_id_connect_url="https://login.alloy.ch/realms/a2a/.well-known/openid-configuration",
+        description="OIDC authentication with token exchange (RFC 8693) - preserves user identity from orchestrator",
+    )
+
+    # Agent card - OIDC authentication required
     agent_card = AgentCard(
         name="Naonous Agent",
         description=(
@@ -105,14 +116,8 @@ def create_app():
         capabilities=capabilities,
         skills=[skill],
         supports_authenticated_extended_card=False,
-        security=[],
-        security_schemes={
-            "bearerAuth": SecurityScheme(
-                root=HTTPAuthSecurityScheme(
-                    type="http", scheme="bearer", bearer_format="JWT", description="Orchestrator JWT authentication"
-                )
-            )
-        },
+        security_schemes={"naonous-agent": SecurityScheme(root=oidc_scheme)},
+        security=[{"naonous-agent": ["openid"]}],
     )
 
     # Create request handler
@@ -128,13 +133,19 @@ def create_app():
     # Build app with lifespan
     app = server.build(lifespan=lifespan)
 
-    # No authentication middleware needed (VPN-protected)
-    # UserContextFromMetadataMiddleware extracts user context from A2A metadata
-    app.add_middleware(UserContextFromMetadataMiddleware)
+    # UserContextFromRequestStateMiddleware runs AFTER SubAgentId (transfers user + sub_agent_id to A2A context)
+    app.add_middleware(UserContextFromRequestStateMiddleware)
 
-    # SubAgentIdMiddleware extracts sub_agent_id from A2A metadata for cost tracking
-    # Must run BEFORE UserContextFromMetadataMiddleware so sub_agent_id is available
+    # SubAgentIdMiddleware extracts sub_agent_id from request metadata for cost tracking
+    # Must run BEFORE UserContextFromRequestStateMiddleware so sub_agent_id is in request.state
     app.add_middleware(SubAgentIdMiddleware)
+
+    # JWTValidatorMiddleware runs FIRST (validates JWT locally via JWKS, sets request.state.user)
+    app.add_middleware(
+        JWTValidatorMiddleware,
+        issuer=os.environ["OIDC_ISSUER"],
+        expected_azp=os.environ.get("ORCHESTRATOR_CLIENT_ID"),
+    )
 
     # TracingMiddleware for LangSmith distributed tracing (receives trace from orchestrator)
     app.add_middleware(TracingMiddleware)

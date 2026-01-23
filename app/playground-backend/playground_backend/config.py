@@ -81,6 +81,16 @@ class OrchestratorConfig(BaseModel):
         return self.environment == "prod"
 
 
+class KeycloakAdminConfig(BaseModel):
+    """Keycloak Admin API configuration for group synchronization."""
+
+    admin_client_id: str = Field(default_factory=lambda: os.getenv("KEYCLOAK_ADMIN_CLIENT_ID", ""))
+    admin_client_secret: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("KEYCLOAK_ADMIN_CLIENT_SECRET", ""))
+    )
+    group_name_prefix: str = Field(default_factory=lambda: os.getenv("KEYCLOAK_GROUP_NAME_PREFIX", ""))
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -94,6 +104,7 @@ class Config(BaseModel):
     dynamodb: DynamoDBConfig = Field(default_factory=DynamoDBConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"
