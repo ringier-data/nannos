@@ -721,14 +721,14 @@ class TestVersionSubmissionWorkflow:
 
     @pytest.mark.asyncio
     async def test_non_owner_cannot_submit_version(self, pg_session: AsyncSession, sub_agent_service):
-        """Test that non-owners cannot submit versions for approval."""
+        """Test that non-owners without write permissions cannot submit versions for approval."""
         service = sub_agent_service
         owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
         other_id = await _create_user(pg_session, "other@test.com", "sub-other")
         agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
 
-        # Try to submit as non-owner
-        with pytest.raises(PermissionError, match="Only the owner can submit"):
+        # Try to submit as non-owner without write permission
+        with pytest.raises(PermissionError, match="don't have permission to submit"):
             await service.submit_for_approval(
                 pg_session,
                 agent.id,
@@ -1383,3 +1383,289 @@ class TestPermissionValidation:
         # Member cannot approve (should fail at service level even if router is bypassed)
         with pytest.raises(PermissionError, match="Approval requires 'approve' or 'approve.admin' capability"):
             await service.approve_version(pg_session, agent.id, 1, member_id, True)
+
+
+class TestSubmittedByUserTracking:
+    """Test tracking of who submitted versions for approval."""
+
+    @pytest.mark.asyncio
+    async def test_submit_stores_submitter_id(self, pg_session: AsyncSession, sub_agent_service):
+        """Test that submitting a version stores the submitter's user ID."""
+        from sqlalchemy import text
+
+        service = sub_agent_service
+        user_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
+        agent = await _create_sub_agent(pg_session, user_id, "Agent", sub_agent_service)
+
+        # Submit for approval
+        await service.submit_for_approval(pg_session, agent.id, user_id, "Ready for review")
+        await pg_session.commit()
+
+        # Verify submitted_by_user_id is set in database
+        result = await pg_session.execute(
+            text("""
+                SELECT submitted_by_user_id, status 
+                FROM sub_agent_config_versions 
+                WHERE sub_agent_id = :sub_agent_id AND version = 1
+            """),
+            {"sub_agent_id": agent.id},
+        )
+        row = result.mappings().first()
+
+        assert row is not None
+        assert row["submitted_by_user_id"] == user_id
+        assert row["status"] == "pending_approval"
+
+    @pytest.mark.asyncio
+    async def test_non_owner_with_write_access_can_submit(self, pg_session: AsyncSession, sub_agent_service):
+        """Test that users with write access through groups can submit for approval."""
+        from sqlalchemy import text
+
+        service = sub_agent_service
+        owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
+        contributor_id = await _create_user(pg_session, "contributor@test.com", "sub-contributor")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
+
+        # Create a group and add contributor as write member
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_groups (id, name, created_at, updated_at)
+                VALUES (1, 'Test Group', NOW(), NOW())
+            """)
+        )
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+                VALUES (1, :user_id, 'write', NOW())
+            """),
+            {"user_id": contributor_id},
+        )
+        # Grant group write permission to the sub-agent
+        await pg_session.execute(
+            text("""
+                INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions)
+                VALUES (:sub_agent_id, 1, ARRAY['read', 'write'])
+            """),
+            {"sub_agent_id": agent.id},
+        )
+        await pg_session.commit()
+
+        # Contributor submits for approval
+        result = await service.submit_for_approval(pg_session, agent.id, contributor_id, "Changes from contributor")
+        await pg_session.commit()
+
+        assert result is not None
+        assert result.config_version.status == SubAgentStatus.PENDING_APPROVAL
+        assert result.config_version.submitted_by_user_id == contributor_id
+
+    @pytest.mark.asyncio
+    async def test_approval_notifies_both_owner_and_submitter(
+        self, pg_session: AsyncSession, sub_agent_service, notification_service
+    ):
+        """Test that approval notifications are sent to both owner and submitter."""
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy import text
+
+        service = sub_agent_service
+        service.set_notification_service(notification_service)
+
+        owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
+        submitter_id = await _create_user(pg_session, "submitter@test.com", "sub-submitter")
+        approver_id = await _create_user(pg_session, "approver@test.com", "sub-approver", role="approver")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
+
+        # Create a group and add approver to it with write access
+        group_result = await pg_session.execute(
+            text("""
+                INSERT INTO user_groups (name, description, created_at, updated_at)
+                VALUES ('Test Group', 'Test group', NOW(), NOW())
+                RETURNING id
+            """)
+        )
+        group_id = group_result.scalar_one()
+
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+                VALUES (:group_id, :user_id, 'write', NOW())
+            """),
+            {"group_id": group_id, "user_id": approver_id},
+        )
+
+        # Grant group read permission on the sub-agent
+        await pg_session.execute(
+            text("""
+                INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions, created_at)
+                VALUES (:sub_agent_id, :group_id, ARRAY['read'], NOW())
+            """),
+            {"sub_agent_id": agent.id, "group_id": group_id},
+        )
+
+        # Manually set submitter (simulating non-owner submission)
+        await pg_session.execute(
+            text("""
+                UPDATE sub_agent_config_versions
+                SET status = 'pending_approval', submitted_by_user_id = :submitter_id
+                WHERE sub_agent_id = :sub_agent_id AND version = 1
+            """),
+            {"sub_agent_id": agent.id, "submitter_id": submitter_id},
+        )
+        await pg_session.commit()
+
+        # Mock notification service
+        notification_service.bulk_create_notifications = AsyncMock()
+
+        # Approve
+        await service.approve_version(pg_session, agent.id, 1, approver_id, True)
+
+        # Verify notifications were sent
+        notification_service.bulk_create_notifications.assert_called_once()
+        notifications = notification_service.bulk_create_notifications.call_args[0][1]
+
+        # Should notify both owner and submitter (but not approver)
+        notified_users = {n.user_id for n in notifications}
+        assert owner_id in notified_users
+        assert submitter_id in notified_users
+        assert approver_id not in notified_users
+        assert len(notified_users) == 2
+
+    @pytest.mark.asyncio
+    async def test_rejection_notifies_both_owner_and_submitter(
+        self, pg_session: AsyncSession, sub_agent_service, notification_service
+    ):
+        """Test that rejection notifications are sent to both owner and submitter."""
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy import text
+
+        service = sub_agent_service
+        service.set_notification_service(notification_service)
+
+        owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
+        submitter_id = await _create_user(pg_session, "submitter@test.com", "sub-submitter")
+        approver_id = await _create_user(pg_session, "approver@test.com", "sub-approver", role="approver")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
+
+        # Create a group and add approver to it with write access
+        group_result = await pg_session.execute(
+            text("""
+                INSERT INTO user_groups (name, description, created_at, updated_at)
+                VALUES ('Test Group', 'Test group', NOW(), NOW())
+                RETURNING id
+            """)
+        )
+        group_id = group_result.scalar_one()
+
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+                VALUES (:group_id, :user_id, 'write', NOW())
+            """),
+            {"group_id": group_id, "user_id": approver_id},
+        )
+
+        # Grant group read permission on the sub-agent
+        await pg_session.execute(
+            text("""
+                INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions, created_at)
+                VALUES (:sub_agent_id, :group_id, ARRAY['read'], NOW())
+            """),
+            {"sub_agent_id": agent.id, "group_id": group_id},
+        )
+
+        # Manually set submitter (simulating non-owner submission)
+        await pg_session.execute(
+            text("""
+                UPDATE sub_agent_config_versions
+                SET status = 'pending_approval', submitted_by_user_id = :submitter_id
+                WHERE sub_agent_id = :sub_agent_id AND version = 1
+            """),
+            {"sub_agent_id": agent.id, "submitter_id": submitter_id},
+        )
+        await pg_session.commit()
+
+        # Mock notification service
+        notification_service.bulk_create_notifications = AsyncMock()
+
+        # Reject
+        await service.approve_version(pg_session, agent.id, 1, approver_id, False, "Needs more work")
+
+        # Verify notifications were sent
+        notification_service.bulk_create_notifications.assert_called_once()
+        notifications = notification_service.bulk_create_notifications.call_args[0][1]
+
+        # Should notify both owner and submitter (but not approver)
+        notified_users = {n.user_id for n in notifications}
+        assert owner_id in notified_users
+        assert submitter_id in notified_users
+        assert approver_id not in notified_users
+        assert len(notified_users) == 2
+
+        # Verify rejection reason is included
+        for notification in notifications:
+            assert notification.notification_type.value == "approval_rejected"
+            assert "Needs more work" in notification.message
+
+    @pytest.mark.asyncio
+    async def test_owner_as_submitter_gets_single_notification(
+        self, pg_session: AsyncSession, sub_agent_service, notification_service
+    ):
+        """Test that when owner submits their own agent, they get only one notification."""
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy import text
+
+        service = sub_agent_service
+        service.set_notification_service(notification_service)
+
+        owner_id = await _create_user(pg_session, "owner@test.com", "sub-owner")
+        approver_id = await _create_user(pg_session, "approver@test.com", "sub-approver", role="approver")
+        agent = await _create_sub_agent(pg_session, owner_id, "Agent", sub_agent_service)
+
+        # Create a group and add approver to it with write access
+        group_result = await pg_session.execute(
+            text("""
+                INSERT INTO user_groups (name, description, created_at, updated_at)
+                VALUES ('Test Group', 'Test group', NOW(), NOW())
+                RETURNING id
+            """)
+        )
+        group_id = group_result.scalar_one()
+
+        await pg_session.execute(
+            text("""
+                INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+                VALUES (:group_id, :user_id, 'write', NOW())
+            """),
+            {"group_id": group_id, "user_id": approver_id},
+        )
+
+        # Grant group read permission on the sub-agent
+        await pg_session.execute(
+            text("""
+                INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions, created_at)
+                VALUES (:sub_agent_id, :group_id, ARRAY['read'], NOW())
+            """),
+            {"sub_agent_id": agent.id, "group_id": group_id},
+        )
+        await pg_session.commit()
+
+        # Submit for approval (owner is submitter)
+        await service.submit_for_approval(pg_session, agent.id, owner_id, "Ready")
+        await pg_session.commit()
+
+        # Mock notification service
+        notification_service.bulk_create_notifications = AsyncMock()
+
+        # Approve
+        await service.approve_version(pg_session, agent.id, 1, approver_id, True)
+
+        # Verify notifications were sent
+        notification_service.bulk_create_notifications.assert_called_once()
+        notifications = notification_service.bulk_create_notifications.call_args[0][1]
+
+        # Should notify owner only once (deduplicated)
+        notified_users = [n.user_id for n in notifications]
+        assert notified_users == [owner_id]
+        assert len(notifications) == 1

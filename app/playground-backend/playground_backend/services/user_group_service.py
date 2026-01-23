@@ -624,9 +624,10 @@ class UserGroupService:
                     (agent_id, agent_name) for agent_id, agent_name, status in rows if status == "approved"
                 ]
 
-                # Bulk activate each approved agent for all new users
+                # Bulk activate each approved agent for all new users and track affected users
+                all_affected_user_ids = set()
                 for agent_id, agent_name in approved_agents:
-                    await self.sub_agent_service.repo.bulk_activate_sub_agent(
+                    affected = await self.sub_agent_service.repo.bulk_activate_sub_agent(
                         db=db,
                         actor_sub="SYSTEM",
                         user_ids=user_ids,
@@ -634,9 +635,10 @@ class UserGroupService:
                         activated_by=ActivationSource.GROUP,
                         group_id=group_id,
                     )
+                    all_affected_user_ids.update(affected)
 
-                # Bulk create notifications for users (only for activated agents)
-                if len(approved_agents) > 0:
+                # Bulk create notifications only for users who actually had agents activated
+                if len(approved_agents) > 0 and all_affected_user_ids:
                     agent_names = [name for _, name in approved_agents[:3]]
                     if len(approved_agents) > 3:
                         agent_names.append(f"and {len(approved_agents) - 3} more")
@@ -654,7 +656,7 @@ class UserGroupService:
                                 "count": len(approved_agents),
                             },
                         )
-                        for user_id in user_ids
+                        for user_id in all_affected_user_ids
                     ]
                     await self.notification_service.bulk_create_notifications(db, notifications)
 
@@ -1474,7 +1476,7 @@ class UserGroupService:
         agent_name = agent_names.get(sub_agent_id, f"Agent {sub_agent_id}")
 
         # Bulk activate the agent
-        await self.sub_agent_service.repo.bulk_activate_sub_agent(
+        affected_user_ids = await self.sub_agent_service.repo.bulk_activate_sub_agent(
             db=db,
             actor_sub=actor_sub,
             user_ids=member_user_ids,
@@ -1483,20 +1485,21 @@ class UserGroupService:
             group_id=group_id,
         )
 
-        # Bulk create notifications
-        notifications = [
-            NotificationData(
-                user_id=user_id,
-                notification_type=NotificationType.AGENT_ACTIVATED,
-                title=f"Agent '{agent_name}' enabled",
-                message=f"The agent '{agent_name}' has been automatically enabled because it was added to default agents for the group '{group_name}'.",
-                metadata={"sub_agent_id": sub_agent_id, "group_id": group_id},
-            )
-            for user_id in member_user_ids
-        ]
-        await self.notification_service.bulk_create_notifications(db, notifications)
+        # Bulk create notifications only for users whose state changed
+        if affected_user_ids:
+            notifications = [
+                NotificationData(
+                    user_id=user_id,
+                    notification_type=NotificationType.AGENT_ACTIVATED,
+                    title=f"Agent '{agent_name}' enabled",
+                    message=f"The agent '{agent_name}' has been automatically enabled because it was added to default agents for the group '{group_name}'.",
+                    metadata={"sub_agent_id": sub_agent_id, "group_id": group_id},
+                )
+                for user_id in affected_user_ids
+            ]
+            await self.notification_service.bulk_create_notifications(db, notifications)
 
-        logger.info(f"Activated agent {sub_agent_id} for {len(member_user_ids)} members of group {group_id}")
+        logger.info(f"Activated agent {sub_agent_id} for {len(affected_user_ids)} members of group {group_id}")
 
     async def _deactivate_default_agent(
         self,
@@ -1537,7 +1540,7 @@ class UserGroupService:
         agent_name = agent_names.get(sub_agent_id, f"Agent {sub_agent_id}")
 
         # Bulk deactivate the agent
-        await self.sub_agent_service.repo.bulk_deactivate_sub_agent(
+        affected_user_ids = await self.sub_agent_service.repo.bulk_deactivate_sub_agent(
             db=db,
             actor_sub=actor_sub,
             user_ids=member_user_ids,
@@ -1545,20 +1548,21 @@ class UserGroupService:
             group_id=group_id,
         )
 
-        # Notify users about deactivation
-        notifications = [
-            NotificationData(
-                user_id=user_id,
-                notification_type=NotificationType.AGENT_DEACTIVATED,
-                title=f"Agent '{agent_name}' disabled",
-                message=f"The agent '{agent_name}' has been automatically disabled because it was removed from default agents for the group '{group_name}'.",
-                metadata={"sub_agent_id": sub_agent_id, "group_id": group_id},
-            )
-            for user_id in member_user_ids
-        ]
-        await self.notification_service.bulk_create_notifications(db, notifications)
+        # Notify users about deactivation only for users whose state changed
+        if affected_user_ids:
+            notifications = [
+                NotificationData(
+                    user_id=user_id,
+                    notification_type=NotificationType.AGENT_DEACTIVATED,
+                    title=f"Agent '{agent_name}' disabled",
+                    message=f"The agent '{agent_name}' has been automatically disabled because it was removed from default agents for the group '{group_name}'.",
+                    metadata={"sub_agent_id": sub_agent_id, "group_id": group_id},
+                )
+                for user_id in affected_user_ids
+            ]
+            await self.notification_service.bulk_create_notifications(db, notifications)
 
-        logger.info(f"Deactivated agent {sub_agent_id} for {len(member_user_ids)} members of group {group_id}")
+        logger.info(f"Deactivated agent {sub_agent_id} for {len(affected_user_ids)} members of group {group_id}")
 
     async def set_group_default_agents(
         self,

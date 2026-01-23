@@ -131,6 +131,7 @@ class SubAgentConfigVersion(BaseModel):
 
     change_summary: str | None = None
     status: SubAgentStatus = SubAgentStatus.DRAFT
+    submitted_by_user_id: str | None = None  # User who submitted for approval
     approved_by_user_id: str | None = None
     approved_at: datetime | None = None
     rejection_reason: str | None = None

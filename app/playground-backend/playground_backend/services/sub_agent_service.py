@@ -120,6 +120,7 @@ class SubAgentService:
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                    cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at,
@@ -174,6 +175,7 @@ class SubAgentService:
                        cv.foundry_version as cv_foundry_version,
                        cv.pricing_config as cv_pricing_config,
                        cv.change_summary as cv_change_summary, cv.status as cv_status,
+                       cv.submitted_by_user_id as cv_submitted_by_user_id,
                        cv.approved_by_user_id as cv_approved_by_user_id,
                        cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                        cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at,
@@ -232,6 +234,7 @@ class SubAgentService:
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                    cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
@@ -278,6 +281,7 @@ class SubAgentService:
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                    cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
@@ -324,6 +328,7 @@ class SubAgentService:
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                    cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
@@ -368,6 +373,7 @@ class SubAgentService:
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
+                   cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                    cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at
@@ -861,8 +867,10 @@ class SubAgentService:
         if not existing:
             return None
 
-        if existing.owner_user_id != user_id:
-            raise PermissionError("Only the owner can submit for approval")
+        # Check if user has write permission (owner or group write access)
+        has_write_permission = await self.check_user_permission(db, sub_agent_id, user_id, "write")
+        if not has_write_permission:
+            raise PermissionError("You don't have permission to submit this sub-agent for approval")
 
         if not existing.config_version:
             raise ValueError("No version to submit")
@@ -888,6 +896,33 @@ class SubAgentService:
         )
 
         await db.commit()
+
+        # Notify eligible approvers (exclude the submitter)
+        if self.notification_service:
+            try:
+                approver_ids = await self._get_eligible_approvers_for_sub_agent(
+                    db, sub_agent_id, exclude_user_id=user_id
+                )
+                if approver_ids:
+                    agent_name = existing.name
+                    notifications = [
+                        NotificationData(
+                            user_id=approver_id,
+                            notification_type=NotificationType.APPROVAL_REQUESTED,
+                            title=f"Approval requested: '{agent_name}'",
+                            message=f"Version {existing.current_version} of agent '{agent_name}' has been submitted for approval.",
+                            metadata={
+                                "sub_agent_id": sub_agent_id,
+                                "version": existing.current_version,
+                                "submitted_by": user_id,
+                            },
+                        )
+                        for approver_id in approver_ids
+                    ]
+                    await self.notification_service.bulk_create_notifications(db, notifications)
+            except Exception as e:
+                logger.error(f"Failed to create approval request notifications: {e}")
+
         return await self.get_sub_agent_by_id(db, sub_agent_id)
 
     async def approve_sub_agent(
@@ -1059,45 +1094,75 @@ class SubAgentService:
             # Execute approval (includes audit)
             await self.repo.approve_version(db, context)
 
-            # Notify owner about approval
-            if self.notification_service and owner_id and admin_user_id != owner_id:
+            # Notify owner and submitter about approval
+            if self.notification_service:
                 try:
                     agent_name = existing.name
-                    notification = NotificationData(
-                        user_id=owner_id,
-                        notification_type=NotificationType.APPROVAL_COMPLETED,
-                        title=f"Agent '{agent_name}' approved",
-                        message=f"Version {version} of your agent '{agent_name}' has been approved and is now available.",
-                        metadata={
-                            "sub_agent_id": sub_agent_id,
-                            "version": version,
-                            "release_number": context.release_number,
-                        },
-                    )
-                    await self.notification_service.bulk_create_notifications(db, [notification])
+
+                    # Get the person who submitted this version for approval
+                    submitter_id = existing.config_version.submitted_by_user_id
+
+                    # Collect unique user IDs to notify (exclude the approver)
+                    notify_user_ids = set()
+                    if owner_id and owner_id != admin_user_id:
+                        notify_user_ids.add(owner_id)
+                    if submitter_id and submitter_id != admin_user_id:
+                        notify_user_ids.add(submitter_id)
+
+                    if notify_user_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=user_id,
+                                notification_type=NotificationType.APPROVAL_COMPLETED,
+                                title=f"Agent '{agent_name}' approved",
+                                message=f"Version {version} of agent '{agent_name}' has been approved and is now available.",
+                                metadata={
+                                    "sub_agent_id": sub_agent_id,
+                                    "version": version,
+                                    "release_number": context.release_number,
+                                },
+                            )
+                            for user_id in notify_user_ids
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
                 except Exception as e:
                     logger.error(f"Failed to create approval notification: {e}")
         else:
             # Execute rejection (includes audit)
             await self.repo.reject_version(db, context)
 
-            # Notify owner about rejection
-            if self.notification_service and owner_id and admin_user_id != owner_id:
+            # Notify owner and submitter about rejection
+            if self.notification_service:
                 try:
                     agent_name = existing.name
-                    notification = NotificationData(
-                        user_id=owner_id,
-                        notification_type=NotificationType.APPROVAL_REJECTED,
-                        title=f"Agent '{agent_name}' rejected",
-                        message=f"Version {version} of your agent '{agent_name}' was rejected."
-                        + (f" Reason: {rejection_reason}" if rejection_reason else ""),
-                        metadata={
-                            "sub_agent_id": sub_agent_id,
-                            "version": version,
-                            "rejection_reason": rejection_reason,
-                        },
-                    )
-                    await self.notification_service.bulk_create_notifications(db, [notification])
+
+                    # Get the person who submitted this version for approval
+                    submitter_id = existing.config_version.submitted_by_user_id
+
+                    # Collect unique user IDs to notify (exclude the approver)
+                    notify_user_ids = set()
+                    if owner_id and owner_id != admin_user_id:
+                        notify_user_ids.add(owner_id)
+                    if submitter_id and submitter_id != admin_user_id:
+                        notify_user_ids.add(submitter_id)
+
+                    if notify_user_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=user_id,
+                                notification_type=NotificationType.APPROVAL_REJECTED,
+                                title=f"Agent '{agent_name}' rejected",
+                                message=f"Version {version} of agent '{agent_name}' was rejected."
+                                + (f" Reason: {rejection_reason}" if rejection_reason else ""),
+                                metadata={
+                                    "sub_agent_id": sub_agent_id,
+                                    "version": version,
+                                    "rejection_reason": rejection_reason,
+                                },
+                            )
+                            for user_id in notify_user_ids
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
                 except Exception as e:
                     logger.error(f"Failed to create rejection notification: {e}")
 
@@ -1151,6 +1216,64 @@ class SubAgentService:
         result = await db.execute(members_query, {"group_ids": group_ids})
         return [row[0] for row in result.fetchall()]
 
+    async def _get_eligible_approvers_for_sub_agent(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        exclude_user_id: str | None = None,
+    ) -> list[str]:
+        """Get list of user IDs who can approve the sub-agent.
+
+        Returns approvers and admins who have access to the sub-agent through:
+        - Being the owner
+        - Having group access with write/manager role
+        - System admins (with approve.admin capability)
+
+        Args:
+            db: Database session
+            sub_agent_id: Sub-agent ID
+            exclude_user_id: Optional user ID to exclude (e.g., the submitter)
+
+        Returns:
+            List of user IDs eligible to approve
+        """
+        query = text("""
+            SELECT DISTINCT u.id
+            FROM users u
+            WHERE 
+                -- User has approver or admin role
+                (u.role IN ('approver', 'admin') OR u.is_administrator = true)
+                AND (
+                    -- User is the owner
+                    EXISTS (
+                        SELECT 1 FROM sub_agents sa
+                        WHERE sa.id = :sub_agent_id AND sa.owner_user_id = u.id
+                    )
+                    OR
+                    -- User has group access with write or manager role
+                    EXISTS (
+                        SELECT 1
+                        FROM sub_agent_permissions sap
+                        JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
+                        WHERE sap.sub_agent_id = :sub_agent_id
+                          AND ugm.user_id = u.id
+                          AND ugm.group_role IN ('write', 'manager')
+                          AND 'write' = ANY(sap.permissions)
+                    )
+                    OR
+                    -- System admin (can approve anything with approve.admin)
+                    u.is_administrator = true
+                )
+        """)
+        result = await db.execute(query, {"sub_agent_id": sub_agent_id})
+        user_ids = [row[0] for row in result.fetchall()]
+
+        # Filter out excluded user
+        if exclude_user_id:
+            user_ids = [uid for uid in user_ids if uid != exclude_user_id]
+
+        return user_ids
+
     async def _get_group_name(self, db: AsyncSession, group_id: int) -> str:
         """Get the name of a group.
 
@@ -1174,6 +1297,7 @@ class SubAgentService:
         group_id: int,
         group_name: str,
         reason: str = "default",
+        affected_user_ids: list[str] | None = None,
     ) -> None:
         """Send activation notifications to users.
 
@@ -1185,11 +1309,19 @@ class SubAgentService:
             group_id: Group ID
             group_name: Group name
             reason: Reason for activation (default, approval, etc.)
+            affected_user_ids: Optional list of user IDs whose state actually changed (filters user_ids)
         """
         if not self.notification_service or not user_ids:
             return
 
         from ..models.notification import NotificationData, NotificationType
+
+        # Filter to only users whose state actually changed
+        if affected_user_ids is not None:
+            user_ids = [uid for uid in user_ids if uid in affected_user_ids]
+
+        if not user_ids:
+            return
 
         notifications = [
             NotificationData(
@@ -1302,8 +1434,10 @@ class SubAgentService:
         if not existing:
             return None
 
-        if existing.owner_user_id != user_id:
-            raise PermissionError("Only the owner can submit for approval")
+        # Check if user has write permission (owner or group write access)
+        has_write_permission = await self.check_user_permission(db, sub_agent_id, user_id, "write")
+        if not has_write_permission:
+            raise PermissionError("You don't have permission to submit this sub-agent for approval")
 
         if not existing.config_version:
             raise ValueError(f"Version {version} not found")
@@ -1326,6 +1460,33 @@ class SubAgentService:
         )
 
         await db.commit()
+
+        # Notify eligible approvers (exclude the submitter)
+        if self.notification_service:
+            try:
+                approver_ids = await self._get_eligible_approvers_for_sub_agent(
+                    db, sub_agent_id, exclude_user_id=user_id
+                )
+                if approver_ids:
+                    agent_name = existing.name
+                    notifications = [
+                        NotificationData(
+                            user_id=approver_id,
+                            notification_type=NotificationType.APPROVAL_REQUESTED,
+                            title=f"Approval requested: '{agent_name}'",
+                            message=f"Version {version} of agent '{agent_name}' has been submitted for approval.",
+                            metadata={
+                                "sub_agent_id": sub_agent_id,
+                                "version": version,
+                                "submitted_by": user_id,
+                            },
+                        )
+                        for approver_id in approver_ids
+                    ]
+                    await self.notification_service.bulk_create_notifications(db, notifications)
+            except Exception as e:
+                logger.error(f"Failed to create approval request notifications: {e}")
+
         return await self.get_sub_agent_by_id(db, sub_agent_id)
 
     async def set_default_version(
@@ -1759,6 +1920,7 @@ class SubAgentService:
                 pricing_config=row.get("cv_pricing_config"),
                 change_summary=row["cv_change_summary"],
                 status=row["cv_status"],
+                submitted_by_user_id=row.get("cv_submitted_by_user_id"),
                 approved_by_user_id=row["cv_approved_by_user_id"],
                 approved_at=row["cv_approved_at"],
                 rejection_reason=row["cv_rejection_reason"],

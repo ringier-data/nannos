@@ -325,6 +325,15 @@ def sub_agent_service():
 
 
 @pytest.fixture
+def notification_service():
+    """Create NotificationService mock for testing."""
+    from playground_backend.services.notification_service import NotificationService
+
+    service = NotificationService()
+    return service
+
+
+@pytest.fixture
 def user_group_service():
     """Create UserGroupService instance with injected dependencies."""
     service = UserGroupService()

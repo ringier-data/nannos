@@ -348,8 +348,8 @@ export function SubAgentDetailPage() {
   // Users with write access through groups can also edit
   const canEdit = (isOwner || (isAdministrator && adminMode) || hasGroupWriteAccess) && !isViewingHistoricalVersion;
   const canDelete = isOwner || canApprove;
-  // Can submit if owner and current version is draft
-  const canSubmitForApproval = isOwner && currentVersionStatus === 'draft';
+  // Can submit if owner or has write access through groups, and current version is draft
+  const canSubmitForApproval = (isOwner || hasGroupWriteAccess) && currentVersionStatus === 'draft';
   
   // Get displayed data based on whether viewing historical version
   const displayedDescription = isViewingHistoricalVersion 
