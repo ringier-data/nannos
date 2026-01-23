@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from uuid6 import uuid7
 
 from ..authorization import check_action_allowed, check_capability
+from ..models.notification import NotificationData, NotificationType
 from ..models.secret import Secret, SecretCreate, SecretType
+from ..services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -19,22 +21,37 @@ logger = logging.getLogger(__name__)
 class SecretsService:
     """Manages secrets stored in AWS SSM Parameter Store with database metadata."""
 
-    def __init__(self, secrets_repository=None):
+    def __init__(self, secrets_repository=None, notification_service=None):
         """Initialize the secrets service with aiobotocore session.
 
         Args:
             secrets_repository: Optional secrets repository instance.
                 If None, must be set via set_repository() before use.
+            notification_service: Optional notification service instance.
         """
         self.session = get_session()
         self.region_name = os.environ.get("AWS_REGION", "eu-central-1")
         self.ssm_vault_prefix = os.environ.get("SSM_VAULT_PREFIX", "/nannos/infrastructure-agents/vault")
         self.kms_key_id = os.environ.get("KMS_VAULT_KEY_ID", "alias/dev-nannos-sensitive-data-kms-key")
         self._repo = secrets_repository
+        self._notification_service = notification_service
 
     def set_repository(self, secrets_repository):
         """Set the secrets repository (dependency injection)."""
         self._repo = secrets_repository
+
+    def set_notification_service(self, notification_service):
+        """Set the notification service (dependency injection)."""
+        self._notification_service = notification_service
+
+    @property
+    def notification_service(self) -> NotificationService:
+        """Get the notification service, raising error if not set."""
+        if self._notification_service is None:
+            raise RuntimeError(
+                "NotificationService not injected. Call set_notification_service() during initialization."
+            )
+        return self._notification_service
 
     @property
     def repo(self):
@@ -498,6 +515,26 @@ class SecretsService:
         if not has_access:
             raise PermissionError("You don't have permission to update permissions for this secret")
 
+        # Get current permissions to detect changes
+        current_perms_query = text("""
+            SELECT user_group_id, permissions FROM secret_permissions
+            WHERE secret_id = :secret_id
+        """)
+        current_result = await db.execute(current_perms_query, {"secret_id": secret_id})
+        current_perms = {row[0]: set(row[1]) for row in current_result.fetchall()}
+
+        # Detect added and removed groups
+        new_perms = {p["user_group_id"]: set(p["permissions"]) for p in group_permissions}
+        added_groups = set(new_perms.keys()) - set(current_perms.keys())
+        removed_groups = set(current_perms.keys()) - set(new_perms.keys())
+        changed_groups = {
+            gid for gid in new_perms.keys() & current_perms.keys() if new_perms[gid] != current_perms[gid]
+        }
+
+        # Get secret name for notifications
+        secret = await self.get_secret_metadata(db, secret_id, user_id, is_admin, is_admin)
+        secret_name = secret.name if secret else f"Secret {secret_id}"
+
         # Use repository for update with automatic audit logging
         await self.repo.update_permissions(
             db=db,
@@ -505,5 +542,82 @@ class SecretsService:
             secret_id=secret_id,
             group_permissions=group_permissions,
         )
+
+        # Notify affected users
+        if self.notification_service and (added_groups or removed_groups or changed_groups):
+            try:
+                # Notify members of groups gaining access
+                if added_groups:
+                    members_query = text("""
+                        SELECT DISTINCT ugm.user_id
+                        FROM user_group_members ugm
+                        WHERE ugm.user_group_id = ANY(:group_ids)
+                    """)
+                    members_result = await db.execute(members_query, {"group_ids": list(added_groups)})
+                    member_ids = [row[0] for row in members_result.fetchall()]
+
+                    if member_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=member_id,
+                                notification_type=NotificationType.SECRET_SHARED,
+                                title=f"Secret '{secret_name}' shared with you",
+                                message=f"The secret '{secret_name}' has been shared with your group.",
+                                metadata={"secret_id": secret_id},
+                            )
+                            for member_id in member_ids
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
+
+                # Notify members of groups losing access
+                if removed_groups:
+                    members_query = text("""
+                        SELECT DISTINCT ugm.user_id
+                        FROM user_group_members ugm
+                        WHERE ugm.user_group_id = ANY(:group_ids)
+                    """)
+                    members_result = await db.execute(members_query, {"group_ids": list(removed_groups)})
+                    member_ids = [row[0] for row in members_result.fetchall()]
+
+                    if member_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=member_id,
+                                notification_type=NotificationType.SECRET_ACCESS_REVOKED,
+                                title=f"Access to '{secret_name}' revoked",
+                                message=f"Your group's access to the secret '{secret_name}' has been revoked.",
+                                metadata={"secret_id": secret_id},
+                            )
+                            for member_id in member_ids
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
+
+                if changed_groups:
+                    members_query = text("""
+                        SELECT DISTINCT ugm.user_id
+                        FROM user_group_members ugm
+                        WHERE ugm.user_group_id = ANY(:group_ids)
+                    """)
+                    members_result = await db.execute(members_query, {"group_ids": list(changed_groups)})
+                    member_ids = [row[0] for row in members_result.fetchall()]
+
+                    if member_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=member_id,
+                                notification_type=NotificationType.SECRET_PERMISSION_CHANGED,
+                                title=f"Permissions for '{secret_name}' changed",
+                                message=f"The permissions for the secret '{secret_name}' have been updated for your group.",
+                                metadata={"secret_id": secret_id},
+                            )
+                            for member_id in member_ids
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
+
+                # Commit all notifications together
+                await db.commit()
+            except Exception as e:
+                logger.error(f"Failed to create permission change notifications: {e}")
+
         await db.commit()
         return True

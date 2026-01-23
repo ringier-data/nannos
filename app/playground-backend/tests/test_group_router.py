@@ -465,7 +465,7 @@ class TestAddMembersEndpoint:
         mock_request = get_mock_request(user=mock_admin_user)
         request_body = GroupMemberAdd(user_ids=["user-999"], role="write")
         with pytest.raises(HTTPException) as exc_info:
-            await group_router.add_members(999, mock_request, request_body, pg_session, mock_user)
+            await group_router.add_members(999, mock_request, request_body, pg_session, mock_admin_user)
         assert exc_info.value.status_code == 404
 
 

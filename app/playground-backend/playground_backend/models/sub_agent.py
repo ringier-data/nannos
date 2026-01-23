@@ -7,6 +7,14 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class ActivationSource(str, Enum):
+    """Activation source enum matching database enum."""
+
+    USER = "user"
+    GROUP = "group"
+    ADMIN = "admin"
+
+
 class SubAgentType(str, Enum):
     """Sub-agent type enum matching database enum."""
 
@@ -149,6 +157,8 @@ class SubAgent(BaseModel):
     config_version: SubAgentConfigVersion | None = None  # Joined version data
     is_public: bool | None = None  # If true, accessible to all users without group permissions
     is_activated: bool | None = None  # If true, user has activated this sub-agent
+    activated_by: ActivationSource | None = None  # Activation source: 'user', 'group', or 'admin'
+    activated_by_groups: list[int] | None = None  # List of group IDs that activated this agent
     deleted_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

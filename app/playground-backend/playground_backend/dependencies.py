@@ -409,6 +409,7 @@ async def require_group_member_management_permission(
     request: Request,
     group_id: int,
     db: AsyncSession,
+    user: User,
 ) -> User:
     """Check if user can manage members in a group.
 
@@ -420,6 +421,7 @@ async def require_group_member_management_permission(
         request: FastAPI request
         group_id: Group ID
         db: Database session
+        user: Authenticated user (from route-level dependency injection)
 
     Returns:
         Authenticated user
@@ -428,8 +430,6 @@ async def require_group_member_management_permission(
         HTTPException 403 if user doesn't have permission
     """
     user_group_service = request.app.state.user_group_service
-
-    user = require_auth(request)
 
     # System admins can do anything
     if user.is_administrator:
@@ -457,6 +457,7 @@ async def require_group_member(
     request: Request,
     group_id: int,
     db: AsyncSession,
+    user: User,
 ) -> User:
     """Check if user is a member of the group.
 
@@ -464,6 +465,7 @@ async def require_group_member(
         request: FastAPI request
         group_id: Group ID
         db: Database session
+        user: Authenticated user
 
     Returns:
         Authenticated user
@@ -472,8 +474,6 @@ async def require_group_member(
         HTTPException 403 if user is not a group member
     """
     user_group_service = request.app.state.user_group_service
-
-    user = require_auth(request)
 
     # System admins can access everything
     if user.is_administrator:

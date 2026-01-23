@@ -848,6 +848,22 @@ async def app_with_db(app, pg_session, test_user_model):
     app.dependency_overrides[require_auth] = override_require_auth
     app.dependency_overrides[require_auth_or_bearer_token] = override_require_auth_or_bearer_token
 
+    await pg_session.execute(
+        text("""
+            INSERT INTO users (id, sub, email, first_name, last_name, role)
+            VALUES (:id, :sub, :email, :first_name, :last_name, :role)
+        """),
+        {
+            "id": test_user_model.id,
+            "sub": test_user_model.sub,
+            "email": test_user_model.email,
+            "first_name": test_user_model.first_name,
+            "last_name": test_user_model.last_name,
+            "role": test_user_model.role,
+        },
+    )
+    await pg_session.commit()
+
     yield app
 
     # Cleanup: Remove the override after the test

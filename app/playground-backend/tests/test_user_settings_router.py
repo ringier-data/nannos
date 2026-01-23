@@ -47,29 +47,6 @@ def mock_user():
     )
 
 
-@pytest_asyncio.fixture
-async def inserted_user(pg_session, mock_user):
-    """Insert a mock user into the database asynchronously."""
-    await pg_session.execute(
-        text("""
-        INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status)
-        VALUES (:id, :sub, :email, :first_name, :last_name, :is_administrator, :role, :status)
-        """),
-        {
-            "id": mock_user.id,
-            "sub": mock_user.sub,
-            "email": mock_user.email,
-            "first_name": mock_user.first_name,
-            "last_name": mock_user.last_name,
-            "is_administrator": mock_user.is_administrator,
-            "role": mock_user.role,
-            "status": mock_user.status,
-        },
-    )
-    await pg_session.commit()
-    return mock_user
-
-
 @pytest.mark.asyncio
 class TestUserSettingsEndpoints:
     """Test user settings endpoints with real database."""
@@ -85,7 +62,7 @@ class TestUserSettingsEndpoints:
         assert data["data"]["language"] == "en"
         assert data["data"]["custom_prompt"] is None
 
-    async def test_patch_settings_update_language(self, client_with_db, inserted_user):
+    async def test_patch_settings_update_language(self, client_with_db):
         """Test PATCH /me/settings updates language."""
         response = await client_with_db.patch(
             "/api/v1/auth/me/settings",
@@ -97,7 +74,7 @@ class TestUserSettingsEndpoints:
         assert data["data"]["language"] == "de"
         assert data["data"]["custom_prompt"] is None
 
-    async def test_patch_settings_update_custom_prompt(self, client_with_db, inserted_user):
+    async def test_patch_settings_update_custom_prompt(self, client_with_db):
         """Test PATCH /me/settings updates custom_prompt."""
         response = await client_with_db.patch(
             "/api/v1/auth/me/settings",
@@ -109,7 +86,7 @@ class TestUserSettingsEndpoints:
         assert data["data"]["language"] == "en"
         assert data["data"]["custom_prompt"] == "You are a helpful assistant."
 
-    async def test_patch_settings_update_both(self, client_with_db, inserted_user):
+    async def test_patch_settings_update_both(self, client_with_db):
         """Test PATCH /me/settings updates both language and custom_prompt."""
         response = await client_with_db.patch(
             "/api/v1/auth/me/settings",
@@ -124,7 +101,7 @@ class TestUserSettingsEndpoints:
         assert data["data"]["language"] == "fr"
         assert data["data"]["custom_prompt"] == "Vous êtes un assistant utile."
 
-    async def test_get_settings_after_update(self, client_with_db, inserted_user):
+    async def test_get_settings_after_update(self, client_with_db):
         """Test GET /me/settings returns updated values after PATCH."""
         # First update settings
         await client_with_db.patch(
@@ -140,7 +117,7 @@ class TestUserSettingsEndpoints:
         assert data["data"]["language"] == "de"
         assert data["data"]["custom_prompt"] == "My custom prompt"
 
-    async def test_patch_settings_partial_update_preserves_existing(self, client_with_db, inserted_user):
+    async def test_patch_settings_partial_update_preserves_existing(self, client_with_db):
         """Test PATCH /me/settings preserves fields not being updated."""
         # Set initial values
         await client_with_db.patch(
@@ -168,7 +145,7 @@ class TestUserSettingsEndpoints:
         assert "data" in data
         assert data["data"]["timezone"] == "Europe/Zurich"  # Default timezone
 
-    async def test_patch_settings_update_timezone(self, client_with_db, inserted_user):
+    async def test_patch_settings_update_timezone(self, client_with_db):
         """Test PATCH /me/settings updates timezone."""
         response = await client_with_db.patch(
             "/api/v1/auth/me/settings",
@@ -180,7 +157,7 @@ class TestUserSettingsEndpoints:
         assert data["data"]["timezone"] == "America/New_York"
         assert data["data"]["language"] == "en"  # Default preserved
 
-    async def test_patch_settings_update_all_fields(self, client_with_db, inserted_user):
+    async def test_patch_settings_update_all_fields(self, client_with_db):
         """Test PATCH /me/settings updates language, timezone, and custom_prompt."""
         response = await client_with_db.patch(
             "/api/v1/auth/me/settings",
@@ -197,7 +174,7 @@ class TestUserSettingsEndpoints:
         assert data["data"]["timezone"] == "Europe/Berlin"
         assert data["data"]["custom_prompt"] == "Du bist ein hilfreicher Assistent."
 
-    async def test_patch_settings_partial_update_preserves_timezone(self, client_with_db, inserted_user):
+    async def test_patch_settings_partial_update_preserves_timezone(self, client_with_db):
         """Test PATCH /me/settings preserves timezone when not updated."""
         # Set initial values including timezone
         await client_with_db.patch(

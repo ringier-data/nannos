@@ -3,8 +3,8 @@
 import { type DefaultError, type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutationOptions } from '@tanstack/react-query';
 
 import { client } from '../client.gen';
-import { activateSubAgentApiV1SubAgentsSubAgentIdActivatePost, addMembersApiV1GroupsGroupIdMembersPost, approveSubAgentApiV1SubAgentsSubAgentIdApprovePost, batchLogUsageApiV1UsageBatchLogPost, bulkDeleteGroupsApiV1AdminGroupsBulkDelete, bulkUpdateUsersApiV1AdminUsersBulkPost, copyModelRatesApiV1AdminRateCardsCopyPost, createGroupApiV1AdminGroupsPost, createModelRateCardApiV1AdminRateCardsModelPost, createRateCardEntryApiV1AdminRateCardsEntryPost, createSecretApiV1SecretsPost, deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePost, debugSessionApiV1ConversationsDebugSessionGet, deleteGroupApiV1AdminGroupsGroupIdDelete, deleteSecretApiV1SecretsSecretIdDelete, deleteSubAgentApiV1SubAgentsSubAgentIdDelete, deleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDelete, expireRateCardEntryApiV1AdminRateCardsExpireRateIdPost, getAgentCardApiV1AgentCardPost, getConversationsByUserApiV1ConversationsGet, getCurrentUserApiV1AuthMeGet, getCurrentUserSettingsApiV1AuthMeSettingsGet, getGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGet, getGroupApiV1AdminGroupsGroupIdGet, getGroupApiV1GroupsGroupIdGet, getMessagesByConversationApiV1MessagesConversationIdGet, getModelRatesApiV1AdminRateCardsModelProviderModelNameGet, getMyDetailedUsageApiV1UsageMyDetailedGet, getMyUsageLogsApiV1UsageMyLogsGet, getMyUsageSummaryApiV1UsageMySummaryGet, getSecretApiV1SecretsSecretIdGet, getSecretPermissionsApiV1SecretsSecretIdPermissionsGet, getSubAgentApiV1SubAgentsSubAgentIdGet, getSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGet, getSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGet, getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGet, getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGet, getUserApiV1AdminUsersUserIdGet, getUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGet, healthCheckApiV1HealthGet, indexApiV1Get, listAuditLogsApiV1AdminAuditLogsGet, listGroupsApiV1AdminGroupsGet, listMembersApiV1GroupsGroupIdMembersGet, listModelsWithRatesApiV1AdminRateCardsModelsGet, listMyGroupsApiV1GroupsGet, listPendingApprovalsApiV1SubAgentsPendingGet, listPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGet, listRateCardEntriesApiV1AdminRateCardsGet, listSecretsApiV1SecretsGet, listUsersApiV1AdminUsersGet, loginApiV1AuthLoginGet, loginCallbackApiV1AuthLoginCallbackGet, logoutApiV1AuthLogoutGet, logoutCallbackApiV1AuthLogoutCallbackGet, logUsageApiV1UsageLogPost, type Options, playgroundCreateSubAgent, playgroundListMcpTools, playgroundListSubAgents, playgroundUpdateSubAgent, removeMembersApiV1GroupsGroupIdMembersRemovePost, revertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPost, reviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPost, setDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPut, submitForApprovalApiV1SubAgentsSubAgentIdSubmitPost, submitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPost, toggleAdminModeApiV1AuthAdminModePost, updateCurrentUserSettingsApiV1AuthMeSettingsPatch, updateGroupApiV1AdminGroupsGroupIdPut, updateMemberRoleApiV1GroupsGroupIdMembersUserIdPut, updateSecretPermissionsApiV1SecretsSecretIdPermissionsPut, updateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPut, updateUserApiV1AdminUsersUserIdPatch, updateUserGroupsApiV1AdminUsersUserIdGroupsPut, updateUserRoleApiV1AdminUsersUserIdRolePut, updateUserStatusApiV1AdminUsersUserIdStatusPut } from '../sdk.gen';
-import type { ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostError, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostResponse, AddMembersApiV1GroupsGroupIdMembersPostData, AddMembersApiV1GroupsGroupIdMembersPostError, AddMembersApiV1GroupsGroupIdMembersPostResponse, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostData, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostError, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostResponse, BatchLogUsageApiV1UsageBatchLogPostData, BatchLogUsageApiV1UsageBatchLogPostError, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteData, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteError, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponse, BulkUpdateUsersApiV1AdminUsersBulkPostData, BulkUpdateUsersApiV1AdminUsersBulkPostError, BulkUpdateUsersApiV1AdminUsersBulkPostResponse, CopyModelRatesApiV1AdminRateCardsCopyPostData, CopyModelRatesApiV1AdminRateCardsCopyPostError, CopyModelRatesApiV1AdminRateCardsCopyPostResponse, CreateGroupApiV1AdminGroupsPostData, CreateGroupApiV1AdminGroupsPostError, CreateGroupApiV1AdminGroupsPostResponse, CreateModelRateCardApiV1AdminRateCardsModelPostData, CreateModelRateCardApiV1AdminRateCardsModelPostError, CreateModelRateCardApiV1AdminRateCardsModelPostResponse, CreateRateCardEntryApiV1AdminRateCardsEntryPostData, CreateRateCardEntryApiV1AdminRateCardsEntryPostError, CreateRateCardEntryApiV1AdminRateCardsEntryPostResponse, CreateSecretApiV1SecretsPostData, CreateSecretApiV1SecretsPostError, CreateSecretApiV1SecretsPostResponse, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostData, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostError, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostResponse, DebugSessionApiV1ConversationsDebugSessionGetData, DebugSessionApiV1ConversationsDebugSessionGetResponse, DeleteGroupApiV1AdminGroupsGroupIdDeleteData, DeleteGroupApiV1AdminGroupsGroupIdDeleteError, DeleteGroupApiV1AdminGroupsGroupIdDeleteResponse, DeleteSecretApiV1SecretsSecretIdDeleteData, DeleteSecretApiV1SecretsSecretIdDeleteError, DeleteSecretApiV1SecretsSecretIdDeleteResponse, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteData, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteError, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteResponse, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteData, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteError, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteResponse, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostData, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostError, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponse, GetAgentCardApiV1AgentCardPostData, GetConversationsByUserApiV1ConversationsGetData, GetConversationsByUserApiV1ConversationsGetError, GetConversationsByUserApiV1ConversationsGetResponse, GetCurrentUserApiV1AuthMeGetData, GetCurrentUserApiV1AuthMeGetResponse, GetCurrentUserSettingsApiV1AuthMeSettingsGetData, GetCurrentUserSettingsApiV1AuthMeSettingsGetResponse, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetData, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetError, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponse, GetGroupApiV1AdminGroupsGroupIdGetData, GetGroupApiV1AdminGroupsGroupIdGetError, GetGroupApiV1AdminGroupsGroupIdGetResponse, GetGroupApiV1GroupsGroupIdGetData, GetGroupApiV1GroupsGroupIdGetError, GetGroupApiV1GroupsGroupIdGetResponse, GetMessagesByConversationApiV1MessagesConversationIdGetData, GetMessagesByConversationApiV1MessagesConversationIdGetError, GetMessagesByConversationApiV1MessagesConversationIdGetResponse, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetData, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetError, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponse, GetMyDetailedUsageApiV1UsageMyDetailedGetData, GetMyDetailedUsageApiV1UsageMyDetailedGetError, GetMyDetailedUsageApiV1UsageMyDetailedGetResponse, GetMyUsageLogsApiV1UsageMyLogsGetData, GetMyUsageLogsApiV1UsageMyLogsGetError, GetMyUsageLogsApiV1UsageMyLogsGetResponse, GetMyUsageSummaryApiV1UsageMySummaryGetData, GetMyUsageSummaryApiV1UsageMySummaryGetError, GetMyUsageSummaryApiV1UsageMySummaryGetResponse, GetSecretApiV1SecretsSecretIdGetData, GetSecretApiV1SecretsSecretIdGetError, GetSecretApiV1SecretsSecretIdGetResponse, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetData, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetError, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetResponse, GetSubAgentApiV1SubAgentsSubAgentIdGetData, GetSubAgentApiV1SubAgentsSubAgentIdGetError, GetSubAgentApiV1SubAgentsSubAgentIdGetResponse, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetData, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetError, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetResponse, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetData, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetError, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponse, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetData, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetError, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetResponse, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetData, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetError, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetResponse, GetUserApiV1AdminUsersUserIdGetData, GetUserApiV1AdminUsersUserIdGetError, GetUserApiV1AdminUsersUserIdGetResponse, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetData, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetError, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponse, HealthCheckApiV1HealthGetData, IndexApiV1GetData, ListAuditLogsApiV1AdminAuditLogsGetData, ListAuditLogsApiV1AdminAuditLogsGetError, ListAuditLogsApiV1AdminAuditLogsGetResponse, ListGroupsApiV1AdminGroupsGetData, ListGroupsApiV1AdminGroupsGetError, ListGroupsApiV1AdminGroupsGetResponse, ListMembersApiV1GroupsGroupIdMembersGetData, ListMembersApiV1GroupsGroupIdMembersGetError, ListMembersApiV1GroupsGroupIdMembersGetResponse, ListModelsWithRatesApiV1AdminRateCardsModelsGetData, ListModelsWithRatesApiV1AdminRateCardsModelsGetError, ListModelsWithRatesApiV1AdminRateCardsModelsGetResponse, ListMyGroupsApiV1GroupsGetData, ListMyGroupsApiV1GroupsGetResponse, ListPendingApprovalsApiV1SubAgentsPendingGetData, ListPendingApprovalsApiV1SubAgentsPendingGetResponse, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetData, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponse, ListRateCardEntriesApiV1AdminRateCardsGetData, ListRateCardEntriesApiV1AdminRateCardsGetError, ListRateCardEntriesApiV1AdminRateCardsGetResponse, ListSecretsApiV1SecretsGetData, ListSecretsApiV1SecretsGetResponse, ListUsersApiV1AdminUsersGetData, ListUsersApiV1AdminUsersGetError, ListUsersApiV1AdminUsersGetResponse, LoginApiV1AuthLoginGetData, LoginCallbackApiV1AuthLoginCallbackGetData, LogoutApiV1AuthLogoutGetData, LogoutCallbackApiV1AuthLogoutCallbackGetData, LogUsageApiV1UsageLogPostData, LogUsageApiV1UsageLogPostError, PlaygroundCreateSubAgentData, PlaygroundCreateSubAgentError, PlaygroundCreateSubAgentResponse, PlaygroundListMcpToolsData, PlaygroundListMcpToolsResponse, PlaygroundListSubAgentsData, PlaygroundListSubAgentsError, PlaygroundListSubAgentsResponse, PlaygroundUpdateSubAgentData, PlaygroundUpdateSubAgentError, PlaygroundUpdateSubAgentResponse, RemoveMembersApiV1GroupsGroupIdMembersRemovePostData, RemoveMembersApiV1GroupsGroupIdMembersRemovePostError, RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponse, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostData, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostError, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostResponse, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostData, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostError, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostResponse, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutData, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutError, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutResponse, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostData, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostError, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostResponse, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostData, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostError, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostResponse, ToggleAdminModeApiV1AuthAdminModePostData, ToggleAdminModeApiV1AuthAdminModePostError, ToggleAdminModeApiV1AuthAdminModePostResponse, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchData, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchError, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponse, UpdateGroupApiV1AdminGroupsGroupIdPutData, UpdateGroupApiV1AdminGroupsGroupIdPutError, UpdateGroupApiV1AdminGroupsGroupIdPutResponse, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutError, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponse, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutData, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutError, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponse, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutData, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutError, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutResponse, UpdateUserApiV1AdminUsersUserIdPatchData, UpdateUserApiV1AdminUsersUserIdPatchError, UpdateUserApiV1AdminUsersUserIdPatchResponse, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutData, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutError, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponse, UpdateUserRoleApiV1AdminUsersUserIdRolePutData, UpdateUserRoleApiV1AdminUsersUserIdRolePutError, UpdateUserRoleApiV1AdminUsersUserIdRolePutResponse, UpdateUserStatusApiV1AdminUsersUserIdStatusPutData, UpdateUserStatusApiV1AdminUsersUserIdStatusPutError, UpdateUserStatusApiV1AdminUsersUserIdStatusPutResponse } from '../types.gen';
+import { activateSubAgentApiV1SubAgentsSubAgentIdActivatePost, addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPost, addMembersApiV1GroupsGroupIdMembersPost, approveSubAgentApiV1SubAgentsSubAgentIdApprovePost, batchLogUsageApiV1UsageBatchLogPost, bulkDeleteGroupsApiV1AdminGroupsBulkDelete, bulkUpdateUsersApiV1AdminUsersBulkPost, copyModelRatesApiV1AdminRateCardsCopyPost, createGroupApiV1AdminGroupsPost, createModelRateCardApiV1AdminRateCardsModelPost, createRateCardEntryApiV1AdminRateCardsEntryPost, createSecretApiV1SecretsPost, deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePost, debugSessionApiV1ConversationsDebugSessionGet, deleteGroupApiV1AdminGroupsGroupIdDelete, deleteSecretApiV1SecretsSecretIdDelete, deleteSubAgentApiV1SubAgentsSubAgentIdDelete, deleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDelete, expireRateCardEntryApiV1AdminRateCardsExpireRateIdPost, getAgentCardApiV1AgentCardPost, getConversationsByUserApiV1ConversationsGet, getCurrentUserApiV1AuthMeGet, getCurrentUserSettingsApiV1AuthMeSettingsGet, getGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGet, getGroupApiV1AdminGroupsGroupIdGet, getGroupApiV1GroupsGroupIdGet, getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGet, getMessagesByConversationApiV1MessagesConversationIdGet, getModelRatesApiV1AdminRateCardsModelProviderModelNameGet, getMyDetailedUsageApiV1UsageMyDetailedGet, getMyUsageLogsApiV1UsageMyLogsGet, getMyUsageSummaryApiV1UsageMySummaryGet, getNotificationsApiV1NotificationsGet, getSecretApiV1SecretsSecretIdGet, getSecretPermissionsApiV1SecretsSecretIdPermissionsGet, getSubAgentApiV1SubAgentsSubAgentIdGet, getSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGet, getSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGet, getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGet, getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGet, getUnreadCountApiV1NotificationsUnreadCountGet, getUserApiV1AdminUsersUserIdGet, getUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGet, healthCheckApiV1HealthGet, indexApiV1Get, listAuditLogsApiV1AdminAuditLogsGet, listGroupsApiV1AdminGroupsGet, listMembersApiV1GroupsGroupIdMembersGet, listModelsWithRatesApiV1AdminRateCardsModelsGet, listMyGroupsApiV1GroupsGet, listPendingApprovalsApiV1SubAgentsPendingGet, listPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGet, listRateCardEntriesApiV1AdminRateCardsGet, listSecretsApiV1SecretsGet, listUsersApiV1AdminUsersGet, loginApiV1AuthLoginGet, loginCallbackApiV1AuthLoginCallbackGet, logoutApiV1AuthLogoutGet, logoutCallbackApiV1AuthLogoutCallbackGet, logUsageApiV1UsageLogPost, markAllNotificationsAsReadApiV1NotificationsMarkAllReadPut, markNotificationsAsReadApiV1NotificationsMarkReadPut, type Options, playgroundCreateSubAgent, playgroundListMcpTools, playgroundListSubAgents, playgroundUpdateSubAgent, removeGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDelete, removeMembersApiV1GroupsGroupIdMembersRemovePost, revertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPost, reviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPost, setDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPut, setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPut, submitForApprovalApiV1SubAgentsSubAgentIdSubmitPost, submitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPost, toggleAdminModeApiV1AuthAdminModePost, updateCurrentUserSettingsApiV1AuthMeSettingsPatch, updateGroupApiV1AdminGroupsGroupIdPut, updateMemberRoleApiV1GroupsGroupIdMembersUserIdPut, updateSecretPermissionsApiV1SecretsSecretIdPermissionsPut, updateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPut, updateUserApiV1AdminUsersUserIdPatch, updateUserGroupsApiV1AdminUsersUserIdGroupsPut, updateUserRoleApiV1AdminUsersUserIdRolePut, updateUserStatusApiV1AdminUsersUserIdStatusPut } from '../sdk.gen';
+import type { ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostError, ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostResponse, AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostData, AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostError, AddMembersApiV1GroupsGroupIdMembersPostData, AddMembersApiV1GroupsGroupIdMembersPostError, AddMembersApiV1GroupsGroupIdMembersPostResponse, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostData, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostError, ApproveSubAgentApiV1SubAgentsSubAgentIdApprovePostResponse, BatchLogUsageApiV1UsageBatchLogPostData, BatchLogUsageApiV1UsageBatchLogPostError, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteData, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteError, BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponse, BulkUpdateUsersApiV1AdminUsersBulkPostData, BulkUpdateUsersApiV1AdminUsersBulkPostError, BulkUpdateUsersApiV1AdminUsersBulkPostResponse, CopyModelRatesApiV1AdminRateCardsCopyPostData, CopyModelRatesApiV1AdminRateCardsCopyPostError, CopyModelRatesApiV1AdminRateCardsCopyPostResponse, CreateGroupApiV1AdminGroupsPostData, CreateGroupApiV1AdminGroupsPostError, CreateGroupApiV1AdminGroupsPostResponse, CreateModelRateCardApiV1AdminRateCardsModelPostData, CreateModelRateCardApiV1AdminRateCardsModelPostError, CreateModelRateCardApiV1AdminRateCardsModelPostResponse, CreateRateCardEntryApiV1AdminRateCardsEntryPostData, CreateRateCardEntryApiV1AdminRateCardsEntryPostError, CreateRateCardEntryApiV1AdminRateCardsEntryPostResponse, CreateSecretApiV1SecretsPostData, CreateSecretApiV1SecretsPostError, CreateSecretApiV1SecretsPostResponse, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostData, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostError, DeactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostResponse, DebugSessionApiV1ConversationsDebugSessionGetData, DebugSessionApiV1ConversationsDebugSessionGetResponse, DeleteGroupApiV1AdminGroupsGroupIdDeleteData, DeleteGroupApiV1AdminGroupsGroupIdDeleteError, DeleteGroupApiV1AdminGroupsGroupIdDeleteResponse, DeleteSecretApiV1SecretsSecretIdDeleteData, DeleteSecretApiV1SecretsSecretIdDeleteError, DeleteSecretApiV1SecretsSecretIdDeleteResponse, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteData, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteError, DeleteSubAgentApiV1SubAgentsSubAgentIdDeleteResponse, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteData, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteError, DeleteVersionApiV1SubAgentsSubAgentIdVersionsVersionDeleteResponse, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostData, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostError, ExpireRateCardEntryApiV1AdminRateCardsExpireRateIdPostResponse, GetAgentCardApiV1AgentCardPostData, GetConversationsByUserApiV1ConversationsGetData, GetConversationsByUserApiV1ConversationsGetError, GetConversationsByUserApiV1ConversationsGetResponse, GetCurrentUserApiV1AuthMeGetData, GetCurrentUserApiV1AuthMeGetResponse, GetCurrentUserSettingsApiV1AuthMeSettingsGetData, GetCurrentUserSettingsApiV1AuthMeSettingsGetResponse, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetData, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetError, GetGlobalUsageSummaryApiV1UsageAdminGlobalSummaryGetResponse, GetGroupApiV1AdminGroupsGroupIdGetData, GetGroupApiV1AdminGroupsGroupIdGetError, GetGroupApiV1AdminGroupsGroupIdGetResponse, GetGroupApiV1GroupsGroupIdGetData, GetGroupApiV1GroupsGroupIdGetError, GetGroupApiV1GroupsGroupIdGetResponse, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetError, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponse, GetMessagesByConversationApiV1MessagesConversationIdGetData, GetMessagesByConversationApiV1MessagesConversationIdGetError, GetMessagesByConversationApiV1MessagesConversationIdGetResponse, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetData, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetError, GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponse, GetMyDetailedUsageApiV1UsageMyDetailedGetData, GetMyDetailedUsageApiV1UsageMyDetailedGetError, GetMyDetailedUsageApiV1UsageMyDetailedGetResponse, GetMyUsageLogsApiV1UsageMyLogsGetData, GetMyUsageLogsApiV1UsageMyLogsGetError, GetMyUsageLogsApiV1UsageMyLogsGetResponse, GetMyUsageSummaryApiV1UsageMySummaryGetData, GetMyUsageSummaryApiV1UsageMySummaryGetError, GetMyUsageSummaryApiV1UsageMySummaryGetResponse, GetNotificationsApiV1NotificationsGetData, GetNotificationsApiV1NotificationsGetError, GetNotificationsApiV1NotificationsGetResponse, GetSecretApiV1SecretsSecretIdGetData, GetSecretApiV1SecretsSecretIdGetError, GetSecretApiV1SecretsSecretIdGetResponse, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetData, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetError, GetSecretPermissionsApiV1SecretsSecretIdPermissionsGetResponse, GetSubAgentApiV1SubAgentsSubAgentIdGetData, GetSubAgentApiV1SubAgentsSubAgentIdGetError, GetSubAgentApiV1SubAgentsSubAgentIdGetResponse, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetData, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetError, GetSubAgentByConfigHashApiV1SubAgentsConfigsByHashVersionHashGetResponse, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetData, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetError, GetSubAgentByConfigVersionApiV1SubAgentsConfigsConfigVersionIdGetResponse, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetData, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetError, GetSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetResponse, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetData, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetError, GetSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetResponse, GetUnreadCountApiV1NotificationsUnreadCountGetData, GetUnreadCountApiV1NotificationsUnreadCountGetResponse, GetUserApiV1AdminUsersUserIdGetData, GetUserApiV1AdminUsersUserIdGetError, GetUserApiV1AdminUsersUserIdGetResponse, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetData, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetError, GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponse, HealthCheckApiV1HealthGetData, IndexApiV1GetData, ListAuditLogsApiV1AdminAuditLogsGetData, ListAuditLogsApiV1AdminAuditLogsGetError, ListAuditLogsApiV1AdminAuditLogsGetResponse, ListGroupsApiV1AdminGroupsGetData, ListGroupsApiV1AdminGroupsGetError, ListGroupsApiV1AdminGroupsGetResponse, ListMembersApiV1GroupsGroupIdMembersGetData, ListMembersApiV1GroupsGroupIdMembersGetError, ListMembersApiV1GroupsGroupIdMembersGetResponse, ListModelsWithRatesApiV1AdminRateCardsModelsGetData, ListModelsWithRatesApiV1AdminRateCardsModelsGetError, ListModelsWithRatesApiV1AdminRateCardsModelsGetResponse, ListMyGroupsApiV1GroupsGetData, ListMyGroupsApiV1GroupsGetResponse, ListPendingApprovalsApiV1SubAgentsPendingGetData, ListPendingApprovalsApiV1SubAgentsPendingGetResponse, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetData, ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponse, ListRateCardEntriesApiV1AdminRateCardsGetData, ListRateCardEntriesApiV1AdminRateCardsGetError, ListRateCardEntriesApiV1AdminRateCardsGetResponse, ListSecretsApiV1SecretsGetData, ListSecretsApiV1SecretsGetResponse, ListUsersApiV1AdminUsersGetData, ListUsersApiV1AdminUsersGetError, ListUsersApiV1AdminUsersGetResponse, LoginApiV1AuthLoginGetData, LoginCallbackApiV1AuthLoginCallbackGetData, LogoutApiV1AuthLogoutGetData, LogoutCallbackApiV1AuthLogoutCallbackGetData, LogUsageApiV1UsageLogPostData, LogUsageApiV1UsageLogPostError, MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutData, MarkNotificationsAsReadApiV1NotificationsMarkReadPutData, MarkNotificationsAsReadApiV1NotificationsMarkReadPutError, PlaygroundCreateSubAgentData, PlaygroundCreateSubAgentError, PlaygroundCreateSubAgentResponse, PlaygroundListMcpToolsData, PlaygroundListMcpToolsResponse, PlaygroundListSubAgentsData, PlaygroundListSubAgentsError, PlaygroundListSubAgentsResponse, PlaygroundUpdateSubAgentData, PlaygroundUpdateSubAgentError, PlaygroundUpdateSubAgentResponse, RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteData, RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteError, RemoveMembersApiV1GroupsGroupIdMembersRemovePostData, RemoveMembersApiV1GroupsGroupIdMembersRemovePostError, RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponse, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostData, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostError, RevertToVersionApiV1SubAgentsSubAgentIdVersionsVersionRevertPostResponse, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostData, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostError, ReviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostResponse, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutData, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutError, SetDefaultVersionApiV1SubAgentsSubAgentIdDefaultVersionPutResponse, SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData, SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutError, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostData, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostError, SubmitForApprovalApiV1SubAgentsSubAgentIdSubmitPostResponse, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostData, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostError, SubmitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPostResponse, ToggleAdminModeApiV1AuthAdminModePostData, ToggleAdminModeApiV1AuthAdminModePostError, ToggleAdminModeApiV1AuthAdminModePostResponse, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchData, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchError, UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponse, UpdateGroupApiV1AdminGroupsGroupIdPutData, UpdateGroupApiV1AdminGroupsGroupIdPutError, UpdateGroupApiV1AdminGroupsGroupIdPutResponse, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutError, UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponse, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutData, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutError, UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponse, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutData, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutError, UpdateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutResponse, UpdateUserApiV1AdminUsersUserIdPatchData, UpdateUserApiV1AdminUsersUserIdPatchError, UpdateUserApiV1AdminUsersUserIdPatchResponse, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutData, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutError, UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponse, UpdateUserRoleApiV1AdminUsersUserIdRolePutData, UpdateUserRoleApiV1AdminUsersUserIdRolePutError, UpdateUserRoleApiV1AdminUsersUserIdRolePutResponse, UpdateUserStatusApiV1AdminUsersUserIdStatusPutData, UpdateUserStatusApiV1AdminUsersUserIdStatusPutError, UpdateUserStatusApiV1AdminUsersUserIdStatusPutResponse } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -1578,6 +1578,100 @@ export const removeMembersApiV1GroupsGroupIdMembersRemovePostMutation = (options
     return mutationOptions;
 };
 
+export const getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetQueryKey = (options: Options<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData>) => createQueryKey('getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGet', options);
+
+/**
+ * Get Group Default Agents
+ *
+ * Get default agents for a group with approval and activation status.
+ *
+ * Returns agents with status indicators for UI:
+ * - approval_status: draft | pending_approval | approved | rejected
+ * - is_activated: whether the agent is currently activated for the user
+ * - activated_by_groups: list of group IDs that activated this agent
+ *
+ * Requires group member role.
+ */
+export const getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions = (options: Options<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData>) => queryOptions<GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponse, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetError, GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponse, ReturnType<typeof getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGet({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetQueryKey(options)
+});
+
+/**
+ * Set Group Default Agents
+ *
+ * Set (replace) default agents for a group (bulk operation).
+ *
+ * Requires group manager role or system admin.
+ * Validates that all agents are approved and group has permissions.
+ */
+export const setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation = (options?: Partial<Options<SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData>>): UseMutationOptions<unknown, SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutError, Options<SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData>> => {
+    const mutationOptions: UseMutationOptions<unknown, SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutError, Options<SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPut({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Remove Group Default Agent
+ *
+ * Remove a single default agent from a group.
+ *
+ * Requires group manager role or system admin.
+ * Deactivates the agent for all group members.
+ */
+export const removeGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteMutation = (options?: Partial<Options<RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteData>>): UseMutationOptions<unknown, RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteError, Options<RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteData>> => {
+    const mutationOptions: UseMutationOptions<unknown, RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteError, Options<RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await removeGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDelete({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Add Group Default Agent
+ *
+ * Add a single default agent to a group.
+ *
+ * Requires group manager role or system admin.
+ * Validates that the agent is approved and group has permissions.
+ * Activates the agent for all existing group members.
+ */
+export const addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostMutation = (options?: Partial<Options<AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostData>>): UseMutationOptions<unknown, AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostError, Options<AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostData>> => {
+    const mutationOptions: UseMutationOptions<unknown, AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostError, Options<AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPost({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 /**
  * Log Usage
  *
@@ -1952,6 +2046,125 @@ export const getModelRatesApiV1AdminRateCardsModelProviderModelNameGetOptions = 
     },
     queryKey: getModelRatesApiV1AdminRateCardsModelProviderModelNameGetQueryKey(options)
 });
+
+export const getNotificationsApiV1NotificationsGetQueryKey = (options?: Options<GetNotificationsApiV1NotificationsGetData>) => createQueryKey('getNotificationsApiV1NotificationsGet', options);
+
+/**
+ * Get Notifications
+ *
+ * Get notifications for the current user with pagination.
+ *
+ * Query Parameters:
+ * - page: Page number (default: 1)
+ * - limit: Items per page (default: 50, max: 100)
+ * - unread_only: If true, only return unread notifications (default: false)
+ */
+export const getNotificationsApiV1NotificationsGetOptions = (options?: Options<GetNotificationsApiV1NotificationsGetData>) => queryOptions<GetNotificationsApiV1NotificationsGetResponse, GetNotificationsApiV1NotificationsGetError, GetNotificationsApiV1NotificationsGetResponse, ReturnType<typeof getNotificationsApiV1NotificationsGetQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await getNotificationsApiV1NotificationsGet({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getNotificationsApiV1NotificationsGetQueryKey(options)
+});
+
+export const getNotificationsApiV1NotificationsGetInfiniteQueryKey = (options?: Options<GetNotificationsApiV1NotificationsGetData>): QueryKey<Options<GetNotificationsApiV1NotificationsGetData>> => createQueryKey('getNotificationsApiV1NotificationsGet', options, true);
+
+/**
+ * Get Notifications
+ *
+ * Get notifications for the current user with pagination.
+ *
+ * Query Parameters:
+ * - page: Page number (default: 1)
+ * - limit: Items per page (default: 50, max: 100)
+ * - unread_only: If true, only return unread notifications (default: false)
+ */
+export const getNotificationsApiV1NotificationsGetInfiniteOptions = (options?: Options<GetNotificationsApiV1NotificationsGetData>) => infiniteQueryOptions<GetNotificationsApiV1NotificationsGetResponse, GetNotificationsApiV1NotificationsGetError, InfiniteData<GetNotificationsApiV1NotificationsGetResponse>, QueryKey<Options<GetNotificationsApiV1NotificationsGetData>>, number | Pick<QueryKey<Options<GetNotificationsApiV1NotificationsGetData>>[0], 'body' | 'headers' | 'path' | 'query'>>(
+// @ts-ignore
+{
+    queryFn: async ({ pageParam, queryKey, signal }) => {
+        // @ts-ignore
+        const page: Pick<QueryKey<Options<GetNotificationsApiV1NotificationsGetData>>[0], 'body' | 'headers' | 'path' | 'query'> = typeof pageParam === 'object' ? pageParam : {
+            query: {
+                page: pageParam
+            }
+        };
+        const params = createInfiniteParams(queryKey, page);
+        const { data } = await getNotificationsApiV1NotificationsGet({
+            ...options,
+            ...params,
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getNotificationsApiV1NotificationsGetInfiniteQueryKey(options)
+});
+
+export const getUnreadCountApiV1NotificationsUnreadCountGetQueryKey = (options?: Options<GetUnreadCountApiV1NotificationsUnreadCountGetData>) => createQueryKey('getUnreadCountApiV1NotificationsUnreadCountGet', options);
+
+/**
+ * Get Unread Count
+ *
+ * Get count of unread notifications for the current user.
+ */
+export const getUnreadCountApiV1NotificationsUnreadCountGetOptions = (options?: Options<GetUnreadCountApiV1NotificationsUnreadCountGetData>) => queryOptions<GetUnreadCountApiV1NotificationsUnreadCountGetResponse, DefaultError, GetUnreadCountApiV1NotificationsUnreadCountGetResponse, ReturnType<typeof getUnreadCountApiV1NotificationsUnreadCountGetQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await getUnreadCountApiV1NotificationsUnreadCountGet({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getUnreadCountApiV1NotificationsUnreadCountGetQueryKey(options)
+});
+
+/**
+ * Mark Notifications As Read
+ *
+ * Mark multiple notifications as read.
+ *
+ * Body: {"notification_ids": [1, 2, 3]}
+ */
+export const markNotificationsAsReadApiV1NotificationsMarkReadPutMutation = (options?: Partial<Options<MarkNotificationsAsReadApiV1NotificationsMarkReadPutData>>): UseMutationOptions<unknown, MarkNotificationsAsReadApiV1NotificationsMarkReadPutError, Options<MarkNotificationsAsReadApiV1NotificationsMarkReadPutData>> => {
+    const mutationOptions: UseMutationOptions<unknown, MarkNotificationsAsReadApiV1NotificationsMarkReadPutError, Options<MarkNotificationsAsReadApiV1NotificationsMarkReadPutData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await markNotificationsAsReadApiV1NotificationsMarkReadPut({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Mark All Notifications As Read
+ *
+ * Mark all notifications as read for the current user.
+ */
+export const markAllNotificationsAsReadApiV1NotificationsMarkAllReadPutMutation = (options?: Partial<Options<MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutData>>): UseMutationOptions<unknown, DefaultError, Options<MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutData>> => {
+    const mutationOptions: UseMutationOptions<unknown, DefaultError, Options<MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await markAllNotificationsAsReadApiV1NotificationsMarkAllReadPut({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
 
 export const healthCheckApiV1HealthGetQueryKey = (options?: Options<HealthCheckApiV1HealthGetData>) => createQueryKey('healthCheckApiV1HealthGet', options);
 

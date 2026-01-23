@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.sub_agent import ActivationSource
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -314,38 +315,98 @@ class SubAgentRepository(AuditedRepository):
             logger.error(f"Failed to update permissions for sub-agent {sub_agent_id}: {e}")
             raise
 
-    async def activate_sub_agent(
+    async def bulk_activate_sub_agent(
         self,
         db: AsyncSession,
         actor_sub: str,
-        user_id: str,
+        user_ids: list[str],
         sub_agent_id: int,
-    ) -> None:
+        activated_by: ActivationSource = ActivationSource.USER,
+        group_id: int | None = None,
+    ) -> int:
         """
-        Activate a sub-agent for user.
+        Activate a sub-agent for multiple users in a single query.
 
         Args:
             db: Database session
             actor_sub: The sub of the user performing the action
-            user_id: User ID
+            user_ids: List of user IDs
             sub_agent_id: Sub-agent ID
+            activated_by: Source of activation ('user', 'group', 'admin')
+            group_id: Optional group ID if activated_by='group'
+
+        Returns:
+            Number of activations performed
         """
+        if not user_ids:
+            return 0
+
         try:
             now = datetime.now(timezone.utc)
 
-            query = text("""
-                INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_at)
-                VALUES (:user_id, :sub_agent_id, :now)
-                ON CONFLICT (user_id, sub_agent_id) DO UPDATE
-                SET activated_at = :now
-            """)
+            if activated_by == "group" and group_id is not None:
+                # Build VALUES clause for bulk insert
+                group_id_array = json.dumps([group_id])  # Proper JSONB array: [123] not ["123"]
+                values = []
+                params = {
+                    "sub_agent_id": sub_agent_id,
+                    "now": now,
+                    "activated_by": activated_by,
+                    "group_id_array": group_id_array,  # Single parameter reused for all rows
+                }
+                for i, user_id in enumerate(user_ids):
+                    values.append(f"(:user_id_{i}, :sub_agent_id, :now, :activated_by, CAST(:group_id_array AS jsonb))")
+                    params[f"user_id_{i}"] = user_id
 
-            await db.execute(
-                query,
-                {"user_id": user_id, "sub_agent_id": sub_agent_id, "now": now},
-            )
+                query = text(f"""
+                    INSERT INTO user_sub_agent_activations 
+                        (user_id, sub_agent_id, activated_at, activated_by, activated_by_groups)
+                    VALUES {", ".join(values)}
+                    ON CONFLICT (user_id, sub_agent_id) 
+                    DO UPDATE SET 
+                        activated_by = CASE 
+                            WHEN user_sub_agent_activations.activated_by = 'user' THEN 'user'
+                            ELSE EXCLUDED.activated_by
+                        END,
+                        activated_by_groups = CASE
+                            WHEN user_sub_agent_activations.activated_by_groups IS NULL 
+                                THEN EXCLUDED.activated_by_groups
+                            WHEN NOT (user_sub_agent_activations.activated_by_groups @> EXCLUDED.activated_by_groups)
+                                THEN user_sub_agent_activations.activated_by_groups || EXCLUDED.activated_by_groups
+                            ELSE user_sub_agent_activations.activated_by_groups
+                        END
+                    RETURNING user_id
+                """)
 
-            # Auto-audit
+                result = await db.execute(query, params)
+                count = len(result.fetchall())
+            else:
+                # User or admin activation: bulk insert
+                values = []
+                params = {
+                    "sub_agent_id": sub_agent_id,
+                    "now": now,
+                    "activated_by": activated_by,
+                }
+                for i, user_id in enumerate(user_ids):
+                    values.append(f"(:user_id_{i}, :sub_agent_id, :now, :activated_by)")
+                    params[f"user_id_{i}"] = user_id
+
+                query = text(f"""
+                    INSERT INTO user_sub_agent_activations 
+                        (user_id, sub_agent_id, activated_at, activated_by)
+                    VALUES {", ".join(values)}
+                    ON CONFLICT (user_id, sub_agent_id) 
+                    DO UPDATE SET 
+                        activated_at = :now,
+                        activated_by = :activated_by
+                    RETURNING user_id
+                """)
+
+                result = await db.execute(query, params)
+                count = len(result.fetchall())
+
+            # Bulk audit log
             await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
@@ -353,46 +414,111 @@ class SubAgentRepository(AuditedRepository):
                 entity_id=str(sub_agent_id),
                 action=AuditAction.ACTIVATE,
                 changes={
-                    "user_id": user_id,
+                    "user_ids": user_ids,
                     "sub_agent_id": sub_agent_id,
                     "activated_at": now.isoformat(),
+                    "activated_by": activated_by,
+                    "group_id": group_id,
+                    "count": count,
                 },
             )
 
-            logger.info(f"Activated sub-agent {sub_agent_id} for user {user_id} by {actor_sub}")
+            logger.info(
+                f"Bulk activated sub-agent {sub_agent_id} for {count} users by {actor_sub} "
+                f"(source: {activated_by}, group_id: {group_id})"
+            )
+
+            return count
 
         except Exception as e:
-            logger.error(f"Failed to activate sub-agent {sub_agent_id} for user {user_id}: {e}")
+            logger.error(f"Failed to bulk activate sub-agent {sub_agent_id}: {e}")
             raise
 
-    async def deactivate_sub_agent(
+    async def bulk_deactivate_sub_agent(
         self,
         db: AsyncSession,
         actor_sub: str,
-        user_id: str,
+        user_ids: list[str],
         sub_agent_id: int,
-    ) -> None:
+        group_id: int | None = None,
+    ) -> int:
         """
-        Deactivate a sub-agent for user.
+        Deactivate a sub-agent for multiple users in a single query.
 
         Args:
             db: Database session
             actor_sub: The sub of the user performing the action
-            user_id: User ID
+            user_ids: List of user IDs
             sub_agent_id: Sub-agent ID
+            group_id: Optional group ID to remove from activated_by_groups
+
+        Returns:
+            Number of deactivations performed
         """
+        if not user_ids:
+            return 0
+
         try:
-            query = text("""
-                DELETE FROM user_sub_agent_activations 
-                WHERE user_id = :user_id AND sub_agent_id = :sub_agent_id
-            """)
+            if group_id is not None:
+                # First, delete activations that only have this group
+                group_id_array = json.dumps([group_id])  # Proper JSONB array: [123] not ["123"]
+                delete_query = text(f"""
+                    DELETE FROM user_sub_agent_activations
+                    WHERE user_id = ANY(:user_ids)
+                    AND sub_agent_id = :sub_agent_id
+                    AND activated_by = 'group'
+                    AND activated_by_groups = '{group_id_array}'::jsonb
+                    RETURNING user_id
+                """)
+                delete_result = await db.execute(
+                    delete_query,
+                    {
+                        "user_ids": user_ids,
+                        "sub_agent_id": sub_agent_id,
+                    },
+                )
+                deleted_count = len(delete_result.fetchall())
 
-            await db.execute(
-                query,
-                {"user_id": user_id, "sub_agent_id": sub_agent_id},
-            )
+                # Then, remove this group from arrays that have multiple groups
+                # Use jsonb_array_elements to check membership and rebuild array without the group_id
+                update_query = text(f"""
+                    UPDATE user_sub_agent_activations
+                    SET activated_by_groups = (
+                        SELECT jsonb_agg(elem)
+                        FROM jsonb_array_elements(activated_by_groups) elem
+                        WHERE elem::int != :group_id
+                    )
+                    WHERE user_id = ANY(:user_ids)
+                    AND sub_agent_id = :sub_agent_id
+                    AND activated_by_groups @> '{group_id_array}'::jsonb
+                    RETURNING user_id
+                """)
 
-            # Auto-audit
+                update_result = await db.execute(
+                    update_query,
+                    {
+                        "user_ids": user_ids,
+                        "sub_agent_id": sub_agent_id,
+                        "group_id": group_id,
+                    },
+                )
+                updated_count = len(update_result.fetchall())
+                count = deleted_count + updated_count
+            else:
+                # Full deactivation (user request)
+                query = text("""
+                    DELETE FROM user_sub_agent_activations 
+                    WHERE user_id = ANY(:user_ids) AND sub_agent_id = :sub_agent_id
+                    RETURNING user_id
+                """)
+
+                result = await db.execute(
+                    query,
+                    {"user_ids": user_ids, "sub_agent_id": sub_agent_id},
+                )
+                count = len(result.fetchall())
+
+            # Bulk audit log
             await self.audit_service.log_action(
                 db=db,
                 actor_sub=actor_sub,
@@ -400,15 +526,21 @@ class SubAgentRepository(AuditedRepository):
                 entity_id=str(sub_agent_id),
                 action=AuditAction.DEACTIVATE,
                 changes={
-                    "user_id": user_id,
+                    "user_ids": user_ids,
                     "sub_agent_id": sub_agent_id,
+                    "group_id": group_id,
+                    "count": count,
                 },
             )
 
-            logger.info(f"Deactivated sub-agent {sub_agent_id} for user {user_id} by {actor_sub}")
+            logger.info(
+                f"Bulk deactivated sub-agent {sub_agent_id} for {count} users by {actor_sub} (group_id: {group_id})"
+            )
+
+            return count
 
         except Exception as e:
-            logger.error(f"Failed to deactivate sub-agent {sub_agent_id} for user {user_id}: {e}")
+            logger.error(f"Failed to bulk deactivate sub-agent {sub_agent_id}: {e}")
             raise
 
     async def update_sub_agent(

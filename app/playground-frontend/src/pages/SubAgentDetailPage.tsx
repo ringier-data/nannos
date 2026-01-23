@@ -31,6 +31,7 @@ import {
   Unlock,
   Database,
   Key,
+  UsersRound,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -40,6 +41,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -80,6 +82,9 @@ import {
   reviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostMutation,
   listSecretsApiV1SecretsGetOptions,
   getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions,
+  listMyGroupsApiV1GroupsGetOptions,
+  getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions,
+  addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { SubAgentConfigVersion } from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
@@ -169,6 +174,10 @@ export function SubAgentDetailPage() {
   const [versionSidebarCollapsed, setVersionSidebarCollapsed] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Group default agents dialog state
+  const [showGroupDefaultDialog, setShowGroupDefaultDialog] = useState(false);
+  const [selectedGroups, setSelectedGroups] = useState<Set<number>>(new Set());
+
   // Fetch sub-agent
   const { data: subAgent } = useQuery({
     ...getSubAgentApiV1SubAgentsSubAgentIdGetOptions({
@@ -196,6 +205,12 @@ export function SubAgentDetailPage() {
       path: { sub_agent_id: parseInt(id || '0', 10) },
     }),
     enabled: !!id,
+  });
+
+  // Fetch groups where user is a member (for default agent selection)
+  const { data: groupsData } = useQuery({
+    ...listMyGroupsApiV1GroupsGetOptions(),
+    enabled: showGroupDefaultDialog,
   });
 
   // Fetch version history for all agent types
@@ -297,6 +312,22 @@ export function SubAgentDetailPage() {
     },
     onError: (err) => {
       toast.error('Failed to process review action', { description: getErrorMessage(err) });
+    },
+  });
+
+  const addToGroupDefaultsMutation = useMutation({
+    ...addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostMutation(),
+    onSuccess: (_, variables) => {
+      // Don't show toast here - we'll show one after all groups are done
+      // Invalidate query for the affected group
+      queryClient.invalidateQueries({
+        queryKey: getGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetOptions({
+          path: { group_id: variables.path.group_id },
+        }).queryKey,
+      });
+    },
+    onError: (err) => {
+      toast.error('Failed to add as default agent', { description: getErrorMessage(err) });
     },
   });
 
@@ -496,6 +527,52 @@ export function SubAgentDetailPage() {
   const handleSave = async () => {
     // Show change summary dialog instead of saving directly
     setShowChangeSummaryDialog(true);
+  };
+
+  const handleSetGroupDefaults = async () => {
+    if (selectedGroups.size === 0 || !id) return;
+    
+    const groupArray = Array.from(selectedGroups);
+    const subAgentId = parseInt(id, 10);
+    let successCount = 0;
+    let errorCount = 0;
+
+    // Add to each group sequentially
+    for (const groupId of groupArray) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          addToGroupDefaultsMutation.mutate(
+            {
+              path: { group_id: groupId, sub_agent_id: subAgentId },
+            },
+            {
+              onSuccess: () => {
+                successCount++;
+                resolve();
+              },
+              onError: (err) => {
+                errorCount++;
+                reject(err);
+              },
+            }
+          );
+        });
+      } catch (err) {
+        // Continue with other groups even if one fails
+        console.error('Failed to add to group', groupId, err);
+      }
+    }
+
+    // Show final result
+    if (successCount > 0) {
+      toast.success(`Added as default agent for ${successCount} group${successCount !== 1 ? 's' : ''}`);
+    }
+    if (errorCount > 0) {
+      toast.error(`Failed to add to ${errorCount} group${errorCount !== 1 ? 's' : ''}`);
+    }
+
+    setShowGroupDefaultDialog(false);
+    setSelectedGroups(new Set());
   };
   
   const handleSaveWithSummary = async (summary: string) => {
@@ -714,6 +791,14 @@ export function SubAgentDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setShowGroupDefaultDialog(true)}
+            title="Set as default agent for groups"
+          >
+            <UsersRound className="h-4 w-4 mr-2" />
+            Set as Group Default
+          </Button>
           {canSubmitForApproval && (
             <Button onClick={() => setShowSubmitDialog(true)} disabled={isSubmitting}>
               {isSubmitting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Send className="h-4 w-4 mr-2" />}
@@ -1813,6 +1898,75 @@ export function SubAgentDetailPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowMcpToolsSheet(false)}>
               Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set as Group Default Dialog */}
+      <Dialog open={showGroupDefaultDialog} onOpenChange={setShowGroupDefaultDialog}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Set as Group Default</DialogTitle>
+            <DialogDescription>
+              Select groups where this agent should be enabled by default for members. You can select from groups where you are a member.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <Label>Select Groups</Label>
+            {groupsData && Array.isArray(groupsData) && groupsData.length > 0 ? (
+              <div className="border rounded-lg max-h-64 overflow-y-auto">
+                {groupsData.map((group: { id: number; name: string }) => (
+                  <div
+                    key={group.id}
+                    className="flex items-center space-x-2 px-4 py-3 hover:bg-muted/50 border-b last:border-b-0"
+                  >
+                    <Checkbox
+                      id={`group-${group.id}`}
+                      checked={selectedGroups.has(group.id)}
+                      onCheckedChange={(checked) => {
+                        const newSelection = new Set(selectedGroups);
+                        if (checked) {
+                          newSelection.add(group.id);
+                        } else {
+                          newSelection.delete(group.id);
+                        }
+                        setSelectedGroups(newSelection);
+                      }}
+                    />
+                    <label
+                      htmlFor={`group-${group.id}`}
+                      className="flex-1 cursor-pointer font-medium"
+                    >
+                      {group.name}
+                    </label>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center text-muted-foreground py-8">
+                No groups found. You must be a member of a group to set it as default.
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onClick={() => {
+                setShowGroupDefaultDialog(false);
+                setSelectedGroups(new Set());
+              }}
+            >
+              Cancel
+            </Button>
+            <Button 
+              onClick={handleSetGroupDefaults}
+              disabled={selectedGroups.size === 0 || addToGroupDefaultsMutation.isPending}
+            >
+              {addToGroupDefaultsMutation.isPending ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : null}
+              Set as Default for {selectedGroups.size} Group{selectedGroups.size !== 1 ? 's' : ''}
             </Button>
           </DialogFooter>
         </DialogContent>

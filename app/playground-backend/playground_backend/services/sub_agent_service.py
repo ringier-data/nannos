@@ -10,7 +10,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
+from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import (
+    ActivationSource,
     SubAgent,
     SubAgentConfigVersion,
     SubAgentCreate,
@@ -20,9 +22,11 @@ from ..models.sub_agent import (
     SubAgentUpdate,
 )
 from ..repositories.sub_agent_repository import ApprovalContext
+from ..services.notification_service import NotificationService
 
 if TYPE_CHECKING:
     from ..repositories.sub_agent_repository import SubAgentRepository
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,25 +44,40 @@ class SubAgentService:
     - For specific version: join with the requested version
     """
 
-    def __init__(self, sub_agent_repository=None):
+    def __init__(
+        self,
+        sub_agent_repository: "SubAgentRepository | None" = None,
+        notification_service: NotificationService | None = None,
+    ):
         """Initialize sub-agent service.
 
         Args:
             sub_agent_repository: Optional sub-agent repository instance.
                 If None, must be set via set_repository() before use.
+            notification_service: Optional notification service instance.
         """
-        self._repo: "SubAgentRepository | None" = sub_agent_repository
+        self._repo = sub_agent_repository
+        self._notification_service = notification_service
 
     def set_repository(self, sub_agent_repository: "SubAgentRepository") -> None:
         """Set the sub-agent repository (dependency injection)."""
         self._repo = sub_agent_repository
 
     @property
-    def repo(self):
+    def repo(self) -> "SubAgentRepository":
         """Get the sub-agent repository, raising error if not set."""
         if self._repo is None:
             raise RuntimeError("SubAgentRepository not injected. Call set_repository() during initialization.")
         return self._repo
+
+    def set_notification_service(self, notification_service: NotificationService) -> None:
+        """Set the notification service (dependency injection)."""
+        self._notification_service = notification_service
+
+    @property
+    def notification_service(self) -> NotificationService | None:
+        """Get the notification service."""
+        return self._notification_service
 
     async def get_accessible_sub_agents(
         self,
@@ -104,7 +123,9 @@ class SubAgentService:
                    cv.approved_by_user_id as cv_approved_by_user_id,
                    cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                    cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at,
-                   (usa.sub_agent_id IS NOT NULL) as is_activated
+                   (usa.sub_agent_id IS NOT NULL) as is_activated,
+                   usa.activated_by as activated_by,
+                   usa.activated_by_groups as activated_by_groups
             FROM sub_agents sa
             JOIN users u ON sa.owner_user_id = u.id
             LEFT JOIN sub_agent_config_versions cv 
@@ -156,7 +177,9 @@ class SubAgentService:
                        cv.approved_by_user_id as cv_approved_by_user_id,
                        cv.approved_at as cv_approved_at, cv.rejection_reason as cv_rejection_reason,
                        cv.deleted_at as cv_deleted_at, cv.created_at as cv_created_at,
-                       (usa.sub_agent_id IS NOT NULL) as is_activated
+                       (usa.sub_agent_id IS NOT NULL) as is_activated,
+                       usa.activated_by as activated_by,
+                       usa.activated_by_groups as activated_by_groups
                 FROM sub_agents sa
                 JOIN users u ON sa.owner_user_id = u.id
                 LEFT JOIN sub_agent_config_versions cv 
@@ -1035,12 +1058,228 @@ class SubAgentService:
             context.release_number = await self.repo.get_next_release_number(db, sub_agent_id)
             # Execute approval (includes audit)
             await self.repo.approve_version(db, context)
+
+            # Notify owner about approval
+            if self.notification_service and owner_id and admin_user_id != owner_id:
+                try:
+                    agent_name = existing.name
+                    notification = NotificationData(
+                        user_id=owner_id,
+                        notification_type=NotificationType.APPROVAL_COMPLETED,
+                        title=f"Agent '{agent_name}' approved",
+                        message=f"Version {version} of your agent '{agent_name}' has been approved and is now available.",
+                        metadata={
+                            "sub_agent_id": sub_agent_id,
+                            "version": version,
+                            "release_number": context.release_number,
+                        },
+                    )
+                    await self.notification_service.bulk_create_notifications(db, [notification])
+                except Exception as e:
+                    logger.error(f"Failed to create approval notification: {e}")
         else:
             # Execute rejection (includes audit)
             await self.repo.reject_version(db, context)
 
+            # Notify owner about rejection
+            if self.notification_service and owner_id and admin_user_id != owner_id:
+                try:
+                    agent_name = existing.name
+                    notification = NotificationData(
+                        user_id=owner_id,
+                        notification_type=NotificationType.APPROVAL_REJECTED,
+                        title=f"Agent '{agent_name}' rejected",
+                        message=f"Version {version} of your agent '{agent_name}' was rejected."
+                        + (f" Reason: {rejection_reason}" if rejection_reason else ""),
+                        metadata={
+                            "sub_agent_id": sub_agent_id,
+                            "version": version,
+                            "rejection_reason": rejection_reason,
+                        },
+                    )
+                    await self.notification_service.bulk_create_notifications(db, [notification])
+                except Exception as e:
+                    logger.error(f"Failed to create rejection notification: {e}")
+
         await db.commit()
+
+        # After approval, activate for all groups that have this agent as a default
+        if approve:
+            try:
+                await self._activate_for_default_agent_groups(db, sub_agent_id, admin_sub)
+            except Exception as e:
+                logger.error(f"Failed to activate agent for default groups: {e}")
+                # Don't fail the approval - activation can be retried
+
         return await self.get_sub_agent_by_id(db, sub_agent_id)
+
+    async def _get_group_members(self, db: AsyncSession, group_id: int) -> list[str]:
+        """Get all user IDs for members of a group.
+
+        Args:
+            db: Database session
+            group_id: Group ID
+
+        Returns:
+            List of user IDs
+        """
+        members_query = text("""
+            SELECT user_id FROM user_group_members
+            WHERE user_group_id = :group_id
+        """)
+        result = await db.execute(members_query, {"group_id": group_id})
+        return [row[0] for row in result.fetchall()]
+
+    async def _get_members_from_groups(self, db: AsyncSession, group_ids: list[int]) -> list[str]:
+        """Get all distinct user IDs from multiple groups.
+
+        Args:
+            db: Database session
+            group_ids: List of group IDs
+
+        Returns:
+            List of distinct user IDs
+        """
+        if not group_ids:
+            return []
+
+        members_query = text("""
+            SELECT DISTINCT user_id
+            FROM user_group_members
+            WHERE user_group_id = ANY(:group_ids)
+        """)
+        result = await db.execute(members_query, {"group_ids": group_ids})
+        return [row[0] for row in result.fetchall()]
+
+    async def _get_group_name(self, db: AsyncSession, group_id: int) -> str:
+        """Get the name of a group.
+
+        Args:
+            db: Database session
+            group_id: Group ID
+
+        Returns:
+            Group name or fallback string
+        """
+        query = text("SELECT name FROM user_groups WHERE id = :group_id")
+        result = await db.execute(query, {"group_id": group_id})
+        return result.scalar() or f"Group {group_id}"
+
+    async def _notify_agent_activation(
+        self,
+        db: AsyncSession,
+        user_ids: list[str],
+        agent_id: int,
+        agent_name: str,
+        group_id: int,
+        group_name: str,
+        reason: str = "default",
+    ) -> None:
+        """Send activation notifications to users.
+
+        Args:
+            db: Database session
+            user_ids: List of user IDs to notify
+            agent_id: Sub-agent ID
+            agent_name: Sub-agent name
+            group_id: Group ID
+            group_name: Group name
+            reason: Reason for activation (default, approval, etc.)
+        """
+        if not self.notification_service or not user_ids:
+            return
+
+        from ..models.notification import NotificationData, NotificationType
+
+        notifications = [
+            NotificationData(
+                user_id=user_id,
+                notification_type=NotificationType.AGENT_ACTIVATED,
+                title=f"Agent '{agent_name}' now available",
+                message=f"The agent '{agent_name}' has been approved and is now active for the group '{group_name}'.",
+                metadata={
+                    "sub_agent_id": agent_id,
+                    "group_id": group_id,
+                    "reason": reason,
+                },
+            )
+            for user_id in user_ids
+        ]
+        await self.notification_service.bulk_create_notifications(db, notifications)
+
+    async def _activate_for_default_agent_groups(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        actor_sub: str,
+    ) -> None:
+        """
+        Internal helper to activate a newly-approved agent for all groups that have it as a default.
+
+        This is called after approval to automatically activate agents for users in groups
+        where the agent was set as a default while still non-approved.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID that was just approved
+            actor_sub: The admin who approved (for audit trail)
+        """
+        # Find all groups that have this agent as a default
+        groups_query = text("""
+            SELECT DISTINCT user_group_id
+            FROM user_group_default_agents
+            WHERE sub_agent_id = :sub_agent_id
+        """)
+        groups_result = await db.execute(groups_query, {"sub_agent_id": sub_agent_id})
+        group_ids = [row[0] for row in groups_result.fetchall()]
+
+        if not group_ids:
+            logger.info(f"No groups have agent {sub_agent_id} as default, skipping activation")
+            return
+
+        logger.info(f"Agent {sub_agent_id} is a default for {len(group_ids)} groups, activating for members")
+
+        # Get agent name once for all notifications
+        agent_names = await self.get_agent_names(db, [sub_agent_id])
+        agent_name = agent_names.get(sub_agent_id, f"Agent {sub_agent_id}")
+
+        # For each group, get all members and bulk activate
+        for group_id in group_ids:
+            try:
+                # Get all members of the group
+                member_user_ids = await self._get_group_members(db, group_id)
+                if not member_user_ids:
+                    continue
+
+                # Bulk activate the agent for all members
+                await self.repo.bulk_activate_sub_agent(
+                    db=db,
+                    actor_sub="SYSTEM",  # System activation on approval
+                    user_ids=member_user_ids,
+                    sub_agent_id=sub_agent_id,
+                    activated_by=ActivationSource.GROUP,
+                    group_id=group_id,
+                )
+
+                # Get group name and notify members
+                group_name = await self._get_group_name(db, group_id)
+                await self._notify_agent_activation(
+                    db=db,
+                    user_ids=member_user_ids,
+                    agent_id=sub_agent_id,
+                    agent_name=agent_name,
+                    group_id=group_id,
+                    group_name=group_name,
+                    reason="approval",
+                )
+
+                logger.info(
+                    f"Activated agent {sub_agent_id} for {len(member_user_ids)} members of group {group_id} (approval trigger)"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to activate agent {sub_agent_id} for group {group_id}: {e}")
+                # Continue to next group - don't fail the entire operation
 
     async def submit_version_for_approval(
         self,
@@ -1206,6 +1445,20 @@ class SubAgentService:
         result = await db.execute(user_query, {"user_id": user_id})
         actor_sub = result.scalar_one()
 
+        # Get current permissions to detect changes
+        current_perms_query = text("""
+            SELECT user_group_id, permissions FROM sub_agent_permissions
+            WHERE sub_agent_id = :sub_agent_id
+        """)
+        current_result = await db.execute(current_perms_query, {"sub_agent_id": sub_agent_id})
+        current_perms = {row[0]: set(row[1]) for row in current_result.fetchall()}
+
+        # Detect added and removed groups
+        new_perms = {p["user_group_id"]: set(p["permissions"]) for p in group_permissions}
+        added_groups = set(new_perms.keys()) - set(current_perms.keys())
+        removed_groups = set(current_perms.keys()) - set(new_perms.keys())
+        changed_groups = {gid for gid in new_perms if gid in current_perms and new_perms[gid] != current_perms[gid]}
+
         # Use repository for update with automatic audit logging
         await self.repo.update_permissions(
             db=db,
@@ -1213,6 +1466,69 @@ class SubAgentService:
             sub_agent_id=sub_agent_id,
             group_permissions=group_permissions,
         )
+
+        # Notify affected users
+        if self.notification_service and (added_groups or removed_groups):
+            try:
+                agent_name = existing.name
+
+                # Notify members of groups gaining access
+                if added_groups:
+                    member_ids = await self._get_members_from_groups(db, list(added_groups))
+
+                    if member_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=member_id,
+                                notification_type=NotificationType.AGENT_SHARED,
+                                title=f"Agent '{agent_name}' shared with you",
+                                message=f"The agent '{agent_name}' has been shared with your group.",
+                                metadata={"sub_agent_id": sub_agent_id},
+                            )
+                            for member_id in member_ids
+                            if member_id != user_id  # Don't notify the actor
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
+
+                # Notify members of groups losing access
+                if removed_groups:
+                    member_ids = await self._get_members_from_groups(db, list(removed_groups))
+
+                    if member_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=member_id,
+                                notification_type=NotificationType.AGENT_ACCESS_REVOKED,
+                                title=f"Access to '{agent_name}' revoked",
+                                message=f"Your group's access to the agent '{agent_name}' has been revoked.",
+                                metadata={"sub_agent_id": sub_agent_id},
+                            )
+                            for member_id in member_ids
+                            if member_id != user_id  # Don't notify the actor
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
+
+                # Notify members of groups with changed permissions
+                if changed_groups:
+                    member_ids = await self._get_members_from_groups(db, list(changed_groups))
+
+                    if member_ids:
+                        notifications = [
+                            NotificationData(
+                                user_id=member_id,
+                                notification_type=NotificationType.AGENT_PERMISSION_CHANGED,
+                                title=f"Permissions changed for agent '{agent_name}'",
+                                message=f"The permissions for the agent '{agent_name}' have been updated for your group.",
+                                metadata={"sub_agent_id": sub_agent_id},
+                            )
+                            for member_id in member_ids
+                            if member_id != user_id  # Don't notify the actor
+                        ]
+                        await self.notification_service.bulk_create_notifications(db, notifications)
+
+            except Exception as e:
+                logger.error(f"Failed to create permission change notifications: {e}")
+
         await db.commit()
         return True
 
@@ -1455,6 +1771,8 @@ class SubAgentService:
             config_version=config_version,
             is_public=row.get("is_public", False),
             is_activated=row.get("is_activated", False),
+            activated_by=row.get("activated_by"),
+            activated_by_groups=row.get("activated_by_groups", []),
             deleted_at=row.get("deleted_at"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -1539,7 +1857,9 @@ class SubAgentService:
         actor_sub = result.scalar_one()
 
         # Insert activation record with automatic audit
-        await self.repo.activate_sub_agent(db=db, actor_sub=actor_sub, user_id=user_id, sub_agent_id=sub_agent_id)
+        await self.repo.bulk_activate_sub_agent(
+            db=db, actor_sub=actor_sub, user_ids=[user_id], sub_agent_id=sub_agent_id
+        )
         await db.commit()
         return True
 
@@ -1569,6 +1889,137 @@ class SubAgentService:
         actor_sub = result.scalar_one()
 
         # Delete activation record with automatic audit
-        await self.repo.deactivate_sub_agent(db=db, actor_sub=actor_sub, user_id=user_id, sub_agent_id=sub_agent_id)
+        await self.repo.bulk_deactivate_sub_agent(
+            db=db, actor_sub=actor_sub, user_ids=[user_id], sub_agent_id=sub_agent_id
+        )
         await db.commit()
         return True
+
+    async def get_agents_with_group_permissions(
+        self,
+        db: AsyncSession,
+        agent_ids: list[int],
+        group_id: int,
+    ) -> list[dict[str, Any]]:
+        """
+        Get sub-agents with their approval status and group permissions.
+
+        This read method encapsulates the complex join logic for validating
+        agents in the context of a specific group.
+
+        Args:
+            db: Database session
+            agent_ids: List of sub-agent IDs to fetch
+            group_id: Group ID to check permissions for
+
+        Returns:
+            List of dicts with keys: id, name, status, has_permission
+        """
+        if not agent_ids:
+            return []
+
+        query = text("""
+            SELECT 
+                sa.id, 
+                sa.name, 
+                COALESCE(cv_default.status, cv_current.status, 'draft') as status,
+                (sap.sub_agent_id IS NOT NULL) as has_permission
+            FROM sub_agents sa
+            LEFT JOIN sub_agent_config_versions cv_default
+                ON sa.id = cv_default.sub_agent_id AND sa.default_version = cv_default.version
+            LEFT JOIN sub_agent_config_versions cv_current
+                ON sa.id = cv_current.sub_agent_id AND sa.current_version = cv_current.version
+            LEFT JOIN sub_agent_permissions sap 
+                ON sa.id = sap.sub_agent_id AND sap.user_group_id = :group_id
+            WHERE sa.id = ANY(:ids)
+            AND sa.deleted_at IS NULL
+        """)
+
+        try:
+            result = await db.execute(
+                query,
+                {"group_id": group_id, "ids": agent_ids},
+            )
+            rows = result.mappings().all()
+
+            return [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "status": row["status"],
+                    "has_permission": row["has_permission"],
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get agents with group permissions: {e}")
+            raise
+
+    async def get_agent_names(
+        self,
+        db: AsyncSession,
+        agent_ids: list[int],
+    ) -> dict[int, str]:
+        """
+        Get agent names by IDs.
+
+        Args:
+            db: Database session
+            agent_ids: List of sub-agent IDs
+
+        Returns:
+            Dict mapping agent_id to name
+        """
+        if not agent_ids:
+            return {}
+
+        query = text("SELECT id, name FROM sub_agents WHERE id = ANY(:ids) AND deleted_at IS NULL")
+
+        try:
+            result = await db.execute(query, {"ids": agent_ids})
+            return {row[0]: row[1] for row in result.fetchall()}
+        except Exception as e:
+            logger.error(f"Failed to get agent names: {e}")
+            raise
+
+    async def validate_agents_for_group(
+        self,
+        db: AsyncSession,
+        agent_ids: list[int],
+        group_id: int,
+    ) -> None:
+        """
+        Validate that agents exist and group has permissions.
+
+        This encapsulates all sub-agent validation logic for group operations.
+        Note: Approval status is NOT validated - non-approved agents can be set
+        as defaults, but will only activate once approved.
+
+        Args:
+            db: Database session
+            agent_ids: List of sub-agent IDs to validate
+            group_id: Group ID to check permissions for
+
+        Raises:
+            ValueError: If validation fails with specific error message
+        """
+        if not agent_ids:
+            return
+
+        # Get agents with their status and permissions using repository read method
+        agents = await self.get_agents_with_group_permissions(db, agent_ids, group_id)
+
+        # Check if all requested agents were found
+        if len(agents) != len(agent_ids):
+            found_ids = {agent["id"] for agent in agents}
+            missing = set(agent_ids) - found_ids
+            raise ValueError(f"Sub-agents not found: {missing}")
+
+        # Validate each agent has permissions (approval status no longer checked)
+        for agent in agents:
+            if not agent["has_permission"]:
+                raise ValueError(
+                    f"Group does not have permission to sub-agent '{agent['name']}'. Add permissions first."
+                )
+
+        logger.info(f"Validated {len(agent_ids)} agents for group {group_id}")

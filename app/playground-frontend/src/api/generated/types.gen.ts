@@ -5,6 +5,13 @@ export type ClientOptions = {
 };
 
 /**
+ * ActivationSource
+ *
+ * Activation source enum matching database enum.
+ */
+export type ActivationSource = 'user' | 'group' | 'admin';
+
+/**
  * AdminModeToggleRequest
  *
  * Request model for admin mode toggle.
@@ -385,6 +392,33 @@ export type MemberInfo = {
 };
 
 /**
+ * NotificationListResponse
+ *
+ * Response model for listing notifications.
+ */
+export type NotificationListResponse = {
+    /**
+     * Items
+     */
+    items: Array<UserNotification>;
+    /**
+     * Total
+     */
+    total: number;
+    /**
+     * Unread Count
+     */
+    unread_count: number;
+};
+
+/**
+ * NotificationType
+ *
+ * Notification type enum matching database enum.
+ */
+export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_permission_changed' | 'group_added' | 'group_removed' | 'role_updated' | 'approval_requested' | 'approval_completed' | 'approval_rejected' | 'agent_shared' | 'agent_access_revoked' | 'secret_shared' | 'secret_access_revoked' | 'secret_permission_changed' | 'system_announcement';
+
+/**
  * OwnerStatus
  *
  * Owner status enum matching database enum.
@@ -749,6 +783,11 @@ export type SubAgent = {
      * Is Activated
      */
     is_activated?: boolean | null;
+    activated_by?: ActivationSource | null;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
     /**
      * Deleted At
      */
@@ -761,6 +800,18 @@ export type SubAgent = {
      * Updated At
      */
     updated_at?: string;
+};
+
+/**
+ * SubAgentAdd
+ *
+ * Request to add default sub-agents to a group.
+ */
+export type SubAgentAdd = {
+    /**
+     * Sub Agent Ids
+     */
+    sub_agent_ids: Array<number>;
 };
 
 /**
@@ -1052,6 +1103,31 @@ export type SubAgentPermissionsUpdate = {
 };
 
 /**
+ * SubAgentRefWithStatus
+ *
+ * Sub-agent reference with status indicators for UI.
+ */
+export type SubAgentRefWithStatus = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    approval_status: SubAgentStatus;
+    /**
+     * Is Activated
+     */
+    is_activated: boolean;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
+};
+
+/**
  * SubAgentSetDefaultVersion
  *
  * Request model for setting the default version.
@@ -1181,6 +1257,18 @@ export type SubAgentVersionApproval = {
      * Rejection Reason
      */
     rejection_reason?: string | null;
+};
+
+/**
+ * UnreadCountResponse
+ *
+ * Response model for unread notification count.
+ */
+export type UnreadCountResponse = {
+    /**
+     * Count
+     */
+    count: number;
 };
 
 /**
@@ -1597,6 +1685,45 @@ export type UserListResponse = {
      */
     data: Array<UserWithGroups>;
     meta: PaginationMeta;
+};
+
+/**
+ * UserNotification
+ *
+ * User notification model.
+ */
+export type UserNotification = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * User Id
+     */
+    user_id: string;
+    type: NotificationType;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Message
+     */
+    message: string;
+    /**
+     * Metadata
+     */
+    metadata?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Read At
+     */
+    read_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
 };
 
 /**
@@ -3553,6 +3680,130 @@ export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses = {
 
 export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponse = RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses[keyof RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses];
 
+export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-agents';
+};
+
+export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetError = GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetErrors[keyof GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetErrors];
+
+export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponses = {
+    /**
+     * Response Get Group Default Agents Api V1 Groups  Group Id  Default Agents Get
+     *
+     * Successful Response
+     */
+    200: Array<SubAgentRefWithStatus>;
+};
+
+export type GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponse = GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponses[keyof GetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsGetResponses];
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData = {
+    body: SubAgentAdd;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-agents';
+};
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutError = SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutErrors[keyof SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutErrors];
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-agents/{sub_agent_id}';
+};
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteError = RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteErrors[keyof RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteErrors];
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-agents/{sub_agent_id}';
+};
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostError = AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostErrors[keyof AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostErrors];
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
 export type LogUsageApiV1UsageLogPostData = {
     body: UsageLogCreate;
     path?: never;
@@ -4047,6 +4298,102 @@ export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses =
 };
 
 export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponse = GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses[keyof GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses];
+
+export type GetNotificationsApiV1NotificationsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Page
+         */
+        page?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+        /**
+         * Unread Only
+         */
+        unread_only?: boolean;
+    };
+    url: '/api/v1/notifications';
+};
+
+export type GetNotificationsApiV1NotificationsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetNotificationsApiV1NotificationsGetError = GetNotificationsApiV1NotificationsGetErrors[keyof GetNotificationsApiV1NotificationsGetErrors];
+
+export type GetNotificationsApiV1NotificationsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: NotificationListResponse;
+};
+
+export type GetNotificationsApiV1NotificationsGetResponse = GetNotificationsApiV1NotificationsGetResponses[keyof GetNotificationsApiV1NotificationsGetResponses];
+
+export type GetUnreadCountApiV1NotificationsUnreadCountGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/notifications/unread-count';
+};
+
+export type GetUnreadCountApiV1NotificationsUnreadCountGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: UnreadCountResponse;
+};
+
+export type GetUnreadCountApiV1NotificationsUnreadCountGetResponse = GetUnreadCountApiV1NotificationsUnreadCountGetResponses[keyof GetUnreadCountApiV1NotificationsUnreadCountGetResponses];
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutData = {
+    /**
+     * Request Body
+     */
+    body: {
+        [key: string]: unknown;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/notifications/mark-read';
+};
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutError = MarkNotificationsAsReadApiV1NotificationsMarkReadPutErrors[keyof MarkNotificationsAsReadApiV1NotificationsMarkReadPutErrors];
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/notifications/mark-all-read';
+};
+
+export type MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;
