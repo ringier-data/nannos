@@ -5,6 +5,10 @@ import {
   ADMIN_MODE_STORAGE_KEY,
   getAdminModeFromStorage,
   setAdminModeInStorage,
+  IMPERSONATE_USER_STORAGE_KEY,
+  getImpersonatedUserIdFromStorage,
+  setImpersonatedUserIdInStorage,
+  clearImpersonatedUserId,
 } from '../api/apiInstanceConfig';
 
 // Permission types
@@ -48,6 +52,14 @@ interface AuthContextType {
   toggleAdminMode: () => void;
   /** Set admin mode explicitly. Only works if user is an admin. */
   setAdminMode: (enabled: boolean) => void;
+  /** Whether currently impersonating another user */
+  isImpersonating: boolean;
+  /** ID of the user being impersonated, if any */
+  impersonatedUserId: string | null;
+  /** Start impersonating a user by ID */
+  startImpersonation: (userId: string) => Promise<void>;
+  /** Stop impersonating and return to admin user */
+  stopImpersonation: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -81,6 +93,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Only enable admin mode on mount if user is admin and it was previously enabled
     return getAdminModeFromStorage();
   });
+
+  // Impersonation state - initialize from localStorage
+  const [impersonatedUserId, setImpersonatedUserIdState] = useState<string | null>(() => {
+    return getImpersonatedUserIdFromStorage();
+  });
+
+  const isImpersonating = impersonatedUserId !== null;
 
   // Mutation to log admin mode toggle for audit trail
   const { mutate: logAdminModeToggle } = useMutation({
@@ -121,6 +140,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const newValue = e.newValue === 'true';
         setAdminModeState(newValue);
         queryClient.invalidateQueries();
+      } else if (e.key === IMPERSONATE_USER_STORAGE_KEY) {
+        const newValue = e.newValue;
+        setImpersonatedUserIdState(newValue);
+        queryClient.invalidateQueries();
       }
     };
     window.addEventListener('storage', handleStorageChange);
@@ -143,6 +166,72 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return permissions[resource]?.includes(action) ?? false;
   };
 
+  // Impersonation functions
+  const startImpersonation = useCallback(async (userId: string) => {
+    if (!isAdmin || !adminMode) {
+      throw new Error('Must be admin with admin mode enabled to impersonate');
+    }
+    
+    try {
+      // Call backend to start impersonation (logs audit)
+      const response = await fetch('/api/v1/admin/users/impersonate/start', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-Admin-Mode': 'true', // Must include admin mode header
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({ target_user_id: userId }),
+      });
+      
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: 'Failed to start impersonation' }));
+        throw new Error(error.detail || 'Failed to start impersonation');
+      }
+      
+      // Update local state FIRST
+      setImpersonatedUserIdInStorage(userId);
+      setImpersonatedUserIdState(userId);
+      
+      // Force refetch all queries with new impersonation header
+      // Use resetQueries to clear cache and force immediate refetch
+      await queryClient.resetQueries();
+    } catch (error) {
+      console.error('Failed to start impersonation:', error);
+      throw error;
+    }
+  }, [isAdmin, adminMode, queryClient]);
+
+  const stopImpersonation = useCallback(async () => {
+    try {
+      // Call backend to stop impersonation (logs audit)
+      const response = await fetch('/api/v1/admin/users/impersonate/stop', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-Admin-Mode': 'true', // Must include admin mode header
+        },
+        credentials: 'same-origin',
+      });
+      
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: 'Failed to stop impersonation' }));
+        throw new Error(error.detail || 'Failed to stop impersonation');
+      }
+      
+      // Clear local state FIRST
+      clearImpersonatedUserId();
+      setImpersonatedUserIdState(null);
+      
+      // Force refetch all queries without impersonation header
+      // Use resetQueries to clear cache and force immediate refetch
+      await queryClient.resetQueries();
+    } catch (error) {
+      console.error('Failed to stop impersonation:', error);
+      throw error;
+    }
+  }, [queryClient]);
+
   return (
     <AuthContext.Provider
       value={{
@@ -157,6 +246,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         adminMode: isAdmin && adminMode,
         toggleAdminMode,
         setAdminMode,
+        isImpersonating,
+        impersonatedUserId,
+        startImpersonation,
+        stopImpersonation,
       }}
     >
       {children}

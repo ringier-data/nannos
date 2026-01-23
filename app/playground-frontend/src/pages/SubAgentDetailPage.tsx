@@ -102,7 +102,7 @@ export function SubAgentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user, adminMode } = useAuth();
+  const { user, adminMode, isImpersonating } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -1702,6 +1702,14 @@ export function SubAgentDetailPage() {
 
           {/* Input */}
           <div className="p-3 border-t border-border shrink-0">
+            {isImpersonating ? (
+              <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
+                <AlertTriangle className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="text-amber-600 text-xs">
+                  Playground chat is unavailable while impersonating. Chat requires the user's access token.
+                </AlertDescription>
+              </Alert>
+            ) : (
             <div className="flex gap-2">
               <Textarea
                 value={inputValue}
@@ -1712,11 +1720,13 @@ export function SubAgentDetailPage() {
                 placeholder="Type a message to test..."
                 className="min-h-[44px] max-h-32 resize-none bg-background"
                 rows={1}
+                  disabled={isImpersonating}
               />
-              <Button onClick={handleSendMessage} disabled={!inputValue.trim() || isLoading} className="shrink-0">
+                <Button onClick={handleSendMessage} disabled={!inputValue.trim() || isLoading || isImpersonating} className="shrink-0">
                 <Send className="h-4 w-4" />
               </Button>
             </div>
+            )}
           </div>
         </div>
 

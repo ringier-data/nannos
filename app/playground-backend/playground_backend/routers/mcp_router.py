@@ -55,6 +55,15 @@ async def list_mcp_tools(
         503 Service Unavailable: If MCP gateway is unreachable
     """
     try:
+        # When impersonating, return empty tools list since we don't have impersonated user's token
+        # MCP tools are tied to the user's access token, not their user object
+        if hasattr(request.state, "original_user") and request.state.original_user:
+            logger.info(
+                f"Admin {request.state.original_user.email} is impersonating {user.email}. "
+                "Returning empty MCP tools list (impersonated user's token not available)"
+            )
+            return MCPToolsResponse(tools=[])
+
         # Get user's access token from request state (session) or Authorization header (Bearer token)
 
         auth_header = request.headers.get("Authorization")

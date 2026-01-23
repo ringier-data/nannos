@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 # Header name for admin mode toggle
 ADMIN_MODE_HEADER = "X-Admin-Mode"
+# Header name for user impersonation
+IMPERSONATE_USER_HEADER = "X-Impersonate-User-Id"
 
 
 def get_admin_mode(request: Request) -> bool:
@@ -22,6 +24,14 @@ def get_admin_mode(request: Request) -> bool:
     """
     header_value = request.headers.get(ADMIN_MODE_HEADER, "").lower()
     return header_value == "true"
+
+
+def get_impersonated_user_id(request: Request) -> str | None:
+    """Get impersonated user ID from request header.
+
+    Returns the user ID if the X-Impersonate-User-Id header is set, otherwise None.
+    """
+    return request.headers.get(IMPERSONATE_USER_HEADER) or None
 
 
 def require_auth(request: Request) -> User:
@@ -166,6 +176,9 @@ def require_admin(request: Request) -> User:
     3. X-Admin-Mode header must be set to 'true'
 
     This allows admin users to operate as regular users when admin mode is disabled.
+    
+    NOTE: When impersonating, this returns the ORIGINAL ADMIN user, not the impersonated user.
+    This ensures admin-only endpoints remain accessible during impersonation.
 
     Raises HTTPException 401 if user is not authenticated.
     Raises HTTPException 403 if:
@@ -178,7 +191,12 @@ def require_admin(request: Request) -> User:
         async def create_user(user: User = Depends(require_admin)):
             return {"created_by": user.email}
     """
-    user = require_auth(request)
+    # Check if currently impersonating - if so, use the original admin user
+    if hasattr(request.state, "original_user") and request.state.original_user:
+        user = request.state.original_user
+    else:
+        user = require_auth(request)
+    
     admin_mode = get_admin_mode(request)
 
     # Detect privilege escalation attempt: non-admin trying to use admin mode header
@@ -216,16 +234,19 @@ def is_admin_mode(request: Request, user: User) -> bool:
             effective_admin = is_admin_mode(request, user)
             return await service.list(is_admin=effective_admin)
     """
+    # Check if currently impersonating - if so, use the original admin user for admin checks
+    effective_user = request.state.original_user if hasattr(request.state, "original_user") and request.state.original_user else user
+    
     admin_mode = get_admin_mode(request)
 
     # Detect privilege escalation attempt
-    if admin_mode and not user.is_administrator:
+    if admin_mode and not effective_user.is_administrator:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Privilege escalation attempt: admin mode not allowed for non-administrators",
         )
 
-    return user.is_administrator and admin_mode
+    return effective_user.is_administrator and admin_mode
 
 
 def has_capability(user: User, resource_type: str, action: str) -> bool:
@@ -284,7 +305,12 @@ def require_approver(request: Request) -> User:
         async def approve_sub_agent(user: User = Depends(require_approver)):
             return {"approved_by": user.email}
     """
-    user = require_auth(request)
+    # Check if currently impersonating - if so, use the original admin user for approval checks
+    if hasattr(request.state, "original_user") and request.state.original_user:
+        user = request.state.original_user
+    else:
+        user = require_auth(request)
+    
     admin_mode = get_admin_mode(request)
 
     # Check if user has approval capabilities (either regular approve or approve.admin)

@@ -19,6 +19,7 @@ import { Switch } from '@/components/ui/switch';
 import { useAuth } from '@/contexts/AuthContext';
 import { mainNavItems, groupManagerNavItems, adminNavItems } from '@/config/navigation';
 import { NotificationInbox } from '@/components/notifications/NotificationInbox';
+import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -118,6 +119,7 @@ export function DashboardLayout() {
             </Button>
           </div>
         </header>
+        <ImpersonationBanner />
         <main className="flex-1 overflow-y-auto">
           <Outlet />
         </main>

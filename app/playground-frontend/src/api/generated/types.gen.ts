@@ -44,7 +44,7 @@ export type AdminModeToggleResponse = {
  *
  * Audit action enum.
  */
-export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update';
+export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update' | 'impersonation_start' | 'impersonation_end';
 
 /**
  * AuditEntityType
@@ -326,6 +326,18 @@ export type HttpValidationError = {
      * Detail
      */
     detail?: Array<ValidationError>;
+};
+
+/**
+ * ImpersonateStartRequest
+ *
+ * Request model for starting user impersonation.
+ */
+export type ImpersonateStartRequest = {
+    /**
+     * Target User Id
+     */
+    target_user_id: string;
 };
 
 /**
@@ -3229,6 +3241,43 @@ export type BulkUpdateUsersApiV1AdminUsersBulkPostResponses = {
 };
 
 export type BulkUpdateUsersApiV1AdminUsersBulkPostResponse = BulkUpdateUsersApiV1AdminUsersBulkPostResponses[keyof BulkUpdateUsersApiV1AdminUsersBulkPostResponses];
+
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostData = {
+    body: ImpersonateStartRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/users/impersonate/start';
+};
+
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostError = StartImpersonationApiV1AdminUsersImpersonateStartPostErrors[keyof StartImpersonationApiV1AdminUsersImpersonateStartPostErrors];
+
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type StopImpersonationApiV1AdminUsersImpersonateStopPostData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/users/impersonate/stop';
+};
+
+export type StopImpersonationApiV1AdminUsersImpersonateStopPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
 
 export type ListGroupsApiV1AdminGroupsGetData = {
     body?: never;

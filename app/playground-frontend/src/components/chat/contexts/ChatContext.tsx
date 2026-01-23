@@ -3,6 +3,12 @@ import type { AgentResponseData, Conversation, Message, Settings, Task, TaskHist
 import { useSocket } from './SocketContext';
 import { useLocalStorage, useSessionId } from '../hooks/useLocalStorage';
 import { extractPartTexts, generateUUID, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
+import {
+  getAdminModeFromStorage,
+  getImpersonatedUserIdFromStorage,
+  ADMIN_MODE_HEADER,
+  IMPERSONATE_USER_HEADER,
+} from '../../../api/apiInstanceConfig';
 
 interface ChatContextType {
   // State
@@ -310,7 +316,20 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         url.searchParams.set('exclude_playground', 'true');
       }
 
-      const resp = await fetch(url.toString(), { credentials: 'include' });
+      // Inject impersonation headers if active
+      const headers: HeadersInit = {};
+      const impersonatedUserId = getImpersonatedUserIdFromStorage();
+      if (impersonatedUserId) {
+        headers[IMPERSONATE_USER_HEADER] = impersonatedUserId;
+        headers[ADMIN_MODE_HEADER] = 'true'; // Force admin mode when impersonating
+      } else {
+        const adminMode = getAdminModeFromStorage();
+        if (adminMode) {
+          headers[ADMIN_MODE_HEADER] = 'true';
+        }
+      }
+
+      const resp = await fetch(url.toString(), { credentials: 'include', headers });
       if (!resp.ok) {
         throw new Error(`Failed to load conversations (status=${resp.status})`);
       }
@@ -374,7 +393,20 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       const url = new URL(`/api/v1/messages/${encodeURIComponent(conversationId)}`, window.location.origin);
       url.searchParams.set('limit', '100');
 
-      const resp = await fetch(url.toString(), { credentials: 'include' });
+      // Inject impersonation headers if active
+      const headers: HeadersInit = {};
+      const impersonatedUserId = getImpersonatedUserIdFromStorage();
+      if (impersonatedUserId) {
+        headers[IMPERSONATE_USER_HEADER] = impersonatedUserId;
+        headers[ADMIN_MODE_HEADER] = 'true'; // Force admin mode when impersonating
+      } else {
+        const adminMode = getAdminModeFromStorage();
+        if (adminMode) {
+          headers[ADMIN_MODE_HEADER] = 'true';
+        }
+      }
+
+      const resp = await fetch(url.toString(), { credentials: 'include', headers });
       if (!resp.ok) {
         throw new Error(`Failed to load messages (status=${resp.status})`);
       }

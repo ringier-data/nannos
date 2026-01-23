@@ -51,7 +51,7 @@ class TestAuthDependencies:
     def test_require_admin_with_admin_user_and_admin_mode_enabled(self, test_admin_user):
         """Test require_admin with admin user and admin mode header enabled."""
         request = MagicMock()
-        request.state = MagicMock()
+        request.state = MagicMock(spec_set=["user"])  # Only 'user' attribute exists
         request.state.user = test_admin_user
         request.headers = {ADMIN_MODE_HEADER: "true"}
 
@@ -63,7 +63,7 @@ class TestAuthDependencies:
     def test_require_admin_with_admin_user_but_admin_mode_disabled(self, test_admin_user):
         """Test require_admin with admin user but admin mode header disabled raises 403."""
         request = MagicMock()
-        request.state = MagicMock()
+        request.state = MagicMock(spec_set=["user"])  # Only 'user' attribute exists
         request.state.user = test_admin_user
         request.headers = {ADMIN_MODE_HEADER: "false"}
 
@@ -76,7 +76,7 @@ class TestAuthDependencies:
     def test_require_admin_with_admin_user_but_no_admin_mode_header(self, test_admin_user):
         """Test require_admin with admin user but no admin mode header raises 403."""
         request = MagicMock()
-        request.state = MagicMock()
+        request.state = MagicMock(spec_set=["user"])  # Only 'user' attribute exists
         request.state.user = test_admin_user
         request.headers = {}
 
@@ -88,7 +88,7 @@ class TestAuthDependencies:
     def test_require_admin_with_non_admin_user(self, test_user):
         """Test require_admin with non-admin user raises 403."""
         request = MagicMock()
-        request.state = MagicMock()
+        request.state = MagicMock(spec_set=["user"])  # Only 'user' attribute exists
         request.state.user = test_user
         request.headers = {}
 
@@ -100,7 +100,7 @@ class TestAuthDependencies:
     def test_require_admin_with_non_admin_user_privilege_escalation_attempt(self, test_user):
         """Test require_admin with non-admin user trying to use admin mode header raises 403."""
         request = MagicMock()
-        request.state = MagicMock()
+        request.state = MagicMock(spec_set=["user"])  # Only 'user' attribute exists
         request.state.user = test_user
         request.headers = {ADMIN_MODE_HEADER: "true"}
 
@@ -113,7 +113,7 @@ class TestAuthDependencies:
     def test_require_admin_without_user(self):
         """Test require_admin without user raises 401."""
         request = MagicMock()
-        request.state = MagicMock()
+        request.state = MagicMock(spec_set=["user"])  # Only 'user' attribute exists
         request.state.user = None
         request.headers = {ADMIN_MODE_HEADER: "true"}
 
@@ -189,6 +189,7 @@ class TestIsAdminMode:
     def test_is_admin_mode_privilege_escalation_attempt(self, test_user):
         """Test is_admin_mode raises 403 for non-admin with header enabled."""
         request = MagicMock()
+        request.state = MagicMock(spec_set=[])  # No attributes at all
         request.headers = MagicMock()
         request.headers.get = MagicMock(return_value="true")
 
