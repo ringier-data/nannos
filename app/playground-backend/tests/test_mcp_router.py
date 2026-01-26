@@ -101,7 +101,7 @@ class TestListMcpTools:
                 # Verify token exchange
                 mock_oauth.exchange_token.assert_awaited_once_with(
                     subject_token="valid_user_token",
-                    target_client_id="mcp-gateway",
+                    target_client_id="gatana",
                     requested_scopes=["openid", "profile", "offline_access"],
                 )
 
@@ -209,7 +209,7 @@ class TestListMcpTools:
                 # Verify token exchange used refreshed token
                 mock_oauth_exchange.exchange_token.assert_awaited_once_with(
                     subject_token="refreshed_token",
-                    target_client_id="mcp-gateway",
+                    target_client_id="gatana",
                     requested_scopes=["openid", "profile", "offline_access"],
                 )
 

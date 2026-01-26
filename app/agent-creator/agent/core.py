@@ -72,7 +72,7 @@ class UserCredentialInjector:
         )
         mcp_gateway_token = await oauth2_client.exchange_token(
             subject_token=access_token,
-            target_client_id="mcp-gateway",
+            target_client_id=os.environ.get("MCP_GATEWAY_CLIENT_ID", "gatana"),
             requested_scopes=["openid", "profile", "offline_access"],
         )
         headers["Authorization"] = f"Bearer {mcp_gateway_token}"

@@ -936,6 +936,10 @@ export type SubAgentConfigVersion = {
     change_summary?: string | null;
     status?: SubAgentStatus;
     /**
+     * Submitted By User Id
+     */
+    submitted_by_user_id?: string | null;
+    /**
      * Approved By User Id
      */
     approved_by_user_id?: string | null;

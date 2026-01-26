@@ -351,7 +351,7 @@ export const playgroundListMcpToolsQueryKey = (options?: Options<PlaygroundListM
  * List available MCP tools from Gatana gateway.
  *
  * Uses MCP JSON-RPC standard to fetch tools list.
- * Performs token exchange to obtain a token for the mcp-gateway client.
+ * Performs token exchange to obtain a token for the gatana client.
  *
  * Returns:
  * List of available MCP tools with names and descriptions.

@@ -23,7 +23,7 @@ class TestBedrockTimeoutConfiguration:
 
         # Execute
         with patch.dict(os.environ, {}, clear=True):
-            model = create_model("claude-sonnet-4.5", config, thinking=False)
+            _ = create_model("claude-sonnet-4.5", config, thinking=False)
 
         # Verify boto3.client was called with proper configuration
         mock_boto_client.assert_called_once()
@@ -67,7 +67,7 @@ class TestBedrockTimeoutConfiguration:
             "BEDROCK_RETRY_MODE": "standard",  # standard mode
         }
         with patch.dict(os.environ, custom_env, clear=True):
-            model = create_model("claude-sonnet-4.5", config, thinking=False)
+            _ = create_model("claude-sonnet-4.5", config, thinking=False)
 
         # Verify custom configuration was used
         call_args = mock_boto_client.call_args
@@ -89,7 +89,7 @@ class TestBedrockTimeoutConfiguration:
         mock_boto_client.return_value = Mock()
 
         # Execute
-        model = create_model("claude-sonnet-4.5", config, thinking=True)
+        _ = create_model("claude-sonnet-4.5", config, thinking=True)
 
         # Verify thinking parameters are set
         mock_chat_bedrock.assert_called_once()
@@ -107,7 +107,7 @@ class TestBedrockTimeoutConfiguration:
 
         # Execute
         with patch("app.core.model_factory.boto3.client") as mock_boto_client:
-            model = create_model("gpt4o", config, thinking=False)
+            _ = create_model("gpt4o", config, thinking=False)
 
             # Verify boto3 client was NOT created
             mock_boto_client.assert_not_called()

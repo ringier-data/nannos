@@ -94,9 +94,10 @@ def create_app():
     agent_base_url = os.getenv("AGENT_BASE_URL", "http://localhost:5004")
 
     # Configure OIDC authentication (token exchange preserves user identity)
+    oidc_issuer = os.environ["OIDC_ISSUER"]
     oidc_scheme = OpenIdConnectSecurityScheme(
         type="openIdConnect",
-        open_id_connect_url="https://login.alloy.ch/realms/a2a/.well-known/openid-configuration",
+        open_id_connect_url=f"{oidc_issuer}/.well-known/openid-configuration",
         description="OIDC authentication with token exchange (RFC 8693) - preserves user identity from orchestrator",
     )
 

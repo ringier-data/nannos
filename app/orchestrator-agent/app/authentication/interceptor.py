@@ -79,10 +79,6 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         config = A2AClientConfig(auth_interceptor=interceptor)
     """
 
-    SUPPORTED_ISSUERS = [
-        "https://login.alloy.ch/realms/a2a",
-    ]
-
     def __init__(
         self,
         user_token: str,
@@ -104,6 +100,7 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         self.oauth2_client = oauth2_client
         self.sub_agent_id = sub_agent_id
         self._exchanged_tokens: dict[str, str] = {}  # Cache: target_client_id -> token
+        self.oidc_issuer = self.oauth2_client.issuer
 
     def _detect_auth_scheme(self, agent_card: AgentCard) -> tuple[str, str, Any]:
         """
@@ -208,14 +205,11 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         Returns:
             Tuple of (request_payload, modified_http_kwargs)
         """
-        # Verify supported issuer
-        for issuer in self.SUPPORTED_ISSUERS:
-            if scheme_obj.open_id_connect_url.startswith(issuer):
-                break
-        else:
+        # Verify issuer matches configuration
+        if not scheme_obj.open_id_connect_url.startswith(self.oidc_issuer):
             logger.warning(
-                f"Agent {agent_card.name} uses unsupported OIDC issuer: {scheme_obj.open_id_connect_url}. "
-                "Proceeding without auth header."
+                f"Agent {agent_card.name} uses different OIDC issuer: {scheme_obj.open_id_connect_url} "
+                f"(expected: {self.oidc_issuer}). Proceeding without auth header."
             )
             return request_payload, http_kwargs
 

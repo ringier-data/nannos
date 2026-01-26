@@ -1,8 +1,10 @@
-"""Shared utility functions for the orchestrator agent.
+"""Shared utility functions for the orchestrator agent."""
 
-This module contains utilities that are used across multiple modules
-to avoid circular imports.
-"""
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
 
 # Language code to display name mapping
 LANGUAGE_NAMES: dict[str, str] = {
@@ -114,12 +116,8 @@ For sub-agents:
     tools = [tool1, tool2, ...]  # Keep as BaseTool instances
 
 TODO: This should be fixed upstream in langchain-google-genai or langchain-core
+===========================================================================
 """
-
-import logging
-from typing import Any
-
-logger = logging.getLogger(__name__)
 
 
 def clean_schema_properties(properties: dict[str, Any]) -> dict[str, Any]:

@@ -90,7 +90,7 @@ The Orchestrator Agent implements a **Zero-Trust Authentication Architecture** w
 2. Extract JWT token from Authorization header
 3. Fetch JWKS from OIDC provider (cached after first fetch)
 4. Validate JWT signature using JWKS public key
-5. Verify issuer, audience (aud=orchestrator), authorized party (azp=web-client)
+5. Verify issuer, audience (aud=orchestrator), authorized party (azp=agent-console)
 6. Check expiration with 30s leeway
 7. Extract claims (sub, email, name, groups) and store in request.state.user
 ```
@@ -102,9 +102,9 @@ The Orchestrator Agent implements a **Zero-Trust Authentication Architecture** w
 # JWKS is cached and refreshed automatically
 # Validation includes:
 # - Signature verification using RS256
-# - Issuer check (https://login.alloy.ch/realms/a2a)
+# - Issuer check (https://login.p.nannos.rcplus.io/realms/nannos)
 # - Audience check (aud=orchestrator)
-# - Authorized party check (azp=web-client)
+# - Authorized party check (azp=agent-console)
 # - Expiration with leeway
 ```
 
@@ -269,14 +269,14 @@ params = {
 
 **Location:** `app/core/discovery.py`
 
-MCP gateway (Gatana) require token exchange to the `mcp-gateway` service:
+MCP gateway (Gatana) require token exchange to the `gatana` service:
 
 ```python
 async def discover_tools(self, token: str, white_list: List[str] = None):
-    # Exchange user token for mcp-gateway-specific token
+    # Exchange user token for gatana-specific token
     mcp_gateway_token = await self.oauth2_client.exchange_token(
         subject_token=token,
-        target_client_id="mcp-gateway",
+        target_client_id="gatana",
         requested_scopes=["openid", "profile", "offline_access"],
     )
     
@@ -518,12 +518,12 @@ class OidcOAuth2Client:
 │ register_agents()     │  │ discover_tools()      │  │ get_graph(model_type) │
 │                       │  │                       │  │                       │
 │ For each sub-agent:   │  │ Token Exchange to     │  │ ONE graph per model:  │
-│ ┌───────────────────┐ │  │ mcp-gateway:          │  │ ┌───────────────────┐ │
+│ ┌───────────────────┐ │  │ gatana:          │  │ ┌───────────────────┐ │
 │ │SmartTokenInterceptor│ │  │                       │  │ │ gpt4o             │ │
 │ │                   │ │  │ oauth2_client         │  │ │ claude-sonnet-4.5 │ │
 │ │ Detect auth scheme│ │  │   .exchange_token(    │  │ └───────────────────┘ │
 │ │ from AgentCard    │ │  │     user_token,       │  │                       │
-│ │                   │ │  │     "mcp-gateway",    │  │ Shared checkpointer   │
+│ │                   │ │  │     "gatana",    │  │ Shared checkpointer   │
 │ │ OIDC → exchange   │ │  │     ["openid",...]    │  │ for all graphs        │
 │ │ JWT  → client creds│ │  │   )                   │  │                       │
 │ └───────────────────┘ │  └───────────────────────┘  └───────────────────────┘

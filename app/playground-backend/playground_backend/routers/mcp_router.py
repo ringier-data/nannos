@@ -1,4 +1,4 @@
-"""MCP tools router for discovering available tools from Gatana gateway."""
+"""MCP tools router for discovering available tools from MCP gateway."""
 
 import json
 import logging
@@ -17,9 +17,6 @@ logger = logging.getLogger(__name__)
 
 # Create router
 router: APIRouter = APIRouter(prefix="/api/v1/mcp", tags=["mcp"])
-
-# Gatana MCP gateway URL
-MCP_GATEWAY_URL = "https://alloych.gatana.ai/mcp"
 
 
 class MCPTool(BaseModel):
@@ -45,7 +42,7 @@ async def list_mcp_tools(
     """List available MCP tools from Gatana gateway.
 
     Uses MCP JSON-RPC standard to fetch tools list.
-    Performs token exchange to obtain a token for the mcp-gateway client.
+    Performs token exchange to obtain a token for the gatana client.
 
     Returns:
         List of available MCP tools with names and descriptions.
@@ -67,7 +64,7 @@ async def list_mcp_tools(
         # Get user's access token from request state (session) or Authorization header (Bearer token)
 
         auth_header = request.headers.get("Authorization")
-        # Exchange user token for mcp-gateway token
+        # Exchange user token for gatana token
         if not auth_header:
             access_token = getattr(request.state, "access_token", None)
             if not access_token:
@@ -142,7 +139,7 @@ async def list_mcp_tools(
                         status_code=401,
                         detail="Session expired: Unable to refresh access token. Please re-authenticate.",
                     )
-            # Exchange user token for mcp-gateway token
+            # Exchange user token for MCP gateway token
             oauth2_client = OidcOAuth2Client(
                 client_id=config.oidc.client_id,
                 client_secret=config.oidc.client_secret.get_secret_value(),
@@ -150,12 +147,12 @@ async def list_mcp_tools(
             )
             mcp_gateway_token = await oauth2_client.exchange_token(
                 subject_token=access_token,
-                target_client_id="mcp-gateway",
+                target_client_id=config.mcp_gateway.client_id,
                 requested_scopes=["openid", "profile", "offline_access"],
             )
         else:
             # Extract Bearer token from Authorization header
-            # NOTE: in this case we should receive the already exchanged token for mcp-gateway
+            # NOTE: in this case we should receive the already exchanged token for MCP gateway
             if not auth_header.startswith("Bearer "):
                 logger.error("Invalid Authorization header format")
                 raise HTTPException(
@@ -164,13 +161,13 @@ async def list_mcp_tools(
                 )
             mcp_gateway_token = auth_header[len("Bearer ") :].strip()
 
-        logger.info(f"Successfully exchanged token for mcp-gateway for user {user.email}")
+        logger.info(f"Successfully exchanged token for {config.mcp_gateway.client_id} for user {user.email}")
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             # MCP standard JSON-RPC request for tools/list with authentication
             # Gatana requires both application/json and text/event-stream in Accept header
             response = await client.post(
-                MCP_GATEWAY_URL,
+                config.mcp_gateway.url,
                 headers={
                     "Authorization": f"Bearer {mcp_gateway_token}",
                     "Content-Type": "application/json",
@@ -263,7 +260,7 @@ async def list_mcp_tools(
         logger.error(f"Cannot connect to Gatana MCP gateway: {e}")
         raise HTTPException(
             status_code=503,
-            detail=f"Cannot connect to Gatana MCP gateway at {MCP_GATEWAY_URL}. Gateway may be offline.",
+            detail=f"Cannot connect to Gatana MCP gateway at {config.mcp_gateway.url}. Gateway may be offline.",
         )
     except httpx.TimeoutException as e:
         logger.error(f"Gatana MCP gateway request timed out: {e}")

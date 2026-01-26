@@ -52,7 +52,7 @@ async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession
 
     # Bulk activate for multiple users
     user_ids = ["user-1", "user-2", "user-3"]
-    count = await repo.bulk_activate_sub_agent(
+    user_ids = await repo.bulk_activate_sub_agent(
         db=pg_session,
         actor_sub="admin-123",
         user_ids=user_ids,
@@ -63,7 +63,7 @@ async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession
     await pg_session.commit()
 
     # Verify activations
-    assert count == 3
+    assert len(user_ids) == 3
 
     result = await pg_session.execute(
         text("""
@@ -109,7 +109,7 @@ async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession)
     await pg_session.commit()
 
     # Bulk activate for single user (common case from API)
-    count = await repo.bulk_activate_sub_agent(
+    user_ids = await repo.bulk_activate_sub_agent(
         db=pg_session,
         actor_sub="user-1",
         user_ids=["user-1"],
@@ -119,7 +119,7 @@ async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession)
     await pg_session.commit()
 
     # Verify activation
-    assert count == 1
+    assert len(user_ids) == 1
 
     result = await pg_session.execute(
         text("""
@@ -171,7 +171,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession):
     user_ids = ["user-1", "user-2"]
 
     # First activation
-    count1 = await repo.bulk_activate_sub_agent(
+    user_ids_activated1 = await repo.bulk_activate_sub_agent(
         db=pg_session,
         actor_sub="admin-123",
         user_ids=user_ids,
@@ -182,7 +182,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession):
     await pg_session.commit()
 
     # Second activation (should update, not fail)
-    count2 = await repo.bulk_activate_sub_agent(
+    user_ids_activated2 = await repo.bulk_activate_sub_agent(
         db=pg_session,
         actor_sub="admin-123",
         user_ids=user_ids,
@@ -192,8 +192,8 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession):
     )
     await pg_session.commit()
 
-    assert count1 == 2
-    assert count2 == 2  # Still returns count
+    assert len(user_ids_activated1) == 2
+    assert len(user_ids_activated2) == 0  # No affected rows on second call
 
 
 @pytest.mark.asyncio
@@ -266,7 +266,7 @@ async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession)
     assert set(groups) == {3, 4}  # JSONB stores as integers
 
     # Deactivate from group 3
-    count = await repo.bulk_deactivate_sub_agent(
+    user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
         actor_sub="admin-123",
         user_ids=user_ids,
@@ -275,7 +275,7 @@ async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession)
     )
     await pg_session.commit()
 
-    assert count == 2  # Updated 2 rows
+    assert len(user_ids_deactivated) == 2  # Updated 2 rows
 
     # Verify group 3 removed, group 4 remains
     result = await pg_session.execute(
@@ -337,7 +337,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession)
     await pg_session.commit()
 
     # Deactivate (should delete)
-    count = await repo.bulk_deactivate_sub_agent(
+    user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
         actor_sub="admin-123",
         user_ids=user_ids,
@@ -346,7 +346,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession)
     )
     await pg_session.commit()
 
-    assert count == 2
+    assert len(user_ids_deactivated) == 2
 
     # Verify deleted
     result = await pg_session.execute(
@@ -398,7 +398,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession):
     await pg_session.commit()
 
     # Full deactivation
-    count = await repo.bulk_deactivate_sub_agent(
+    user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
         actor_sub="user-1",
         user_ids=user_ids,
@@ -407,7 +407,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession):
     )
     await pg_session.commit()
 
-    assert count == 2
+    assert len(user_ids_deactivated) == 2
 
     # Verify deleted
     result = await pg_session.execute(
@@ -442,7 +442,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession):
     await pg_session.commit()
 
     # Empty activation
-    count = await repo.bulk_activate_sub_agent(
+    user_ids_activated = await repo.bulk_activate_sub_agent(
         db=pg_session,
         actor_sub="admin-123",
         user_ids=[],
@@ -450,14 +450,14 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession):
         activated_by=ActivationSource.GROUP,
         group_id=1,
     )
-    assert count == 0
+    assert len(user_ids_activated) == 0
 
     # Empty deactivation
-    count = await repo.bulk_deactivate_sub_agent(
+    user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
         actor_sub="admin-123",
         user_ids=[],
         sub_agent_id=7,
         group_id=1,
     )
-    assert count == 0
+    assert len(user_ids_deactivated) == 0
