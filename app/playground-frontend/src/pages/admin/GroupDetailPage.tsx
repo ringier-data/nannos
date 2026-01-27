@@ -13,6 +13,8 @@ import {
   removeMembersApiV1GroupsGroupIdMembersRemovePostMutation,
   updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation,
   listUsersApiV1AdminUsersGetOptions,
+  getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
+  setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { RoleEnum } from '@/api/generated';
 import { Button } from '@/components/ui/button';
@@ -100,6 +102,14 @@ export function GroupDetailPage() {
       query: { limit: 100 },
     }),
     enabled: addMemberDialogOpen,
+  });
+
+  // Accessible agents queries
+  const { data: defaultAgentsData, isLoading: defaultAgentsLoading } = useQuery({
+    ...getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
+      path: { group_id: groupId },
+    }),
+    enabled: !isNaN(groupId),
   });
 
   const updateMutation = useMutation({
@@ -193,12 +203,31 @@ export function GroupDetailPage() {
     },
   });
 
+  const addDefaultAgentsMutation = useMutation({
+    ...setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation(),
+    onSuccess: () => {
+      toast.success('Default agent status updated');
+      queryClient.invalidateQueries({
+        queryKey: getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
+          path: { group_id: groupId },
+        }).queryKey,
+      });
+    },
+    onError: (error: any) => {
+      const message = error?.response?.data?.detail || 'Failed to update default agent';
+      toast.error(message);
+    },
+  });
+
   const group = groupData?.data;
   const members = membersData?.data ?? [];
   const membersMeta = membersData?.meta ?? { page: 1, limit: 20, total: 0 };
   const allUsers = usersData?.data ?? [];
   const memberUserIds = new Set(members.map((m) => m.user_id));
   const availableUsers = allUsers.filter((u) => !memberUserIds.has(u.id));
+
+  const accessibleAgents = defaultAgentsData ?? [];
+  const defaultAgents = accessibleAgents.filter((a: any) => a.is_default);
 
   const startEditing = () => {
     if (!group) return;
@@ -242,6 +271,20 @@ export function GroupDetailPage() {
     updateRoleMutation.mutate({
       path: { group_id: groupId, user_id: userId },
       body: { role },
+    });
+  };
+
+  const handleToggleDefault = (agentId: number, currentlyDefault: boolean) => {
+    const currentDefaultIds = defaultAgents.map((a: any) => a.id);
+    const newDefaultIds = currentlyDefault
+      ? currentDefaultIds.filter((id) => id !== agentId)  // Remove from defaults
+      : [...currentDefaultIds, agentId];  // Add to defaults
+    
+    addDefaultAgentsMutation.mutate({
+      path: { group_id: groupId },
+      body: {
+        sub_agent_ids: newDefaultIds,
+      },
     });
   };
 
@@ -354,6 +397,71 @@ export function GroupDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardHeader>
+          <div>
+            <CardTitle>Accessible Agents</CardTitle>
+            <CardDescription>
+              All approved agents this group can access. Toggle to set as default for new members.
+            </CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="border rounded-lg">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-16">Default</TableHead>
+                  <TableHead>Agent Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Owner</TableHead>
+                  <TableHead className="w-20">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {defaultAgentsLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-8">
+                      Loading...
+                    </TableCell>
+                  </TableRow>
+                ) : accessibleAgents.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                      No accessible agents. Add permissions first.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  accessibleAgents.map((agent: any) => (
+                    <TableRow key={agent.id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={agent.is_default}
+                          onCheckedChange={() => handleToggleDefault(agent.id, agent.is_default)}
+                          disabled={addDefaultAgentsMutation.isPending}
+                        />
+                      </TableCell>
+                      <TableCell className="font-medium">{agent.name}</TableCell>
+                      <TableCell className="capitalize">{(agent as any).agent_type || '-'}</TableCell>
+                      <TableCell>
+                        {(agent as any).owner_email || '-'}
+                      </TableCell>
+                      <TableCell>
+                        {agent.is_activated ? (
+                          <span className="text-green-600 text-sm">Active</span>
+                        ) : (
+                          <span className="text-muted-foreground text-sm">Inactive</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, UserCheck, UserX, Trash2, Plus, X } from 'lucide-react';
+import { ArrowLeft, UserCheck, UserX, Trash2, Plus, X, UserCog } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   getUserApiV1AdminUsersUserIdGetOptions,
@@ -33,7 +33,7 @@ export function UserDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, adminMode, startImpersonation } = useAuth();
   const [confirmDialog, setConfirmDialog] = useState<{
     open: boolean;
     title: string;
@@ -160,6 +160,22 @@ export function UserDetailPage() {
     });
   };
 
+  const handleImpersonate = async () => {
+    if (!adminMode) {
+      toast.error('Admin mode must be enabled to impersonate users');
+      return;
+    }
+    
+    if (!user) return;
+    
+    try {
+      await startImpersonation(user.id);
+      toast.success(`Now impersonating ${user.email}`);
+    } catch (error) {
+      toast.error((error as Error).message || 'Failed to start impersonation');
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="space-y-6 p-4">
@@ -192,6 +208,14 @@ export function UserDetailPage() {
           </h1>
           <p className="text-muted-foreground">{user.email}</p>
         </div>
+        <Button
+          variant="outline"
+          onClick={handleImpersonate}
+          disabled={!adminMode || isViewingSelf}
+        >
+          <UserCog className="h-4 w-4 mr-2" />
+          Impersonate User
+        </Button>
         <UserStatusBadge status={user.status ?? 'active'} />
       </div>
 

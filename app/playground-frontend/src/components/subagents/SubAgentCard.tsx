@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bot, Globe, Terminal, Users, Database } from 'lucide-react';
+import { Bot, Globe, Terminal, Users, Database, User, Shield, UsersRound } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SubAgentPermissionsDialog } from './SubAgentPermissionsDialog';
@@ -123,6 +123,31 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
               <TypeIcon className="h-3 w-3" />
               <span className="capitalize">{subAgent.type}</span>
             </span>
+            {subAgent.activated_by && (
+              <>
+                {subAgent.activated_by === 'user' && (
+                  <Badge variant="outline" className="flex items-center gap-1 text-xs">
+                    <User className="h-3 w-3" />
+                    Self-enabled
+                  </Badge>
+                )}
+                {subAgent.activated_by === 'group' && (
+                  <Badge variant="secondary" className="flex items-center gap-1 text-xs">
+                    <UsersRound className="h-3 w-3" />
+                    Group default
+                    {subAgent.activated_by_groups && subAgent.activated_by_groups.length > 0 && (
+                      <span className="ml-1">({subAgent.activated_by_groups.length})</span>
+                    )}
+                  </Badge>
+                )}
+                {subAgent.activated_by === 'admin' && (
+                  <Badge variant="default" className="flex items-center gap-1 text-xs">
+                    <Shield className="h-3 w-3" />
+                    Admin-enabled
+                  </Badge>
+                )}
+              </>
+            )}
           </div>
           <div className="flex items-center gap-1">
             {canManageAccess && (

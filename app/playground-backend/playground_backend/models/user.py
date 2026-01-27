@@ -169,3 +169,9 @@ class UserAdminUpdate(BaseModel):
     """Request for admin to update user fields."""
 
     is_administrator: bool | None = None
+
+
+class ImpersonateStartRequest(BaseModel):
+    """Request model for starting user impersonation."""
+
+    target_user_id: str

@@ -21,10 +21,10 @@ Required Keycloak Configuration:
 
 Usage:
     service = KeycloakAdminService(
-        issuer="https://login.alloy.ch/realms/a2a",
+        issuer=os.environ["OIDC_ISSUER"],  # e.g., "https://login.p.nannos.rcplus.io/realms/nannos"
         admin_client_id="nannos-admin",
         admin_client_secret="secret",
-        oidc_client_id="web-client"
+        oidc_client_id="agent-console"
     )
 
     # Automatically configure group mapper on first call
@@ -69,10 +69,10 @@ class KeycloakAdminService:
         """Initialize Keycloak Admin client.
 
         Args:
-            issuer: OIDC issuer URL (e.g., https://login.alloy.ch/realms/a2a)
+            issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
             admin_client_id: Client ID with admin permissions (e.g., nannos-admin)
             admin_client_secret: Client secret for admin client
-            oidc_client_id: OIDC client ID to configure group mapper on (e.g., web-client)
+            oidc_client_id: OIDC client ID to configure group mapper on (e.g., agent-console)
             group_name_prefix: Prefix for group names (e.g., "dev-", "stg-", "prod-")
         """
         self.issuer = issuer
@@ -97,7 +97,7 @@ class KeycloakAdminService:
     def _extract_realm_from_issuer(self, issuer_url: str) -> str:
         """Extract realm name from OIDC issuer URL.
 
-        Example: https://login.alloy.ch/realms/a2a → a2a
+        Example: https://login.p.nannos.rcplus.io/realms/nannos → nannos
         """
         parsed = urlparse(issuer_url)
         path_parts = parsed.path.split("/")
@@ -114,7 +114,7 @@ class KeycloakAdminService:
     def _extract_server_url_from_issuer(self, issuer_url: str) -> str:
         """Extract Keycloak server base URL from issuer.
 
-        Example: https://login.alloy.ch/realms/a2a → https://login.alloy.ch
+        Example: https://login.p.nannos.rcplus.io/realms/nannos → https://login.p.nannos.rcplus.io
         """
         parsed = urlparse(issuer_url)
         return f"{parsed.scheme}://{parsed.netloc}"
@@ -133,7 +133,7 @@ class KeycloakAdminService:
         """Configure group mapper for a specific client.
 
         Args:
-            client_id_str: The clientId string (e.g., "web-client", "mcp-gateway")
+            client_id_str: The clientId string (e.g., "agent-console", "gatana")
 
         Raises:
             KeycloakSyncError: If mapper configuration fails
@@ -188,8 +188,8 @@ class KeycloakAdminService:
         """Ensure group mapper is configured on all relevant clients.
 
         Configures the Group Membership mapper on:
-        1. The OIDC client (web-client) - for user login tokens
-        2. The mcp-gateway client - for token exchange (critical!)
+        1. The OIDC client (agent-console) - for user login tokens
+        2. The gatana client - for token exchange (critical!)
         3. The orchestrator client - for token exchange
         4. The agent-creator client - for token exchange
 
@@ -202,7 +202,7 @@ class KeycloakAdminService:
         # List of clients that need group mapper
         clients_to_configure = [
             self.oidc_client_id,  # Web client (user login)
-            "mcp-gateway",  # MCP gateway (token exchange target)
+            "gatana",  # MCP gateway (token exchange target)
             "orchestrator",  # Orchestrator (token exchange target)
             "agent-creator",  # Agent creator (token exchange target)
         ]

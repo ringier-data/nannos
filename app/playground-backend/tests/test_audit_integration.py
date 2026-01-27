@@ -475,11 +475,12 @@ class TestSubAgentRepositoryAudit:
             returning="id",
         )
 
-        await repo.activate_sub_agent(
+        await repo.bulk_activate_sub_agent(
             db=pg_session,
             actor_sub="user-sub-4",
-            user_id="user-id-4",
+            user_ids=["user-id-4"],
             sub_agent_id=sub_agent_id,
+            group_id=None,
         )
         await pg_session.commit()
 
@@ -535,19 +536,21 @@ class TestSubAgentRepositoryAudit:
         )
 
         # First activate it
-        await repo.activate_sub_agent(
+        await repo.bulk_activate_sub_agent(
             db=pg_session,
             actor_sub="user-sub-5",
-            user_id="user-id-5",
+            user_ids=["user-id-5"],
             sub_agent_id=sub_agent_id,
+            group_id=None,
         )
 
         # Now deactivate it
-        await repo.deactivate_sub_agent(
+        await repo.bulk_deactivate_sub_agent(
             db=pg_session,
             actor_sub="user-sub-5",
-            user_id="user-id-5",
+            user_ids=["user-id-5"],
             sub_agent_id=sub_agent_id,
+            group_id=None,
         )
         await pg_session.commit()
 

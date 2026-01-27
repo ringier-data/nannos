@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .sub_agent import SubAgentStatus
 from .user import PaginationMeta
 
 
@@ -131,3 +132,25 @@ class BulkGroupDeleteResponse(BaseModel):
     """Response for bulk group deletion."""
 
     data: list[BulkDeleteResult]
+
+
+class SubAgentRef(BaseModel):
+    """Basic reference to a sub-agent."""
+
+    id: int
+    name: str
+
+
+class SubAgentRefWithStatus(SubAgentRef):
+    """Sub-agent reference with status indicators for UI."""
+
+    approval_status: SubAgentStatus  # draft, pending_approval, approved, rejected
+    is_activated: bool  # Whether currently activated for the user
+    activated_by_groups: list[int] | None = None  # Which groups activated it
+    is_default: bool = False  # Whether this agent is a default for the group
+
+
+class SubAgentAdd(BaseModel):
+    """Request to add default sub-agents to a group."""
+
+    sub_agent_ids: list[int]

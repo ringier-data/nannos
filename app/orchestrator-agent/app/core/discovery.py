@@ -202,9 +202,9 @@ class ToolDiscoveryService:
         token: str,
         white_list: Optional[List[str]] = None,
     ) -> List[BaseTool]:
-        """Discover available MCP tools with token exchange for mcp-gateway.
+        """Discover available MCP tools with token exchange for gatana.
 
-        Performs token exchange to obtain a token for the mcp-gateway client
+        Performs token exchange to obtain a token for the gatana client
         in the same Keycloak realm, then uses that token to authenticate with
         MCP services.
 
@@ -216,22 +216,22 @@ class ToolDiscoveryService:
         """
         logger.debug("Discovering tools for orchestrator deep agent")
         try:
-            # Exchange user token for mcp-gateway token
-            # The target client is 'mcp-gateway' in the same Keycloak realm
+            # Exchange user token for gatana token
+            # The target client is 'gatana' in the same Keycloak realm
             mcp_gateway_token = await self.oauth2_client.exchange_token(
                 subject_token=token,
-                target_client_id="mcp-gateway",
+                target_client_id="gatana",
                 requested_scopes=["openid", "profile", "offline_access"],
             )
-            logger.info("Successfully exchanged token for mcp-gateway")
+            logger.info("Successfully exchanged token for gatana")
 
             # Use the exchanged token for MCP connection
             # logger.debug(f"Gatana MCP gateway token: {mcp_gateway_token}")
             client = MultiServerMCPClient(
                 connections={
-                    "gatana": StreamableHttpConnection(
+                    self.config.MCP_GATEWAY_CLIENT_ID: StreamableHttpConnection(
                         transport="streamable_http",
-                        url="https://alloych.gatana.ai/mcp",
+                        url=self.config.MCP_GATEWAY_URL,
                         headers={"Authorization": f"Bearer {mcp_gateway_token}"},
                     )
                 }

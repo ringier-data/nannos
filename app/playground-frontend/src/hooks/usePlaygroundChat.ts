@@ -3,6 +3,12 @@ import { io, Socket } from 'socket.io-client';
 import { v7 as uuidv7 } from 'uuid';
 import type { AgentResponseData, SendMessagePayload } from '@/components/chat/types';
 import { config } from '@/config';
+import {
+  getAdminModeFromStorage,
+  getImpersonatedUserIdFromStorage,
+  ADMIN_MODE_HEADER,
+  IMPERSONATE_USER_HEADER,
+} from '@/api/apiInstanceConfig';
 
 export interface PlaygroundMessage {
   id: string;
@@ -360,8 +366,21 @@ export function usePlaygroundChat({
       url.searchParams.set('limit', '50');
       url.searchParams.set('sub_agent_config_hash', subAgentConfigHash);
 
+      // Inject impersonation headers if active
+      const headers: HeadersInit = {};
+      const impersonatedUserId = getImpersonatedUserIdFromStorage();
+      if (impersonatedUserId) {
+        headers[IMPERSONATE_USER_HEADER] = impersonatedUserId;
+        headers[ADMIN_MODE_HEADER] = 'true'; // Force admin mode when impersonating
+      } else {
+        const adminMode = getAdminModeFromStorage();
+        if (adminMode) {
+          headers[ADMIN_MODE_HEADER] = 'true';
+        }
+      }
+
       console.log('[Playground] Loading conversations for hash:', subAgentConfigHash);
-      const resp = await fetch(url.toString(), { credentials: 'include' });
+      const resp = await fetch(url.toString(), { credentials: 'include', headers });
       
       if (!resp.ok) {
         throw new Error(`Failed to load conversations (status=${resp.status})`);
@@ -434,8 +453,21 @@ export function usePlaygroundChat({
       const url = new URL(`/api/v1/messages/${encodeURIComponent(conversationId)}`, window.location.origin);
       url.searchParams.set('limit', '100');
 
+      // Inject impersonation headers if active
+      const headers: HeadersInit = {};
+      const impersonatedUserId = getImpersonatedUserIdFromStorage();
+      if (impersonatedUserId) {
+        headers[IMPERSONATE_USER_HEADER] = impersonatedUserId;
+        headers[ADMIN_MODE_HEADER] = 'true'; // Force admin mode when impersonating
+      } else {
+        const adminMode = getAdminModeFromStorage();
+        if (adminMode) {
+          headers[ADMIN_MODE_HEADER] = 'true';
+        }
+      }
+
       console.log('[Playground] Loading messages for conversation:', conversationId);
-      const resp = await fetch(url.toString(), { credentials: 'include' });
+      const resp = await fetch(url.toString(), { credentials: 'include', headers });
       
       if (!resp.ok) {
         throw new Error(`Failed to load messages (status=${resp.status})`);

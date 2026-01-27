@@ -71,7 +71,7 @@ markers = [
     "slow: marks tests as slow running",
 ]
 env = [
-    "OIDC_ISSUER=https://login.alloy.ch/realms/a2a",
+    "OIDC_ISSUER=https://login.p.nannos.rcplus.io/realms/nannos",
     "OIDC_CLIENT_ID=orchestrator",
     "OIDC_CLIENT_SECRET=test-secret",
     "AZURE_OPENAI_ENDPOINT=https://rcplus-alloy-eu-prod.openai.azure.com",

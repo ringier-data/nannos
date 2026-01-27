@@ -17,40 +17,40 @@ async def test_prefix_isolation_different_environments():
 
         # Local creates "local-sales"
         service_local = KeycloakAdminService(
-            issuer="https://login.alloy.ch/realms/a2a",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
-            oidc_client_id="web-client",
+            oidc_client_id="agent-console",
             group_name_prefix="local-",
         )
         await service_local.create_group("sales")
 
         # Dev creates "dev-sales"
         service_dev = KeycloakAdminService(
-            issuer="https://login.alloy.ch/realms/a2a",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
-            oidc_client_id="web-client",
+            oidc_client_id="agent-console",
             group_name_prefix="dev-",
         )
         await service_dev.create_group("sales")
 
         # Stg creates "stg-sales"
         service_stg = KeycloakAdminService(
-            issuer="https://login.alloy.ch/realms/a2a",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
-            oidc_client_id="web-client",
+            oidc_client_id="agent-console",
             group_name_prefix="stg-",
         )
         await service_stg.create_group("sales")
 
         # Prod creates "sales"
         service_prod = KeycloakAdminService(
-            issuer="https://login.alloy.ch/realms/a2a",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
-            oidc_client_id="web-client",
+            oidc_client_id="agent-console",
             group_name_prefix="",
         )
         await service_prod.create_group("sales")

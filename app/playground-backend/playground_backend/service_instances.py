@@ -23,6 +23,7 @@ from .services.audit_service import AuditService
 from .services.conversation_service import ConversationService
 from .services.keycloak_admin_service import KeycloakAdminService
 from .services.messages_service import MessagesService
+from .services.notification_service import NotificationService
 from .services.rate_card_service import RateCardService
 from .services.sub_agent_service import SubAgentService
 from .services.usage_service import UsageService
@@ -44,6 +45,9 @@ async def initialize_services(app: "FastAPI") -> None:
     """
     # Initialize audit service first (required by repositories)
     app.state.audit_service = AuditService()
+
+    # Initialize notification service first (required by user group service)
+    app.state.notification_service = NotificationService()
 
     # Initialize repositories and inject audit service
     app.state.user_repository = UserRepository()
@@ -72,12 +76,16 @@ async def initialize_services(app: "FastAPI") -> None:
 
     app.state.secrets_service = SecretsService()
     app.state.secrets_service.set_repository(app.state.secrets_repository)
+    app.state.secrets_service.set_notification_service(app.state.notification_service)
 
     app.state.sub_agent_service = SubAgentService()
     app.state.sub_agent_service.set_repository(app.state.sub_agent_repository)
+    app.state.sub_agent_service.set_notification_service(app.state.notification_service)
 
     app.state.user_group_service = UserGroupService()
     app.state.user_group_service.set_repository(app.state.user_group_repository)
+    app.state.user_group_service.set_sub_agent_service(app.state.sub_agent_service)
+    app.state.user_group_service.set_notification_service(app.state.notification_service)
 
     # Initialize Keycloak Admin service for group synchronization
     app.state.keycloak_admin_service = KeycloakAdminService(

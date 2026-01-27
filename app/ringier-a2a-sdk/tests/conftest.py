@@ -2,37 +2,33 @@
 Pytest configuration and fixtures for ringier-a2a-sdk tests.
 """
 
-import pytest
 from datetime import datetime, timedelta, timezone
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
+
 import jwt as pyjwt
+import pytest
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 @pytest.fixture
 def rsa_key_pair():
     """Generate RSA key pair for testing."""
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-        backend=default_backend()
-    )
-    
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+
     public_key = private_key.public_key()
-    
+
     # Export keys
     private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
+        encryption_algorithm=serialization.NoEncryption(),
     )
-    
+
     public_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
+        encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    
+
     return {
         "private_key": private_key,
         "public_key": public_key,
@@ -47,14 +43,14 @@ def mock_jwks_response(rsa_key_pair):
     # Convert public key to JWK format
     public_key = rsa_key_pair["public_key"]
     public_numbers = public_key.public_numbers()
-    
+
     # Base64url encode the numbers
     import base64
-    
+
     def int_to_base64url(num):
-        num_bytes = num.to_bytes((num.bit_length() + 7) // 8, byteorder='big')
-        return base64.urlsafe_b64encode(num_bytes).rstrip(b'=').decode('utf-8')
-    
+        num_bytes = num.to_bytes((num.bit_length() + 7) // 8, byteorder="big")
+        return base64.urlsafe_b64encode(num_bytes).rstrip(b"=").decode("utf-8")
+
     jwk = {
         "kty": "RSA",
         "use": "sig",
@@ -63,7 +59,7 @@ def mock_jwks_response(rsa_key_pair):
         "n": int_to_base64url(public_numbers.n),
         "e": int_to_base64url(public_numbers.e),
     }
-    
+
     return {"keys": [jwk]}
 
 
@@ -86,18 +82,19 @@ def mock_oidc_discovery():
 @pytest.fixture
 def generate_test_jwt(rsa_key_pair):
     """Factory fixture to generate test JWTs with custom claims."""
+
     def _generate(
         claims: dict = None,
         expired: bool = False,
         invalid_signature: bool = False,
-        private_key = None,
+        private_key=None,
         issuer: str = None,
         azp: str = None,
-        audience = None
+        audience=None,
     ) -> str:
         """
         Generate a test JWT token.
-        
+
         Args:
             claims: JWT claims to include (optional, can use keyword args instead)
             expired: Whether to generate an expired token
@@ -106,14 +103,14 @@ def generate_test_jwt(rsa_key_pair):
             issuer: Issuer claim (optional)
             azp: Authorized party claim (optional)
             audience: Audience claim (optional, can be string or list)
-        
+
         Returns:
             JWT token string
         """
         now = datetime.now(timezone.utc)
-        
+
         default_claims = {
-            "iss": issuer or "https://login.alloy.ch/realms/a2a",
+            "iss": issuer or "https://login.p.nannos.rcplus.io/realms/nannos",
             "sub": "service-account-orchestrator",
             "azp": azp or "orchestrator",
             "aud": audience or ["foundry-jira-ticket-agent"],
@@ -121,32 +118,23 @@ def generate_test_jwt(rsa_key_pair):
             "nbf": now,
             "exp": now + timedelta(minutes=5) if not expired else now - timedelta(minutes=1),
         }
-        
+
         # Merge with provided claims if any
         token_claims = {**default_claims, **(claims or {})}
-        
+
         # Choose key
         if invalid_signature:
             # Generate a different key for invalid signature
-            wrong_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=default_backend()
-            )
+            wrong_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
             key = wrong_key
         else:
             key = private_key or rsa_key_pair["private_key"]
-        
+
         # Encode JWT
-        token = pyjwt.encode(
-            token_claims,
-            key,
-            algorithm="RS256",
-            headers={"kid": "test-key-id"}
-        )
-        
+        token = pyjwt.encode(token_claims, key, algorithm="RS256", headers={"kid": "test-key-id"})
+
         return token
-    
+
     return _generate
 
 
@@ -154,11 +142,7 @@ def generate_test_jwt(rsa_key_pair):
 def valid_jwt_token(generate_test_jwt):
     """Generate a valid JWT token for testing."""
     # Use issuer that matches test expectations
-    return generate_test_jwt(
-        issuer="https://login.example.com/realms/test",
-        azp="orchestrator",
-        audience=["agent-1"]
-    )
+    return generate_test_jwt(issuer="https://login.example.com/realms/test", azp="orchestrator", audience=["agent-1"])
 
 
 @pytest.fixture
@@ -175,16 +159,7 @@ def mock_a2a_request_body():
         "method": "agent/sendMessage",
         "id": "test-request-id",
         "params": {
-            "message": {
-                "role": "user",
-                "parts": [{"kind": "text", "text": "Create a Jira ticket"}]
-            },
-            "metadata": {
-                "user_context": {
-                    "user_id": "user-123",
-                    "email": "test@example.com",
-                    "name": "Test User"
-                }
-            }
-        }
+            "message": {"role": "user", "parts": [{"kind": "text", "text": "Create a Jira ticket"}]},
+            "metadata": {"user_context": {"user_id": "user-123", "email": "test@example.com", "name": "Test User"}},
+        },
     }

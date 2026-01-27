@@ -156,7 +156,6 @@ Resources:
             - { Name: 'ORCHESTRATOR_CLIENT_ID', Value: '{{ orchestrator_oidc_client_id }}' }
             - { Name: 'AGENT_CLIENT_ID', Value: '{{ alloy_agent_client_id }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ alloy_agent_fqdn }}' }
-            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
             - { Name: 'OIDC_CLIENT_ID', Value: '{{ alloy_agent_client_id }}' }
             - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing | string | lower }}' }
             - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }

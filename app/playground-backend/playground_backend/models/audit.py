@@ -37,6 +37,8 @@ class AuditAction(str, Enum):
     SET_DEFAULT = "set_default"
     REVERT = "revert"
     PERMISSION_UPDATE = "permission_update"
+    IMPERSONATION_START = "impersonation_start"
+    IMPERSONATION_END = "impersonation_end"
 
 
 class AuditLog(BaseModel):

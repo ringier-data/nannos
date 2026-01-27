@@ -220,6 +220,8 @@ Resources:
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
+            - { Name: 'MCP_GATEWAY_URL', Value: '{{ mcp_gateway_url }}' }
+            - { Name: 'MCP_GATEWAY_CLIENT_ID', Value: '{{ mcp_gateway_client_id }}' }
             - {
                 Name: POSTGRES_HOST,
                 Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",

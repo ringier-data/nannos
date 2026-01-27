@@ -63,6 +63,13 @@ NAONOUS_MCP_URLS=(
     prod "https://naonous.alloy.rcplus.io/mcp"
 )
 
+# OIDC Configuration
+OIDC_ISSUER="https://login.p.nannos.rcplus.io/realms/nannos"
+
+# MCP Gateway Configuration
+MCP_GATEWAY_URL="https://alloych.gatana.ai/mcp"
+MCP_GATEWAY_CLIENT_ID="gatana"
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -400,6 +407,10 @@ if [ "$BACKEND_ENV" = "local" ]; then
     update_env_var ".env" "DYNAMODB_USERS_TABLE" "dev-nannos-infrastructure-agents-users"
     update_env_var ".env" "LANGSMITH_PROJECT" "dev-nannos-agent-framework"
     
+    # MCP Gateway Configuration
+    update_env_var ".env" "MCP_GATEWAY_URL" "$MCP_GATEWAY_URL"
+    update_env_var ".env" "MCP_GATEWAY_CLIENT_ID" "$MCP_GATEWAY_CLIENT_ID"
+    
     # Fetch secrets from AWS SSM
     echo -e "${YELLOW}Fetching secrets from AWS SSM...${NC}"
     
@@ -415,14 +426,14 @@ if [ "$BACKEND_ENV" = "local" ]; then
     fi
     update_env_var ".env" "LANGSMITH_API_KEY" "$LANGSMITH_API_KEY"
     
-    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/oidc-chat-ui-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
+    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/keycloak/agent-console-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
         echo -e "${RED}Failed to fetch OIDC_CLIENT_SECRET from AWS SSM${NC}"
         exit 1
     fi
     update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
     
     # Keycloak Admin credentials for group sync (with environment prefix)
-    if ! KEYCLOAK_ADMIN_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/keycloak-admin-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
+    if ! KEYCLOAK_ADMIN_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/keycloak/nannos-admin-secret --output json --with-decryption | jq -r .Parameter.Value); then
         echo -e "${YELLOW}Warning: Could not fetch KEYCLOAK_ADMIN_CLIENT_SECRET (Keycloak sync disabled)${NC}"
     else
         update_env_var ".env" "KEYCLOAK_ADMIN_CLIENT_SECRET" "$KEYCLOAK_ADMIN_CLIENT_SECRET"
@@ -482,6 +493,10 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
         update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
         update_env_var ".env" "DYNAMODB_USERS_TABLE" "dev-nannos-infrastructure-agents-users"
         update_env_var ".env" "LANGSMITH_PROJECT" "dev-nannos-agent-framework"
+        
+        # MCP Gateway Configuration
+        update_env_var ".env" "MCP_GATEWAY_URL" "$MCP_GATEWAY_URL"
+        update_env_var ".env" "MCP_GATEWAY_CLIENT_ID" "$MCP_GATEWAY_CLIENT_ID"
     else
         # Use remote backend's PostgreSQL and AWS resources
         case "$BACKEND_ENV" in
@@ -513,6 +528,10 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
         update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "${ENV_PREFIX}-nannos-infrastructure-agents-orchestrator-checkpoints"
         update_env_var ".env" "DYNAMODB_USERS_TABLE" "${ENV_PREFIX}-nannos-infrastructure-agents-users"
         update_env_var ".env" "LANGSMITH_PROJECT" "${ENV_PREFIX}-nannos-agent-framework"
+        
+        # MCP Gateway Configuration
+        update_env_var ".env" "MCP_GATEWAY_URL" "$MCP_GATEWAY_URL"
+        update_env_var ".env" "MCP_GATEWAY_CLIENT_ID" "$MCP_GATEWAY_CLIENT_ID"
     fi
     
     # Fetch secrets from AWS SSM
@@ -529,8 +548,8 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
         exit 1
     fi
     update_env_var ".env" "LANGSMITH_API_KEY" "$LANGSMITH_API_KEY"
-    
-    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/oidc-orchestrator-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
+
+    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/keycloak/orchestrator-secret --output json --with-decryption | jq -r .Parameter.Value); then
         echo -e "${RED}Failed to fetch OIDC_CLIENT_SECRET from AWS SSM${NC}"
         exit 1
     fi
@@ -574,14 +593,18 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
     update_env_var ".env" "PLAYGROUND_FRONTEND_URL" "http://localhost:5173"
     
     # OIDC Authentication
-    update_env_var ".env" "OIDC_ISSUER" "https://login.alloy.ch/realms/a2a"
+    update_env_var ".env" "OIDC_ISSUER" "$OIDC_ISSUER"
     update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
+    
+    # MCP Gateway Configuration
+    update_env_var ".env" "MCP_GATEWAY_URL" "$MCP_GATEWAY_URL"
+    update_env_var ".env" "MCP_GATEWAY_CLIENT_ID" "$MCP_GATEWAY_CLIENT_ID"
     
     # Override environment-specific AWS resources (always use dev for local)
     update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-nannos-infrastructure-agents-langgraph-checkpoints"
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
 
-    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/agent-creator/oidc-client-secret --output json --with-decryption | jq -r .Parameter.Value); then
+    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/keycloak/agent-creator-secret --output json --with-decryption | jq -r .Parameter.Value); then
         echo -e "${RED}Failed to fetch OIDC_CLIENT_SECRET from AWS SSM${NC}"
         exit 1
     fi
@@ -625,7 +648,7 @@ if [ "$ALLOY_ENV" = "local" ]; then
     update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
     
     # OIDC Authentication
-    update_env_var ".env" "OIDC_ISSUER" "https://login.alloy.ch/realms/a2a"
+    update_env_var ".env" "OIDC_ISSUER" "$OIDC_ISSUER"
     update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
     
     # Set MCP URLs based on ALLOY_ENV (defaults to dev for local)

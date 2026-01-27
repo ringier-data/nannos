@@ -1,12 +1,15 @@
 import { useState, useRef, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
-import { Send } from 'lucide-react';
+import { Send, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useChat } from '../contexts';
+import { useAuth } from '@/contexts/AuthContext';
 
 export function ChatInput() {
   const { sendMessage, isConnected } = useChat();
+  const { isImpersonating } = useAuth();
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -39,10 +42,24 @@ export function ChatInput() {
 
   // Focus textarea when connected
   useEffect(() => {
-    if (isConnected && textareaRef.current) {
+    if (isConnected && textareaRef.current && !isImpersonating) {
       textareaRef.current.focus();
     }
-  }, [isConnected]);
+  }, [isConnected, isImpersonating]);
+
+  // Show warning when impersonating
+  if (isImpersonating) {
+    return (
+      <div className="p-4 border-t border-border bg-card">
+        <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="text-amber-600">
+            Chat is unavailable while impersonating. Chat requires the user's access token which is not available during impersonation.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
 
   return (
     <div className="flex gap-3 p-4 border-t border-border bg-card">

@@ -20,20 +20,6 @@
       Repository: '{{ git_info.repo_name }}'
       Version: '{{ project_version }}'
 
-- name: 'upload Orchestrator OIDC client secret to SSM'
-  ringier.aws_cicd.ssm_parameter:
-    overwrite_value: 'changed'
-    name: '{{ ssmkey_orchestrator_oidc_client_secret }}'
-    description: 'The OIDC client secret for the Orchestrator component of RC+/Alloy'
-    string_type: 'SecureString'
-    value: '{{ orchestrator_oidc_client_secret }}'
-    tags:
-      Name: '{{ env }}-{{ project_id }}-orchestrator-oidc-client-secret'
-      Project: '{{ project_id }}'
-      Environment: '{{ env }}'
-      Repository: '{{ git_info.repo_name }}'
-      Version: '{{ project_version }}'
-
 
 - name: 'get the GCP key from vault'
   set_fact:
