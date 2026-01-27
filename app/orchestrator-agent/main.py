@@ -165,7 +165,8 @@ def create_app():
     app.add_middleware(
         JWTValidatorMiddleware,
         issuer=os.environ["OIDC_ISSUER"],
-        expected_aud="orchestrator",  # Token audience must be orchestrator
+        # TODO: re-enable expected_aud check once https://github.com/alloy-ch/rcplus-alloy-a2a-slack-client/issues/28 is resolved
+        # expected_aud="orchestrator",  # Token audience must be orchestrator
         # NOTE: we do not validate azp here because we might use different clients to call the orchestrator
     )
 
