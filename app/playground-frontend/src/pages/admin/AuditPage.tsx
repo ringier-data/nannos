@@ -38,6 +38,8 @@ const actionColors: Record<AuditAction, 'default' | 'secondary' | 'destructive' 
   set_default: 'secondary',
   revert: 'outline',
   permission_update: 'secondary',
+  impersonation_start: 'default',
+  impersonation_end: 'outline',
 };
 
 const entityTypeLabels: Record<AuditEntityType, string> = {

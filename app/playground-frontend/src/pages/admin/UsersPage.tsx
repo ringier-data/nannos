@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router';
-import { Search, MoreHorizontal, UserCheck, UserX, Trash2 } from 'lucide-react';
+import { Search, MoreHorizontal, UserCheck, UserX, Trash2, UserCog, Eye } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAuth } from '@/contexts/AuthContext';
 import {
   listUsersApiV1AdminUsersGetOptions,
   bulkUpdateUsersApiV1AdminUsersBulkPostMutation,
@@ -39,6 +40,7 @@ import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 
 export function UsersPage() {
   const queryClient = useQueryClient();
+  const { adminMode, startImpersonation } = useAuth();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
@@ -156,6 +158,20 @@ export function UsersPage() {
 
   const allSelected = users.length > 0 && users.every((u) => selectedUsers.has(u.id));
   const someSelected = selectedUsers.size > 0;
+
+  const handleImpersonate = async (user: UserWithGroups) => {
+    if (!adminMode) {
+      toast.error('Admin mode must be enabled to impersonate users');
+      return;
+    }
+    
+    try {
+      await startImpersonation(user.id);
+      toast.success(`Now impersonating ${user.email}`);
+    } catch (error) {
+      toast.error((error as Error).message || 'Failed to start impersonation');
+    }
+  };
 
   return (
     <div className="space-y-6 p-4">
@@ -303,15 +319,27 @@ export function UsersPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem asChild>
-                          <Link to={`/app/admin/users/${user.id}`}>View Details</Link>
+                          <Link to={`/app/admin/users/${user.id}`}>
+                            <Eye className="h-4 w-4 mr-2" />
+                            View Details
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem 
+                          onClick={() => handleImpersonate(user)}
+                          disabled={!adminMode}
+                        >
+                          <UserCog className="h-4 w-4 mr-2" />
+                          Impersonate User
                         </DropdownMenuItem>
                         {user.status !== 'active' && (
                           <DropdownMenuItem onClick={() => handleSingleAction(user, 'activate')}>
+                            <UserCheck className="h-4 w-4 mr-2" />
                             Activate
                           </DropdownMenuItem>
                         )}
                         {user.status === 'active' && (
                           <DropdownMenuItem onClick={() => handleSingleAction(user, 'suspend')}>
+                            <UserX className="h-4 w-4 mr-2" />
                             Suspend
                           </DropdownMenuItem>
                         )}
@@ -320,6 +348,7 @@ export function UsersPage() {
                             className="text-destructive"
                             onClick={() => handleSingleAction(user, 'delete')}
                           >
+                            <Trash2 className="h-4 w-4 mr-2" />
                             Delete
                           </DropdownMenuItem>
                         )}

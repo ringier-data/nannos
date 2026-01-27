@@ -22,7 +22,7 @@ from rcplus_alloy_common.logging import configure_existing_logger, configure_log
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.cost_tracking.logger import get_request_access_token
 from ringier_a2a_sdk.middleware import (
-    OidcUserinfoMiddleware,
+    JWTValidatorMiddleware,
     UserContextFromRequestStateMiddleware,
 )
 from ringier_a2a_sdk.server import AuthRequestContextBuilder
@@ -81,11 +81,11 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
         logger.info("Shutting down application...")
         await budget_guard.stop_polling()
         logger.info("Budget guard shutdown complete")
-        
+
         # Close agent (includes cost logger and database connection pool cleanup)
         await agent_executor.agent.close()
         logger.info("Agent resources cleaned up")
-        
+
         logger.info("Application shutdown complete")
 
     return lifespan
@@ -158,16 +158,16 @@ def create_app():
     # Add authentication middleware stack (EXECUTION ORDER: bottom to top for requests)
     app = server.build(lifespan=create_lifespan(agent_executor))
 
-    # UserContextFromRequestStateMiddleware runs AFTER OIDC (transfers user to A2A context)
+    # UserContextFromRequestStateMiddleware runs AFTER JWT validation (transfers user to A2A context)
     app.add_middleware(UserContextFromRequestStateMiddleware)
 
-    # OidcUserinfoMiddleware runs FIRST (validates JWT, sets request.state.user)
+    # JWTValidatorMiddleware runs FIRST (validates JWT locally, sets request.state.user)
     app.add_middleware(
-        OidcUserinfoMiddleware,
+        JWTValidatorMiddleware,
         issuer=os.environ["OIDC_ISSUER"],
-        jwt_secret_key=os.environ["JWT_SECRET_KEY"],
-        client_id=os.environ.get("OIDC_CLIENT_ID", "orchestrator"),
-        client_secret=os.environ.get("OIDC_CLIENT_SECRET"),
+        # TODO: re-enable expected_aud check once https://github.com/alloy-ch/rcplus-alloy-a2a-slack-client/issues/28 is resolved
+        # expected_aud="orchestrator",  # Token audience must be orchestrator
+        # NOTE: we do not validate azp here because we might use different clients to call the orchestrator
     )
 
     return app

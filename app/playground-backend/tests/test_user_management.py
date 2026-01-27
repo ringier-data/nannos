@@ -536,7 +536,7 @@ class TestUserGroupService:
         assert updated is not None
         assert updated.group_role == "manager"
 
-    async def test_remove_member(self, user_service, user_group_service: UserGroupService, db_session):
+    async def test_remove_members(self, user_service, user_group_service: UserGroupService, db_session):
         """Test removing a member from a group."""
         await user_service.upsert_user(
             db=db_session,
@@ -553,12 +553,9 @@ class TestUserGroupService:
         )
 
         # Remove member
-        success = await user_group_service.remove_member(
-            db=db_session, group_id=group.id, user_id="test-user", actor_sub="test-actor"
+        await user_group_service.remove_members(
+            db=db_session, group_id=group.id, user_ids=["test-user"], actor_sub="test-actor"
         )
-
-        assert success is True
-
         members, total = await user_group_service.list_members(db_session, group.id)
         assert total == 0
 

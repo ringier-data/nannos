@@ -10,12 +10,28 @@ import { client } from './generated/client.gen';
 import {
   ADMIN_MODE_HEADER,
   getAdminModeFromStorage,
+  IMPERSONATE_USER_HEADER,
+  getImpersonatedUserIdFromStorage,
 } from './apiInstanceConfig';
 
-// Add request interceptor to inject X-Admin-Mode header
+// Add request interceptor to inject X-Admin-Mode and X-Impersonate-User-Id headers
 client.interceptors.request.use((request) => {
+  const impersonatedUserId = getImpersonatedUserIdFromStorage();
   const adminMode = getAdminModeFromStorage();
-  request.headers.set(ADMIN_MODE_HEADER, adminMode ? 'true' : 'false');
+  
+  // If impersonating, admin mode MUST be true (required by backend)
+  // Otherwise use the actual admin mode state
+  const effectiveAdminMode = impersonatedUserId ? true : adminMode;
+  
+  request.headers.set(ADMIN_MODE_HEADER, effectiveAdminMode ? 'true' : 'false');
+  
+  if (impersonatedUserId) {
+    request.headers.set(IMPERSONATE_USER_HEADER, impersonatedUserId);
+    console.log('[Interceptor] Impersonation active, forcing admin mode:', impersonatedUserId);
+  } else {
+    console.log('[Interceptor] No impersonation, admin mode:', effectiveAdminMode);
+  }
+  
   return request;
 });
 

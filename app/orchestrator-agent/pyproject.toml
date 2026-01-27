@@ -1,6 +1,6 @@
 [project]
 name = "orchestrator-agent-a2a-server"
-version = "0.1.4"
+version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -71,7 +71,7 @@ markers = [
     "slow: marks tests as slow running",
 ]
 env = [
-    "OIDC_ISSUER=https://login.alloy.ch/realms/a2a",
+    "OIDC_ISSUER=https://login.p.nannos.rcplus.io/realms/nannos",
     "OIDC_CLIENT_ID=orchestrator",
     "OIDC_CLIENT_SECRET=test-secret",
     "AZURE_OPENAI_ENDPOINT=https://rcplus-alloy-eu-prod.openai.azure.com",
@@ -82,9 +82,6 @@ env = [
     "LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com",
     "LANGSMITH_PROJECT=dev-nannos-agent-framework",
     "LANGSMITH_API_KEY=test-key",
-    "JWT_SESSION_EXPIRY_MINUTES=15",
-    "JWT_SECRET_KEY=test-jwt-secret-key",
-    "SESSION_COOKIE_SECURE=false",
     "DYNAMODB_USERS_TABLE=dev-nannos-infrastructure-agents-users",
     "AWS_ACCESS_KEY_ID=testing",
     "AWS_SECRET_ACCESS_KEY=testing",

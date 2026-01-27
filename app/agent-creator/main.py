@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
-    OidcUserinfoMiddleware,
+    JWTValidatorMiddleware,
     SubAgentIdMiddleware,
     UserContextFromRequestStateMiddleware,
 )
@@ -94,9 +94,10 @@ def create_app():
     )
 
     # Configure OIDC authentication for token exchange (preserves user identity)
+    oidc_issuer = os.environ["OIDC_ISSUER"]
     oidc_scheme = OpenIdConnectSecurityScheme(
         type="openIdConnect",
-        open_id_connect_url="https://login.alloy.ch/realms/a2a/.well-known/openid-configuration",
+        open_id_connect_url=f"{oidc_issuer}/.well-known/openid-configuration",
         description="OIDC authentication with token exchange (RFC 8693) - preserves user identity from orchestrator",
     )
 
@@ -146,13 +147,12 @@ def create_app():
     # Must run BEFORE UserContextFromRequestStateMiddleware so sub_agent_id is in request.state
     app.add_middleware(SubAgentIdMiddleware)
 
-    # OidcUserinfoMiddleware runs FIRST (validates JWT, sets request.state.user)
+    # JWTValidatorMiddleware runs FIRST (validates JWT locally via JWKS, sets request.state.user)
     app.add_middleware(
-        OidcUserinfoMiddleware,
+        JWTValidatorMiddleware,
         issuer=os.environ["OIDC_ISSUER"],
-        jwt_secret_key=os.environ.get("JWT_SECRET_KEY", ""),
-        client_id=os.environ.get("OIDC_CLIENT_ID", "agent-creator"),
-        client_secret=os.environ.get("OIDC_CLIENT_SECRET"),
+        expected_azp=os.environ.get("ORCHESTRATOR_CLIENT_ID"),
+        expected_aud=os.environ.get("OIDC_CLIENT_ID", "agent-creator"),
     )
 
     # TracingMiddleware for LangSmith distributed tracing (receives trace from orchestrator)

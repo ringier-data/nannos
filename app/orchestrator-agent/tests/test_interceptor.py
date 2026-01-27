@@ -38,28 +38,6 @@ class MockAgentCard:
 class TestDetectAuthScheme:
     """Test authentication scheme detection from AgentCard."""
 
-    def test_detect_jwt_bearer_scheme(self):
-        """Test detection of JWT bearer authentication."""
-        # Use actual HTTPAuthSecurityScheme type to pass isinstance check
-        from a2a.types import HTTPAuthSecurityScheme
-
-        http_scheme = HTTPAuthSecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
-
-        agent_card = MockAgentCard(
-            name="test-agent",
-            url="https://example.com",
-            security_schemes={"jwt_auth": MockSecuritySchemeWrapper(http_scheme)},
-        )
-
-        mock_oauth_client = Mock()
-        interceptor = SmartTokenInterceptor(user_token="user-token", oauth2_client=mock_oauth_client)
-
-        auth_type, scheme_name, scheme_obj = interceptor._detect_auth_scheme(agent_card)
-
-        assert auth_type == "jwt"
-        assert scheme_name == "jwt_auth"
-        assert scheme_obj.type == "http"
-
     def test_detect_oidc_scheme(self):
         """Test detection of OpenID Connect authentication."""
         agent_card = MockAgentCard(
@@ -105,47 +83,32 @@ class TestDetectAuthScheme:
             interceptor._detect_auth_scheme(agent_card)
 
 
-# NOTE: The following test classes have been removed as they test private methods
-# that were refactored. The functionality is now tested through integration tests.
-# The current implementation adds user_context and sub_agent_id as HTTP headers
-# in _handle_jwt_auth and _handle_oidc_auth methods instead of injecting into
-# request payload metadata.
-#
-# Removed test classes:
-# - TestExtractSubAgentId: tested _extract_sub_agent_id_from_card (removed method)
-# - TestInjectUserContext: tested _inject_user_context (removed method)
-# - TestInjectSubAgentId: tested _inject_sub_agent_id (removed method)
-
-
-class TestHeaderInjection:
-    """Test HTTP header injection for user context and sub_agent_id."""
+class TestTokenExchange:
+    """Test token exchange logic with target-based configuration."""
 
     @pytest.mark.asyncio
-    async def test_jwt_auth_injects_user_context_headers(self):
-        """Test that JWT auth adds user context as HTTP headers."""
-        from a2a.types import HTTPAuthSecurityScheme
-
-        http_scheme = HTTPAuthSecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
-
+    async def test_oidc_auth_exchanges_token_for_orchestrator_target(self):
+        """Test that OIDC auth exchanges token with 'orchestrator' target by default."""
         agent_card = MockAgentCard(
             name="test-agent",
             url="https://example.com",
-            security_schemes={"test-jwt": MockSecuritySchemeWrapper(http_scheme)},
+            security_schemes={
+                "test-oidc": MockSecuritySchemeWrapper(
+                    MockSecurityScheme(
+                        scheme_type="openIdConnect",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
+                    )
+                )
+            },
         )
 
         mock_oauth_client = AsyncMock()
-        mock_oauth_client.get_token = AsyncMock(return_value="mock-jwt-token")
-
-        user_context = {
-            "user_id": "user-123",
-            "email": "test@example.com",
-            "name": "Test User",
-        }
+        mock_oauth_client.exchange_token = AsyncMock(return_value="orchestrator-token")
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
 
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
             oauth2_client=mock_oauth_client,
-            user_context=user_context,
         )
 
         request_payload = {"jsonrpc": "2.0", "method": "test"}
@@ -159,33 +122,37 @@ class TestHeaderInjection:
             context=None,
         )
 
-        # Verify user context headers were added
-        assert modified_kwargs["headers"]["X-User-Id"] == "user-123"
-        assert modified_kwargs["headers"]["X-User-Email"] == "test@example.com"
-        assert modified_kwargs["headers"]["X-User-Name"] == "Test User"
-        # Verify auth header was added
-        assert modified_kwargs["headers"]["Authorization"] == "Bearer mock-jwt-token"
+        # Verify token exchange was called with orchestrator target
+        mock_oauth_client.exchange_token.assert_called_once_with(
+            subject_token="user-token",
+            target_client_id="orchestrator",
+            requested_scopes=["openid", "profile", "email"],
+        )
+        # Verify exchanged token was added to headers
+        assert modified_kwargs["headers"]["Authorization"] == "Bearer orchestrator-token"
 
     @pytest.mark.asyncio
-    async def test_jwt_auth_injects_sub_agent_id_header(self):
-        """Test that JWT auth adds sub_agent_id as HTTP header."""
-        from a2a.types import HTTPAuthSecurityScheme
-
-        http_scheme = HTTPAuthSecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
-
+    async def test_oidc_auth_exchanges_token_for_agent_creator_target(self):
+        """Test that agent-creator uses its own client ID as target."""
         agent_card = MockAgentCard(
-            name="test-agent",
+            name="agent-creator",
             url="https://example.com",
-            security_schemes={"test-jwt": MockSecuritySchemeWrapper(http_scheme)},
+            security_schemes={
+                "agent-creator": MockSecuritySchemeWrapper(
+                    MockSecurityScheme(
+                        scheme_type="openIdConnect",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
+                    )
+                )
+            },
         )
 
         mock_oauth_client = AsyncMock()
-        mock_oauth_client.get_token = AsyncMock(return_value="mock-jwt-token")
-
+        mock_oauth_client.exchange_token = AsyncMock(return_value="agent-creator-token")
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
             oauth2_client=mock_oauth_client,
-            sub_agent_id=42,
         )
 
         request_payload = {"jsonrpc": "2.0", "method": "test"}
@@ -199,10 +166,95 @@ class TestHeaderInjection:
             context=None,
         )
 
-        # Verify sub_agent_id header was added
-        assert modified_kwargs["headers"]["X-Sub-Agent-Id"] == "42"
-        # Verify auth header was added
-        assert modified_kwargs["headers"]["Authorization"] == "Bearer mock-jwt-token"
+        # Verify token exchange was called with agent-creator target
+        mock_oauth_client.exchange_token.assert_called_once_with(
+            subject_token="user-token",
+            target_client_id="agent-creator",
+            requested_scopes=["openid", "profile", "email"],
+        )
+        # Verify exchanged token was added to headers
+        assert modified_kwargs["headers"]["Authorization"] == "Bearer agent-creator-token"
+
+    @pytest.mark.asyncio
+    async def test_token_exchange_caches_per_target(self):
+        """Test that exchanged tokens are cached per target client ID."""
+        # First request to orchestrator target
+        agent_card_1 = MockAgentCard(
+            name="test-agent-1",
+            url="https://example.com",
+            security_schemes={
+                "oidc": MockSecuritySchemeWrapper(
+                    MockSecurityScheme(
+                        scheme_type="openIdConnect",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
+                    )
+                )
+            },
+        )
+
+        mock_oauth_client = AsyncMock()
+        mock_oauth_client.exchange_token = AsyncMock(side_effect=["orchestrator-token-1", "agent-creator-token-1"])
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
+
+        interceptor = SmartTokenInterceptor(
+            user_token="user-token",
+            oauth2_client=mock_oauth_client,
+        )
+
+        request_payload = {"jsonrpc": "2.0", "method": "test"}
+        http_kwargs = {}
+
+        # First call to orchestrator target
+        await interceptor.intercept(
+            method_name="test",
+            request_payload=request_payload,
+            http_kwargs=http_kwargs,
+            agent_card=agent_card_1,
+            context=None,
+        )
+
+        # Second call to same target (should use cache)
+        http_kwargs_2 = {}
+        await interceptor.intercept(
+            method_name="test",
+            request_payload=request_payload,
+            http_kwargs=http_kwargs_2,
+            agent_card=agent_card_1,
+            context=None,
+        )
+
+        # Should only call exchange_token once for orchestrator target
+        assert mock_oauth_client.exchange_token.call_count == 1
+
+        # Now call with agent-creator target
+        agent_card_2 = MockAgentCard(
+            name="agent-creator",
+            url="https://example.com",
+            security_schemes={
+                "agent-creator": MockSecuritySchemeWrapper(
+                    MockSecurityScheme(
+                        scheme_type="openIdConnect",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
+                    )
+                )
+            },
+        )
+
+        http_kwargs_3 = {}
+        await interceptor.intercept(
+            method_name="test",
+            request_payload=request_payload,
+            http_kwargs=http_kwargs_3,
+            agent_card=agent_card_2,
+            context=None,
+        )
+
+        # Should call exchange_token again for different target
+        assert mock_oauth_client.exchange_token.call_count == 2
+
+
+class TestSubAgentIdHeader:
+    """Test X-Sub-Agent-Id header injection."""
 
     @pytest.mark.asyncio
     async def test_oidc_auth_injects_sub_agent_id_header(self):
@@ -214,7 +266,7 @@ class TestHeaderInjection:
                 "test-oidc": MockSecuritySchemeWrapper(
                     MockSecurityScheme(
                         scheme_type="openIdConnect",
-                        open_id_connect_url="https://login.alloy.ch/realms/a2a/.well-known/openid-configuration",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
                     )
                 )
             },
@@ -222,6 +274,7 @@ class TestHeaderInjection:
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.exchange_token = AsyncMock(return_value="exchanged-token")
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
 
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
@@ -246,25 +299,27 @@ class TestHeaderInjection:
         assert modified_kwargs["headers"]["Authorization"] == "Bearer exchanged-token"
 
     @pytest.mark.asyncio
-    async def test_no_headers_injected_without_user_context_or_sub_agent_id(self):
-        """Test that no extra headers are added when user_context and sub_agent_id are not provided."""
-        from a2a.types import HTTPAuthSecurityScheme
-
-        http_scheme = HTTPAuthSecurityScheme(type="http", scheme="bearer", bearer_format="JWT")
-
+    async def test_no_sub_agent_id_header_when_not_provided(self):
+        """Test that no X-Sub-Agent-Id header is added when sub_agent_id is not provided."""
         agent_card = MockAgentCard(
             name="test-agent",
             url="https://example.com",
-            security_schemes={"test-jwt": MockSecuritySchemeWrapper(http_scheme)},
+            security_schemes={
+                "test-oidc": MockSecuritySchemeWrapper(
+                    MockSecurityScheme(
+                        scheme_type="openIdConnect",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
+                    )
+                )
+            },
         )
 
         mock_oauth_client = AsyncMock()
-        mock_oauth_client.get_token = AsyncMock(return_value="mock-jwt-token")
-
+        mock_oauth_client.exchange_token = AsyncMock(return_value="exchanged-token")
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
             oauth2_client=mock_oauth_client,
-            user_context=None,
             sub_agent_id=None,
         )
 
@@ -279,12 +334,15 @@ class TestHeaderInjection:
             context=None,
         )
 
-        # Verify only auth header was added, no user context or sub_agent_id headers
-        assert modified_kwargs["headers"]["Authorization"] == "Bearer mock-jwt-token"
-        assert "X-User-Id" not in modified_kwargs["headers"]
-        assert "X-User-Email" not in modified_kwargs["headers"]
-        assert "X-User-Name" not in modified_kwargs["headers"]
+        # Verify only auth header was added, no sub_agent_id header
+        assert modified_kwargs["headers"]["Authorization"] == "Bearer exchanged-token"
         assert "X-Sub-Agent-Id" not in modified_kwargs["headers"]
+
+
+# NOTE: User context headers (X-User-Id, X-User-Email, X-User-Name) are NO LONGER injected.
+# User context is now embedded in JWT claims (sub, email, name, groups) which are validated
+# by JWTValidatorMiddleware at the sub-agent. This eliminates the need for separate headers
+# and ensures user context is cryptographically verified.
 
 
 class TestInterceptIntegration:

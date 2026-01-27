@@ -21,33 +21,8 @@ langsmith_api_key: !vault |
   65306266646334323734643861313863656464326133306162626564373833343639623266343464
   363639303064653239386464626564646134
 
-oidc_domain: 'https://login.alloy.ch'
-oidc_client_id: 'web-client'
-oidc_issuer: '{{ oidc_domain }}/realms/a2a'
-chat_ui_oidc_client_secret: !vault |
-  $ANSIBLE_VAULT;1.1;AES256
-  32623131396434623930313261313066353964663261333630386538666134393735643962386539
-  6436303963393763616139393739663434303362663963310a326633356333623764353062393432
-  61616463633139663861336364313532323731663839303239316437306531373061376166366435
-  3265363731616431620a303966383233303364613237346464343034613037366364663737623332
-  61353939303739323530653665306665346133396163633036313239656530363638363961613162
-  6233626438306135383433336130353963313837653739393363
 
 ssmkey_vault_prefix: '/{{ project_id }}/{{ software_component }}/vault'
-ssmkey_chat_ui_oidc_client_secret: '/{{ project_id }}/{{ software_component }}/oidc-chat-ui-client-secret'
-## Orchestrator
-orchestrator_oidc_client_id: 'orchestrator'
-orchestrator_oidc_client_secret: !vault |
-  $ANSIBLE_VAULT;1.1;AES256
-  39356235373839383331373335383262633534383763366363353837383161653464363264643562
-  6235376365613430663465383564626361646235303037380a656335656264383237616237346665
-  66333466643534383938326662373732333535306232646231626532633033346436393236326234
-  6162363231613832330a323230633561353633663765646339613237643436316361323564386162
-  35333732336339323765316333346233343864333635663634306364376135663835323630616530
-  3632303431356335666431323131343762366562346637373164
-ssmkey_orchestrator_oidc_client_secret: '/{{ project_id }}/{{ software_component }}/oidc-orchestrator-client-secret'
-ssmkey_orchestrator_jwt_secret_key: '/{{ project_id }}/{{ software_component }}/orchestrator-jwt-secret-key'
-orchestrator_jwt_session_expiry_minutes: 15
 azure_openai_chat_deployment: 'chatgpt-4o'
 azure_openai_chat_model_name: 'gpt-4o'
 azure_openai_endpoint: 'https://rcplus-alloy-eu-prod.openai.azure.com'
@@ -240,3 +215,28 @@ gcp_key: !vault |
   30636665326230316462653565343836663661626336633537656435633166633035333831353231
   6136326137613266643236633138633739623263346432623634
 ssmkey_gcp_key: '/{{ project_id }}/{{ software_component }}/gcp-key'
+
+
+# == IDP ==
+
+## OIDC Configuration
+
+oidc_domain: 'https://login.p.nannos.rcplus.io'
+oidc_issuer: '{{ oidc_domain }}/realms/nannos'
+
+## MCP Gateway Configuration
+
+mcp_gateway_url: 'https://alloych.gatana.ai/mcp'
+mcp_gateway_client_id: 'gatana'
+
+keycloak_admin_client_id: 'nannos-admin'
+ssmkey_keycloak_admin_client_secret : '/{{ project_id }}/keycloak/nannos-admin-secret'
+
+orchestrator_oidc_client_id: 'orchestrator'
+ssmkey_orchestrator_oidc_client_secret: '/{{ project_id }}/keycloak/orchestrator-secret'
+
+agent_console_oidc_client_id: 'agent-console'
+ssmkey_agent_console_oidc_client_secret: '/{{ project_id }}/keycloak/agent-console-client-secret'
+
+agent_creator_oidc_client_id: 'agent-creator'
+ssmkey_agent_creator_oidc_client_secret: '/{{ project_id }}/keycloak/agent-creator-secret'

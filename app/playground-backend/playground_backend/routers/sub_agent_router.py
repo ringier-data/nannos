@@ -57,13 +57,18 @@ async def list_sub_agents(
 
     - Regular users see their own sub-agents + public sub-agents + those assigned to their groups
     - Admins (with admin mode enabled) see all sub-agents
+    - When impersonating, shows only what the impersonated user can see (not admin view)
     - Use `status` to filter by status (e.g., pending_approval for admin queue)
     - Use `owned_only=true` to see only owned sub-agents
     - Use `activated_only=true` to see only activated sub-agents (for orchestrator)
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        effective_admin = is_admin_mode(request, user)
+        # When impersonating, always use impersonated user's view (not admin view)
+        # Admin privileges are for operations, not for seeing everything the user sees
+        is_impersonating = hasattr(request.state, "original_user") and request.state.original_user
+        effective_admin = is_admin_mode(request, user) and not is_impersonating
+
         if owned_only:
             # Only show owned sub-agents
             sub_agents = await sub_agent_service.get_accessible_sub_agents(

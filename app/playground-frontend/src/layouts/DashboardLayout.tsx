@@ -18,6 +18,8 @@ import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { useAuth } from '@/contexts/AuthContext';
 import { mainNavItems, groupManagerNavItems, adminNavItems } from '@/config/navigation';
+import { NotificationInbox } from '@/components/notifications/NotificationInbox';
+import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -110,12 +112,14 @@ export function DashboardLayout() {
           <SidebarTrigger />
           <div className="flex-1" />
           <div className="flex items-center gap-2">
+            <NotificationInbox />
             <span className="text-sm text-muted-foreground">{user?.email}</span>
             <Button variant="ghost" size="icon" onClick={handleLogout} title="Logout">
               <LogOut className="h-4 w-4" />
             </Button>
           </div>
         </header>
+        <ImpersonationBanner />
         <main className="flex-1 overflow-y-auto">
           <Outlet />
         </main>

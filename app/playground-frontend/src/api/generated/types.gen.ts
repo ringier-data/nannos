@@ -5,6 +5,13 @@ export type ClientOptions = {
 };
 
 /**
+ * ActivationSource
+ *
+ * Activation source enum matching database enum.
+ */
+export type ActivationSource = 'user' | 'group' | 'admin';
+
+/**
  * AdminModeToggleRequest
  *
  * Request model for admin mode toggle.
@@ -37,7 +44,7 @@ export type AdminModeToggleResponse = {
  *
  * Audit action enum.
  */
-export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update';
+export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update' | 'impersonation_start' | 'impersonation_end';
 
 /**
  * AuditEntityType
@@ -291,6 +298,18 @@ export type GroupMemberListResponse = {
 };
 
 /**
+ * GroupMemberRemove
+ *
+ * Request to remove members from a group (bulk operation).
+ */
+export type GroupMemberRemove = {
+    /**
+     * User Ids
+     */
+    user_ids: Array<string>;
+};
+
+/**
  * GroupMemberUpdate
  *
  * Request to update a member's role.
@@ -307,6 +326,18 @@ export type HttpValidationError = {
      * Detail
      */
     detail?: Array<ValidationError>;
+};
+
+/**
+ * ImpersonateStartRequest
+ *
+ * Request model for starting user impersonation.
+ */
+export type ImpersonateStartRequest = {
+    /**
+     * Target User Id
+     */
+    target_user_id: string;
 };
 
 /**
@@ -371,6 +402,33 @@ export type MemberInfo = {
     last_name: string;
     group_role: RoleEnum;
 };
+
+/**
+ * NotificationListResponse
+ *
+ * Response model for listing notifications.
+ */
+export type NotificationListResponse = {
+    /**
+     * Items
+     */
+    items: Array<UserNotification>;
+    /**
+     * Total
+     */
+    total: number;
+    /**
+     * Unread Count
+     */
+    unread_count: number;
+};
+
+/**
+ * NotificationType
+ *
+ * Notification type enum matching database enum.
+ */
+export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_permission_changed' | 'group_added' | 'group_removed' | 'role_updated' | 'approval_requested' | 'approval_completed' | 'approval_rejected' | 'agent_shared' | 'agent_access_revoked' | 'secret_shared' | 'secret_access_revoked' | 'secret_permission_changed' | 'system_announcement';
 
 /**
  * OwnerStatus
@@ -737,6 +795,11 @@ export type SubAgent = {
      * Is Activated
      */
     is_activated?: boolean | null;
+    activated_by?: ActivationSource | null;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
     /**
      * Deleted At
      */
@@ -749,6 +812,18 @@ export type SubAgent = {
      * Updated At
      */
     updated_at?: string;
+};
+
+/**
+ * SubAgentAdd
+ *
+ * Request to add default sub-agents to a group.
+ */
+export type SubAgentAdd = {
+    /**
+     * Sub Agent Ids
+     */
+    sub_agent_ids: Array<number>;
 };
 
 /**
@@ -860,6 +935,10 @@ export type SubAgentConfigVersion = {
      */
     change_summary?: string | null;
     status?: SubAgentStatus;
+    /**
+     * Submitted By User Id
+     */
+    submitted_by_user_id?: string | null;
     /**
      * Approved By User Id
      */
@@ -1040,6 +1119,35 @@ export type SubAgentPermissionsUpdate = {
 };
 
 /**
+ * SubAgentRefWithStatus
+ *
+ * Sub-agent reference with status indicators for UI.
+ */
+export type SubAgentRefWithStatus = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    approval_status: SubAgentStatus;
+    /**
+     * Is Activated
+     */
+    is_activated: boolean;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
+    /**
+     * Is Default
+     */
+    is_default?: boolean;
+};
+
+/**
  * SubAgentSetDefaultVersion
  *
  * Request model for setting the default version.
@@ -1169,6 +1277,18 @@ export type SubAgentVersionApproval = {
      * Rejection Reason
      */
     rejection_reason?: string | null;
+};
+
+/**
+ * UnreadCountResponse
+ *
+ * Response model for unread notification count.
+ */
+export type UnreadCountResponse = {
+    /**
+     * Count
+     */
+    count: number;
 };
 
 /**
@@ -1536,6 +1656,10 @@ export type UserGroupWithMembers = {
      */
     description?: string | null;
     /**
+     * Keycloak Group Id
+     */
+    keycloak_group_id?: string | null;
+    /**
      * Deleted At
      */
     deleted_at?: string | null;
@@ -1581,6 +1705,45 @@ export type UserListResponse = {
      */
     data: Array<UserWithGroups>;
     meta: PaginationMeta;
+};
+
+/**
+ * UserNotification
+ *
+ * User notification model.
+ */
+export type UserNotification = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * User Id
+     */
+    user_id: string;
+    type: NotificationType;
+    /**
+     * Title
+     */
+    title: string;
+    /**
+     * Message
+     */
+    message: string;
+    /**
+     * Metadata
+     */
+    metadata?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Read At
+     */
+    read_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
 };
 
 /**
@@ -3087,6 +3250,43 @@ export type BulkUpdateUsersApiV1AdminUsersBulkPostResponses = {
 
 export type BulkUpdateUsersApiV1AdminUsersBulkPostResponse = BulkUpdateUsersApiV1AdminUsersBulkPostResponses[keyof BulkUpdateUsersApiV1AdminUsersBulkPostResponses];
 
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostData = {
+    body: ImpersonateStartRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/users/impersonate/start';
+};
+
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostError = StartImpersonationApiV1AdminUsersImpersonateStartPostErrors[keyof StartImpersonationApiV1AdminUsersImpersonateStartPostErrors];
+
+export type StartImpersonationApiV1AdminUsersImpersonateStartPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type StopImpersonationApiV1AdminUsersImpersonateStopPostData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/users/impersonate/stop';
+};
+
+export type StopImpersonationApiV1AdminUsersImpersonateStopPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
 export type ListGroupsApiV1AdminGroupsGetData = {
     body?: never;
     path?: never;
@@ -3473,40 +3673,6 @@ export type AddMembersApiV1GroupsGroupIdMembersPostResponses = {
 
 export type AddMembersApiV1GroupsGroupIdMembersPostResponse = AddMembersApiV1GroupsGroupIdMembersPostResponses[keyof AddMembersApiV1GroupsGroupIdMembersPostResponses];
 
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteData = {
-    body?: never;
-    path: {
-        /**
-         * Group Id
-         */
-        group_id: number;
-        /**
-         * User Id
-         */
-        user_id: string;
-    };
-    query?: never;
-    url: '/api/v1/groups/{group_id}/members/{user_id}';
-};
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteError = RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors[keyof RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteErrors];
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses = {
-    /**
-     * Successful Response
-     */
-    204: void;
-};
-
-export type RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponse = RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses[keyof RemoveMemberApiV1GroupsGroupIdMembersUserIdDeleteResponses];
-
 export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutData = {
     body: GroupMemberUpdate;
     path: {
@@ -3540,6 +3706,160 @@ export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses = {
 };
 
 export type UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponse = UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses[keyof UpdateMemberRoleApiV1GroupsGroupIdMembersUserIdPutResponses];
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostData = {
+    body: GroupMemberRemove;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/members/remove';
+};
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostError = RemoveMembersApiV1GroupsGroupIdMembersRemovePostErrors[keyof RemoveMembersApiV1GroupsGroupIdMembersRemovePostErrors];
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: GroupMemberListResponse;
+};
+
+export type RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponse = RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses[keyof RemoveMembersApiV1GroupsGroupIdMembersRemovePostResponses];
+
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/accessible-agents';
+};
+
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetError = GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetErrors[keyof GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetErrors];
+
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses = {
+    /**
+     * Response Get Group Accessible Agents Api V1 Groups  Group Id  Accessible Agents Get
+     *
+     * Successful Response
+     */
+    200: Array<SubAgentRefWithStatus>;
+};
+
+export type GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponse = GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses[keyof GetGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetResponses];
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutData = {
+    body: SubAgentAdd;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-agents';
+};
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutError = SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutErrors[keyof SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutErrors];
+
+export type SetGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-agents/{sub_agent_id}';
+};
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteError = RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteErrors[keyof RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteErrors];
+
+export type RemoveGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/groups/{group_id}/default-agents/{sub_agent_id}';
+};
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostError = AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostErrors[keyof AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostErrors];
+
+export type AddGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
 
 export type LogUsageApiV1UsageLogPostData = {
     body: UsageLogCreate;
@@ -4035,6 +4355,102 @@ export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses =
 };
 
 export type GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponse = GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses[keyof GetModelRatesApiV1AdminRateCardsModelProviderModelNameGetResponses];
+
+export type GetNotificationsApiV1NotificationsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Page
+         */
+        page?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+        /**
+         * Unread Only
+         */
+        unread_only?: boolean;
+    };
+    url: '/api/v1/notifications';
+};
+
+export type GetNotificationsApiV1NotificationsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetNotificationsApiV1NotificationsGetError = GetNotificationsApiV1NotificationsGetErrors[keyof GetNotificationsApiV1NotificationsGetErrors];
+
+export type GetNotificationsApiV1NotificationsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: NotificationListResponse;
+};
+
+export type GetNotificationsApiV1NotificationsGetResponse = GetNotificationsApiV1NotificationsGetResponses[keyof GetNotificationsApiV1NotificationsGetResponses];
+
+export type GetUnreadCountApiV1NotificationsUnreadCountGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/notifications/unread-count';
+};
+
+export type GetUnreadCountApiV1NotificationsUnreadCountGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: UnreadCountResponse;
+};
+
+export type GetUnreadCountApiV1NotificationsUnreadCountGetResponse = GetUnreadCountApiV1NotificationsUnreadCountGetResponses[keyof GetUnreadCountApiV1NotificationsUnreadCountGetResponses];
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutData = {
+    /**
+     * Request Body
+     */
+    body: {
+        [key: string]: unknown;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/notifications/mark-read';
+};
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutError = MarkNotificationsAsReadApiV1NotificationsMarkReadPutErrors[keyof MarkNotificationsAsReadApiV1NotificationsMarkReadPutErrors];
+
+export type MarkNotificationsAsReadApiV1NotificationsMarkReadPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/notifications/mark-all-read';
+};
+
+export type MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;

@@ -31,6 +31,7 @@ import {
   Unlock,
   Database,
   Key,
+  AlertTriangle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -38,6 +39,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import {
@@ -47,7 +49,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   Dialog,
   DialogContent,
@@ -97,7 +98,7 @@ export function SubAgentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user, adminMode } = useAuth();
+  const { user, adminMode, isImpersonating } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -347,8 +348,8 @@ export function SubAgentDetailPage() {
   // Users with write access through groups can also edit
   const canEdit = (isOwner || (isAdministrator && adminMode) || hasGroupWriteAccess) && !isViewingHistoricalVersion;
   const canDelete = isOwner || canApprove;
-  // Can submit if owner and current version is draft
-  const canSubmitForApproval = isOwner && currentVersionStatus === 'draft';
+  // Can submit if owner or has write access through groups, and current version is draft
+  const canSubmitForApproval = (isOwner || hasGroupWriteAccess) && currentVersionStatus === 'draft';
   
   // Get displayed data based on whether viewing historical version
   const displayedDescription = isViewingHistoricalVersion 
@@ -483,7 +484,7 @@ export function SubAgentDetailPage() {
         setEditRateCardEntries(
           pricingConfig.rate_card_entries.map((e: any) => ({
             billing_unit: e.billing_unit,
-            price_per_million: e.price_per_million.toString()
+            price_per_million: e.price_per_million != null ? e.price_per_million.toString() : ''
           }))
         );
       } else {
@@ -1617,21 +1618,31 @@ export function SubAgentDetailPage() {
 
           {/* Input */}
           <div className="p-3 border-t border-border shrink-0">
-            <div className="flex gap-2">
-              <Textarea
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onFocus={() => setActiveFocusArea('chat')}
-                onBlur={() => setActiveFocusArea(null)}
-                placeholder="Type a message to test..."
-                className="min-h-[44px] max-h-32 resize-none bg-background"
-                rows={1}
-              />
-              <Button onClick={handleSendMessage} disabled={!inputValue.trim() || isLoading} className="shrink-0">
-                <Send className="h-4 w-4" />
-              </Button>
-            </div>
+            {isImpersonating ? (
+              <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
+                <AlertTriangle className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="text-amber-600 text-xs">
+                  Playground chat is unavailable while impersonating. Chat requires the user's access token.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <div className="flex gap-2">
+                <Textarea
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  onFocus={() => setActiveFocusArea('chat')}
+                  onBlur={() => setActiveFocusArea(null)}
+                  placeholder="Type a message to test..."
+                  className="min-h-[44px] max-h-32 resize-none bg-background"
+                  rows={1}
+                  disabled={isImpersonating}
+                />
+                <Button onClick={handleSendMessage} disabled={!inputValue.trim() || isLoading || isImpersonating} className="shrink-0">
+                  <Send className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
           </div>
         </div>
 

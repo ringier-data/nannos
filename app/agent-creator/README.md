@@ -26,7 +26,7 @@ The Agent Creator acts as an expert consultant that guides users through:
 - **LLM**: Claude Sonnet 4.5 via AWS Bedrock
 - **Tools**: MCP (Model Context Protocol) tools from playground backend
 - **Checkpointing**: DynamoDB with S3 offload for conversation persistence
-- **Authentication**: JWT bearer tokens via OrchestratorJWTMiddleware
+- **Authentication**: JWT bearer tokens via JWTValidatorMiddleware (validates orchestrator tokens)
 
 ## Available MCP Tools
 

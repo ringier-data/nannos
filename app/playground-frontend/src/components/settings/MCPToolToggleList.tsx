@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Search, Wrench, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react';
+import { Search, Wrench, AlertCircle, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
 import { playgroundListMcpToolsOptions } from '@/api/generated/@tanstack/react-query.gen';
 import type { McpTool, McpToolsResponse } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
@@ -16,6 +16,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface MCPToolToggleListProps {
   /** Currently enabled tool names */
@@ -67,6 +68,7 @@ function formatSignature(params: ParameterInfo[]): string {
 }
 
 export function MCPToolToggleList({ value = [], onChange, disabled = false }: MCPToolToggleListProps) {
+  const { isImpersonating } = useAuth();
   const [activeTab, setActiveTab] = useState<FilterTab>(() => value.length > 0 ? 'enabled' : 'all');
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
@@ -224,6 +226,15 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Failed to load MCP tools</AlertTitle>
           <AlertDescription>{getErrorMessage(error)}</AlertDescription>
+        </Alert>
+      ) : allTools.length === 0 && isImpersonating ? (
+        <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <AlertTitle className="text-amber-600">MCP Tools Unavailable During Impersonation</AlertTitle>
+          <AlertDescription className="text-amber-600">
+            MCP tools require the user's access token which is not available during impersonation.
+            Stop impersonating to view and manage MCP tools.
+          </AlertDescription>
         </Alert>
       ) : filteredTools.length === 0 ? (
         <div className="text-center py-12 border rounded-lg">

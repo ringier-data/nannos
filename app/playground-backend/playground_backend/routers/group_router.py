@@ -1,11 +1,8 @@
 """Group management router for non-admin users."""
 
-from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.session import get_db_session
+from ..db.session import DbSession
 from ..dependencies import (
     require_auth,
     require_group_admin_or_admin,
@@ -16,16 +13,17 @@ from ..models.user import PaginationMeta, User
 from ..models.user_group import (
     GroupMemberAdd,
     GroupMemberListResponse,
+    GroupMemberRemove,
     GroupMemberUpdate,
     MemberInfo,
+    SubAgentAdd,
+    SubAgentRefWithStatus,
     UserGroupDetailResponse,
     UserGroupWithMembers,
 )
 from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/groups", tags=["groups"])
-
-DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 def get_user_group_service(request: Request) -> UserGroupService:
@@ -70,7 +68,7 @@ async def get_group(
     """
     user_group_service = get_user_group_service(request)
     # Check if user is a member (or admin)
-    await require_group_member(request, group_id, db)
+    await require_group_member(request, group_id, db, user)
 
     group = await user_group_service.get_group_with_members(db, group_id)
 
@@ -136,7 +134,7 @@ async def add_members(
     """
     user_group_service = get_user_group_service(request)
     # Check permission
-    await require_group_member_management_permission(request, group_id, db)
+    await require_group_member_management_permission(request, group_id, db, user)
 
     # Verify group exists
     group = await user_group_service.get_group(db, group_id)
@@ -176,7 +174,7 @@ async def update_member_role(
     """
     user_group_service = get_user_group_service(request)
     # Check permission
-    await require_group_member_management_permission(request, group_id, db)
+    await require_group_member_management_permission(request, group_id, db, user)
 
     # Verify group exists
     group = await user_group_service.get_group(db, group_id)
@@ -205,22 +203,23 @@ async def update_member_role(
     return member
 
 
-@router.delete("/{group_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_member(
+@router.post("/{group_id}/members/remove", response_model=GroupMemberListResponse)
+async def remove_members(
     group_id: int,
-    user_id: str,
     request: Request,
+    request_body: GroupMemberRemove,
     db: DbSession,
     user: User = Depends(require_auth),
-) -> None:
-    """Remove a member from a group.
+) -> GroupMemberListResponse:
+    """Remove multiple members from a group (bulk operation).
 
     Requires group manager role or system admin.
-    Cannot remove the last manager.
+    Cannot remove all managers.
+    All members must exist or operation fails.
     """
     user_group_service = get_user_group_service(request)
     # Check permission
-    await require_group_member_management_permission(request, group_id, db)
+    await require_group_member_management_permission(request, group_id, db, user)
 
     # Verify group exists
     group = await user_group_service.get_group(db, group_id)
@@ -231,22 +230,172 @@ async def remove_member(
         )
 
     try:
-        success = await user_group_service.remove_member(
+        members = await user_group_service.remove_members(
             db,
             actor_sub=user.sub,
             group_id=group_id,
-            user_id=user_id,
+            user_ids=request_body.user_ids,
         )
-
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Member not found in group",
-            )
-
         await db.commit()
+
+        return GroupMemberListResponse(
+            data=members,
+            meta=PaginationMeta(page=1, limit=len(members), total=len(members)),
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+
+
+@router.get("/{group_id}/accessible-agents", response_model=list[SubAgentRefWithStatus])
+async def get_group_accessible_agents(
+    group_id: int,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> list[SubAgentRefWithStatus]:
+    """Get all accessible approved agents for a group with default flags and status.
+
+    Returns ALL approved agents that the group has permission to access, with indicators:
+    - approval_status: approval status of the agent
+    - is_default: whether this agent is set as a default for automatic activation
+    - is_activated: whether the agent is currently activated for the user
+    - activated_by_groups: list of group IDs that activated this agent
+
+    Requires group member role.
+    """
+    user_group_service = get_user_group_service(request)
+    await require_group_member(request, group_id, db, user)
+
+    # Verify group exists
+    group = await user_group_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        )
+
+    sub_agents = await user_group_service.get_group_accessible_agents(
+        db=db,
+        group_id=group_id,
+        user_id=user.id,
+    )
+
+    return sub_agents
+
+
+@router.put("/{group_id}/default-agents")
+async def set_group_default_agents(
+    group_id: int,
+    request: Request,
+    db: DbSession,
+    request_body: SubAgentAdd,
+    user: User = Depends(require_auth),
+):
+    """Set (replace) default agents for a group (bulk operation).
+
+    Requires group manager role or system admin.
+    Validates that all agents are approved and group has permissions.
+    """
+    user_group_service = get_user_group_service(request)
+    await require_group_member_management_permission(request, group_id, db, user)
+
+    sub_agent_ids = request_body.sub_agent_ids
+
+    try:
+        await user_group_service.set_group_default_agents(
+            db=db,
+            group_id=group_id,
+            sub_agent_ids=sub_agent_ids,
+            actor_sub=user.sub,
+        )
+        await db.commit()
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post("/{group_id}/default-agents/{sub_agent_id}")
+async def add_group_default_agent(
+    group_id: int,
+    sub_agent_id: int,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+):
+    """Add a single default agent to a group.
+
+    Requires group manager role or system admin.
+    Validates that the agent is approved and group has permissions.
+    Activates the agent for all existing group members.
+    """
+    user_group_service = get_user_group_service(request)
+    await require_group_member_management_permission(request, group_id, db, user)
+
+    # Verify group exists
+    group = await user_group_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        )
+
+    try:
+        await user_group_service.add_group_default_agent(
+            db=db,
+            group_id=group_id,
+            sub_agent_id=sub_agent_id,
+            actor_sub=user.sub,
+        )
+        await db.commit()
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.delete("/{group_id}/default-agents/{sub_agent_id}")
+async def remove_group_default_agent(
+    group_id: int,
+    sub_agent_id: int,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+):
+    """Remove a single default agent from a group.
+
+    Requires group manager role or system admin.
+    Deactivates the agent for all group members.
+    """
+    user_group_service = get_user_group_service(request)
+    await require_group_member_management_permission(request, group_id, db, user)
+
+    # Verify group exists
+    group = await user_group_service.get_group(db, group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        )
+
+    try:
+        await user_group_service.remove_group_default_agent(
+            db=db,
+            group_id=group_id,
+            sub_agent_id=sub_agent_id,
+            actor_sub=user.sub,
+        )
+        await db.commit()
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )

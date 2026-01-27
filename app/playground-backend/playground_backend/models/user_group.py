@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .sub_agent import SubAgentStatus
 from .user import PaginationMeta
 
 
@@ -14,6 +15,7 @@ class UserGroup(BaseModel):
     id: int
     name: str
     description: str | None = None
+    keycloak_group_id: str | None = None  # Keycloak group ID for one-way sync
     deleted_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -82,6 +84,12 @@ class GroupMemberUpdate(BaseModel):
     role: Literal["read", "write", "manager"]
 
 
+class GroupMemberRemove(BaseModel):
+    """Request to remove members from a group (bulk operation)."""
+
+    user_ids: list[str]
+
+
 class BulkGroupDelete(BaseModel):
     """Request to delete multiple groups."""
 
@@ -124,3 +132,25 @@ class BulkGroupDeleteResponse(BaseModel):
     """Response for bulk group deletion."""
 
     data: list[BulkDeleteResult]
+
+
+class SubAgentRef(BaseModel):
+    """Basic reference to a sub-agent."""
+
+    id: int
+    name: str
+
+
+class SubAgentRefWithStatus(SubAgentRef):
+    """Sub-agent reference with status indicators for UI."""
+
+    approval_status: SubAgentStatus  # draft, pending_approval, approved, rejected
+    is_activated: bool  # Whether currently activated for the user
+    activated_by_groups: list[int] | None = None  # Which groups activated it
+    is_default: bool = False  # Whether this agent is a default for the group
+
+
+class SubAgentAdd(BaseModel):
+    """Request to add default sub-agents to a group."""
+
+    sub_agent_ids: list[int]

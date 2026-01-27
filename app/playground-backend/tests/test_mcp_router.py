@@ -24,7 +24,10 @@ class TestListMcpTools:
         request.state.access_token = "valid_user_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         request.state.refresh_token = "valid_refresh_token"
-        request.headers = {}  # No Authorization header
+        # No impersonation
+        request.state.original_user = None
+        # Mock headers.get() method
+        request.headers.get = MagicMock(return_value=None)  # No Authorization header
         return request
 
     @pytest.fixture
@@ -72,7 +75,7 @@ class TestListMcpTools:
         }
 
     @pytest.mark.asyncio
-    async def test_successful_token_exchange_and_tool_fetch(self, mock_request, mock_user, sample_mcp_response, client):
+    async def test_successful_token_exchange_and_tool_fetch(self, mock_request, mock_user, sample_mcp_response):
         """Test successful flow: token exchange → MCP request → parse tools."""
         with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             # Mock OAuth2 client
@@ -98,7 +101,7 @@ class TestListMcpTools:
                 # Verify token exchange
                 mock_oauth.exchange_token.assert_awaited_once_with(
                     subject_token="valid_user_token",
-                    target_client_id="mcp-gateway",
+                    target_client_id="gatana",
                     requested_scopes=["openid", "profile", "offline_access"],
                 )
 
@@ -150,7 +153,8 @@ class TestListMcpTools:
         """Test that missing access token raises 401."""
         request = MagicMock()
         request.state.access_token = None
-        request.headers = {}
+        request.state.original_user = None
+        request.headers.get = MagicMock(return_value=None)  # No Authorization header
 
         with pytest.raises(HTTPException) as exc_info:
             await list_mcp_tools(request, mock_user)
@@ -166,7 +170,8 @@ class TestListMcpTools:
         request.state.access_token = "expired_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
         request.state.refresh_token = "valid_refresh_token"
-        request.headers = {}
+        request.state.original_user = None
+        request.headers.get = MagicMock(return_value=None)  # No Authorization header
 
         with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             # Create two separate mock instances for refresh and exchange
@@ -204,7 +209,7 @@ class TestListMcpTools:
                 # Verify token exchange used refreshed token
                 mock_oauth_exchange.exchange_token.assert_awaited_once_with(
                     subject_token="refreshed_token",
-                    target_client_id="mcp-gateway",
+                    target_client_id="gatana",
                     requested_scopes=["openid", "profile", "offline_access"],
                 )
 
@@ -217,7 +222,8 @@ class TestListMcpTools:
         request.state.access_token = "expired_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
         request.state.refresh_token = "invalid_refresh_token"
-        request.headers = {}
+        request.state.original_user = None
+        request.headers.get = MagicMock(return_value=None)  # No Authorization header
 
         with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
@@ -237,7 +243,8 @@ class TestListMcpTools:
         request.state.access_token = "expired_token"
         request.state.access_token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=10)
         request.state.refresh_token = None
-        request.headers = {}
+        request.state.original_user = None
+        request.headers.get = MagicMock(return_value=None)  # No Authorization header
 
         with pytest.raises(HTTPException) as exc_info:
             await list_mcp_tools(request, mock_user)

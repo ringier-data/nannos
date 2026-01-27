@@ -187,6 +187,7 @@ class OrchestratorDeepAgent:
             "user_id": user_config.user_id,
             "email": user_config.email,
             "name": user_config.name,
+            "groups": user_config.groups,
         }
         sub_agents = await self.agent_discovery_service.register_agents(
             agent_metadata=user.agent_metadata,  # Pass metadata with sub_agent_id

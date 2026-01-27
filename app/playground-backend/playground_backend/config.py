@@ -81,6 +81,23 @@ class OrchestratorConfig(BaseModel):
         return self.environment == "prod"
 
 
+class KeycloakAdminConfig(BaseModel):
+    """Keycloak Admin API configuration for group synchronization."""
+
+    admin_client_id: str = Field(default_factory=lambda: os.getenv("KEYCLOAK_ADMIN_CLIENT_ID", ""))
+    admin_client_secret: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("KEYCLOAK_ADMIN_CLIENT_SECRET", ""))
+    )
+    group_name_prefix: str = Field(default_factory=lambda: os.getenv("KEYCLOAK_GROUP_NAME_PREFIX", ""))
+
+
+class MCPGatewayConfig(BaseModel):
+    """MCP Gateway configuration for tool discovery."""
+
+    url: str = Field(default_factory=lambda: os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp"))
+    client_id: str = Field(default_factory=lambda: os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana"))
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -94,6 +111,8 @@ class Config(BaseModel):
     dynamodb: DynamoDBConfig = Field(default_factory=DynamoDBConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)
+    mcp_gateway: MCPGatewayConfig = Field(default_factory=MCPGatewayConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"

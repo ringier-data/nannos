@@ -53,11 +53,11 @@ class BaseAgentExecutor(AgentExecutor, ABC):
         """Execute the agent task.
 
         Authentication:
-        - User identity is validated by OrchestratorJWTMiddleware before this method is called
-        - Only authenticated requests with valid orchestrator JWTs can reach this point
+        - User identity is validated by JWTValidatorMiddleware before this method is called
+        - Only authenticated requests with valid JWTs can reach this point
         - User info is available in request.state.user (set by middleware) but not directly
           accessible here since A2A SDK abstracts the request layer
-        - User context is extracted from message metadata by UserContextFromMetadataMiddleware
+        - User context is extracted from request.state.user by UserContextFromRequestStateMiddleware
 
         Args:
             context: Request context with user information

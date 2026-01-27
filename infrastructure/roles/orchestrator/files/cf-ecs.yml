@@ -44,7 +44,6 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_openai_api_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_langsmith_api_key }}'
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_jwt_secret_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_docstore_password }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_gcp_key }}'
@@ -221,7 +220,8 @@ Resources:
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
-            - { Name: 'JWT_SESSION_EXPIRY_MINUTES', Value: '{{ orchestrator_jwt_session_expiry_minutes }}' }
+            - { Name: 'MCP_GATEWAY_URL', Value: '{{ mcp_gateway_url }}' }
+            - { Name: 'MCP_GATEWAY_CLIENT_ID', Value: '{{ mcp_gateway_client_id }}' }
             - {
                 Name: POSTGRES_HOST,
                 Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",
@@ -253,7 +253,6 @@ Resources:
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
-            - { Name: 'JWT_SECRET_KEY', ValueFrom: '{{ ssmkey_orchestrator_jwt_secret_key }}' }
             - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_oidc_client_secret }}' }
             - { Name: 'POSTGRES_PASSWORD', ValueFrom: '{{ ssmkey_rds_docstore_password }}' }
             - { Name: "GCP_KEY", ValueFrom: '{{ ssmkey_gcp_key }}' }

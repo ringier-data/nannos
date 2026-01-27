@@ -42,9 +42,10 @@ Resources:
                   - 'ssm:GetParameter'
                   - 'ssm:GetParameters'
                 Resource:
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_oidc_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_agent_console_oidc_client_secret }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_chat_ui_secret_key }}'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_service_password }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_keycloak_admin_client_secret }}'
               - Sid: "GetProjectSsmParams"
                 Effect: "Allow"
                 Action:
@@ -197,7 +198,7 @@ Resources:
             - { Name: "DYNAMODB_CONVERSATIONS_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-conversations-table-name' }
             - { Name: "DYNAMODB_MESSAGES_TABLE", Value: !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-messages-table-name' }
             - { Name: "API_PORT", Value: "{{ chat_ui_public_api_port }}" }
-            - { Name: "OIDC_CLIENT_ID", Value: '{{ oidc_client_id }}' }
+            - { Name: "OIDC_CLIENT_ID", Value: '{{ agent_console_oidc_client_id }}' }
             - { Name: "OIDC_ISSUER", Value: '{{ oidc_issuer }}' }
             - { Name: "BASE_DOMAIN", Value: '{{ chat_ui_fqdn }}' }
             - { Name: "ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
@@ -215,10 +216,15 @@ Resources:
             - { Name: POSTGRES_VERIFY_SSL, Value: "true" }
             - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
             - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
+            - { Name: "MCP_GATEWAY_URL", Value: '{{ mcp_gateway_url }}' }
+            - { Name: "MCP_GATEWAY_CLIENT_ID", Value: '{{ mcp_gateway_client_id }}' }
+            - { Name: "KEYCLOAK_ADMIN_CLIENT_ID", Value: '{{ keycloak_admin_client_id }}' }
+            - { Name: "KEYCLOAK_GROUP_NAME_PREFIX", Value: '{{ keycloak_group_name_prefix }}' }
           Secrets:
-            - { Name: "OIDC_CLIENT_SECRET", ValueFrom: '{{ ssmkey_chat_ui_oidc_client_secret }}' }
+            - { Name: "OIDC_CLIENT_SECRET", ValueFrom: '{{ ssmkey_agent_console_oidc_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
             - { Name: "POSTGRES_PASSWORD", ValueFrom: '{{ ssmkey_rds_service_password }}' }
+            - { Name: "KEYCLOAK_ADMIN_CLIENT_SECRET", ValueFrom: '{{ ssmkey_keycloak_admin_client_secret }}' }
             - {
                 Name: "POSTGRES_SSL_CA",
                 ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",

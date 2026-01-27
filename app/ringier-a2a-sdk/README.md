@@ -40,10 +40,11 @@ A Python SDK for building authenticated agent-to-agent communication systems usi
 
 ### Middleware (`ringier_a2a_sdk.middleware`)
 
-- `OrchestratorJWTMiddleware`: Validate orchestrator JWT tokens (fail-fast)
-- `UserContextFromMetadataMiddleware`: Extract user context from A2A message metadata
-- `OidcUserinfoMiddleware`: Alternative user token validation via userinfo endpoint
-- `session_jwt`: Session JWT utilities
+- `JWTValidatorMiddleware`: JWT token validation via local JWKS-based validation
+  - Validates both user tokens and orchestrator exchanged tokens
+  - Configure `expected_azp` to require tokens from specific client (e.g., orchestrator)
+  - Configure `expected_aud` to require tokens targeted for specific audience
+- `UserContextFromRequestStateMiddleware`: Extract user context from request.state.user (set by JWTValidatorMiddleware)
 
 ### Agent (`ringier_a2a_sdk.agent`)
 
@@ -132,8 +133,8 @@ class MyAgent(BaseAgent):
 from a2a.server.starlette import A2AServer
 from a2a.types import HTTPAuthSecurityScheme
 from ringier_a2a_sdk.middleware import (
-    OrchestratorJWTMiddleware,
-    UserContextFromMetadataMiddleware,
+    JWTValidatorMiddleware,
+    UserContextFromRequestStateMiddleware,
 )
 from ringier_a2a_sdk.server import AuthRequestContextBuilder, BaseAgentExecutor
 import os
@@ -154,7 +155,7 @@ server = A2AServer(
             type="http",
             scheme="bearer",
             bearer_format="JWT",
-            description="Orchestrator JWT authentication"
+            description="JWT authentication via orchestrator"
         )
     ],
     scopes=[],
@@ -163,30 +164,29 @@ server = A2AServer(
 app = server.build()
 
 # Add middleware (order matters: bottom-to-top for requests)
-app.add_middleware(UserContextFromMetadataMiddleware)
+app.add_middleware(UserContextFromRequestStateMiddleware)
 app.add_middleware(
-    OrchestratorJWTMiddleware,
+    JWTValidatorMiddleware,
     issuer=os.getenv("OIDC_ISSUER"),
-    expected_azp=os.getenv("ORCHESTRATOR_CLIENT_ID"),
-    expected_aud=os.getenv("AGENT_CLIENT_ID"),
+    expected_azp=os.getenv("ORCHESTRATOR_CLIENT_ID"),  # Require tokens from orchestrator
+    expected_aud=os.getenv("AGENT_CLIENT_ID"),  # Require tokens targeted for this agent
 )
 ```
 
-### Agent with Orchestrator JWT Authentication (Legacy)
+### Alternative Configuration: Sub-Agent with Required Orchestrator Authentication
 
 ```python
-from ringier_a2a_sdk.middleware import OrchestratorJWTMiddleware, UserContextFromMetadataMiddleware
-from a2a.server.apps import A2AFastAPIApplication
+from ringier_a2a_sdk.middleware import JWTValidatorMiddleware, UserContextFromRequestStateMiddleware
 import os
 
-# Configure middleware
+# Configure middleware to require tokens from orchestrator
 app = server.build()
-app.add_middleware(UserContextFromMetadataMiddleware)
+app.add_middleware(UserContextFromRequestStateMiddleware)
 app.add_middleware(
-    OrchestratorJWTMiddleware,
+    JWTValidatorMiddleware,
     issuer=os.getenv("OIDC_ISSUER"),
-    expected_azp=os.getenv("ORCHESTRATOR_CLIENT_ID"),
-    expected_aud=os.getenv("AGENT_CLIENT_ID")
+    expected_azp=os.getenv("ORCHESTRATOR_CLIENT_ID"),  # REQUIRED: Ensures tokens from orchestrator only
+    expected_aud=os.getenv("AGENT_CLIENT_ID")  # Optional: Validates audience claim
 )
 ```
 

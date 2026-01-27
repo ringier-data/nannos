@@ -48,6 +48,7 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
 from ..a2a_utils.models import LocalLangGraphSubAgentConfig
 from ..middleware import RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware
+from ..models.config import AgentSettings
 from ..utils import get_language_display_name
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         sub_agent_id: Optional[int] = None,
         store: Optional[AsyncPostgresStore] = None,
         backend_factory: Optional[Any] = None,
-        agent_settings: Optional[Any] = None,
+        agent_settings: Optional[AgentSettings] = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -214,7 +215,10 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         self.custom_prompt = custom_prompt
         self.store = store
         self.backend_factory = backend_factory
-        self.agent_settings = agent_settings
+        if agent_settings is None:
+            self.agent_settings = AgentSettings()
+        else:
+            self.agent_settings = agent_settings
         self._agent = None
         self._discovered_tools: Optional[List[BaseTool]] = None
 
@@ -290,10 +294,12 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
         Raises:
             Exception: If MCP discovery fails (will result in failed state)
         """
-        # Gatana MCP gateway URL (hardcoded - no longer configurable per sub-agent)
-        mcp_gateway_url = "https://alloych.gatana.ai/mcp"
 
-        logger.info(f"Discovering MCP tools for {self.name} from Gatana gateway")
+        # Get MCP gateway config from AgentSettings
+        mcp_gateway_url = self.agent_settings.MCP_GATEWAY_URL
+        mcp_gateway_client_id = self.agent_settings.MCP_GATEWAY_CLIENT_ID
+
+        logger.info(f"Discovering MCP tools for {self.name} from MCP gateway at {mcp_gateway_url}")
 
         try:
             # Build connection headers - use token exchange if oauth2_client is available
@@ -304,7 +310,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
                 logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
                 mcp_gateway_token = await self.oauth2_client.exchange_token(
                     subject_token=self.user_token,
-                    target_client_id="mcp-gateway",
+                    target_client_id=mcp_gateway_client_id,
                     requested_scopes=["openid", "profile", "offline_access"],
                 )
                 headers["Authorization"] = f"Bearer {mcp_gateway_token}"
@@ -317,7 +323,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
             client = MultiServerMCPClient(
                 connections={
-                    "gatana": StreamableHttpConnection(
+                    mcp_gateway_client_id: StreamableHttpConnection(
                         transport="streamable_http",
                         url=mcp_gateway_url,
                         headers=headers if headers else None,
@@ -425,7 +431,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             logger.debug(f"Using orchestrator backend factory for {self.name}")
         else:
             # Fallback to simple StateBackend (ephemeral only, no persistence)
-            backend = lambda rt: StateBackend(rt)
+            backend = lambda rt: StateBackend(rt)  # noqa: E731
             logger.debug(f"Using simple StateBackend for {self.name} (no persistence)")
 
         # Create middleware list with FilesystemMiddleware

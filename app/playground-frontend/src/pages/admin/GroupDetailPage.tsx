@@ -10,9 +10,11 @@ import {
   updateGroupApiV1AdminGroupsGroupIdPutMutation,
   listMembersApiV1GroupsGroupIdMembersGetOptions,
   addMembersApiV1GroupsGroupIdMembersPostMutation,
-  removeMemberApiV1GroupsGroupIdMembersUserIdDeleteMutation,
+  removeMembersApiV1GroupsGroupIdMembersRemovePostMutation,
   updateMemberRoleApiV1GroupsGroupIdMembersUserIdPutMutation,
   listUsersApiV1AdminUsersGetOptions,
+  getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
+  setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { RoleEnum } from '@/api/generated';
 import { Button } from '@/components/ui/button';
@@ -45,7 +47,6 @@ import {
 } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { Pagination } from '@/components/admin/Pagination';
 
 export function GroupDetailPage() {
@@ -65,11 +66,7 @@ export function GroupDetailPage() {
   const [selectedUsersToAdd, setSelectedUsersToAdd] = useState<Set<string>>(new Set());
   const [newMemberRole, setNewMemberRole] = useState<RoleEnum>('read');
 
-  const [removeMemberDialog, setRemoveMemberDialog] = useState<{
-    open: boolean;
-    userId: string;
-    userName: string;
-  } | null>(null);
+  const [selectedMembersToRemove, setSelectedMembersToRemove] = useState<Set<string>>(new Set());
 
   const [membersPage, setMembersPage] = useState(1);
 
@@ -105,6 +102,14 @@ export function GroupDetailPage() {
       query: { limit: 100 },
     }),
     enabled: addMemberDialogOpen,
+  });
+
+  // Accessible agents queries
+  const { data: defaultAgentsData, isLoading: defaultAgentsLoading } = useQuery({
+    ...getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
+      path: { group_id: groupId },
+    }),
+    enabled: !isNaN(groupId),
   });
 
   const updateMutation = useMutation({
@@ -152,10 +157,11 @@ export function GroupDetailPage() {
     },
   });
 
-  const removeMemberMutation = useMutation({
-    ...removeMemberApiV1GroupsGroupIdMembersUserIdDeleteMutation(),
+  const removeMembersMutation = useMutation({
+    ...removeMembersApiV1GroupsGroupIdMembersRemovePostMutation(),
     onSuccess: () => {
-      toast.success('Member removed successfully');
+      toast.success(`Removed ${selectedMembersToRemove.size} member(s)`);
+      setSelectedMembersToRemove(new Set());
       queryClient.invalidateQueries({ 
         queryKey: listMembersApiV1GroupsGroupIdMembersGetOptions({
           path: { group_id: groupId },
@@ -169,7 +175,13 @@ export function GroupDetailPage() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to remove member';
+      const detail = error?.response?.data?.detail || error?.detail || error?.message;
+      let message = 'Failed to remove members';
+      
+      if (detail) {
+        message = detail;
+      }
+      
       toast.error(message);
     },
   });
@@ -191,12 +203,31 @@ export function GroupDetailPage() {
     },
   });
 
+  const addDefaultAgentsMutation = useMutation({
+    ...setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation(),
+    onSuccess: () => {
+      toast.success('Default agent status updated');
+      queryClient.invalidateQueries({
+        queryKey: getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions({
+          path: { group_id: groupId },
+        }).queryKey,
+      });
+    },
+    onError: (error: any) => {
+      const message = error?.response?.data?.detail || 'Failed to update default agent';
+      toast.error(message);
+    },
+  });
+
   const group = groupData?.data;
   const members = membersData?.data ?? [];
   const membersMeta = membersData?.meta ?? { page: 1, limit: 20, total: 0 };
   const allUsers = usersData?.data ?? [];
   const memberUserIds = new Set(members.map((m) => m.user_id));
   const availableUsers = allUsers.filter((u) => !memberUserIds.has(u.id));
+
+  const accessibleAgents = defaultAgentsData ?? [];
+  const defaultAgents = accessibleAgents.filter((a: any) => a.is_default);
 
   const startEditing = () => {
     if (!group) return;
@@ -226,18 +257,34 @@ export function GroupDetailPage() {
     });
   };
 
-  const handleRemoveMember = () => {
-    if (!removeMemberDialog) return;
-    removeMemberMutation.mutate({
-      path: { group_id: groupId, user_id: removeMemberDialog.userId },
+  const handleRemoveSelectedMembers = () => {
+    if (selectedMembersToRemove.size === 0) return;
+    removeMembersMutation.mutate({
+      path: { group_id: groupId },
+      body: {
+        user_ids: Array.from(selectedMembersToRemove),
+      },
     });
-    setRemoveMemberDialog(null);
   };
 
   const handleRoleChange = (userId: string, role: RoleEnum) => {
     updateRoleMutation.mutate({
       path: { group_id: groupId, user_id: userId },
       body: { role },
+    });
+  };
+
+  const handleToggleDefault = (agentId: number, currentlyDefault: boolean) => {
+    const currentDefaultIds = defaultAgents.map((a: any) => a.id);
+    const newDefaultIds = currentlyDefault
+      ? currentDefaultIds.filter((id) => id !== agentId)  // Remove from defaults
+      : [...currentDefaultIds, agentId];  // Add to defaults
+    
+    addDefaultAgentsMutation.mutate({
+      path: { group_id: groupId },
+      body: {
+        sub_agent_ids: newDefaultIds,
+      },
     });
   };
 
@@ -352,25 +399,115 @@ export function GroupDetailPage() {
       )}
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader>
           <div>
-            <CardTitle>Members</CardTitle>
-            <CardDescription>Manage group membership</CardDescription>
+            <CardTitle>Accessible Agents</CardTitle>
+            <CardDescription>
+              All approved agents this group can access. Toggle to set as default for new members.
+            </CardDescription>
           </div>
-          <Button onClick={() => setAddMemberDialogOpen(true)}>
-            <UserPlus className="h-4 w-4 mr-2" />
-            Add Members
-          </Button>
         </CardHeader>
         <CardContent>
           <div className="border rounded-lg">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-16">Default</TableHead>
+                  <TableHead>Agent Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Owner</TableHead>
+                  <TableHead className="w-20">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {defaultAgentsLoading ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-8">
+                      Loading...
+                    </TableCell>
+                  </TableRow>
+                ) : accessibleAgents.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                      No accessible agents. Add permissions first.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  accessibleAgents.map((agent: any) => (
+                    <TableRow key={agent.id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={agent.is_default}
+                          onCheckedChange={() => handleToggleDefault(agent.id, agent.is_default)}
+                          disabled={addDefaultAgentsMutation.isPending}
+                        />
+                      </TableCell>
+                      <TableCell className="font-medium">{agent.name}</TableCell>
+                      <TableCell className="capitalize">{(agent as any).agent_type || '-'}</TableCell>
+                      <TableCell>
+                        {(agent as any).owner_email || '-'}
+                      </TableCell>
+                      <TableCell>
+                        {agent.is_activated ? (
+                          <span className="text-green-600 text-sm">Active</span>
+                        ) : (
+                          <span className="text-muted-foreground text-sm">Inactive</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle>Members</CardTitle>
+            <CardDescription>Manage group membership</CardDescription>
+          </div>
+          <div className="flex gap-2">
+            {selectedMembersToRemove.size > 0 && (
+              <Button
+                variant="destructive"
+                onClick={handleRemoveSelectedMembers}
+                disabled={removeMembersMutation.isPending}
+              >
+                <X className="h-4 w-4 mr-2" />
+                {removeMembersMutation.isPending
+                  ? 'Removing...'
+                  : `Remove ${selectedMembersToRemove.size} Selected`}
+              </Button>
+            )}
+            <Button onClick={() => setAddMemberDialogOpen(true)}>
+              <UserPlus className="h-4 w-4 mr-2" />
+              Add Members
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="border rounded-lg">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-12">
+                    <Checkbox
+                      checked={members.length > 0 && selectedMembersToRemove.size === members.length}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          setSelectedMembersToRemove(new Set(members.map(m => m.user_id)));
+                        } else {
+                          setSelectedMembersToRemove(new Set());
+                        }
+                      }}
+                    />
+                  </TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead>Role</TableHead>
-                  <TableHead className="w-12"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -389,6 +526,20 @@ export function GroupDetailPage() {
                 ) : (
                   members.map((member) => (
                     <TableRow key={member.user_id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={selectedMembersToRemove.has(member.user_id)}
+                          onCheckedChange={(checked) => {
+                            const newSet = new Set(selectedMembersToRemove);
+                            if (checked) {
+                              newSet.add(member.user_id);
+                            } else {
+                              newSet.delete(member.user_id);
+                            }
+                            setSelectedMembersToRemove(newSet);
+                          }}
+                        />
+                      </TableCell>
                       <TableCell className="font-medium">
                         {member.first_name} {member.last_name}
                       </TableCell>
@@ -409,21 +560,6 @@ export function GroupDetailPage() {
                             <SelectItem value="manager">Manager</SelectItem>
                           </SelectContent>
                         </Select>
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() =>
-                            setRemoveMemberDialog({
-                              open: true,
-                              userId: member.user_id,
-                              userName: `${member.first_name} ${member.last_name}`,
-                            })
-                          }
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
                       </TableCell>
                     </TableRow>
                   ))
@@ -512,20 +648,6 @@ export function GroupDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Remove Member Dialog */}
-      {removeMemberDialog && (
-        <ConfirmDialog
-          open={removeMemberDialog.open}
-          onOpenChange={(open) => !open && setRemoveMemberDialog(null)}
-          title="Remove Member"
-          description={`Are you sure you want to remove ${removeMemberDialog.userName} from this group?`}
-          confirmLabel="Remove"
-          variant="destructive"
-          onConfirm={handleRemoveMember}
-          isLoading={removeMemberMutation.isPending}
-        />
-      )}
     </div>
   );
 }

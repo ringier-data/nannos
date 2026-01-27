@@ -69,7 +69,7 @@ class JWKSFetcher:
         Initialize JWKS fetcher.
 
         Args:
-            issuer: The OIDC issuer URL (e.g., https://login.alloy.ch/realms/a2a)
+            issuer: The OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
             cache_ttl: Cache TTL in seconds for JWKS keys
         """
         self.issuer = issuer.rstrip("/")
@@ -203,9 +203,7 @@ class JWTValidator:
             # Verify issuer
             token_issuer = payload.get("iss", "").rstrip("/")
             if token_issuer != self.issuer:
-                raise InvalidIssuerError(
-                    f"Invalid issuer. Expected '{self.issuer}', got '{token_issuer}'"
-                )
+                raise InvalidIssuerError(f"Invalid issuer. Expected '{self.issuer}', got '{token_issuer}'")
 
             # Verify authorized party (azp) if expected
             if self.expected_azp:
@@ -226,13 +224,10 @@ class JWTValidator:
                 # aud can be string or list
                 audiences = [token_aud] if isinstance(token_aud, str) else token_aud
                 if self.expected_aud not in audiences:
-                    raise InvalidAudienceError(
-                        f"Invalid audience. Expected '{self.expected_aud}' in {audiences}"
-                    )
+                    raise InvalidAudienceError(f"Invalid audience. Expected '{self.expected_aud}' in {audiences}")
 
             logger.debug(
-                f"Successfully validated JWT: iss={token_issuer}, "
-                f"azp={payload.get('azp')}, aud={payload.get('aud')}"
+                f"Successfully validated JWT: iss={token_issuer}, azp={payload.get('azp')}, aud={payload.get('aud')}"
             )
 
             return payload

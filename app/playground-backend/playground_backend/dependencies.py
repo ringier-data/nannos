@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 # Header name for admin mode toggle
 ADMIN_MODE_HEADER = "X-Admin-Mode"
+# Header name for user impersonation
+IMPERSONATE_USER_HEADER = "X-Impersonate-User-Id"
 
 
 def get_admin_mode(request: Request) -> bool:
@@ -22,6 +24,14 @@ def get_admin_mode(request: Request) -> bool:
     """
     header_value = request.headers.get(ADMIN_MODE_HEADER, "").lower()
     return header_value == "true"
+
+
+def get_impersonated_user_id(request: Request) -> str | None:
+    """Get impersonated user ID from request header.
+
+    Returns the user ID if the X-Impersonate-User-Id header is set, otherwise None.
+    """
+    return request.headers.get(IMPERSONATE_USER_HEADER) or None
 
 
 def require_auth(request: Request) -> User:
@@ -86,6 +96,8 @@ async def require_auth_or_bearer_token(request: Request) -> User:
                 issuer=config.oidc.issuer,
                 # Don't validate azp/aud - accept any valid token from the issuer
                 # The token could be issued to the frontend, orchestrator, or other clients
+                # TODO: we do not validate the audience here. Consider tightening this in the future.
+                # this requires the sub-agent to exchange the token with agent-console as target audience.
             )
 
             payload = await validator.validate(token)
@@ -165,6 +177,9 @@ def require_admin(request: Request) -> User:
 
     This allows admin users to operate as regular users when admin mode is disabled.
 
+    NOTE: When impersonating, this returns the ORIGINAL ADMIN user, not the impersonated user.
+    This ensures admin-only endpoints remain accessible during impersonation.
+
     Raises HTTPException 401 if user is not authenticated.
     Raises HTTPException 403 if:
         - User is not an administrator, or
@@ -176,7 +191,12 @@ def require_admin(request: Request) -> User:
         async def create_user(user: User = Depends(require_admin)):
             return {"created_by": user.email}
     """
-    user = require_auth(request)
+    # Check if currently impersonating - if so, use the original admin user
+    if hasattr(request.state, "original_user") and request.state.original_user:
+        user = request.state.original_user
+    else:
+        user = require_auth(request)
+
     admin_mode = get_admin_mode(request)
 
     # Detect privilege escalation attempt: non-admin trying to use admin mode header
@@ -214,16 +234,21 @@ def is_admin_mode(request: Request, user: User) -> bool:
             effective_admin = is_admin_mode(request, user)
             return await service.list(is_admin=effective_admin)
     """
+    # Check if currently impersonating - if so, use the original admin user for admin checks
+    effective_user = (
+        request.state.original_user if hasattr(request.state, "original_user") and request.state.original_user else user
+    )
+
     admin_mode = get_admin_mode(request)
 
     # Detect privilege escalation attempt
-    if admin_mode and not user.is_administrator:
+    if admin_mode and not effective_user.is_administrator:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Privilege escalation attempt: admin mode not allowed for non-administrators",
         )
 
-    return user.is_administrator and admin_mode
+    return effective_user.is_administrator and admin_mode
 
 
 def has_capability(user: User, resource_type: str, action: str) -> bool:
@@ -282,7 +307,12 @@ def require_approver(request: Request) -> User:
         async def approve_sub_agent(user: User = Depends(require_approver)):
             return {"approved_by": user.email}
     """
-    user = require_auth(request)
+    # Check if currently impersonating - if so, use the original admin user for approval checks
+    if hasattr(request.state, "original_user") and request.state.original_user:
+        user = request.state.original_user
+    else:
+        user = require_auth(request)
+
     admin_mode = get_admin_mode(request)
 
     # Check if user has approval capabilities (either regular approve or approve.admin)
@@ -407,6 +437,7 @@ async def require_group_member_management_permission(
     request: Request,
     group_id: int,
     db: AsyncSession,
+    user: User,
 ) -> User:
     """Check if user can manage members in a group.
 
@@ -418,6 +449,7 @@ async def require_group_member_management_permission(
         request: FastAPI request
         group_id: Group ID
         db: Database session
+        user: Authenticated user (from route-level dependency injection)
 
     Returns:
         Authenticated user
@@ -426,8 +458,6 @@ async def require_group_member_management_permission(
         HTTPException 403 if user doesn't have permission
     """
     user_group_service = request.app.state.user_group_service
-
-    user = require_auth(request)
 
     # System admins can do anything
     if user.is_administrator:
@@ -455,6 +485,7 @@ async def require_group_member(
     request: Request,
     group_id: int,
     db: AsyncSession,
+    user: User,
 ) -> User:
     """Check if user is a member of the group.
 
@@ -462,6 +493,7 @@ async def require_group_member(
         request: FastAPI request
         group_id: Group ID
         db: Database session
+        user: Authenticated user
 
     Returns:
         Authenticated user
@@ -470,8 +502,6 @@ async def require_group_member(
         HTTPException 403 if user is not a group member
     """
     user_group_service = request.app.state.user_group_service
-
-    user = require_auth(request)
 
     # System admins can access everything
     if user.is_administrator:

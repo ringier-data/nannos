@@ -45,7 +45,7 @@ class BaseOAuth2Client:
         Args:
             client_id: OAuth2 client ID
             client_secret: OAuth2 client secret
-            issuer: OIDC issuer URL (e.g., https://login.alloy.ch/realms/a2a)
+            issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
         """
         self.client_id = client_id
         self.client_secret = client_secret
@@ -67,17 +67,25 @@ class BaseOAuth2Client:
         """
         if self._metadata is None:
             well_known_url = f"{self.issuer}/.well-known/openid-configuration"
-            logger.debug(f"Fetching OIDC metadata from: {well_known_url}")
+            logger.info(f"Fetching OIDC metadata from: {well_known_url} (issuer={self.issuer})")
 
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    logger.debug(f"Making GET request to {well_known_url}")
                     response = await client.get(well_known_url)
+                    logger.debug(f"Response status: {response.status_code}, headers: {dict(response.headers)}")
                     response.raise_for_status()
                     self._metadata = response.json()
                     logger.info(f"Discovered OIDC metadata for {self.issuer}")
             except httpx.HTTPError as e:
+                logger.error(
+                    f"HTTP error fetching OIDC metadata: status={getattr(e.response, 'status_code', 'N/A')}, url={well_known_url}, error={e}"
+                )
                 raise OAuthError(f"Failed to fetch OIDC metadata from {well_known_url}: {e}") from e
             except Exception as e:
+                logger.error(
+                    f"Unexpected error during metadata discovery for {well_known_url}: {type(e).__name__}: {e}"
+                )
                 raise OAuthError(f"Unexpected error during metadata discovery: {e}") from e
 
         # Type assertion: _metadata is guaranteed to be dict after successful discovery
@@ -101,11 +109,16 @@ class BaseOAuth2Client:
                 raise OAuthError(f"Token endpoint not found in OIDC metadata for {self.issuer}")
 
             logger.debug(f"Creating OAuth2 client for {self.client_id}")
+
+            # Determine auth method based on whether client_secret is provided
+            # Public clients (like agent-console) don't use client secrets
+            auth_method = "client_secret_post" if self.client_secret else "none"
+
             self._oauth_client = AsyncOAuth2Client(
                 client_id=self.client_id,
-                client_secret=self.client_secret,
+                client_secret=self.client_secret if self.client_secret else None,
                 token_endpoint=metadata["token_endpoint"],
-                token_endpoint_auth_method="client_secret_post",
+                token_endpoint_auth_method=auth_method,
             )
 
         return self._oauth_client

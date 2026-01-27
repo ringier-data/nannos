@@ -29,6 +29,62 @@ from playground_backend.models.user_group import (
 from playground_backend.routers import admin_group_router
 
 
+@pytest.fixture(autouse=True)
+def mock_keycloak_service(monkeypatch):
+    """Mock KeycloakAdminService to avoid hitting real Keycloak in tests.
+
+    This autouse fixture patches the KeycloakAdminService class before it's
+    instantiated during the FastAPI lifespan, ensuring all tests use mocks.
+    """
+    # Counter for generating unique group IDs
+    counter = {"value": 0}
+
+    # Create mock methods
+    async def mock_create_group(self, name: str, description: str | None = None) -> str:
+        counter["value"] += 1
+        return f"mock-keycloak-group-id-{counter['value']}"
+
+    async def mock_update_group(self, group_id: str, name: str | None = None, description: str | None = None) -> None:
+        pass
+
+    async def mock_delete_group(self, group_id: str) -> None:
+        pass
+
+    async def mock_add_user_to_group(self, user_id: str, group_id: str) -> None:
+        pass
+
+    async def mock_remove_user_from_group(self, user_id: str, group_id: str) -> None:
+        pass
+
+    async def mock_ensure_group_mapper_configured(self) -> None:
+        pass
+
+    # Patch the methods on the KeycloakAdminService class
+    monkeypatch.setattr(
+        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.create_group", mock_create_group
+    )
+    monkeypatch.setattr(
+        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.update_group", mock_update_group
+    )
+    monkeypatch.setattr(
+        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.delete_group", mock_delete_group
+    )
+    monkeypatch.setattr(
+        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.add_user_to_group",
+        mock_add_user_to_group,
+    )
+    monkeypatch.setattr(
+        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.remove_user_from_group",
+        mock_remove_user_from_group,
+    )
+    monkeypatch.setattr(
+        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.ensure_group_mapper_configured",
+        mock_ensure_group_mapper_configured,
+    )
+
+    yield
+
+
 @pytest_asyncio.fixture
 async def admin_user(pg_session):
     """Create an admin user in the database."""
