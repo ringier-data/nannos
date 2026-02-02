@@ -64,7 +64,9 @@ NAONOUS_MCP_URLS=(
 )
 
 # OIDC Configuration
-OIDC_ISSUER="https://login.p.nannos.rcplus.io/realms/nannos"
+OIDC_BASE_URL="https://login.p.nannos.rcplus.io"
+KEYCLOAK_REALM_NAME="nannos"
+OIDC_ISSUER="${OIDC_BASE_URL}/realms/${KEYCLOAK_REALM_NAME}"
 
 # MCP Gateway Configuration
 MCP_GATEWAY_URL="https://alloych.gatana.ai/mcp"
@@ -702,6 +704,8 @@ VITE_API_BASE_URL=${BACKEND_URLS[$BACKEND_ENV]}
 VITE_ORCHESTRATOR_BASE_DOMAIN=${ORCHESTRATOR_DOMAINS[$ORCHESTRATOR_ENV]}
 VITE_LANGSMITH_ORGANIZATION_ID=eacaca37-6472-40d5-80b4-9206d058caef
 VITE_LANGSMITH_PROJECT_ID=052ac0c2-787f-44e2-810a-34d8b7845a09
+VITE_KEYCLOAK_BASE_URL=${OIDC_BASE_URL}
+VITE_KEYCLOAK_REALM=${KEYCLOAK_REALM_NAME}
 EOF
 
 # If backend is remote, fetch its PostgreSQL configuration for SDK generation

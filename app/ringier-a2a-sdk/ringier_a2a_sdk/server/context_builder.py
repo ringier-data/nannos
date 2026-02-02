@@ -6,8 +6,8 @@ and makes it available to the agent executor following zero-trust principles.
 
 ZERO-TRUST PATTERN:
 - Never trust client-provided identifiers (context_id, task_id, etc.)
-- Always extract user_id from validated JWT tokens (middleware)
-- User isolation is based on authenticated user_id, not client-provided values
+- Always extract user_sub from validated JWT tokens (middleware)
+- User isolation is based on authenticated user_sub, not client-provided values
 """
 
 import logging
@@ -26,13 +26,13 @@ class AuthRequestContextBuilder(RequestContextBuilder):
     Custom RequestContextBuilder implementing zero-trust authentication pattern.
 
     Extracts verified user information from JWT validation (middleware sets current_user_context):
-    - 'user_id': User ID (from validated JWT) - PRIMARY IDENTIFIER
+    - 'user_sub': OIDC subject identifier (from validated JWT sub claim)
     - 'email': User email
     - 'name': User display name
     - 'token': Original JWT token
     - 'scopes': OAuth scopes granted
 
-    The user_id is the ONLY trusted identifier for user isolation.
+    The user_sub is the OIDC subject identifier used for authentication.
     Context IDs and task IDs from clients are for conversation tracking only.
     """
 
@@ -47,7 +47,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
         """
         Build RequestContext with verified user information from authentication middleware.
 
-        ZERO-TRUST: The authenticated user_id is extracted from async context variable
+        ZERO-TRUST: The authenticated user_sub is extracted from async context variable
         (set by JWTValidatorMiddleware after JWT validation) and stored in call_context.state.
 
         Args:
@@ -58,7 +58,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
             context: ServerCallContext (will be populated with user info)
 
         Returns:
-            RequestContext with verified user_id in call_context.state
+            RequestContext with verified user_sub in call_context.state
         """
         # Use provided context or create new one
         call_context = context if context is not None else ServerCallContext()
@@ -67,9 +67,9 @@ class AuthRequestContextBuilder(RequestContextBuilder):
         # This was set by JWTValidatorMiddleware after JWT validation
         user_context = current_user_context.get()
 
-        if user_context and "user_id" in user_context:
+        if user_context and "user_sub" in user_context:
             # Store verified user information in call context
-            call_context.state["user_id"] = user_context["user_id"]
+            call_context.state["user_sub"] = user_context["user_sub"]  # OIDC subject identifier
             call_context.state["user_email"] = user_context.get("email")
             call_context.state["user_name"] = user_context.get("name")
             call_context.state["user_token"] = user_context.get("token")
@@ -80,7 +80,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
 
             logger.debug(
                 "[ZERO-TRUST] Building RequestContext for verified "
-                f"user_id: {user_context['user_id']}, "
+                f"user_sub: {user_context['user_sub']}, "
                 f"sub_agent_id: {user_context.get('sub_agent_id')}, "
                 f"groups: {user_context.get('groups', [])}"
             )
@@ -90,7 +90,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
             logger.warning(
                 "Ensure JWT authentication and UserContextFromRequestStateMiddleware are properly configured"
             )
-            call_context.state["user_id"] = "anonymous"  # Fallback (should trigger auth errors)
+            call_context.state["user_sub"] = "anonymous"  # Fallback (should trigger auth errors)
 
         # Create and return the request context
         return RequestContext(

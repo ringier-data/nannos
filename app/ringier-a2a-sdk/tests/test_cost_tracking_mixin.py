@@ -109,7 +109,7 @@ class TestCostTrackingMixin:
 
         # Manual reporting should still work
         await agent.report_llm_usage(
-            user_id="test-user",
+            user_sub="sub-123",
             provider="bedrock_converse",
             model_name="claude-3-sonnet",
             billing_unit_breakdown={"input_tokens": 100, "output_tokens": 50},
@@ -119,7 +119,7 @@ class TestCostTrackingMixin:
         # Verify the log was recorded
         agent._cost_logger.log_cost_async.assert_called_once()
         call_kwargs = agent._cost_logger.log_cost_async.call_args[1]
-        assert call_kwargs["user_id"] == "test-user"
+        assert call_kwargs["user_sub"] == "sub-123"
         assert call_kwargs["provider"] == "bedrock_converse"
         assert call_kwargs["model_name"] == "claude-3-sonnet"
         assert call_kwargs["billing_unit_breakdown"] == {"input_tokens": 100, "output_tokens": 50}
@@ -135,7 +135,7 @@ class TestCostTrackingMixin:
 
         # Should not raise even though cost tracking is disabled
         await agent.report_llm_usage(
-            user_id="test-user",
+            user_sub="sub-123",
             provider="openai",
             model_name="gpt-4",
             billing_unit_breakdown={"input_tokens": 100, "output_tokens": 50},
@@ -157,7 +157,7 @@ class TestCostTrackingMixin:
         conversation_id = "conv-123"
 
         await agent.report_llm_usage(
-            user_id="test-user",
+            user_sub="sub-123",
             provider="openai",
             model_name="gpt-4o",
             billing_unit_breakdown=billing_unit_breakdown,
@@ -169,7 +169,7 @@ class TestCostTrackingMixin:
         mock_logger.log_cost_async.assert_called_once()
         call_kwargs = mock_logger.log_cost_async.call_args[1]
 
-        assert call_kwargs["user_id"] == "test-user"
+        assert call_kwargs["user_sub"] == "sub-123"
         assert call_kwargs["provider"] == "openai"
         assert call_kwargs["model_name"] == "gpt-4o"
         assert call_kwargs["billing_unit_breakdown"] == billing_unit_breakdown
@@ -253,19 +253,19 @@ class TestCostTrackingMixin:
         agent._langchain_callbacks = []
 
         config = agent.create_runnable_config(
-            user_id="user-123",
+            user_sub="sub-123",
             conversation_id="conv-456",
         )
 
         # Should be a dict (fallback when RunnableConfig not available) or RunnableConfig
         assert config is not None
         if isinstance(config, dict):
-            assert config["tags"] == ["user:user-123", "conversation:conv-456"]
+            assert config["tags"] == ["user_sub:sub-123", "conversation:conv-456"]
             assert config["callbacks"] == []
             assert config["configurable"] == {}
         else:
             # RunnableConfig object
-            assert config.tags == ["user:user-123", "conversation:conv-456"]
+            assert config.tags == ["user_sub:sub-123", "conversation:conv-456"]
             assert config.callbacks == []
 
     def test_create_runnable_config_with_checkpointer(self):
@@ -277,7 +277,7 @@ class TestCostTrackingMixin:
         mock_checkpointer = MagicMock()
 
         config = agent.create_runnable_config(
-            user_id="user-123",
+            user_sub="sub-123",
             conversation_id="conv-456",
             thread_id="thread-789",
             checkpoint_ns="test-namespace",
@@ -303,7 +303,7 @@ class TestCostTrackingMixin:
         agent._langchain_callbacks = [mock_callback]
 
         config = agent.create_runnable_config(
-            user_id="user-123",
+            user_sub="sub-123",
             conversation_id="conv-456",
         )
 
@@ -328,17 +328,17 @@ class TestCostTrackingMixin:
 
             with patch("ringier_a2a_sdk.agent.cost_tracking_mixin.current_sub_agent_id", mock_contextvar):
                 config = agent.create_runnable_config(
-                    user_id="user-123",
+                    user_sub="sub-123",
                     conversation_id="conv-456",
                 )
 
                 # Should include sub_agent tag
                 if isinstance(config, dict):
                     assert "sub_agent:42" in config["tags"]
-                    assert config["tags"] == ["user:user-123", "conversation:conv-456", "sub_agent:42"]
+                    assert config["tags"] == ["user_sub:sub-123", "conversation:conv-456", "sub_agent:42"]
                 else:
                     assert "sub_agent:42" in config.tags
-                    assert config.tags == ["user:user-123", "conversation:conv-456", "sub_agent:42"]
+                    assert config.tags == ["user_sub:sub-123", "conversation:conv-456", "sub_agent:42"]
 
     def test_create_runnable_config_with_extra_configurable(self):
         """Test create_runnable_config accepts extra configurable parameters."""
@@ -347,7 +347,7 @@ class TestCostTrackingMixin:
         agent._langchain_callbacks = []
 
         config = agent.create_runnable_config(
-            user_id="user-123",
+            user_sub="sub-123",
             conversation_id="conv-456",
             custom_param="custom-value",
             another_param=123,
@@ -367,7 +367,7 @@ class TestCostTrackingMixin:
         agent._cost_tracking_enabled = False
 
         config = agent.create_runnable_config(
-            user_id="user-123",
+            user_sub="sub-123",
             conversation_id="conv-456",
         )
 
@@ -409,7 +409,7 @@ class TestCostTrackingMixin:
             # Simulate two requests with different tokens
             set_request_access_token("tokenA")
             logger.log_cost_async(
-                user_id="userA",
+                user_sub="subA",
                 provider="openai",
                 model_name="gpt-4",
                 billing_unit_breakdown={"input_tokens": 10, "output_tokens": 5},
@@ -417,7 +417,7 @@ class TestCostTrackingMixin:
             )
             set_request_access_token("tokenB")
             logger.log_cost_async(
-                user_id="userB",
+                user_sub="subB",
                 provider="openai",
                 model_name="gpt-4",
                 billing_unit_breakdown={"input_tokens": 20, "output_tokens": 10},

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.authentication.interceptor import SmartTokenInterceptor
+from app.a2a_utils.authentication import SmartTokenInterceptor
 
 
 class MockSecurityScheme:

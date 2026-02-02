@@ -21,6 +21,7 @@ from ..models.sub_agent import (
     SubAgentType,
     SubAgentUpdate,
 )
+from ..models.user import User
 from ..repositories.sub_agent_repository import ApprovalContext
 from ..services.notification_service import NotificationService
 
@@ -439,8 +440,8 @@ class SubAgentService:
     async def create_sub_agent(
         self,
         db: AsyncSession,
-        user_id: str,
         data: SubAgentCreate,
+        actor: User,
     ) -> SubAgent:
         """Create a new sub-agent with initial version."""
         now = datetime.now(timezone.utc)
@@ -467,18 +468,13 @@ class SubAgentService:
                     "All Foundry configuration fields must be provided."
                 )
 
-        # Get actor_sub for audit
-        user_query = text("SELECT sub FROM users WHERE id = :user_id")
-        result = await db.execute(user_query, {"user_id": user_id})
-        actor_sub = result.scalar_one()
-
         # Insert sub-agent with automatic audit
         sub_agent_id = await self.repo.create(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             fields={
                 "name": data.name,
-                "owner_user_id": user_id,
+                "owner_user_id": actor.id,
                 "type": data.type.value,
                 "is_public": data.is_public,
                 "current_version": 1,
@@ -491,7 +487,7 @@ class SubAgentService:
         # Create initial version with all configuration data
         await self._create_config_version(
             db,
-            actor_sub,
+            actor,
             sub_agent_id,
             1,
             "Initial version",
@@ -519,7 +515,7 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         data: SubAgentUpdate,
-        user_id: str,
+        actor: User,
     ) -> SubAgent | None:
         """Update a sub-agent.
 
@@ -533,7 +529,7 @@ class SubAgentService:
             return None
 
         # Check if user has write permission (owner or group write access)
-        has_write_permission = await self.check_user_permission(db, sub_agent_id, user_id, "write")
+        has_write_permission = await self.check_user_permission(db, sub_agent_id, actor.id, "write", sub_agent=existing)
         if not has_write_permission:
             raise PermissionError("You don't have permission to update this sub-agent")
 
@@ -552,7 +548,7 @@ class SubAgentService:
             updates["updated_at"] = now
             await self.repo.update_sub_agent(
                 db=db,
-                actor_sub=user_id,
+                actor=actor,
                 sub_agent_id=sub_agent_id,
                 fields=updates,
             )
@@ -713,7 +709,7 @@ class SubAgentService:
             # Create new version
             await self._create_config_version(
                 db,
-                user_id,
+                actor,
                 sub_agent_id,
                 new_version,
                 data.change_summary or f"Updated to version {new_version}",
@@ -735,7 +731,7 @@ class SubAgentService:
             # Update current_version pointer
             await self.repo.update_current_version(
                 db=db,
-                actor_sub=user_id,
+                actor=actor,
                 sub_agent_id=sub_agent_id,
                 version=new_version,
             )
@@ -747,24 +743,21 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-        user_id: str,
-        is_admin: bool = False,
+        actor: User,
     ) -> bool:
-        """Delete a sub-agent. Only owner or admin can delete."""
+        """Delete a sub-agent."""
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        can_delete = self.check_user_permission(
+            db, sub_agent_id, actor.id, required_permission="write", sub_agent=existing
+        )
+        if not can_delete:
+            raise PermissionError("You don't have permission to delete this sub-agent")
+
         if not existing:
             return False
 
-        if not is_admin and existing.owner_user_id != user_id:
-            raise PermissionError("Only the owner or an admin can delete this sub-agent")
-
-        # Get actor_sub for audit
-        user_query = text("SELECT sub FROM users WHERE id = :user_id")
-        result = await db.execute(user_query, {"user_id": user_id})
-        actor_sub = result.scalar_one()
-
         # Soft delete with automatic audit
-        await self.repo.delete(db=db, actor_sub=actor_sub, entity_id=sub_agent_id, soft=True)
+        await self.repo.delete(db=db, actor=actor, entity_id=sub_agent_id, soft=True)
         await db.commit()
         return True
 
@@ -773,7 +766,7 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         version: int,
-        user_id: str,
+        actor: User,
     ) -> bool:
         """Soft-delete a specific version.
 
@@ -784,7 +777,7 @@ class SubAgentService:
             db: Database session
             sub_agent_id: The sub-agent ID
             version: The version number to delete
-            user_id: The user requesting deletion
+            actor: The user requesting deletion
 
         Returns:
             True if deleted, False if version not found
@@ -794,10 +787,15 @@ class SubAgentService:
             ValueError: If version is approved (cannot delete approved versions)
         """
         existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
+        can_delete = self.check_user_permission(
+            db, sub_agent_id, actor.id, required_permission="write", sub_agent=existing
+        )
+        if not can_delete:
+            raise PermissionError("You don't have permission to delete this version")
         if not existing:
             return False
 
-        if existing.owner_user_id != user_id:
+        if existing.owner_user_id != actor.id:
             raise PermissionError("Only the owner can delete versions")
 
         if not existing.config_version:
@@ -826,7 +824,7 @@ class SubAgentService:
         # Soft delete the version using repository
         await self.repo.delete_version(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             sub_agent_id=sub_agent_id,
             version=version,
         )
@@ -835,13 +833,13 @@ class SubAgentService:
         if existing.current_version == version:
             await self.repo.update_current_version_to_previous(
                 db=db,
-                actor_sub=user_id,
+                actor=actor,
                 sub_agent_id=sub_agent_id,
             )
         else:
             await self.repo.update_sub_agent_timestamp(
                 db=db,
-                actor_sub=user_id,
+                actor=actor,
                 sub_agent_id=sub_agent_id,
             )
 
@@ -852,23 +850,23 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-        user_id: str,
         change_summary: str,
+        actor: User,
     ) -> SubAgent | None:
         """Submit the current version for approval.
 
         Args:
             db: Database session
             sub_agent_id: The sub-agent ID
-            user_id: The user submitting
             change_summary: Required description of changes in this version
+            actor: The user submitting for approval
         """
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
 
         # Check if user has write permission (owner or group write access)
-        has_write_permission = await self.check_user_permission(db, sub_agent_id, user_id, "write")
+        has_write_permission = await self.check_user_permission(db, sub_agent_id, actor.id, "write", sub_agent=existing)
         if not has_write_permission:
             raise PermissionError("You don't have permission to submit this sub-agent for approval")
 
@@ -882,7 +880,7 @@ class SubAgentService:
         # Update the current version status and change_summary
         await self.repo.submit_version_for_approval(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             sub_agent_id=sub_agent_id,
             version=existing.current_version,
             change_summary=change_summary,
@@ -891,7 +889,7 @@ class SubAgentService:
         # Update sub_agents.updated_at
         await self.repo.update_sub_agent_timestamp(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             sub_agent_id=sub_agent_id,
         )
 
@@ -901,7 +899,7 @@ class SubAgentService:
         if self.notification_service:
             try:
                 approver_ids = await self._get_eligible_approvers_for_sub_agent(
-                    db, sub_agent_id, exclude_user_id=user_id
+                    db, sub_agent_id, exclude_user_id=actor.id
                 )
                 if approver_ids:
                     agent_name = existing.name
@@ -914,7 +912,7 @@ class SubAgentService:
                             metadata={
                                 "sub_agent_id": sub_agent_id,
                                 "version": existing.current_version,
-                                "submitted_by": user_id,
+                                "submitted_by": actor.id,
                             },
                         )
                         for approver_id in approver_ids
@@ -929,7 +927,7 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-        admin_user_id: str,
+        actor: User,
         approve: bool,
         rejection_reason: str | None = None,
     ) -> SubAgent | None:
@@ -941,12 +939,12 @@ class SubAgentService:
         """
         # Defense in depth: Verify approval capabilities at service level
         admin_check = await db.execute(
-            text("SELECT is_administrator, sub, role FROM users WHERE id = :user_id"), {"user_id": admin_user_id}
+            text("SELECT is_administrator, sub, role FROM users WHERE id = :user_id"), {"user_id": actor.id}
         )
         admin_row = admin_check.first()
 
         if not admin_row:
-            logger.error(f"SECURITY: approve_sub_agent called with non-existent user {admin_user_id}")
+            logger.error(f"SECURITY: approve_sub_agent called with non-existent user {actor.id}")
             raise PermissionError("User not found")
 
         is_administrator = admin_row[0]
@@ -965,7 +963,7 @@ class SubAgentService:
 
         if not can_approve:
             logger.error(
-                f"SECURITY: approve_sub_agent called with user {admin_user_id} without approval capabilities (is_admin={is_administrator}, role={user_role})"
+                f"SECURITY: approve_sub_agent called with user {actor.id} without approval capabilities (is_admin={is_administrator}, role={user_role})"
             )
             raise PermissionError(
                 "Approval requires 'approve' or 'approve.admin' capability per SYSTEM_ROLE_CAPABILITIES"
@@ -973,15 +971,15 @@ class SubAgentService:
 
         # Defense in depth: For non-admin 'approve' action, verify user has group-based access to the resource
         # 'approve.admin' bypasses intersection check, but plain 'approve' requires group access
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not is_administrator and not has_approve_admin:
-            has_access = await self.check_user_permission(db, sub_agent_id, admin_user_id, "read")
+            has_access = await self.check_user_permission(db, sub_agent_id, actor.id, "read", sub_agent=existing)
             if not has_access:
                 logger.error(
-                    f"SECURITY: approve_sub_agent called by user {admin_user_id} without group access to sub_agent {sub_agent_id}"
+                    f"SECURITY: approve_sub_agent called by user {actor.id} without group access to sub_agent {sub_agent_id}"
                 )
                 raise PermissionError("Approval with 'approve' capability requires group-based access to the sub-agent")
 
-        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
 
@@ -995,7 +993,7 @@ class SubAgentService:
             db=db,
             sub_agent_id=sub_agent_id,
             version=existing.current_version,
-            admin_user_id=admin_user_id,
+            actor=actor,
             approve=approve,
             rejection_reason=rejection_reason,
         )
@@ -1008,8 +1006,8 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         version: int,
-        admin_user_id: str,
         approve: bool,
+        actor: User,
         rejection_reason: str | None = None,
     ) -> SubAgent | None:
         """Approve or reject a specific version.
@@ -1020,17 +1018,16 @@ class SubAgentService:
         """
         # Defense in depth: Verify approval capabilities at service level
         admin_check = await db.execute(
-            text("SELECT is_administrator, sub, role FROM users WHERE id = :user_id"), {"user_id": admin_user_id}
+            text("SELECT is_administrator, role FROM users WHERE id = :user_id"), {"user_id": actor.id}
         )
         admin_row = admin_check.first()
 
         if not admin_row:
-            logger.error(f"SECURITY: approve_version called with non-existent user {admin_user_id}")
+            logger.error(f"SECURITY: approve_version called with non-existent user {actor.id}")
             raise PermissionError("User not found")
 
         is_administrator = admin_row[0]
-        admin_sub = admin_row[1]
-        user_role = admin_row[2]
+        user_role = admin_row[1]
 
         # Check if user has approval capabilities per SYSTEM_ROLE_CAPABILITIES
         # System admins have all capabilities
@@ -1044,23 +1041,23 @@ class SubAgentService:
 
         if not can_approve:
             logger.error(
-                f"SECURITY: approve_version called with user {admin_user_id} without approval capabilities (is_admin={is_administrator}, role={user_role})"
+                f"SECURITY: approve_version called with user {actor.id} without approval capabilities (is_admin={is_administrator}, role={user_role})"
             )
             raise PermissionError(
                 "Approval requires 'approve' or 'approve.admin' capability per SYSTEM_ROLE_CAPABILITIES"
             )
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
 
         # Defense in depth: For non-admin 'approve' action, verify user has group-based access to the resource
         # 'approve.admin' bypasses intersection check, but plain 'approve' requires group access
         if not is_administrator and not has_approve_admin:
-            has_access = await self.check_user_permission(db, sub_agent_id, admin_user_id, "read")
+            has_access = await self.check_user_permission(db, sub_agent_id, actor.id, "read", sub_agent=existing)
             if not has_access:
                 logger.error(
-                    f"SECURITY: approve_version called by user {admin_user_id} without group access to sub_agent {sub_agent_id}"
+                    f"SECURITY: approve_version called by user {actor.id} without group access to sub_agent {sub_agent_id}"
                 )
                 raise PermissionError("Approval with 'approve' capability requires group-based access to the sub-agent")
 
-        existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
         if not existing:
             return None
 
@@ -1082,8 +1079,6 @@ class SubAgentService:
         context = ApprovalContext(
             sub_agent_id=sub_agent_id,
             version=version,
-            admin_user_id=admin_user_id,
-            admin_sub=admin_sub,
             action="approve" if approve else "reject",
             rejection_reason=rejection_reason,
         )
@@ -1092,7 +1087,7 @@ class SubAgentService:
             # Get next release number
             context.release_number = await self.repo.get_next_release_number(db, sub_agent_id)
             # Execute approval (includes audit)
-            await self.repo.approve_version(db, context)
+            await self.repo.approve_version(db, actor, context)
 
             # Notify owner and submitter about approval
             if self.notification_service:
@@ -1104,9 +1099,9 @@ class SubAgentService:
 
                     # Collect unique user IDs to notify (exclude the approver)
                     notify_user_ids = set()
-                    if owner_id and owner_id != admin_user_id:
+                    if owner_id and owner_id != actor.id:
                         notify_user_ids.add(owner_id)
-                    if submitter_id and submitter_id != admin_user_id:
+                    if submitter_id and submitter_id != actor.id:
                         notify_user_ids.add(submitter_id)
 
                     if notify_user_ids:
@@ -1129,7 +1124,7 @@ class SubAgentService:
                     logger.error(f"Failed to create approval notification: {e}")
         else:
             # Execute rejection (includes audit)
-            await self.repo.reject_version(db, context)
+            await self.repo.reject_version(db, context, actor=actor)
 
             # Notify owner and submitter about rejection
             if self.notification_service:
@@ -1141,9 +1136,9 @@ class SubAgentService:
 
                     # Collect unique user IDs to notify (exclude the approver)
                     notify_user_ids = set()
-                    if owner_id and owner_id != admin_user_id:
+                    if owner_id and owner_id != actor.id:
                         notify_user_ids.add(owner_id)
-                    if submitter_id and submitter_id != admin_user_id:
+                    if submitter_id and submitter_id != actor.id:
                         notify_user_ids.add(submitter_id)
 
                     if notify_user_ids:
@@ -1171,7 +1166,7 @@ class SubAgentService:
         # After approval, activate for all groups that have this agent as a default
         if approve:
             try:
-                await self._activate_for_default_agent_groups(db, sub_agent_id, admin_sub)
+                await self._activate_for_default_agent_groups(db, sub_agent_id, actor=actor)
             except Exception as e:
                 logger.error(f"Failed to activate agent for default groups: {e}")
                 # Don't fail the approval - activation can be retried
@@ -1343,7 +1338,7 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-        actor_sub: str,
+        actor: User,
     ) -> None:
         """
         Internal helper to activate a newly-approved agent for all groups that have it as a default.
@@ -1354,7 +1349,7 @@ class SubAgentService:
         Args:
             db: Database session
             sub_agent_id: The sub-agent ID that was just approved
-            actor_sub: The admin who approved (for audit trail)
+            actor: The admin user who approved (for audit trail)
         """
         # Find all groups that have this agent as a default
         groups_query = text("""
@@ -1386,7 +1381,7 @@ class SubAgentService:
                 # Bulk activate the agent for all members
                 await self.repo.bulk_activate_sub_agent(
                     db=db,
-                    actor_sub="SYSTEM",  # System activation on approval
+                    actor=actor,
                     user_ids=member_user_ids,
                     sub_agent_id=sub_agent_id,
                     activated_by=ActivationSource.GROUP,
@@ -1418,8 +1413,8 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         version: int,
-        user_id: str,
         change_summary: str,
+        actor: User,
     ) -> SubAgent | None:
         """Submit a specific version for approval.
 
@@ -1427,15 +1422,16 @@ class SubAgentService:
             db: Database session
             sub_agent_id: The sub-agent ID
             version: The version number to submit
-            user_id: The user submitting
             change_summary: Required description of changes in this version
+            actor: The user submitting
+
         """
         existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
         if not existing:
             return None
 
         # Check if user has write permission (owner or group write access)
-        has_write_permission = await self.check_user_permission(db, sub_agent_id, user_id, "write")
+        has_write_permission = await self.check_user_permission(db, sub_agent_id, actor.id, "write", sub_agent=existing)
         if not has_write_permission:
             raise PermissionError("You don't have permission to submit this sub-agent for approval")
 
@@ -1447,7 +1443,7 @@ class SubAgentService:
 
         await self.repo.submit_version_for_approval(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             sub_agent_id=sub_agent_id,
             version=version,
             change_summary=change_summary,
@@ -1455,7 +1451,7 @@ class SubAgentService:
 
         await self.repo.update_sub_agent_timestamp(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             sub_agent_id=sub_agent_id,
         )
 
@@ -1465,7 +1461,7 @@ class SubAgentService:
         if self.notification_service:
             try:
                 approver_ids = await self._get_eligible_approvers_for_sub_agent(
-                    db, sub_agent_id, exclude_user_id=user_id
+                    db, sub_agent_id, exclude_user_id=actor.id
                 )
                 if approver_ids:
                     agent_name = existing.name
@@ -1478,7 +1474,7 @@ class SubAgentService:
                             metadata={
                                 "sub_agent_id": sub_agent_id,
                                 "version": version,
-                                "submitted_by": user_id,
+                                "submitted_by": actor.id,
                             },
                         )
                         for approver_id in approver_ids
@@ -1494,14 +1490,14 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         version: int,
-        user_id: str,
+        actor: User,
     ) -> SubAgent | None:
         """Set an approved version as the default version."""
         existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
         if not existing:
             return None
 
-        if existing.owner_user_id != user_id:
+        if existing.owner_user_id != actor.id:
             raise PermissionError("Only the owner can set the default version")
 
         if not existing.config_version:
@@ -1512,7 +1508,7 @@ class SubAgentService:
 
         await self.repo.set_default_version(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             sub_agent_id=sub_agent_id,
             version=version,
         )
@@ -1525,14 +1521,14 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         version: int,
-        user_id: str,
+        actor: User,
     ) -> SubAgent | None:
         """Revert to a previous version by creating a new version with its config."""
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
 
-        if existing.owner_user_id != user_id:
+        if existing.owner_user_id != actor.id:
             raise PermissionError("Only the owner can revert versions")
 
         # Fetch the target version
@@ -1545,7 +1541,7 @@ class SubAgentService:
 
         await self._create_config_version(
             db,
-            user_id,
+            actor,
             sub_agent_id,
             new_version,
             f"Reverted to version {version}",
@@ -1566,7 +1562,7 @@ class SubAgentService:
 
         await self.repo.update_current_version(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             sub_agent_id=sub_agent_id,
             version=new_version,
         )
@@ -1579,8 +1575,7 @@ class SubAgentService:
         db: AsyncSession,
         sub_agent_id: int,
         group_permissions: list[dict[str, Any]],
-        user_id: str,
-        is_admin: bool = False,
+        actor: User,
     ) -> bool:
         """Update group permissions with read/write granularity.
 
@@ -1588,8 +1583,7 @@ class SubAgentService:
             db: Database session
             sub_agent_id: The sub-agent ID
             group_permissions: List of dicts with user_group_id and permissions array
-            user_id: User making the change
-            is_admin: Whether user is admin
+            actor: User making the change
 
         Returns:
             True if successful, False if sub-agent not found
@@ -1597,14 +1591,6 @@ class SubAgentService:
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return False
-
-        if not is_admin and existing.owner_user_id != user_id:
-            raise PermissionError("Only the owner or an admin can update permissions")
-
-        # Get actor_sub for audit
-        user_query = text("SELECT sub FROM users WHERE id = :user_id")
-        result = await db.execute(user_query, {"user_id": user_id})
-        actor_sub = result.scalar_one()
 
         # Get current permissions to detect changes
         current_perms_query = text("""
@@ -1623,7 +1609,7 @@ class SubAgentService:
         # Use repository for update with automatic audit logging
         await self.repo.update_permissions(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             sub_agent_id=sub_agent_id,
             group_permissions=group_permissions,
         )
@@ -1652,7 +1638,7 @@ class SubAgentService:
                                 metadata={"sub_agent_id": sub_agent_id},
                             )
                             for member_id in member_ids
-                            if member_id != user_id  # Don't notify the actor
+                            if member_id != actor.id  # Don't notify the actor
                         ]
                         await self.notification_service.bulk_create_notifications(db, notifications)
 
@@ -1670,7 +1656,7 @@ class SubAgentService:
                                 metadata={"sub_agent_id": sub_agent_id},
                             )
                             for member_id in member_ids
-                            if member_id != user_id  # Don't notify the actor
+                            if member_id != actor.id  # Don't notify the actor
                         ]
                         await self.notification_service.bulk_create_notifications(db, notifications)
 
@@ -1688,7 +1674,7 @@ class SubAgentService:
                                 metadata={"sub_agent_id": sub_agent_id},
                             )
                             for member_id in member_ids
-                            if member_id != user_id  # Don't notify the actor
+                            if member_id != actor.id  # Don't notify the actor
                         ]
                         await self.notification_service.bulk_create_notifications(db, notifications)
                         # Commit notifications separately
@@ -1730,6 +1716,7 @@ class SubAgentService:
         sub_agent_id: int,
         user_id: str,
         required_permission: str,  # "read" or "write"
+        sub_agent: SubAgent | None = None,
     ) -> bool:
         """Check if user has specific permission on a sub-agent.
 
@@ -1750,7 +1737,8 @@ class SubAgentService:
             True if user has the required permission
         """
         # Check if user owns the sub-agent
-        sub_agent = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not sub_agent:
+            sub_agent = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not sub_agent:
             return False
 
@@ -1840,7 +1828,7 @@ class SubAgentService:
     async def _create_config_version(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         version: int,
         change_summary: str,
@@ -1866,7 +1854,7 @@ class SubAgentService:
 
         return await self.repo.create_config_version(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             sub_agent_id=sub_agent_id,
             version=version,
             version_hash=version_hash,
@@ -1982,7 +1970,7 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-        user_id: str,
+        actor: User,
         is_admin: bool = False,
     ) -> bool:
         """Activate a sub-agent for a user.
@@ -2007,7 +1995,7 @@ class SubAgentService:
 
         # Check if user has read permission (unless admin)
         if not is_admin:
-            has_read = await self.check_user_permission(db, sub_agent_id, user_id, "read")
+            has_read = await self.check_user_permission(db, sub_agent_id, actor.id, "read", sub_agent=sub_agent)
             if not has_read:
                 raise PermissionError("You don't have read permission for this sub-agent")
 
@@ -2016,19 +2004,12 @@ class SubAgentService:
             SELECT 1 FROM user_sub_agent_activations
             WHERE user_id = :user_id AND sub_agent_id = :sub_agent_id
         """)
-        result = await db.execute(check_query, {"user_id": user_id, "sub_agent_id": sub_agent_id})
+        result = await db.execute(check_query, {"user_id": actor.id, "sub_agent_id": sub_agent_id})
         if result.scalar_one_or_none():
             return False  # Already activated
 
-        # Get actor_sub for audit
-        user_query = text("SELECT sub FROM users WHERE id = :user_id")
-        result = await db.execute(user_query, {"user_id": user_id})
-        actor_sub = result.scalar_one()
-
         # Insert activation record with automatic audit
-        await self.repo.bulk_activate_sub_agent(
-            db=db, actor_sub=actor_sub, user_ids=[user_id], sub_agent_id=sub_agent_id
-        )
+        await self.repo.bulk_activate_sub_agent(db=db, actor=actor, user_ids=[actor.id], sub_agent_id=sub_agent_id)
         await db.commit()
         return True
 
@@ -2036,7 +2017,7 @@ class SubAgentService:
         self,
         db: AsyncSession,
         sub_agent_id: int,
-        user_id: str,
+        actor: User,
     ) -> bool:
         """Deactivate a sub-agent for a user.
 
@@ -2048,19 +2029,12 @@ class SubAgentService:
             SELECT 1 FROM user_sub_agent_activations
             WHERE user_id = :user_id AND sub_agent_id = :sub_agent_id
         """)
-        result = await db.execute(check_query, {"user_id": user_id, "sub_agent_id": sub_agent_id})
+        result = await db.execute(check_query, {"user_id": actor.id, "sub_agent_id": sub_agent_id})
         if not result.scalar_one_or_none():
             return False  # Not activated
 
-        # Get actor_sub for audit
-        user_query = text("SELECT sub FROM users WHERE id = :user_id")
-        result = await db.execute(user_query, {"user_id": user_id})
-        actor_sub = result.scalar_one()
-
         # Delete activation record with automatic audit
-        await self.repo.bulk_deactivate_sub_agent(
-            db=db, actor_sub=actor_sub, user_ids=[user_id], sub_agent_id=sub_agent_id
-        )
+        await self.repo.bulk_deactivate_sub_agent(db=db, actor=actor, user_ids=[actor.id], sub_agent_id=sub_agent_id)
         await db.commit()
         return True
 

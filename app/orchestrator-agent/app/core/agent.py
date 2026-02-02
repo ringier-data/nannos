@@ -28,7 +28,6 @@ from ..models.config import GraphRuntimeContext, ModelType
 from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 from .graph_factory import DEFAULT_MODEL, GraphFactory
-from .registry import RegistryService, User
 from .s3_service import get_s3_service
 
 logger = logging.getLogger(__name__)
@@ -111,9 +110,6 @@ class OrchestratorDeepAgent:
         self.tool_discovery_service = ToolDiscoveryService(self.config, oauth2_client=self.oauth2_client)
         self.agent_discovery_service = AgentDiscoveryService(self.config, oauth2_client=self.oauth2_client)
 
-        # Registry service for user lookups
-        self.registry_service = RegistryService()
-
     def _get_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:
         """Get a graph for the specified model type.
 
@@ -127,100 +123,6 @@ class OrchestratorDeepAgent:
             CompiledStateGraph: The graph instance (cached or newly created)
         """
         return self._graph_factory.get_graph(model_type)
-
-    async def _get_user_from_registry(
-        self, sub: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
-    ) -> User:
-        """Fetch agents from a service registry using the provided sub.
-
-        Args:
-            sub: The user's sub (OIDC subject identifier)
-            access_token: The user's access token for authenticated API calls
-            sub_agent_config_hash: Optional config hash for playground testing mode
-
-        Returns:
-            User object with sub-agents
-
-        Raises:
-            ValueError: If user is not found in registry
-        """
-        user = await self.registry_service.get_user(
-            sub, access_token=access_token, sub_agent_config_hash=sub_agent_config_hash
-        )
-        if not user:
-            raise ValueError(f"User with sub {sub} not found in registry")
-        return user
-
-    async def discover_capabilities(self, user_config: UserConfig) -> UserConfig:
-        """Discover tools and sub-agents for a user based on their permissions.
-
-        Fetches user permissions from registry and discovers available capabilities:
-        - Remote A2A sub-agents (with token exchange)
-        - MCP tools (with token exchange)
-        - Local sub-agent configurations (from playground backend)
-
-        This method is idempotent - if capabilities are already discovered, returns immediately.
-
-        Args:
-            user_config: Base user configuration with user_id and tokens
-
-        Returns:
-            UserConfig: Enriched with discovered tools, sub_agents, and local_subagents
-        """
-        # Skip discovery if already done (tools and sub_agents are always set together)
-        # Note: local_subagents is optional and may remain None if user has none configured
-        if user_config.tools is not None and user_config.sub_agents is not None:
-            return user_config
-
-        logger.debug(f"Discovering capabilities for user_id: {user_config.user_id}")
-
-        # Pass access token to authenticate with playground backend
-        # In playground mode, only the specified sub-agent is fetched
-        user = await self._get_user_from_registry(
-            user_config.user_id,
-            access_token=user_config.access_token.get_secret_value(),
-            sub_agent_config_hash=user_config.sub_agent_config_hash,
-        )
-
-        # Discover sub-agents with token exchange and client credentials support
-        user_context = {
-            "user_id": user_config.user_id,
-            "email": user_config.email,
-            "name": user_config.name,
-            "groups": user_config.groups,
-        }
-        sub_agents = await self.agent_discovery_service.register_agents(
-            agent_metadata=user.agent_metadata,  # Pass metadata with sub_agent_id
-            token=user_config.access_token.get_secret_value(),
-            user_context=user_context,
-            streaming_middleware=self._graph_factory.a2a_middleware,
-        )
-
-        # Discover tools with token exchange support
-        tools = await self.tool_discovery_service.discover_tools(
-            user_config.access_token.get_secret_value(),
-            # TODO: reason better about how and if mcp tools shall be available to the orchestrator at all
-            white_list=user.tool_names if user.tool_names else None,
-        )
-        logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
-
-        # Update user_config with discovered data
-        user_config.tools = tools
-        user_config.sub_agents = sub_agents
-        user_config.language = user.language
-        user_config.custom_prompt = user.custom_prompt
-
-        # Pass local sub-agent configurations
-        if user.local_subagents:
-            user_config.local_subagents = user.local_subagents
-            logger.info(
-                f"Found {len(user.local_subagents)} local sub-agent configs: {[sa.name for sa in user.local_subagents]}"
-            )
-
-        logger.debug(f"Discovered {len(user_config.sub_agents) if user_config.sub_agents else 0} sub-agents")
-        logger.debug(f"User preferred language: {user.language}")
-
-        return user_config
 
     def build_runtime_context(self, user_config: UserConfig) -> GraphRuntimeContext:
         """Build GraphRuntimeContext from enriched user config.
@@ -288,7 +190,7 @@ class OrchestratorDeepAgent:
         Args:
             message_parts: User message parts (text + files)
             user_config: User configuration with credentials and preferences
-            config: graph config from executor (contains metadata like user_id, assistant_id).
+            config: graph config from executor (contains metadata like user_sub, assistant_id).
             resume: Optional resume value for interrupt handling
 
         ARCHITECTURE:
@@ -334,7 +236,7 @@ class OrchestratorDeepAgent:
         """
         logger.debug(
             f"Processing {len(message_parts)} message parts, "
-            f"User ID: {user_config.user_id}, "
+            f"User sub: {user_config.user_sub}, "
             f"Context ID: {config.get('configurable', {}).get('thread_id')}"
         )
 
@@ -353,8 +255,7 @@ class OrchestratorDeepAgent:
             return
 
         # Build GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
-        # Discovers tools/agents if not already done, then builds context with all registries
-        user_config = await self.discover_capabilities(user_config)
+        # UserConfig should already have tools/agents discovered by executor via discover_capabilities()
         runtime_context = self.build_runtime_context(user_config)
 
         # Determine input based on whether we're resuming or starting fresh

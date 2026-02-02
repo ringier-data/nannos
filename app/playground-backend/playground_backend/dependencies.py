@@ -3,10 +3,12 @@
 import logging
 
 from fastapi import HTTPException, Request, status
+from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
 from .config import config
+from .db import get_async_session_factory
 from .models.user import User, UserRole, UserStatus
 
 logger = logging.getLogger(__name__)
@@ -86,10 +88,6 @@ async def require_auth_or_bearer_token(request: Request) -> User:
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
-
-        # Import JWT validation
-        from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
-
         try:
             # Validate the user's access token against OIDC provider
             validator = JWTValidator(
@@ -101,9 +99,9 @@ async def require_auth_or_bearer_token(request: Request) -> User:
             )
 
             payload = await validator.validate(token)
-            user_id = payload.get("sub")
+            sub = payload.get("sub")
 
-            if not user_id:
+            if not sub:
                 logger.warning("Token missing 'sub' claim")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -113,21 +111,20 @@ async def require_auth_or_bearer_token(request: Request) -> User:
 
             # Look up user in database using service from app state
             user_service = request.app.state.user_service
-            from .db import get_async_session_factory
 
             async_session_factory = get_async_session_factory()
             async with async_session_factory() as db:
-                user = await user_service.get_user(db, user_id)
+                user = await user_service.get_user_by_sub(db, sub)
 
             if not user:
-                logger.warning(f"User not found for sub={user_id}")
+                logger.warning(f"User not found for sub={sub}")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="User not found",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-            logger.info(f"Bearer token validated for user: {user.email} (sub={user_id})")
+            logger.info(f"Bearer token validated for user: {user.email} (sub={sub})")
             return user
 
         except JWTValidationError as e:

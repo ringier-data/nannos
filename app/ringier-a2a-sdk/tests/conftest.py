@@ -160,6 +160,6 @@ def mock_a2a_request_body():
         "id": "test-request-id",
         "params": {
             "message": {"role": "user", "parts": [{"kind": "text", "text": "Create a Jira ticket"}]},
-            "metadata": {"user_context": {"user_id": "user-123", "email": "test@example.com", "name": "Test User"}},
+            "metadata": {"user_context": {"user_sub": "user-123", "email": "test@example.com", "name": "Test User"}},
         },
     }

@@ -154,26 +154,26 @@ async def db_test_user_groups(pg_session, mock_user, user_group_service):
     assert user is not None
     await user_group_service.create_group(
         pg_session,
-        actor_sub=mock_user.sub,
+        actor=mock_user,
         name="Test Group 1",
         description="Description 1",
     )
     await user_group_service.create_group(
         pg_session,
-        actor_sub=mock_user.sub,
+        actor=mock_user,
         name="Test Group 2",
         description="Description 2",
     )
     await user_group_service.add_members(
         pg_session,
-        actor_sub=mock_user.sub,
+        actor=mock_user,
         group_id=1,
         user_ids=[mock_user.id],
         role="manager",
     )
     await user_group_service.add_members(
         pg_session,
-        actor_sub=mock_user.sub,
+        actor=mock_user,
         group_id=2,
         user_ids=[mock_user.id],
         role="read",

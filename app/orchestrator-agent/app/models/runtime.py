@@ -17,6 +17,7 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
 from ..a2a_utils.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
+from ..core.document_store_tools import create_document_store_tools
 from ..core.model_factory import ModelType, create_model
 from ..core.s3_service import S3Service
 from .config import GraphRuntimeContext, UserConfig
@@ -81,14 +82,13 @@ def build_runtime_context(
 
     # Add document store tools if dependencies are provided
     if document_store is not None and s3_service is not None and document_store_bucket:
-        logger.info(f"Adding document store tools for user {user_config.user_id}")
-        from ..core.document_store_tools import create_document_store_tools
+        logger.info(f"Adding document store tools for user_id: {user_config.user_id}")
 
         doc_tools = create_document_store_tools(
             store=document_store,
             s3_service=s3_service,
             s3_bucket=document_store_bucket,
-            user_id=user_config.user_id,
+            user_id=user_config.user_id,  # Use database ID for docstore namespace
         )
         for tool in doc_tools:
             tool_registry[tool.name] = tool
@@ -133,7 +133,7 @@ def build_runtime_context(
                     dynamic_subagent = create_foundry_local_subagent(
                         config=config,
                         user={
-                            "sub": user_config.user_id,
+                            "sub": user_config.user_sub,
                             "name": user_config.name,
                             "email": user_config.email,
                         },
@@ -215,7 +215,8 @@ def build_runtime_context(
         )
 
     return GraphRuntimeContext(
-        user_id=user_config.user_id,
+        user_id=user_config.user_id,  # Database ID (stable)
+        user_sub=user_config.user_sub,  # OIDC sub (current)
         name=user_config.name,
         email=user_config.email,
         language=user_config.language,

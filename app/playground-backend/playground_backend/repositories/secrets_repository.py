@@ -6,6 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.user import User
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class SecretsRepository(AuditedRepository):
     async def update_permissions(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         secret_id: int,
         group_permissions: list[dict],
     ) -> None:
@@ -29,7 +30,7 @@ class SecretsRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             secret_id: Secret ID
             group_permissions: List of dicts with user_group_id and permissions
         """
@@ -67,7 +68,7 @@ class SecretsRepository(AuditedRepository):
             # Custom audit for permission change
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(secret_id),
                 action=AuditAction.PERMISSION_UPDATE,
@@ -77,7 +78,7 @@ class SecretsRepository(AuditedRepository):
                 },
             )
 
-            logger.info(f"Updated permissions for secret {secret_id} by {actor_sub}")
+            logger.info(f"Updated permissions for secret {secret_id} by {actor.sub}")
 
         except Exception as e:
             logger.error(f"Failed to update permissions for secret {secret_id}: {e}")

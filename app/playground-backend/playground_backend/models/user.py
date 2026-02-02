@@ -31,8 +31,8 @@ class UserRole(str, Enum):
 class User(BaseModel):
     """User model for PostgreSQL storage."""
 
-    id: str  # Primary key (sub from OIDC)
-    sub: str  # OIDC subject identifier
+    id: str  # Primary key (UUID for new users, original sub for existing users - stable)
+    sub: str  # OIDC subject identifier (current - can change with IDP)
     email: str
     first_name: str
     last_name: str

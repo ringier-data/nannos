@@ -39,7 +39,7 @@ from a2a.types import (
 from langchain_core.messages import AIMessage
 from langsmith.run_helpers import get_current_run_tree
 
-from ..authentication import (
+from ..a2a_utils.authentication import (
     AuthenticationMethod,
     AuthPayload,
     ServiceAuthRequirement,

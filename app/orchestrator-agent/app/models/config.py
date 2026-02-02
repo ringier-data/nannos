@@ -52,7 +52,10 @@ class GraphRuntimeContext:
     """
 
     user_id: str
-    """User identifier for logging and isolation."""
+    """User's database ID (users.id - stable identifier for DB operations and isolation)."""
+
+    user_sub: str
+    """User's OIDC sub claim (subject identifier from identity provider - can change with IDP)."""
 
     name: str
     """User's display name for personalization."""
@@ -137,7 +140,10 @@ class UserConfig(BaseModel):
     Use build_runtime_context(user_config, runtime_deps) to create GraphRuntimeContext.
     """
 
-    user_id: str = Field(..., description="User identifier")
+    user_id: str = Field(
+        description="User's database ID (users.id - stable identifier for DB operations and isolation)",
+    )
+    user_sub: str = Field(..., description="User's OIDC sub claim (can change with IDP)")
     access_token: SecretStr = Field(..., description="User authentication token")
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
@@ -162,6 +168,14 @@ class UserConfig(BaseModel):
     sub_agent_config_hash: Optional[str] = Field(
         default=None,
         description="Sub-agent config hash for playground testing mode (single sub-agent isolation)",
+    )
+    agent_metadata: Optional[dict[str, dict[str, Any]]] = Field(
+        default=None,
+        description="Agent metadata from registry: Maps agent_url -> {sub_agent_id, name, description}",
+    )
+    tool_names: Optional[list[str]] = Field(
+        default=None,
+        description="MCP tool names enabled for orchestrator (from registry)",
     )
     sub_agents: Optional[list[CompiledSubAgent]] = Field(
         default=None,

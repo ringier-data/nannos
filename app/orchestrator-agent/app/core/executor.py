@@ -1,4 +1,5 @@
 import logging
+from typing import Literal
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -17,15 +18,17 @@ from a2a.utils import (
     new_task,
 )
 from a2a.utils.errors import ServerError
+from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
 
 from app.models.responses import AgentStreamResponse
 
-from ..models.config import UserConfig
+from ..models.config import ModelType, UserConfig
 
 # from google.adk.sessions import InMemorySessionService
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
+from .registry import RegistryService, User
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +39,103 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
     def __init__(self, cost_logger=None):
         self.agent = OrchestratorDeepAgent(cost_logger=cost_logger)
+        self.registry_service = RegistryService()
+
+    async def _get_user_from_registry(
+        self, sub: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
+    ):
+        """Fetch user from registry using the provided sub.
+
+        Args:
+            sub: The user's sub (OIDC subject identifier)
+            access_token: The user's access token for authenticated API calls
+            sub_agent_config_hash: Optional config hash for playground testing mode
+
+        Returns:
+            User object with all user-specific data
+
+        Raises:
+            ServerError: If user is not found in registry
+        """
+        user = await self.registry_service.get_user(
+            sub, access_token=access_token, sub_agent_config_hash=sub_agent_config_hash
+        )
+        if not user:
+            logger.error(f"[REGISTRY] User with sub {sub} not found in registry")
+            raise ServerError(error=InvalidParamsError())
+        return user
+
+    async def _build_user_config(
+        self,
+        user: User,
+        user_sub: str,
+        user_token: str,
+        user_name: str,
+        user_email: str,
+        user_groups: list[str],
+        model_choice: ModelType | None,
+        message_formatting: Literal["markdown", "slack", "plain"],
+        slack_user_handle: str | None,
+        sub_agent_config_hash: str | None,
+    ) -> UserConfig:
+        """Build complete UserConfig with all data and discovered capabilities.
+
+        Args:
+            user: User object from registry
+            user_sub: OIDC subject from JWT
+            user_token: User access token
+            user_name: User's full name
+            user_email: User's email
+            user_groups: User's group memberships
+            model_choice: Optional model preference
+            message_formatting: Message formatting style
+            slack_user_handle: Optional Slack user handle
+            sub_agent_config_hash: Optional playground mode config hash
+
+        Returns:
+            UserConfig: Fully initialized with static data and discovered tools/agents
+        """
+        # Build base UserConfig with static data from registry and request context
+        user_config = UserConfig(
+            user_sub=user_sub,  # OIDC sub from JWT
+            user_id=user.id,  # Stable database ID from registry
+            access_token=SecretStr(user_token),
+            name=user_name,
+            email=user_email,
+            groups=user_groups,  # Pass groups for authorization
+            model=model_choice,
+            message_formatting=message_formatting,
+            slack_user_handle=slack_user_handle,
+            sub_agent_config_hash=sub_agent_config_hash,
+            language=user.language,
+            custom_prompt=user.custom_prompt,
+            local_subagents=user.local_subagents,
+            agent_metadata=user.agent_metadata,
+            tool_names=user.tool_names,
+        )
+
+        # Discover capabilities (tools and sub-agents)
+        logger.debug(f"Discovering capabilities for user_sub: {user_config.user_sub}")
+        sub_agents = await self.agent.agent_discovery_service.register_agents(
+            agent_metadata=user_config.agent_metadata or {},
+            token=user_config.access_token.get_secret_value(),
+            user_config=user_config,
+            streaming_middleware=self.agent._graph_factory.a2a_middleware,
+        )
+
+        tools = await self.agent.tool_discovery_service.discover_tools(
+            user_config.access_token.get_secret_value(),
+            white_list=user_config.tool_names if user_config.tool_names else None,
+        )
+        logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
+
+        # Update user_config with discovered data
+        user_config.tools = tools
+        user_config.sub_agents = sub_agents
+
+        logger.debug(f"Built complete UserConfig with {len(user_config.sub_agents)} sub-agents")
+
+        return user_config
 
     async def execute(
         self,
@@ -81,10 +181,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
-        # ZERO-TRUST: Extract verified user_id and token from call_context (set by RequestContextBuilder)
+        # ZERO-TRUST: Extract verified user_sub and token from call_context (set by RequestContextBuilder)
         if context.call_context and hasattr(context.call_context, "state"):
             try:
-                user_id = context.call_context.state["user_id"]
+                user_sub = context.call_context.state["user_sub"]  # OIDC subject from JWT
                 user_token = context.call_context.state["user_token"]
                 user_name = context.call_context.state["user_name"]
                 user_email = context.call_context.state["user_email"]
@@ -100,9 +200,18 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         # Set the access token for cost tracking (ContextVar)
         set_request_access_token(user_token)
-        logger.info(f"[ZERO-TRUST] Using verified user_id for graph retrieval: {user_id}")
+        logger.info(f"[ZERO-TRUST] Using verified user_sub for graph retrieval: {user_sub}")
         if sub_agent_config_hash:
             logger.info(f"[PLAYGROUND] Playground mode enabled for sub-agent config hash: {sub_agent_config_hash}")
+
+        # Fetch user from registry to get stable database ID (user.id)
+        # This allows us to use the database ID in config metadata instead of OIDC sub e.g. for docstore read/write
+        user = await self._get_user_from_registry(
+            user_sub,
+            access_token=user_token,
+            sub_agent_config_hash=sub_agent_config_hash,
+        )
+        logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
 
         # Extract metadata from both message-level and params-level (message takes priority)
         logger.info(f"[EXECUTOR] Params-level metadata: {context.metadata}")
@@ -143,26 +252,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Client may send 'slackUserId' (camelCase) or 'slack_user_id' (snake_case)
             slack_user_id = request_metadata.get("slackUserId")
             slack_channel_id = request_metadata.get("slackChannelId")  # for filesystem namespace isolation
-
-            # NOTE: we decide to use channel_id as part of the filesystem namespace since if one has access to the
-            # channel, she should have access to all files shared in that channel.
-            # This is a design decision based on Slack's permission model.
-            # Create config for graph execution with interrupt support
-            config = {
-                "configurable": {"thread_id": task.context_id},
-                "metadata": {
-                    "assistant_id": slack_channel_id if slack_channel_id else user_id,
-                    "user_id": user_id,
-                    "user_name": user_name,
-                    "slack_thread_ts": request_metadata.get("slackThreadTs"),
-                    "scope": "personal" if not slack_channel_id else "channel",
-                },
-                "tags": [
-                    f"user:{user_id}",
-                    f"conversation:{task.context_id}",
-                ],
-            }
-
             if slack_user_id:
                 slack_user_handle = f"<@{slack_user_id}>"
             else:
@@ -173,24 +262,46 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 request_metadata.get("messageFormatting") or request_metadata.get("message_formatting") or "markdown"
             )
 
-            user_config = UserConfig(
-                user_id=user_id,
-                access_token=user_token,
-                name=user_name,
-                email=user_email,
-                groups=user_groups,  # Pass groups for authorization
-                model=model_choice,
+            # Build complete UserConfig with all data and discovered capabilities
+            user_config = await self._build_user_config(
+                user=user,
+                user_sub=user_sub,
+                user_token=user_token,
+                user_name=user_name,
+                user_email=user_email,
+                user_groups=user_groups,
+                model_choice=model_choice,
                 message_formatting=message_formatting,
                 slack_user_handle=slack_user_handle,
                 sub_agent_config_hash=sub_agent_config_hash,
             )
+
+            # NOTE: we decide to use channel_id as part of the filesystem namespace since if one has access to the
+            # channel, she should have access to all files shared in that channel.
+            # This is a design decision based on Slack's permission model.
+            # Create config for graph execution with interrupt support
+            config = {
+                "configurable": {"thread_id": task.context_id},
+                "metadata": {
+                    "assistant_id": slack_channel_id if slack_channel_id else user_sub,
+                    "user_id": user.id,  # Stable database ID (not OIDC sub)
+                    "user_name": user_name,
+                    "slack_thread_ts": request_metadata.get("slackThreadTs"),
+                    "scope": "personal" if not slack_channel_id else "channel",
+                },
+                "tags": [
+                    f"user_sub:{user_sub}",  # Keep OIDC sub in tags for tracing
+                    f"user_id:{user.id}",  # Add database ID tag
+                    f"conversation:{task.context_id}",
+                ],
+            }
 
             # Extract message parts for multimodal support (text + files)
             message_parts = context.message.parts if context.message else []
 
             # Check if we need to resume from an interrupt
             # Get or create graph for this user's configuration
-            # ZERO-TRUST: Pass verified user_id and user_token from call_context
+            # ZERO-TRUST: Pass verified user_sub and user_token from call_context
             graph = await self.agent.get_or_create_graph(
                 model_type=user_config.model if user_config.model else self.agent._default_model_type
             )

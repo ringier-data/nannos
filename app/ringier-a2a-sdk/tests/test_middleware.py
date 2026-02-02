@@ -61,7 +61,7 @@ class TestUserContextFromRequestStateMiddleware:
 
                 request = Request(scope, receive)
                 request.state.user = {
-                    "sub": "user-123",
+                    "sub": "sub-123",
                     "email": "test@example.com",
                     "name": "Test User",
                     "token": "jwt-token",
@@ -86,7 +86,7 @@ class TestUserContextFromRequestStateMiddleware:
 
         # Verify context was set during request processing
         assert context_during_request["user_context"] is not None
-        assert context_during_request["user_context"]["user_id"] == "user-123"
+        assert context_during_request["user_context"]["user_sub"] == "sub-123"
         assert context_during_request["user_context"]["email"] == "test@example.com"
 
         # Context should be cleared after request

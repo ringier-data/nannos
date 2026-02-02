@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType, AuditLog
+from ..models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ class AuditService:
     async def log_action(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         entity_type: AuditEntityType,
         entity_id: str,
         action: AuditAction,
@@ -29,7 +30,7 @@ class AuditService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             entity_type: Type of entity being modified
             entity_id: ID of the entity being modified
             action: The action being performed
@@ -48,7 +49,7 @@ class AuditService:
             result = await db.execute(
                 query,
                 {
-                    "actor_sub": actor_sub,
+                    "actor_sub": actor.sub,
                     "entity_type": entity_type.value,
                     "entity_id": str(entity_id),
                     "action": action.value,
@@ -60,7 +61,7 @@ class AuditService:
             if row is None:
                 raise RuntimeError("Failed to create audit log entry")
 
-            logger.info(f"Audit: {actor_sub} performed {action.value} on {entity_type.value}:{entity_id}")
+            logger.info(f"Audit: {actor.sub} performed {action.value} on {entity_type.value}:{entity_id}")
 
             return AuditLog(
                 id=row["id"],

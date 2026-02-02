@@ -13,6 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from playground_backend.models.secret import SecretCreate, SecretType
+from playground_backend.models.user import User
+from playground_backend.services.secrets_service import SecretsService
 
 
 async def _create_user(
@@ -49,20 +51,21 @@ async def _create_user(
 
 @mock_aws
 @pytest.mark.asyncio
-async def test_secret_permissions_persist_when_notifications_fail(pg_session: AsyncSession, secrets_service):
+async def test_secret_permissions_persist_when_notifications_fail(
+    pg_session: AsyncSession,
+    secrets_service: SecretsService,
+    test_user_db: User,
+    test_approver_user_db: User,
+):
     """Test that secret permission updates are committed even if notifications fail.
 
     This is a critical behavior: permission changes should be persisted to the database
     before notification processing, so that notification failures don't cause data loss.
     """
-    # Create test users
-    await _create_user(pg_session, "owner@test.com", "test-user-1")
-    await _create_user(pg_session, "member@test.com", "test-user-2")
-
     # Create a secret
     secret = await secrets_service.create_secret(
         db=pg_session,
-        user_id="test-user-1",
+        actor=test_user_db,
         data=SecretCreate(
             name="test-secret",
             description="Test secret for transaction isolation",
@@ -70,6 +73,7 @@ async def test_secret_permissions_persist_when_notifications_fail(pg_session: As
             secret_value="secret-value-123",
         ),
     )
+    assert secret is not None
 
     # Create a group to share with
     await pg_session.execute(
@@ -83,8 +87,9 @@ async def test_secret_permissions_persist_when_notifications_fail(pg_session: As
     await pg_session.execute(
         text("""
             INSERT INTO user_group_members (user_group_id, user_id, group_role)
-            VALUES (1, 'test-user-2', 'read')
-        """)
+            VALUES (1, :user_id, 'read')
+        """),
+        {"user_id": test_approver_user_db.id},
     )
     await pg_session.commit()
 
@@ -98,7 +103,7 @@ async def test_secret_permissions_persist_when_notifications_fail(pg_session: As
         db=pg_session,
         secret_id=secret.id,
         group_permissions=[{"user_group_id": 1, "permissions": ["read"]}],
-        user_id="test-user-1",
+        actor=test_user_db,
         is_admin=False,
     )
 
@@ -139,7 +144,9 @@ async def test_secret_permissions_persist_when_notifications_fail(pg_session: As
 
 @mock_aws
 @pytest.mark.asyncio
-async def test_secret_permissions_commit_before_notification_queries(pg_session: AsyncSession, secrets_service):
+async def test_secret_permissions_commit_before_notification_queries(
+    pg_session: AsyncSession, secrets_service: SecretsService, test_user_db: User, test_approver_user_db: User
+):
     """Test that permissions are committed before any notification queries run.
 
     If notification queries fail (e.g., invalid SQL), the permissions should already be saved.
@@ -150,7 +157,7 @@ async def test_secret_permissions_commit_before_notification_queries(pg_session:
     # Create a secret
     secret = await secrets_service.create_secret(
         db=pg_session,
-        user_id="test-user-1",
+        actor=test_user_db,
         data=SecretCreate(
             name="test-secret-2",
             description="Test secret",
@@ -158,6 +165,7 @@ async def test_secret_permissions_commit_before_notification_queries(pg_session:
             secret_value="secret-value-456",
         ),
     )
+    assert secret is not None
 
     # Create a group
     await pg_session.execute(
@@ -165,6 +173,14 @@ async def test_secret_permissions_commit_before_notification_queries(pg_session:
             INSERT INTO user_groups (id, name, description) 
             VALUES (2, 'Test Group 2', 'Test group 2')
         """)
+    )
+    # add a member to the group
+    await pg_session.execute(
+        text("""
+            INSERT INTO user_group_members (user_group_id, user_id, group_role)
+            VALUES (2, :user_id, 'read')
+        """),
+        {"user_id": test_approver_user_db.id},
     )
     await pg_session.commit()
 
@@ -180,16 +196,12 @@ async def test_secret_permissions_commit_before_notification_queries(pg_session:
         return await original_execute(statement, *args, **kwargs)
 
     with patch.object(pg_session, "execute", side_effect=mock_execute):
-        # Update permissions with notification service enabled
-        mock_notification_service = AsyncMock()
-        secrets_service.set_notification_service(mock_notification_service)
-
         # This should succeed - permissions committed before the failing query
         result = await secrets_service.update_permissions(
             db=pg_session,
             secret_id=secret.id,
             group_permissions=[{"user_group_id": 2, "permissions": ["write"]}],
-            user_id="test-user-1",
+            actor=test_user_db,
             is_admin=False,
         )
 
@@ -213,7 +225,9 @@ async def test_secret_permissions_commit_before_notification_queries(pg_session:
 
 @mock_aws
 @pytest.mark.asyncio
-async def test_secret_permissions_multiple_groups_notification_failure(pg_session: AsyncSession, secrets_service):
+async def test_secret_permissions_multiple_groups_notification_failure(
+    pg_session: AsyncSession, secrets_service: SecretsService, test_user_db: User
+):
     """Test permission updates with multiple groups when notifications fail partway through."""
     # Create test user
     await _create_user(pg_session, "owner@test.com", "test-user-1")
@@ -221,7 +235,7 @@ async def test_secret_permissions_multiple_groups_notification_failure(pg_sessio
     # Create a secret
     secret = await secrets_service.create_secret(
         db=pg_session,
-        user_id="test-user-1",
+        actor=test_user_db,
         data=SecretCreate(
             name="test-secret-3",
             description="Test secret for multiple groups",
@@ -229,6 +243,7 @@ async def test_secret_permissions_multiple_groups_notification_failure(pg_sessio
             secret_value="secret-value-789",
         ),
     )
+    assert secret is not None
 
     # Create multiple groups
     for i in range(3, 6):
@@ -255,7 +270,7 @@ async def test_secret_permissions_multiple_groups_notification_failure(pg_sessio
             {"user_group_id": 4, "permissions": ["read", "write"]},
             {"user_group_id": 5, "permissions": ["write"]},
         ],
-        user_id="test-user-1",
+        actor=test_user_db,
         is_admin=False,
     )
 

@@ -15,10 +15,11 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..a2a_utils import make_a2a_async_runnable
 from ..a2a_utils.config import A2AClientConfig
+from ..a2a_utils.factory import make_a2a_async_runnable
 from ..middleware import A2ATaskTrackingMiddleware
 from ..models import AgentSettings
+from ..models.config import UserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class AgentDiscoveryService:
         self,
         agent_metadata: dict[str, dict[str, Any]],
         token: str,
-        user_context: Optional[dict[str, Any]] = None,
+        user_config: Optional[UserConfig] = None,
         streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
     ) -> List[CompiledSubAgent]:
         """Discover available sub-agents by fetching their agent cards.
@@ -55,7 +56,7 @@ class AgentDiscoveryService:
         Args:
             agent_metadata: Metadata map from agent_url -> {sub_agent_id, name, description}
             token: User's access token for authentication and token exchange
-            user_context: Optional user context dict with user_id, email, name
+            user_config: Optional[UserConfig] containing user configuration
             client_credentials_auth: Optional OidcClientCredentialsAuth for client credentials flow
             streaming_middleware: Optional middleware for registering streaming runnables
 
@@ -76,7 +77,7 @@ class AgentDiscoveryService:
                     base_url,
                     streaming_middleware,
                     token,
-                    user_context,
+                    user_config,
                     sub_agent_id=sub_agent_id,  # Pass sub_agent_id to discovery
                 )
                 if agent:
@@ -94,7 +95,7 @@ class AgentDiscoveryService:
         base_url: str,
         streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
         user_token: Optional[str] = None,
-        user_context: Optional[dict[str, Any]] = None,
+        user_config: Optional[UserConfig] = None,
         sub_agent_id: Optional[int] = None,
     ) -> Optional[CompiledSubAgent]:
         """Discover a single agent from the given URL.
@@ -103,7 +104,7 @@ class AgentDiscoveryService:
             base_url: Base URL of the agent
             streaming_middleware: Optional middleware for registering streaming runnables
             user_token: User's access token for authentication
-            user_context: Optional user context dict with user_id, email, name
+            user_config: Optional UserConfig containing user context for token exchange
 
         Returns:
             CompiledSubAgent if discovery succeeds, None otherwise
@@ -130,7 +131,7 @@ class AgentDiscoveryService:
             agent_card,
             self.oauth2_client,
             user_token=user_token,
-            user_context=user_context,
+            user_config=user_config,
             config=config,
         )
         logger.debug(f"A2A runnable created successfully for {agent_card.url} with sub_agent_id={sub_agent_id}")

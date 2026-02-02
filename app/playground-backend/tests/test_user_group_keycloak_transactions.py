@@ -42,7 +42,7 @@ class TestCreateGroupWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_create_group_success_syncs_to_keycloak(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test successful group creation syncs to Keycloak and stores group ID."""
         service = user_group_service_with_keycloak
@@ -50,7 +50,7 @@ class TestCreateGroupWithKeycloakTransaction:
         # Create group
         group = await service.create_group(
             db=pg_session,
-            actor_sub="actor-123",
+            actor=test_user,
             name="Test Group",
             description="Test Description",
         )
@@ -68,7 +68,7 @@ class TestCreateGroupWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_create_group_keycloak_failure_rolls_back_db(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test Keycloak failure during create rolls back database transaction."""
         service = user_group_service_with_keycloak
@@ -80,7 +80,7 @@ class TestCreateGroupWithKeycloakTransaction:
         with pytest.raises(KeycloakSyncError):
             await service.create_group(
                 db=pg_session,
-                actor_sub="actor-123",
+                actor=test_user,
                 name="Failing Group",
                 description="Should not persist",
             )
@@ -101,7 +101,7 @@ class TestUpdateGroupWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_update_group_success_syncs_to_keycloak(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test successful group update syncs to Keycloak."""
         service = user_group_service_with_keycloak
@@ -118,7 +118,7 @@ class TestUpdateGroupWithKeycloakTransaction:
         # Update group
         updated_group = await service.update_group(
             db=pg_session,
-            actor_sub="actor-123",
+            actor=test_user,
             group_id=1,
             name="Updated Name",
             description="Updated Desc",
@@ -134,7 +134,7 @@ class TestUpdateGroupWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_update_group_keycloak_failure_rolls_back_db(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test Keycloak failure during update rolls back database transaction."""
         service = user_group_service_with_keycloak
@@ -155,7 +155,7 @@ class TestUpdateGroupWithKeycloakTransaction:
         with pytest.raises(KeycloakSyncError):
             await service.update_group(
                 db=pg_session,
-                actor_sub="actor-123",
+                actor=test_user,
                 group_id=1,
                 name="Should Not Update",
                 description="Should Not Update",
@@ -176,7 +176,7 @@ class TestDeleteGroupWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_delete_group_success_syncs_to_keycloak(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test successful group deletion syncs to Keycloak."""
         service = user_group_service_with_keycloak
@@ -193,7 +193,7 @@ class TestDeleteGroupWithKeycloakTransaction:
         # Delete group
         success = await service.delete_group(
             db=pg_session,
-            actor_sub="actor-123",
+            actor=test_user,
             group_id=1,
         )
         await pg_session.commit()
@@ -209,7 +209,7 @@ class TestDeleteGroupWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_delete_group_keycloak_failure_rolls_back_db(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test Keycloak failure during delete rolls back database transaction."""
         service = user_group_service_with_keycloak
@@ -230,7 +230,7 @@ class TestDeleteGroupWithKeycloakTransaction:
         with pytest.raises(KeycloakSyncError):
             await service.delete_group(
                 db=pg_session,
-                actor_sub="actor-123",
+                actor=test_user,
                 group_id=1,
             )
 
@@ -248,12 +248,12 @@ class TestAddMembersWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_add_members_success_syncs_to_keycloak(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test successful member addition syncs to Keycloak sequentially."""
         service = user_group_service_with_keycloak
 
-        # Create group and users
+        # Create group and users (using distinct id and sub values)
         await pg_session.execute(
             text("""
                 INSERT INTO user_groups (id, name, keycloak_group_id, created_at, updated_at)
@@ -264,38 +264,38 @@ class TestAddMembersWithKeycloakTransaction:
             text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, role, status, created_at, updated_at)
                 VALUES 
-                    ('sub-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW()),
-                    ('sub-2', 'sub-2', 'user2@test.com', 'User', 'Two', 'member', 'active', NOW(), NOW())
+                    ('user-uuid-1', 'keycloak-sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW()),
+                    ('user-uuid-2', 'keycloak-sub-2', 'user2@test.com', 'User', 'Two', 'member', 'active', NOW(), NOW())
             """)
         )
         await pg_session.commit()
 
-        # Add members
+        # Add members (using user_id, not sub)
         members = await service.add_members(
             db=pg_session,
-            actor_sub="actor-123",
+            actor=test_user,
             group_id=1,
-            user_ids=["sub-1", "sub-2"],
+            user_ids=["user-uuid-1", "user-uuid-2"],
             role="read",
         )
         await pg_session.commit()
 
-        # Verify Keycloak was called twice (sequential)
+        # Verify Keycloak was called twice with the correct sub values (not user_id)
         assert mock_keycloak_service.add_user_to_group.call_count == 2
-        mock_keycloak_service.add_user_to_group.assert_any_call("sub-1", "kc-group-123")
-        mock_keycloak_service.add_user_to_group.assert_any_call("sub-2", "kc-group-123")
+        mock_keycloak_service.add_user_to_group.assert_any_call("keycloak-sub-1", "kc-group-123")
+        mock_keycloak_service.add_user_to_group.assert_any_call("keycloak-sub-2", "kc-group-123")
 
         # Verify database has members
         assert len(members) == 2
 
     @pytest.mark.asyncio
     async def test_add_members_keycloak_failure_rolls_back_db(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test Keycloak failure during add_members rolls back database transaction."""
         service = user_group_service_with_keycloak
 
-        # Create group and users
+        # Create group and users (using distinct id and sub values)
         await pg_session.execute(
             text("""
                 INSERT INTO user_groups (id, name, keycloak_group_id, created_at, updated_at)
@@ -305,7 +305,7 @@ class TestAddMembersWithKeycloakTransaction:
         await pg_session.execute(
             text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, role, status, created_at, updated_at)
-                VALUES ('sub-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW())
+                VALUES ('user-uuid-1', 'keycloak-sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW())
             """)
         )
         await pg_session.commit()
@@ -317,9 +317,9 @@ class TestAddMembersWithKeycloakTransaction:
         with pytest.raises(KeycloakSyncError):
             await service.add_members(
                 db=pg_session,
-                actor_sub="actor-123",
+                actor=test_user,
                 group_id=1,
-                user_ids=["sub-1"],
+                user_ids=["user-uuid-1"],
                 role="read",
             )
 
@@ -339,12 +339,12 @@ class TestRemoveMemberWithKeycloakTransaction:
 
     @pytest.mark.asyncio
     async def test_remove_member_success_syncs_to_keycloak(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test successful member removal syncs to Keycloak."""
         service = user_group_service_with_keycloak
 
-        # Create group, user, and membership
+        # Create group, user, and membership (using distinct id and sub values)
         await pg_session.execute(
             text("""
                 INSERT INTO user_groups (id, name, keycloak_group_id, created_at, updated_at)
@@ -354,53 +354,53 @@ class TestRemoveMemberWithKeycloakTransaction:
         await pg_session.execute(
             text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, role, status, created_at, updated_at)
-                VALUES ('sub-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW())
+                VALUES ('user-uuid-1', 'keycloak-sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW())
             """)
         )
         await pg_session.execute(
             text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, role, status, created_at, updated_at)
-                VALUES ('sub-2', 'sub-2', 'user2@test.com', 'User', 'Two', 'member', 'active', NOW(), NOW())
+                VALUES ('user-uuid-2', 'keycloak-sub-2', 'user2@test.com', 'User', 'Two', 'member', 'active', NOW(), NOW())
             """)
         )
         await pg_session.execute(
             text("""
                 INSERT INTO user_group_members (id, user_id, user_group_id, group_role, created_at)
-                VALUES (1, 'sub-1', 1, 'read', NOW())
+                VALUES (1, 'user-uuid-1', 1, 'read', NOW())
             """)
         )
         await pg_session.execute(
             text("""
                 INSERT INTO user_group_members (id, user_id, user_group_id, group_role, created_at)
-                VALUES (2, 'sub-2', 1, 'read', NOW())
+                VALUES (2, 'user-uuid-2', 1, 'read', NOW())
             """)
         )
         await pg_session.commit()
 
-        # Remove member
+        # Remove member (using user_id, not sub)
         members = await service.remove_members(
             db=pg_session,
-            actor_sub="actor-123",
+            actor=test_user,
             group_id=1,
-            user_ids=["sub-1"],
+            user_ids=["user-uuid-1"],
         )
         await pg_session.commit()
 
-        # Verify Keycloak was called
-        mock_keycloak_service.remove_user_from_group.assert_called_once_with("sub-1", "kc-group-123")
+        # Verify Keycloak was called with the correct sub value (not user_id)
+        mock_keycloak_service.remove_user_from_group.assert_called_once_with("keycloak-sub-1", "kc-group-123")
 
         # Verify 1 member left in the database
         assert len(members) == 1
-        assert members[0].user_id == "sub-2"
+        assert members[0].user_id == "user-uuid-2"
 
     @pytest.mark.asyncio
     async def test_remove_member_keycloak_failure_rolls_back_db(
-        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service
+        self, pg_session, user_group_service_with_keycloak, mock_keycloak_service, test_user
     ):
         """Test Keycloak failure during remove_member rolls back database transaction."""
         service = user_group_service_with_keycloak
 
-        # Create group, user, and membership
+        # Create group, user, and membership (using distinct id and sub values)
         await pg_session.execute(
             text("""
                 INSERT INTO user_groups (id, name, keycloak_group_id, created_at, updated_at)
@@ -410,13 +410,13 @@ class TestRemoveMemberWithKeycloakTransaction:
         await pg_session.execute(
             text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, role, status, created_at, updated_at)
-                VALUES ('sub-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW())
+                VALUES ('user-uuid-1', 'keycloak-sub-1', 'user1@test.com', 'User', 'One', 'member', 'active', NOW(), NOW())
             """)
         )
         await pg_session.execute(
             text("""
                 INSERT INTO user_group_members (id, user_id, user_group_id, group_role, created_at)
-                VALUES (1, 'sub-1', 1, 'read', NOW())
+                VALUES (1, 'user-uuid-1', 1, 'read', NOW())
             """)
         )
         await pg_session.commit()
@@ -428,9 +428,9 @@ class TestRemoveMemberWithKeycloakTransaction:
         with pytest.raises(KeycloakSyncError):
             await service.remove_members(
                 db=pg_session,
-                actor_sub="actor-123",
+                actor=test_user,
                 group_id=1,
-                user_ids=["sub-1"],
+                user_ids=["user-uuid-1"],
             )
 
         # Explicitly rollback the transaction (in real code, controller would do this)
@@ -438,7 +438,7 @@ class TestRemoveMemberWithKeycloakTransaction:
 
         # Verify member was NOT removed from database
         result = await pg_session.execute(
-            text("SELECT COUNT(*) as count FROM user_group_members WHERE user_id = 'sub-1'")
+            text("SELECT COUNT(*) as count FROM user_group_members WHERE user_id = 'user-uuid-1'")
         )
         count = result.scalar()
         assert count == 1

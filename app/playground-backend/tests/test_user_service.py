@@ -31,8 +31,8 @@ class TestUserService:
         )
 
         assert user is not None
-        assert user.id == "new-user-id"
-        assert user.sub == "new-user-id"
+        assert user.sub == "new-user-id"  # sub is the OIDC subject
+        assert user.id is not None  # id is a generated UUID
         assert user.email == "new@example.com"
         assert user.first_name == "New"
         assert user.last_name == "User"
@@ -83,8 +83,8 @@ class TestUserService:
             last_name="User",
         )
 
-        # Get the user
-        user = await user_service.get_user(db_session, "test-user-id")
+        # Get the user by their UUID id
+        user = await user_service.get_user(db_session, created_user.id)
 
         assert user is not None
         assert user.id == created_user.id
@@ -125,12 +125,12 @@ class TestUserService:
                 SET is_administrator = TRUE
                 WHERE id = :user_id
             """),
-            {"user_id": "test-user-id"},
+            {"user_id": user1.id},  # Use the actual UUID
         )
         await db_session.commit()
 
         # Verify the direct update worked
-        user_after_admin_update = await user_service.get_user(db_session, "test-user-id")
+        user_after_admin_update = await user_service.get_user(db_session, user1.id)
         assert user_after_admin_update is not None
         assert user_after_admin_update.is_administrator is True
 

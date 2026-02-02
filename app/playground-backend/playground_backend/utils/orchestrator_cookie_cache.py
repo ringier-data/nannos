@@ -10,7 +10,6 @@ need to share orchestrator session state through DynamoDB.
 """
 
 import logging
-
 from asyncio import Lock
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -18,9 +17,8 @@ from weakref import WeakValueDictionary
 
 from cachetools import TTLCache
 
-
 if TYPE_CHECKING:
-    from services.session_service import SessionService
+    from playground_backend.services.session_service import SessionService
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +36,7 @@ class OrchestratorCookieCache:
 
     def __init__(
         self,
-        session_service: 'SessionService',
+        session_service: "SessionService",
         ttl: int = 60,
         maxsize: int = 10000,
     ) -> None:
@@ -62,7 +60,7 @@ class OrchestratorCookieCache:
         # when no longer referenced
         self._locks: WeakValueDictionary = WeakValueDictionary()
 
-        logger.info(f'OrchestratorCookieCache initialized (ttl={ttl}s, maxsize={maxsize})')
+        logger.info(f"OrchestratorCookieCache initialized (ttl={ttl}s, maxsize={maxsize})")
 
     def _get_lock(self, session_id: str) -> Lock:
         """Get or create an async lock for a session.
@@ -101,7 +99,7 @@ class OrchestratorCookieCache:
         cached = self._cache.get(session_id)
         if cached is not None:
             cookie_value, expires_at = cached
-            logger.debug(f'Cache hit for session {session_id}')
+            logger.debug(f"Cache hit for session {session_id}")
             return (cookie_value, expires_at)
 
         # Slow path: fetch from DynamoDB with lock to prevent stampede
@@ -111,11 +109,11 @@ class OrchestratorCookieCache:
             cached = self._cache.get(session_id)
             if cached is not None:
                 cookie_value, expires_at = cached
-                logger.debug(f'Cache hit after lock for session {session_id}')
+                logger.debug(f"Cache hit after lock for session {session_id}")
                 return (cookie_value, expires_at)
 
             # Fetch from DynamoDB
-            logger.debug(f'Cache miss for session {session_id}, fetching from DynamoDB')
+            logger.debug(f"Cache miss for session {session_id}, fetching from DynamoDB")
             cookie_data = await self.session_service.get_orchestrator_cookie(session_id)
 
             if cookie_data is None:
@@ -153,7 +151,7 @@ class OrchestratorCookieCache:
 
         # Update cache
         self._cache[session_id] = (cookie_value, expires_at)
-        logger.debug(f'Set orchestrator cookie for session {session_id}')
+        logger.debug(f"Set orchestrator cookie for session {session_id}")
 
     async def clear_cookie(self, session_id: str) -> None:
         """Clear orchestrator cookie from both cache and DynamoDB.
@@ -171,7 +169,7 @@ class OrchestratorCookieCache:
         if session_id in self._cache:
             del self._cache[session_id]
 
-        logger.debug(f'Cleared orchestrator cookie for session {session_id}')
+        logger.debug(f"Cleared orchestrator cookie for session {session_id}")
 
     def invalidate(self, session_id: str) -> None:
         """Invalidate cache entry for a session (cache-only operation).
@@ -184,4 +182,4 @@ class OrchestratorCookieCache:
         """
         if session_id in self._cache:
             del self._cache[session_id]
-            logger.debug(f'Invalidated cache entry for session {session_id}')
+            logger.debug(f"Invalidated cache entry for session {session_id}")

@@ -14,6 +14,7 @@ from ..authorization import (
 )
 from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import ActivationSource
+from ..models.user import User
 from ..models.user_group import (
     BulkDeleteResult,
     MemberInfo,
@@ -334,7 +335,7 @@ class UserGroupService:
     async def create_group(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         name: str,
         description: str | None = None,
     ) -> UserGroup:
@@ -342,7 +343,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user creating the group
+            actor: The user creating the group
             name: Group name
             description: Group description
 
@@ -353,7 +354,7 @@ class UserGroupService:
             # First, create group in database (within transaction, not yet committed)
             group_id = await self.repo.create(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 fields={
                     "name": name,
                     "description": description,
@@ -369,7 +370,7 @@ class UserGroupService:
                     keycloak_group_id = await self.keycloak_service.create_group(name, description)
                     await self.repo.update(
                         db=db,
-                        actor_sub=actor_sub,
+                        actor=actor,
                         entity_id=group_id,
                         fields={"keycloak_group_id": keycloak_group_id},
                         fetch_before=False,
@@ -394,7 +395,7 @@ class UserGroupService:
     async def update_group(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         name: str | None = None,
         description: str | None = None,
@@ -403,7 +404,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user updating the group
+            actor: The user updating the group
             group_id: Group ID
             name: New name (optional)
             description: New description (optional)
@@ -431,7 +432,7 @@ class UserGroupService:
             # Update with automatic audit (returns None)
             await self.repo.update(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_id=group_id,
                 fields=fields,
                 fetch_before=True,
@@ -461,12 +462,12 @@ class UserGroupService:
             logger.error(f"Failed to update group: {e}")
             raise
 
-    async def delete_group(self, db: AsyncSession, actor_sub: str, group_id: int, force: bool = False) -> bool:
+    async def delete_group(self, db: AsyncSession, actor: User, group_id: int, force: bool = False) -> bool:
         """Delete a group (soft delete).
 
         Args:
             db: Database session
-            actor_sub: The sub of the user deleting the group
+            actor: The user deleting the group
             group_id: Group ID
             force: If True, delete even if sub-agents are assigned
 
@@ -511,7 +512,7 @@ class UserGroupService:
             # Soft delete with automatic audit (returns None)
             await self.repo.delete(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_id=group_id,
                 soft=True,
             )
@@ -523,13 +524,13 @@ class UserGroupService:
             raise
 
     async def bulk_delete_groups(
-        self, db: AsyncSession, actor_sub: str, group_ids: list[int], force: bool = False
+        self, db: AsyncSession, actor: User, group_ids: list[int], force: bool = False
     ) -> list[BulkDeleteResult]:
         """Bulk delete groups.
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the deletions
+            actor: The user performing the deletions
             group_ids: List of group IDs
             force: If True, delete even if sub-agents are assigned
 
@@ -540,7 +541,7 @@ class UserGroupService:
 
         for group_id in group_ids:
             try:
-                success = await self.delete_group(db, actor_sub, group_id, force)
+                success = await self.delete_group(db, actor, group_id, force)
                 if success:
                     results.append(BulkDeleteResult(group_id=group_id, success=True))
                 else:
@@ -557,7 +558,7 @@ class UserGroupService:
     async def _add_members(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_ids: list[str],
         role: Literal["read", "write", "manager"] = "read",
@@ -569,7 +570,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             group_id: Group ID
             user_ids: List of user IDs to add
             role: Role for the new members
@@ -587,7 +588,7 @@ class UserGroupService:
         # First, add members to database (within transaction, not yet committed)
         await self.repo.add_members(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             group_id=group_id,
             member_additions=member_additions,
         )
@@ -596,14 +597,24 @@ class UserGroupService:
         # If this fails, exception will cause DB transaction to rollback
         if self.keycloak_service:
             if existing.keycloak_group_id:
+                # Fetch user subs for Keycloak operations
+                user_subs_query = text("SELECT id, sub FROM users WHERE id = ANY(:user_ids)")
+                subs_result = await db.execute(user_subs_query, {"user_ids": user_ids})
+                user_id_to_sub = {row[0]: row[1] for row in subs_result.fetchall()}
+
                 tasks = []
                 # TODO: this is not 100% transaction-safe if adding multiple users and one fails
                 #       we could end up with partial additions in Keycloak vs DB
                 try:
                     for user_id in user_ids:
-                        user_sub = user_id  # in this context, user_id is the Keycloak user ID (sub)
+                        user_sub = user_id_to_sub.get(user_id)
+                        if not user_sub:
+                            logger.warning(f"User {user_id} not found, skipping Keycloak sync")
+                            continue
                         tasks.append(self.keycloak_service.add_user_to_group(user_sub, existing.keycloak_group_id))
-                        logger.info(f"Added user {user_id} to Keycloak group {existing.keycloak_group_id}")
+                        logger.info(
+                            f"Added user {user_id} (sub={user_sub}) to Keycloak group {existing.keycloak_group_id}"
+                        )
                     await asyncio.gather(*tasks)
                 except Exception as e:
                     logger.error(f"Failed to add users to Keycloak group: {e}")
@@ -629,7 +640,7 @@ class UserGroupService:
                 for agent_id, agent_name in approved_agents:
                     affected = await self.sub_agent_service.repo.bulk_activate_sub_agent(
                         db=db,
-                        actor_sub="SYSTEM",
+                        actor=actor,
                         user_ids=user_ids,
                         sub_agent_id=agent_id,
                         activated_by=ActivationSource.GROUP,
@@ -760,7 +771,7 @@ class UserGroupService:
     async def add_members(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_ids: list[str],
         role: Literal["read", "write", "manager"] = "read",
@@ -769,7 +780,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             group_id: Group ID
             user_ids: List of user IDs to add
             role: Role for the new members
@@ -779,7 +790,7 @@ class UserGroupService:
         """
         try:
             # Use internal helper
-            await self._add_members(db, actor_sub, group_id, user_ids, role)
+            await self._add_members(db, actor, group_id, user_ids, role)
 
             # Return updated member list
             members, _ = await self.list_members(db, group_id, page=1, limit=1000)
@@ -791,7 +802,7 @@ class UserGroupService:
     async def add_member(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_id: str,
         role: Literal["read", "write", "manager"] = "read",
@@ -800,7 +811,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             group_id: Group ID
             user_id: User ID to add
             role: Role for the new member
@@ -810,7 +821,7 @@ class UserGroupService:
         """
         try:
             # Use internal helper
-            added = await self._add_members(db, actor_sub, group_id, [user_id], role)
+            added = await self._add_members(db, actor, group_id, [user_id], role)
             if not added:
                 raise ValueError("Failed to add member")
             return added[0]
@@ -821,7 +832,7 @@ class UserGroupService:
     async def update_member_role(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_id: str,
         role: Literal["read", "write", "manager"],
@@ -830,7 +841,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             group_id: Group ID
             user_id: User ID
             role: New role
@@ -855,7 +866,7 @@ class UserGroupService:
             # Update role with automatic audit
             await self.repo.update_member_role(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 group_id=group_id,
                 user_id=user_id,
                 old_role=old_role,
@@ -911,7 +922,7 @@ class UserGroupService:
     async def _remove_members(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_ids: list[str],
     ) -> list[str]:
@@ -922,7 +933,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             group_id: Group ID
             user_ids: List of user IDs to remove
 
@@ -960,7 +971,7 @@ class UserGroupService:
         # Repository returns which members were actually removed
         removed = await self.repo.remove_members(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             group_id=group_id,
             user_ids=user_ids,
         )
@@ -969,10 +980,21 @@ class UserGroupService:
         # If this fails, exception will cause DB transaction to rollback
         if self.keycloak_service:
             if existing.keycloak_group_id:
+                # Fetch user subs for Keycloak operations
+                user_subs_query = text("SELECT id, sub FROM users WHERE id = ANY(:user_ids)")
+                subs_result = await db.execute(user_subs_query, {"user_ids": removed})
+                user_id_to_sub = {row[0]: row[1] for row in subs_result.fetchall()}
+
                 tasks = []
                 for user_id in removed:
-                    tasks.append(self.keycloak_service.remove_user_from_group(user_id, existing.keycloak_group_id))
-                    logger.info(f"Removed user {user_id} from Keycloak group {existing.keycloak_group_id}")
+                    user_sub = user_id_to_sub.get(user_id)
+                    if not user_sub:
+                        logger.warning(f"User {user_id} not found, skipping Keycloak sync")
+                        continue
+                    tasks.append(self.keycloak_service.remove_user_from_group(user_sub, existing.keycloak_group_id))
+                    logger.info(
+                        f"Removed user {user_id} (sub={user_sub}) from Keycloak group {existing.keycloak_group_id}"
+                    )
                 await asyncio.gather(*tasks)
             else:
                 logger.warning(f"Group {group_id} has no Keycloak ID; skipping Keycloak member removals")
@@ -1023,7 +1045,7 @@ class UserGroupService:
             for sub_agent_id, user_ids in activations_by_agent.items():
                 await self.sub_agent_service.repo.bulk_deactivate_sub_agent(
                     db=db,
-                    actor_sub="SYSTEM",
+                    actor=actor,
                     user_ids=user_ids,
                     sub_agent_id=sub_agent_id,
                     group_id=group_id,
@@ -1040,7 +1062,7 @@ class UserGroupService:
     async def remove_members(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_ids: list[str],
     ) -> list[MemberInfo]:
@@ -1050,7 +1072,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             group_id: Group ID
             user_ids: List of user IDs to remove
 
@@ -1059,7 +1081,7 @@ class UserGroupService:
         """
         try:
             # Use internal helper
-            await self._remove_members(db, actor_sub, group_id, user_ids)
+            await self._remove_members(db, actor, group_id, user_ids)
 
             # Return updated member list
             members, _ = await self.list_members(db, group_id, page=1, limit=1000)
@@ -1071,7 +1093,7 @@ class UserGroupService:
     async def remove_member(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_id: str,
     ) -> list[MemberInfo]:
@@ -1081,7 +1103,7 @@ class UserGroupService:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: The user performing the action
             group_id: Group ID
             user_id: User ID to remove
 
@@ -1090,7 +1112,7 @@ class UserGroupService:
         """
         try:
             # Use internal helper
-            removed = await self._remove_members(db, actor_sub, group_id, [user_id])
+            removed = await self._remove_members(db, actor, group_id, [user_id])
             if not removed:
                 raise ValueError("Failed to remove member")
 
@@ -1426,7 +1448,7 @@ class UserGroupService:
         db: AsyncSession,
         group_id: int,
         sub_agent_id: int,
-        actor_sub: str,
+        actor: User,
     ) -> None:
         """Internal helper to activate a default agent for all group members.
 
@@ -1440,7 +1462,7 @@ class UserGroupService:
             db: Database session
             group_id: Group ID
             sub_agent_id: Sub-agent ID to activate
-            actor_sub: User performing the action
+            actor: User performing the action
         """
         # Check if agent is approved (has default_version)
         approval_check_query = text("""
@@ -1478,7 +1500,7 @@ class UserGroupService:
         # Bulk activate the agent
         affected_user_ids = await self.sub_agent_service.repo.bulk_activate_sub_agent(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             user_ids=member_user_ids,
             sub_agent_id=sub_agent_id,
             activated_by=ActivationSource.GROUP,
@@ -1506,7 +1528,7 @@ class UserGroupService:
         db: AsyncSession,
         group_id: int,
         sub_agent_id: int,
-        actor_sub: str,
+        actor: User,
     ) -> None:
         """Internal helper to deactivate a default agent for all group members.
 
@@ -1517,7 +1539,7 @@ class UserGroupService:
             db: Database session
             group_id: Group ID
             sub_agent_id: Sub-agent ID to deactivate
-            actor_sub: User performing the action
+            actor: User performing the action
         """
         # Get all current members
         members_query = text("""
@@ -1542,7 +1564,7 @@ class UserGroupService:
         # Bulk deactivate the agent
         affected_user_ids = await self.sub_agent_service.repo.bulk_deactivate_sub_agent(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             user_ids=member_user_ids,
             sub_agent_id=sub_agent_id,
             group_id=group_id,
@@ -1569,7 +1591,7 @@ class UserGroupService:
         db: AsyncSession,
         group_id: int,
         sub_agent_ids: list[int],
-        actor_sub: str,
+        actor: User,
     ) -> None:
         """
         Set (replace) default agents for a group (bulk operation).
@@ -1581,7 +1603,7 @@ class UserGroupService:
             db: Database session
             group_id: Group ID
             sub_agent_ids: List of sub-agent IDs to set as defaults
-            actor_sub: User performing the action
+            actor: User performing the action
         """
         try:
             # Get current defaults to calculate diff
@@ -1615,9 +1637,9 @@ class UserGroupService:
             # Insert only added defaults
             if added_ids:
                 values = []
-                params = {"group_id": group_id, "actor_sub": actor_sub}
+                params = {"group_id": group_id, "user_id": actor.id}
                 for i, agent_id in enumerate(added_ids):
-                    values.append(f"(:group_id, :agent_id_{i}, :actor_sub)")
+                    values.append(f"(:group_id, :agent_id_{i}, :user_id)")
                     params[f"agent_id_{i}"] = agent_id
 
                 insert_query = text(f"""
@@ -1636,13 +1658,13 @@ class UserGroupService:
                 # Activate newly added defaults using helper
                 if added_ids:
                     for agent_id in added_ids:
-                        await self._activate_default_agent(db, group_id, agent_id, actor_sub)
+                        await self._activate_default_agent(db, group_id, agent_id, actor)
                     logger.info(f"Activated {len(added_ids)} new default agents for group {group_id}")
 
                 # Deactivate removed defaults using helper
                 if removed_ids:
                     for agent_id in removed_ids:
-                        await self._deactivate_default_agent(db, group_id, agent_id, actor_sub)
+                        await self._deactivate_default_agent(db, group_id, agent_id, actor)
                     logger.info(f"Deactivated {len(removed_ids)} removed default agents for group {group_id}")
 
             except Exception as e:
@@ -1658,7 +1680,7 @@ class UserGroupService:
         db: AsyncSession,
         group_id: int,
         sub_agent_id: int,
-        actor_sub: str,
+        actor: User,
     ) -> None:
         """Add a single default agent to a group.
 
@@ -1668,7 +1690,7 @@ class UserGroupService:
             db: Database session
             group_id: Group ID
             sub_agent_id: Sub-agent ID to add as default
-            actor_sub: User performing the action
+            actor: User performing the action
         """
         try:
             # Validate the sub-agent
@@ -1692,14 +1714,14 @@ class UserGroupService:
             insert_query = text("""
                 INSERT INTO user_group_default_agents 
                     (user_group_id, sub_agent_id, created_by_user_id)
-                VALUES (:group_id, :sub_agent_id, :actor_sub)
+                VALUES (:group_id, :sub_agent_id, :user_id)
             """)
-            await db.execute(insert_query, {"group_id": group_id, "sub_agent_id": sub_agent_id, "actor_sub": actor_sub})
+            await db.execute(insert_query, {"group_id": group_id, "sub_agent_id": sub_agent_id, "user_id": actor.id})
 
             logger.info(f"Added default agent {sub_agent_id} for group {group_id}")
 
             # Activate for all existing members
-            await self._activate_default_agent(db, group_id, sub_agent_id, actor_sub)
+            await self._activate_default_agent(db, group_id, sub_agent_id, actor)
 
         except Exception as e:
             logger.error(f"Failed to add default agent for group {group_id}: {e}")
@@ -1710,7 +1732,7 @@ class UserGroupService:
         db: AsyncSession,
         group_id: int,
         sub_agent_id: int,
-        actor_sub: str,
+        actor: User,
     ) -> None:
         """Remove a single default agent from a group.
 
@@ -1720,7 +1742,7 @@ class UserGroupService:
             db: Database session
             group_id: Group ID
             sub_agent_id: Sub-agent ID to remove from defaults
-            actor_sub: User performing the action
+            actor: User performing the action
         """
         try:
             # Check if it's currently a default
@@ -1743,7 +1765,7 @@ class UserGroupService:
             logger.info(f"Removed default agent {sub_agent_id} for group {group_id}")
 
             # Deactivate for all group members
-            await self._deactivate_default_agent(db, group_id, sub_agent_id, actor_sub)
+            await self._deactivate_default_agent(db, group_id, sub_agent_id, actor)
 
         except Exception as e:
             logger.error(f"Failed to remove default agent for group {group_id}: {e}")

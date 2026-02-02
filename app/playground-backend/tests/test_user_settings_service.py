@@ -18,7 +18,7 @@ class TestUserSettingsService:
     async def test_get_settings_returns_defaults_when_not_exists(self, user_settings_service, user_service, db_session):
         """Test that get_settings returns default values when no settings exist."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -28,17 +28,17 @@ class TestUserSettingsService:
         await db_session.commit()
 
         # Get settings for user who has no settings record
-        settings = await user_settings_service.get_settings(db_session, "test-user-id")
+        settings = await user_settings_service.get_settings(db_session, user.id)
 
         assert settings is not None
-        assert settings.user_id == "test-user-id"
+        assert settings.user_id == user.id
         assert settings.language == "en"  # Default
         assert settings.custom_prompt is None  # Default
 
     async def test_upsert_settings_creates_new(self, user_settings_service, user_service, db_session):
         """Test creating new settings via upsert."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -50,14 +50,14 @@ class TestUserSettingsService:
         # Create settings
         settings = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="de",
             custom_prompt="You are a helpful assistant.",
         )
         await db_session.commit()
 
         assert settings is not None
-        assert settings.user_id == "test-user-id"
+        assert settings.user_id == user.id
         assert settings.language == "de"
         assert settings.custom_prompt == "You are a helpful assistant."
         assert settings.created_at is not None
@@ -66,7 +66,7 @@ class TestUserSettingsService:
     async def test_upsert_settings_updates_existing(self, user_settings_service, user_service, db_session):
         """Test updating existing settings via upsert."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -78,7 +78,7 @@ class TestUserSettingsService:
         # Create initial settings
         settings1 = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="de",
             custom_prompt="Initial prompt",
         )
@@ -87,7 +87,7 @@ class TestUserSettingsService:
         # Update settings
         settings2 = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="fr",
             custom_prompt="Updated prompt",
         )
@@ -102,7 +102,7 @@ class TestUserSettingsService:
     async def test_upsert_settings_partial_update_language_only(self, user_settings_service, user_service, db_session):
         """Test updating only language preserves custom_prompt."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -114,7 +114,7 @@ class TestUserSettingsService:
         # Create initial settings with custom_prompt
         await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="en",
             custom_prompt="My custom prompt",
         )
@@ -123,7 +123,7 @@ class TestUserSettingsService:
         # Update only language
         settings = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="de",
             custom_prompt=None,  # Not updating
         )
@@ -137,7 +137,7 @@ class TestUserSettingsService:
     ):
         """Test updating only custom_prompt preserves language."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -149,7 +149,7 @@ class TestUserSettingsService:
         # Create initial settings with language
         await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="de",
             custom_prompt=None,
         )
@@ -158,7 +158,7 @@ class TestUserSettingsService:
         # Update only custom_prompt
         settings = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language=None,  # Not updating
             custom_prompt="New prompt",
         )
@@ -170,7 +170,7 @@ class TestUserSettingsService:
     async def test_get_settings_returns_default_timezone(self, user_settings_service, user_service, db_session):
         """Test that get_settings returns default timezone when not set."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -180,7 +180,7 @@ class TestUserSettingsService:
         await db_session.commit()
 
         # Get settings for user who has no settings record
-        settings = await user_settings_service.get_settings(db_session, "test-user-id")
+        settings = await user_settings_service.get_settings(db_session, user.id)
 
         assert settings is not None
         assert settings.timezone == "Europe/Zurich"  # Default timezone
@@ -188,7 +188,7 @@ class TestUserSettingsService:
     async def test_upsert_settings_creates_with_timezone(self, user_settings_service, user_service, db_session):
         """Test creating new settings with timezone."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -200,7 +200,7 @@ class TestUserSettingsService:
         # Create settings with timezone
         settings = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="en",
             timezone_str="America/New_York",
             custom_prompt=None,
@@ -213,7 +213,7 @@ class TestUserSettingsService:
     async def test_upsert_settings_updates_timezone(self, user_settings_service, user_service, db_session):
         """Test updating timezone via upsert."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -225,7 +225,7 @@ class TestUserSettingsService:
         # Create initial settings
         await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="en",
             timezone_str="Europe/Zurich",
             custom_prompt=None,
@@ -235,7 +235,7 @@ class TestUserSettingsService:
         # Update timezone
         settings = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language=None,
             timezone_str="Asia/Tokyo",
             custom_prompt=None,
@@ -250,7 +250,7 @@ class TestUserSettingsService:
     ):
         """Test updating language preserves timezone."""
         # Create a user first
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -262,7 +262,7 @@ class TestUserSettingsService:
         # Create initial settings with timezone
         await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="en",
             timezone_str="America/Los_Angeles",
             custom_prompt=None,
@@ -272,7 +272,7 @@ class TestUserSettingsService:
         # Update only language
         settings = await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="de",
             timezone_str=None,
             custom_prompt=None,
@@ -285,7 +285,7 @@ class TestUserSettingsService:
     async def test_cascade_delete_removes_settings(self, user_settings_service, user_service, db_session):
         """Test that deleting a user cascades to delete their settings."""
         # Create a user
-        await user_service.upsert_user(
+        user = await user_service.upsert_user(
             db=db_session,
             sub="test-user-id",
             email="test@example.com",
@@ -297,7 +297,7 @@ class TestUserSettingsService:
         # Create settings
         await user_settings_service.upsert_settings(
             db=db_session,
-            user_id="test-user-id",
+            user_id=user.id,
             language="de",
             custom_prompt="My prompt",
         )
@@ -306,7 +306,7 @@ class TestUserSettingsService:
         # Verify settings exist
         result = await db_session.execute(
             text("SELECT COUNT(*) FROM user_settings WHERE user_id = :user_id"),
-            {"user_id": "test-user-id"},
+            {"user_id": user.id},
         )
         count = result.scalar()
         assert count == 1
@@ -314,14 +314,14 @@ class TestUserSettingsService:
         # Delete user (hard delete for this test)
         await db_session.execute(
             text("DELETE FROM users WHERE id = :user_id"),
-            {"user_id": "test-user-id"},
+            {"user_id": user.id},
         )
         await db_session.commit()
 
         # Verify settings are deleted via cascade
         result = await db_session.execute(
             text("SELECT COUNT(*) FROM user_settings WHERE user_id = :user_id"),
-            {"user_id": "test-user-id"},
+            {"user_id": user.id},
         )
         count = result.scalar()
         assert count == 0

@@ -185,7 +185,7 @@ async def create_sub_agent(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agent = await sub_agent_service.create_sub_agent(db, user.id, data)
+        sub_agent = await sub_agent_service.create_sub_agent(db, data, actor=user)
         return sub_agent
     except Exception as e:
         logger.error(f"Failed to create sub-agent: {e}")
@@ -245,7 +245,7 @@ async def update_sub_agent(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agent = await sub_agent_service.update_sub_agent(db, sub_agent_id, data, user.id)
+        sub_agent = await sub_agent_service.update_sub_agent(db, sub_agent_id, data, actor=user)
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent
@@ -267,14 +267,10 @@ async def delete_sub_agent(
     db: DbSession,
     user: User = Depends(require_auth),
 ) -> None:
-    """Delete a sub-agent.
-
-    Only the owner or an admin (with admin mode enabled) can delete.
-    """
+    """Delete a sub-agent."""
     sub_agent_service = get_sub_agent_service(request)
     try:
-        effective_admin = is_admin_mode(request, user)
-        deleted = await sub_agent_service.delete_sub_agent(db, sub_agent_id, user.id, is_admin=effective_admin)
+        deleted = await sub_agent_service.delete_sub_agent(db, sub_agent_id, actor=user)
         if not deleted:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
     except PermissionError as e:
@@ -301,7 +297,7 @@ async def activate_sub_agent(
     sub_agent_service = get_sub_agent_service(request)
     try:
         effective_admin = is_admin_mode(request, user)
-        activated = await sub_agent_service.activate_sub_agent(db, sub_agent_id, user.id, is_admin=effective_admin)
+        activated = await sub_agent_service.activate_sub_agent(db, sub_agent_id, is_admin=effective_admin, actor=user)
         if activated:
             return {"message": "Sub-agent activated successfully"}
         else:
@@ -327,7 +323,7 @@ async def deactivate_sub_agent(
     """Deactivate a sub-agent for the current user."""
     sub_agent_service = get_sub_agent_service(request)
     try:
-        deactivated = await sub_agent_service.deactivate_sub_agent(db, sub_agent_id, user.id)
+        deactivated = await sub_agent_service.deactivate_sub_agent(db, sub_agent_id, actor=user)
         if deactivated:
             return {"message": "Sub-agent deactivated successfully"}
         else:
@@ -354,7 +350,7 @@ async def submit_for_approval(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agent = await sub_agent_service.submit_for_approval(db, sub_agent_id, user.id, data.change_summary)
+        sub_agent = await sub_agent_service.submit_for_approval(db, sub_agent_id, data.change_summary, actor=user)
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent
@@ -390,7 +386,7 @@ async def approve_sub_agent(
         sub_agent = await sub_agent_service.approve_sub_agent(
             db,
             sub_agent_id,
-            user.id,
+            actor=user,
             approve=(data.action == "approve"),
             rejection_reason=data.rejection_reason,
         )
@@ -506,9 +502,12 @@ async def update_sub_agent_permissions(
             {"user_group_id": gp.user_group_id, "permissions": gp.permissions} for gp in data.group_permissions
         ]
 
-        # If we get here, user is authorized - pass True for is_admin to bypass service-level check
+        # If we get here, user is authorized
         success = await sub_agent_service.update_permissions(
-            db, sub_agent_id, group_permissions, user.id, is_admin=True
+            db,
+            sub_agent_id,
+            group_permissions,
+            actor=user,
         )
         if not success:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
@@ -536,7 +535,7 @@ async def revert_to_version(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agent = await sub_agent_service.revert_to_version(db, sub_agent_id, version, user.id)
+        sub_agent = await sub_agent_service.revert_to_version(db, sub_agent_id, version, actor=user)
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent
@@ -568,7 +567,7 @@ async def submit_version_for_approval(
     sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agent = await sub_agent_service.submit_version_for_approval(
-            db, sub_agent_id, version, user.id, data.change_summary
+            db, sub_agent_id, version, data.change_summary, actor=user
         )
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
@@ -600,7 +599,7 @@ async def delete_version(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        deleted = await sub_agent_service.delete_version(db, sub_agent_id, version, user.id)
+        deleted = await sub_agent_service.delete_version(db, sub_agent_id, version, actor=user)
         if not deleted:
             raise HTTPException(status_code=404, detail="Version not found")
         return {"success": True, "message": f"Version {version} deleted successfully"}
@@ -652,9 +651,9 @@ async def review_version(
             db,
             sub_agent_id,
             version,
-            user.id,
             approve=(data.action == "approve"),
             rejection_reason=data.rejection_reason,
+            actor=user,
         )
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
@@ -683,7 +682,7 @@ async def set_default_version(
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agent = await sub_agent_service.set_default_version(db, sub_agent_id, data.version, user.id)
+        sub_agent = await sub_agent_service.set_default_version(db, sub_agent_id, data.version, actor=user)
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent

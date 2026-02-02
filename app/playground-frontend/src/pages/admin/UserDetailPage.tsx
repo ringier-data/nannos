@@ -81,13 +81,57 @@ export function UserDetailPage() {
 
   const adminUpdateMutation = useMutation({
     ...updateUserApiV1AdminUsersUserIdPatchMutation(),
+    onMutate: async (variables) => {
+      // Cancel any outgoing refetches
+      await queryClient.cancelQueries({ 
+        queryKey: getUserApiV1AdminUsersUserIdGetOptions({
+          path: { user_id: id! },
+        }).queryKey
+      });
+
+      // Snapshot the previous value
+      const previousUser = queryClient.getQueryData(
+        getUserApiV1AdminUsersUserIdGetOptions({
+          path: { user_id: id! },
+        }).queryKey
+      );
+
+      // Optimistically update to the new value
+      queryClient.setQueryData(
+        getUserApiV1AdminUsersUserIdGetOptions({
+          path: { user_id: id! },
+        }).queryKey,
+        (old: any) => {
+          if (!old?.data) return old;
+          return {
+            ...old,
+            data: {
+              ...old.data,
+              ...variables.body,
+            },
+          };
+        }
+      );
+
+      // Return a context object with the snapshotted value
+      return { previousUser };
+    },
     onSuccess: () => {
       toast.success('User updated');
       queryClient.invalidateQueries({ queryKey: ['getUserApiV1AdminUsersUserIdGet'] });
       queryClient.invalidateQueries({ queryKey: ['listUsersApiV1AdminUsersGet'] });
     },
-    onError: () => {
+    onError: (_error, _variables, context) => {
       toast.error('Failed to update user');
+      // Roll back to the previous value if the mutation fails
+      if (context?.previousUser) {
+        queryClient.setQueryData(
+          getUserApiV1AdminUsersUserIdGetOptions({
+            path: { user_id: id! },
+          }).queryKey,
+          context.previousUser
+        );
+      }
     },
   });
 

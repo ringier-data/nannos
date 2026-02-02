@@ -119,7 +119,7 @@ async def update_user(
     updated_user = await user_service.update_user_admin_fields(
         db,
         user_id,
-        admin.sub,  # actor_sub for audit
+        actor=admin,
         is_administrator=update_request.is_administrator,
     )
 
@@ -167,9 +167,9 @@ async def update_user_groups(
     updated_user = await user_service.update_user_groups(
         db,
         user_id,
-        admin.sub,  # actor_sub for audit
-        update_request.group_ids,
-        update_request.operation,
+        actor=admin,
+        group_ids=update_request.group_ids,
+        operation=update_request.operation,
     )
 
     if updated_user is None:
@@ -208,7 +208,7 @@ async def update_user_role(
     updated_user = await user_service.update_user_role(
         db,
         user_id,
-        admin.sub,
+        admin,
         update_request.role.value,  # actor_sub for audit
     )
 
@@ -256,8 +256,8 @@ async def update_user_status(
     updated_user = await user_service.update_user_status(
         db,
         user_id,
-        admin.sub,
-        update_request.status,  # actor_sub for audit
+        actor=admin,
+        status=update_request.status,  # actor_sub for audit
     )
 
     if updated_user is None:
@@ -293,8 +293,8 @@ async def bulk_update_users(
     user_service = get_user_service(request)
     results = await user_service.bulk_update_users(
         db,
-        admin.sub,
-        bulk_request.operations,  # actor_sub for audit
+        actor=admin,
+        operations=bulk_request.operations,
     )
     await db.commit()
 
@@ -335,7 +335,7 @@ async def start_impersonation(
     audit_service = get_audit_service(request)
     await audit_service.log_action(
         db=db,
-        actor_sub=admin.sub,
+        actor=admin,
         entity_type=AuditEntityType.SESSION,
         entity_id=impersonate_request.target_user_id,
         action=AuditAction.IMPERSONATION_START,
@@ -384,7 +384,7 @@ async def stop_impersonation(
     audit_service = get_audit_service(request)
     await audit_service.log_action(
         db=db,
-        actor_sub=actor_user.sub,
+        actor=actor_user,
         entity_type=AuditEntityType.SESSION,
         entity_id=actor_user.sub,
         action=AuditAction.IMPERSONATION_END,

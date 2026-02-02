@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.user import User
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,7 @@ class UserRepository(AuditedRepository):
         self,
         db: AsyncSession,
         user_id: str,
-        actor_sub: str,
+        actor: User,
         new_status: str,
     ) -> None:
         """Update user status with automatic audit logging.
@@ -31,12 +32,12 @@ class UserRepository(AuditedRepository):
         Args:
             db: Database session
             user_id: ID of user to update
-            actor_sub: ID of user performing the action
+            actor: User performing the action
             new_status: New status value
         """
         await self.update(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_id=user_id,
             fields={"status": new_status, "updated_at": datetime.now(timezone.utc)},
             fetch_before=True,
@@ -46,7 +47,7 @@ class UserRepository(AuditedRepository):
         self,
         db: AsyncSession,
         user_id: str,
-        actor_sub: str,
+        actor: User,
         is_administrator: Optional[bool] = None,
     ) -> None:
         """Update user admin fields with automatic audit logging.
@@ -54,7 +55,7 @@ class UserRepository(AuditedRepository):
         Args:
             db: Database session
             user_id: ID of user to update
-            actor_sub: ID of user performing the action
+            actor: User performing the action
             is_administrator: New is_administrator value
         """
         if is_administrator is None:
@@ -62,7 +63,7 @@ class UserRepository(AuditedRepository):
 
         await self.update(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_id=user_id,
             fields={"is_administrator": is_administrator, "updated_at": datetime.now(timezone.utc)},
             fetch_before=True,
@@ -72,7 +73,7 @@ class UserRepository(AuditedRepository):
         self,
         db: AsyncSession,
         user_id: str,
-        actor_sub: str,
+        actor: User,
         new_role: str,
     ) -> None:
         """Update user role with automatic audit logging.
@@ -80,12 +81,12 @@ class UserRepository(AuditedRepository):
         Args:
             db: Database session
             user_id: ID of user to update
-            actor_sub: ID of user performing the action
+            actor: User performing the action
             new_role: New role value
         """
         await self.update(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_id=user_id,
             fields={"role": new_role, "updated_at": datetime.now(timezone.utc)},
             fetch_before=True,
@@ -95,7 +96,7 @@ class UserRepository(AuditedRepository):
         self,
         db: AsyncSession,
         user_id: str,
-        actor_sub: str,
+        actor: User,
         group_ids: List[int],
     ) -> None:
         """Update user's group memberships with automatic audit logging.
@@ -103,7 +104,7 @@ class UserRepository(AuditedRepository):
         Args:
             db: Database session
             user_id: ID of user to update
-            actor_sub: ID of user performing the action
+            actor: User performing the action
             group_ids: List of group IDs user should belong to
         """
         # Fetch before state
@@ -137,7 +138,7 @@ class UserRepository(AuditedRepository):
             entity_type=AuditEntityType.USER,
             entity_id=user_id,
             action=AuditAction.UPDATE,
-            actor_sub=actor_sub,
+            actor=actor,
             changes={"before": {"group_ids": old_groups}, "after": {"group_ids": group_ids}},
         )
 
@@ -145,7 +146,7 @@ class UserRepository(AuditedRepository):
         self,
         db: AsyncSession,
         user_id: str,
-        actor_sub: str,
+        actor: User,
         new_status: str,
     ) -> bool:
         """Update single user status as part of bulk operation.
@@ -157,7 +158,7 @@ class UserRepository(AuditedRepository):
         Args:
             db: Database session (with autoflush disabled)
             user_id: ID of user to update
-            actor_sub: ID of user performing the action
+            actor: User performing the action
             new_status: New status value
 
         Returns:
@@ -172,7 +173,7 @@ class UserRepository(AuditedRepository):
 
             await self.update(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_id=user_id,
                 fields={"status": new_status, "updated_at": datetime.now(timezone.utc)},
                 fetch_before=True,

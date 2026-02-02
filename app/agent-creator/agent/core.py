@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class UserCredentialInjector:
     """Interceptor that injects user credentials into MCP tool calls.
 
-    This interceptor adds the Authorization Bearer token and X-User-Id header
+    This interceptor adds the Authorization Bearer token
     to every MCP tool call via the MCPToolCallRequest.headers field.
 
     The MCP adapter (langchain_mcp_adapters) handles creating new connections
@@ -48,16 +48,16 @@ class UserCredentialInjector:
             The result from the handler
         """
         # Get credentials from context variables (thread-safe)
-        user_id, access_token = get_request_credentials()
+        user_sub, access_token = get_request_credentials()
 
-        if not user_id or not access_token:
+        if not user_sub or not access_token:
             logger.error(
-                f"Credentials not set in context: user_id={user_id}, access_token={'SET' if access_token else 'NOT SET'}"
+                f"Credentials not set in context: user_sub={user_sub}, access_token={'SET' if access_token else 'NOT SET'}"
             )
             raise ValueError("Credentials not set in context. This should not happen.")
 
         tool_name = request.name
-        logger.info(f"Injecting credentials for tool '{tool_name}', user={user_id}")
+        logger.info(f"Injecting credentials for tool '{tool_name}', user={user_sub}")
 
         # Get existing headers or create new dict
         headers = dict(request.headers) if request.headers else {}

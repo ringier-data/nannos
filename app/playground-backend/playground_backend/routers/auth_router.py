@@ -248,7 +248,7 @@ async def toggle_admin_mode(
     # Log the admin mode toggle for audit
     await audit_service.log_action(
         db=db,
-        actor_sub=user.sub,
+        actor=user,
         entity_type=AuditEntityType.SESSION,
         entity_id=user.sub,
         action=AuditAction.ADMIN_MODE_ACTIVATED,
@@ -259,3 +259,142 @@ async def toggle_admin_mode(
     logger.info(f"Admin mode {'enabled' if toggle_request.enabled else 'disabled'} by {user.email}")
 
     return AdminModeToggleResponse(success=True, enabled=toggle_request.enabled)
+
+
+class ImpersonateStartRequest(BaseModel):
+    """Request model for starting user impersonation."""
+
+    target_user_id: str
+
+
+class ImpersonateResponse(BaseModel):
+    """Response model for impersonation endpoints."""
+
+    success: bool
+    message: str
+
+
+@router.post("/impersonate/start", response_model=ImpersonateResponse)
+async def start_impersonation(
+    impersonate_request: ImpersonateStartRequest,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> ImpersonateResponse:
+    """Start impersonating another user (admin only).
+
+    This endpoint allows administrators to impersonate other users for support and troubleshooting.
+    Requires admin mode to be enabled and logs the impersonation start for audit purposes.
+
+    Args:
+        impersonate_request: Request containing the target user ID to impersonate
+
+    Returns:
+        Success response with impersonation details.
+
+    Raises:
+        401 Unauthorized: If the user is not authenticated.
+        403 Forbidden: If the user is not an administrator or admin mode is not enabled.
+        404 Not Found: If the target user does not exist.
+    """
+    from ..dependencies import get_admin_mode
+
+    # Require admin with admin mode enabled
+    admin_mode = get_admin_mode(request)
+    if not user.is_administrator or not admin_mode:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin mode must be enabled to impersonate users",
+        )
+
+    # Validate target user exists
+    user_service = get_user_service(request)
+    target_user = await user_service.get_user(db, impersonate_request.target_user_id)
+    if not target_user:
+        raise HTTPException(
+            status_code=404,
+            detail=f"User {impersonate_request.target_user_id} not found",
+        )
+
+    # Log the impersonation start
+    audit_service = get_audit_service(request)
+    await audit_service.log_action(
+        db=db,
+        actor=user,
+        entity_type=AuditEntityType.SESSION,
+        entity_id=impersonate_request.target_user_id,
+        action=AuditAction.IMPERSONATION_START,
+        changes={
+            "admin_user_id": user.id,
+            "admin_email": user.email,
+            "target_user_id": target_user.id,
+            "target_email": target_user.email,
+        },
+    )
+    await db.commit()
+
+    logger.info(
+        f"Impersonation started: {user.email} (admin) -> {target_user.email} (target_user_id: {target_user.id})"
+    )
+
+    return ImpersonateResponse(
+        success=True,
+        message=f"Successfully started impersonating {target_user.email}",
+    )
+
+
+@router.post("/impersonate/stop", response_model=ImpersonateResponse)
+async def stop_impersonation(
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> ImpersonateResponse:
+    """Stop impersonating a user (admin only).
+
+    This endpoint stops the current impersonation session and logs the event for audit purposes.
+    The user parameter will be the original admin user if called from impersonation context,
+    or the admin themselves if impersonation already ended.
+
+    Args:
+        request: FastAPI request
+
+    Returns:
+        Success response.
+
+    Raises:
+        401 Unauthorized: If the user is not authenticated.
+        403 Forbidden: If the user is not an administrator.
+    """
+    if not user.is_administrator:
+        raise HTTPException(
+            status_code=403,
+            detail="Only administrators can stop impersonation",
+        )
+
+    # Check if there's an original user in request state (means impersonation is active)
+    original_user = getattr(request.state, "original_user", None)
+
+    # Determine who to log as (original admin if impersonating, current user otherwise)
+    actor_user = original_user if original_user else user
+
+    # Log the impersonation stop
+    audit_service = get_audit_service(request)
+    await audit_service.log_action(
+        db=db,
+        actor=actor_user,
+        entity_type=AuditEntityType.SESSION,
+        entity_id=actor_user.sub,
+        action=AuditAction.IMPERSONATION_END,
+        changes={
+            "admin_user_id": actor_user.id,
+            "admin_email": actor_user.email,
+        },
+    )
+    await db.commit()
+
+    logger.info(f"Impersonation stopped by {actor_user.email}")
+
+    return ImpersonateResponse(
+        success=True,
+        message="Successfully stopped impersonation",
+    )

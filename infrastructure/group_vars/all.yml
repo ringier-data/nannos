@@ -222,7 +222,8 @@ ssmkey_gcp_key: '/{{ project_id }}/{{ software_component }}/gcp-key'
 ## OIDC Configuration
 
 oidc_domain: 'https://login.p.nannos.rcplus.io'
-oidc_issuer: '{{ oidc_domain }}/realms/nannos'
+keycloak_realm_name: 'nannos'
+oidc_issuer: '{{ oidc_domain }}/realms/{{ keycloak_realm_name }}'
 
 ## MCP Gateway Configuration
 

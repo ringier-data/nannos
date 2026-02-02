@@ -16,7 +16,7 @@ from playground_backend.models.notification import NotificationType
 
 
 @pytest.mark.asyncio
-async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSession):
+async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSession, test_user):
     """Test that bulk activation only sends notifications to users whose state changed."""
     from playground_backend.repositories.sub_agent_repository import SubAgentRepository
     from playground_backend.repositories.user_group_repository import UserGroupRepository
@@ -40,9 +40,9 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
 
     # Create test users
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO users (id, sub, email, first_name, last_name, role, status)
-            VALUES ('user-1', 'user-1', 'user1@test.com', 'User', 'One', 'member', 'active'),
+            VALUES ({test_user.id!r}, {test_user.sub!r}, {test_user.email!r}, {test_user.first_name!r}, {test_user.last_name!r}, 'member', 'active'),
                    ('user-2', 'user-2', 'user2@test.com', 'User', 'Two', 'member', 'active'),
                    ('user-3', 'user-3', 'user3@test.com', 'User', 'Three', 'member', 'active')
         """)
@@ -56,9 +56,10 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_members (user_group_id, user_id, group_role)
-            VALUES (1, 'user-1', 'manager'),
+            VALUES 
+                   (1, {test_user.id!r}, 'manager'),
                    (1, 'user-2', 'write'),
                    (1, 'user-3', 'write')
         """)
@@ -66,15 +67,15 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
 
     # Create an approved sub-agent with version
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO sub_agents (id, name, owner_user_id, type, current_version, default_version)
-            VALUES (1, 'Test Agent', 'user-1', 'local', 1, 1)
+            VALUES (1, 'Test Agent', {test_user.id!r}, 'local', 1, 1)
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO sub_agent_config_versions (sub_agent_id, version, description, system_prompt, model, status, approved_by_user_id)
-            VALUES (1, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', 'user-1')
+            VALUES (1, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', {test_user.id!r})
         """)
     )
 
@@ -88,9 +89,9 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
 
     # Pre-activate the agent for user-1 (simulate they already have it activated)
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_at, activated_by)
-            VALUES ('user-1', 1, NOW(), 'user')
+            VALUES ({test_user.id!r}, 1, NOW(), 'user')
         """)
     )
 
@@ -106,7 +107,7 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
         db=pg_session,
         group_id=1,
         sub_agent_id=1,
-        actor_sub="user-1",
+        actor=test_user,
     )
     await pg_session.commit()
 
@@ -123,7 +124,7 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
 
 
 @pytest.mark.asyncio
-async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSession):
+async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSession, test_user):
     """Test that bulk deactivation only sends notifications to users whose state changed."""
     from playground_backend.repositories.sub_agent_repository import SubAgentRepository
     from playground_backend.repositories.user_group_repository import UserGroupRepository
@@ -222,7 +223,7 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
         db=pg_session,
         group_id=1,
         sub_agent_id=1,
-        actor_sub="user-1",
+        actor=test_user,
     )
     await pg_session.commit()
 
@@ -239,7 +240,7 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
 
 
 @pytest.mark.asyncio
-async def test_add_members_only_notifies_members_with_new_activations(pg_session: AsyncSession):
+async def test_add_members_only_notifies_members_with_new_activations(pg_session: AsyncSession, test_user):
     """Test that adding members only notifies those who get new agent activations."""
     from playground_backend.repositories.sub_agent_repository import SubAgentRepository
     from playground_backend.repositories.user_group_repository import UserGroupRepository
@@ -338,7 +339,7 @@ async def test_add_members_only_notifies_members_with_new_activations(pg_session
         group_id=1,
         user_ids=["user-2", "user-3"],
         role="write",
-        actor_sub="user-1",
+        actor=test_user,
     )
     await pg_session.commit()
 

@@ -27,6 +27,21 @@ This mode is used for testing and validating sub-agent behavior in isolation.
 """
 
 
+class UserSettings(BaseModel):
+    """User settings model for user-editable preferences."""
+
+    user_id: str
+    language: str
+    timezone: str
+    custom_prompt: str | None = None
+    mcp_tools: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        json_encoders = {datetime: lambda v: v.isoformat()}
+
+
 class SubAgentConfigVersion(BaseModel):
     """Configuration version data embedded in SubAgent response."""
 
@@ -52,14 +67,15 @@ class SubAgentConfigVersion(BaseModel):
 
     change_summary: str | None = None
     status: str
-    approved_by_user_id: str | None = None
+    approved_by_user_id: str | None = None  # References playground-backend users.id (database PK)
     approved_at: datetime | None = None
     rejection_reason: str | None = None
     created_at: datetime
 
 
 class SubAgent(BaseModel):
-    """Sub-agent model matching the normalized backend response.
+    """
+    Sub-agent model matching the normalized backend response.
 
     Metadata (name, owner, type) comes from sub_agents table.
     Configuration data comes from the embedded config_version.
@@ -67,7 +83,7 @@ class SubAgent(BaseModel):
 
     id: int
     name: str
-    owner_user_id: str
+    owner_user_id: str  # References playground-backend users.id (database PK)
     type: str
     current_version: int = 1
     default_version: int | None = None
@@ -91,7 +107,8 @@ class User(BaseModel):
     focuses on sub-agents rather than the deprecated DynamoDB-based approach.
     """
 
-    id: str  # Primary key (sub from OIDC)
+    id: str  # Database users.id (stable identifier)
+    sub: str  # OIDC sub claim (current identity provider subject - can change with IDP)
     agent_metadata: dict[str, dict[str, Any]] = Field(
         default_factory=dict
     )  # Maps agent_url -> {sub_agent_id, name, description}
@@ -141,7 +158,7 @@ class RegistryService:
         self,
         client: httpx.AsyncClient,
         headers: dict[str, str],
-        user_id: str,
+        user_sub: str,
         sub_agent_config_hash: str | None,
     ) -> list[SubAgent]:
         """Fetch sub-agents from the backend.
@@ -182,12 +199,12 @@ class RegistryService:
             )
 
             if response.status_code == 401:
-                logger.warning(f"Authentication failed for user {user_id}")
+                logger.warning(f"Authentication failed for user {user_sub}, cannot fetch sub-agents")
                 return []
 
             if response.status_code != 200:
                 logger.error(
-                    f"Failed to fetch sub-agents for user {user_id}: "
+                    f"Failed to fetch sub-agents for user {user_sub}: "
                     f"status={response.status_code}, body={response.text}"
                 )
                 return []
@@ -201,7 +218,7 @@ class RegistryService:
             return sub_agents
 
     async def get_user(
-        self, user_id: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
+        self, user_sub: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
     ) -> User | None:
         """Retrieve approved sub-agents for a user from the playground backend.
 
@@ -212,7 +229,7 @@ class RegistryService:
         config version for isolated testing (playground mode).
 
         Args:
-            user_id: The user's ID (sub from OIDC)
+            user_sub: The user's OIDC sub claim (subject identifier from identity provider)
             access_token: The user's access token for authentication
             sub_agent_config_hash: Optional config version hash for playground mode testing
 
@@ -220,8 +237,8 @@ class RegistryService:
             User object with populated agent_metadata and local_subagents, or None on error
         """
         if not access_token:
-            logger.warning(f"No access token provided for user {user_id}, returning empty user")
-            return User(id=user_id)
+            logger.warning(f"No access token provided for user {user_sub}, returning empty user")
+            return None
 
         try:
             client = await self._get_client()
@@ -230,15 +247,15 @@ class RegistryService:
             sub_agents = await self.get_sub_agents(
                 client,
                 headers,
-                user_id,
+                user_sub,
                 sub_agent_config_hash,
             )
 
             # Fetch user settings for language and custom_prompt
-            settings = await self._fetch_user_settings(client, headers, user_id)
+            settings = await self._fetch_user_settings(client, headers, user_sub)
 
             # Convert to User model format with settings
-            user = self._to_user(user_id, sub_agents, settings)
+            user = self._to_user(user_sub, sub_agents, settings)
 
             # Add playground mode info if applicable
             if sub_agent_config_hash is not None and sub_agents:
@@ -248,78 +265,61 @@ class RegistryService:
 
                 # Add playground mode addendum to custom prompt
                 playground_addendum = PLAYGROUND_MODE_ADDENDUM.format(subagent_name=sub_agent.name)
-                base_custom_prompt = settings.get("custom_prompt") or ""
+                base_custom_prompt = settings.custom_prompt or ""
                 user.custom_prompt = base_custom_prompt + playground_addendum
 
                 logger.info(
                     f"Playground mode: loaded sub-agent '{sub_agent.name}' "
-                    f"(config hash: {sub_agent_config_hash}) for user {user_id}"
+                    f"(config hash: {sub_agent_config_hash}) for user {user_sub}"
                 )
 
             return user
 
         except httpx.TimeoutException:
-            logger.error(f"Timeout fetching sub-agents for user {user_id}")
-            return User(id=user_id)
+            logger.error(f"Timeout fetching sub-agents for user sub {user_sub}")
+            return None
         except httpx.RequestError as e:
-            logger.error(f"Request error fetching sub-agents for user {user_id}: {e}")
-            return User(id=user_id)
+            logger.error(f"Request error fetching sub-agents for user sub {user_sub}: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Unexpected error fetching sub-agents for user {user_id}: {e}")
+            logger.error(f"Unexpected error fetching sub-agents for user sub {user_sub}: {e}", exc_info=True)
             return None
 
     async def _fetch_user_settings(
-        self, client: httpx.AsyncClient, headers: dict[str, str], user_id: str
-    ) -> dict[str, Any]:
+        self, client: httpx.AsyncClient, headers: dict[str, str], user_sub: str
+    ) -> UserSettings:
         """Fetch user settings from the playground backend.
 
         Args:
             client: The HTTP client
             headers: Request headers with Authorization
-            user_id: The user's ID for logging
+            user_sub: The user's subject identifier for logging
 
         Returns:
             Dictionary with 'language', 'custom_prompt', and 'mcp_tools' keys, or defaults
         """
-        default_settings = {"language": "en", "timezone": "Europe/Zurich", "custom_prompt": None, "mcp_tools": []}
 
-        try:
-            response = await client.get("/api/v1/auth/me/settings", headers=headers)
+        response = await client.get("/api/v1/auth/me/settings", headers=headers)
+        data = response.json()
+        settings_data = data.get("data", {})
+        return UserSettings.model_validate(settings_data)
 
-            if response.status_code != 200:
-                logger.warning(f"Failed to fetch settings for user {user_id}: status={response.status_code}")
-                return default_settings
-
-            data = response.json()
-            settings_data = data.get("data", {})
-
-            return {
-                "language": settings_data.get("language", "en"),
-                "timezone": settings_data.get("timezone", "Europe/Zurich"),
-                "custom_prompt": settings_data.get("custom_prompt"),
-                "mcp_tools": settings_data.get("mcp_tools", []),
-            }
-
-        except Exception as e:
-            logger.warning(f"Error fetching settings for user {user_id}: {e}")
-            return default_settings
-
-    def _to_user(self, user_id: str, sub_agents: list[SubAgent], settings: dict[str, Any]) -> User:
+    def _to_user(self, user_sub: str, sub_agents: list[SubAgent], settings: UserSettings) -> User:
         """Convert sub-agents from the backend response to User model format.
 
         Args:
-            user_id: The user's ID
             sub_agents: List of SubAgent objects from the backend
-            settings: User settings with 'language' and 'custom_prompt' keys
+            settings: UserSettings object with 'language' and 'custom_prompt' attributes
 
         Returns:
             User object with agent_metadata, local_subagents, language, and custom_prompt
         """
+
         agent_metadata: dict[str, dict[str, Any]] = {}  # Maps agent_url -> {sub_agent_id, name, etc.}
         local_subagents: list[LocalSubAgentConfig] = []
 
         for sa in sub_agents:
-            logger.debug(f"Processing sub-agent '{sa.name}' of type '{sa.type}' for user {user_id}")
+            logger.debug(f"Processing sub-agent '{sa.name}' of type '{sa.type}' for user sub {user_sub}")
             if not sa.config_version:
                 continue
 
@@ -350,7 +350,9 @@ class RegistryService:
                             sub_agent_id=sa.id,  # Include playground backend ID for tracking
                         )
                     )
-                    logger.debug(f"Added local sub-agent '{local_subagents[-1].model_dump_json()}' for user {user_id}")
+                    logger.debug(
+                        f"Added local sub-agent '{local_subagents[-1].model_dump_json()}' for user sub {user_sub}"
+                    )
             elif sa.type == "foundry":
                 # Foundry agents have foundry-specific configuration fields
                 if sa.name and cv.foundry_hostname and cv.foundry_query_api_name:
@@ -369,17 +371,18 @@ class RegistryService:
                         )
                     )
                     logger.debug(
-                        f"Added Foundry local sub-agent '{local_subagents[-1].model_dump_json()}' for user {user_id}"
+                        f"Added Foundry local sub-agent '{local_subagents[-1].model_dump_json()}' for user sub {user_sub}"
                     )
         logger.debug(
-            f"Converted sub-agents for user {user_id}: {len(agent_metadata)} remote, {len(local_subagents)} local"
+            f"Converted sub-agents for user (sub={user_sub}): {len(agent_metadata)} remote, {len(local_subagents)} local"
         )
 
         return User(
-            id=user_id,
+            id=settings.user_id,
+            sub=user_sub,
             agent_metadata=agent_metadata,  # Include metadata for remote agents
-            tool_names=settings.get("mcp_tools", []),  # MCP tools from user settings
+            tool_names=settings.mcp_tools,  # MCP tools from user settings
             local_subagents=local_subagents,
-            language=settings.get("language", "en"),
-            custom_prompt=settings.get("custom_prompt"),
+            language=settings.language,
+            custom_prompt=settings.custom_prompt,
         )

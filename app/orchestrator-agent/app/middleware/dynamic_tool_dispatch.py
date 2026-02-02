@@ -396,7 +396,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.wrap_model_call: "
-            f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_id}: "
+            f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_sub}: "
             f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
         )
 
@@ -429,7 +429,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.awrap_model_call: "
-            f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_id}: "
+            f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_sub}: "
             f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
         )
 
@@ -695,7 +695,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         if tool is None:
             logger.error(
                 f"DynamicToolDispatchMiddleware: Tool '{tool_name}' not found "
-                f"in ToolNode or user registry for user {user_context.user_id}"
+                f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
                 content=f"Error: Tool '{tool_name}' is not available",
@@ -706,7 +706,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.wrap_tool_call: "
-            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_id}"
+            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_sub}"
         )
 
         # Invoke the dynamic tool directly
@@ -802,7 +802,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         if tool is None:
             logger.error(
                 f"DynamicToolDispatchMiddleware: Tool '{tool_name}' not found "
-                f"in ToolNode or user registry for user {user_context.user_id}"
+                f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
                 content=f"Error: Tool '{tool_name}' is not available",
@@ -813,7 +813,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.awrap_tool_call: "
-            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_id}"
+            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_sub}"
         )
 
         # Invoke the dynamic tool asynchronously

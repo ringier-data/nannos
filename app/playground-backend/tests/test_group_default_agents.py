@@ -15,40 +15,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from playground_backend.models.notification import NotificationType
+from playground_backend.models.user import User
+from playground_backend.services.sub_agent_service import SubAgentService
+from playground_backend.services.user_group_service import UserGroupService
 
 
 @pytest.mark.asyncio
-async def test_add_group_default_agent(pg_session: AsyncSession):
+async def test_add_group_default_agent(
+    pg_session: AsyncSession, test_user_db: User, test_approver_user_db: User, user_group_service: UserGroupService
+):
     """Test adding a single default agent to a group activates it for all members."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
-
-    # Setup repositories and services
-    audit_service = AuditService()
-    user_group_repo = UserGroupRepository()
-    sub_agent_repo = SubAgentRepository()
-    sub_agent_repo.set_audit_service(audit_service)
-    notification_service = NotificationService()
-    sub_agent_service = SubAgentService(sub_agent_repository=sub_agent_repo, notification_service=notification_service)
-    user_group_service = UserGroupService(
-        user_group_repository=user_group_repo,
-        sub_agent_service=sub_agent_service,
-        notification_service=notification_service,
-    )
-
-    # Create test users
-    await pg_session.execute(
-        text("""
-            INSERT INTO users (id, sub, email, first_name, last_name, role, status)
-            VALUES ('user-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active'),
-                   ('user-2', 'sub-2', 'user2@test.com', 'User', 'Two', 'member', 'active')
-        """)
-    )
-
     # Create test group
     await pg_session.execute(
         text("""
@@ -59,18 +35,18 @@ async def test_add_group_default_agent(pg_session: AsyncSession):
 
     # Add members to group
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_members (user_group_id, user_id, group_role)
-            VALUES (1, 'user-1', 'manager'),
-                   (1, 'user-2', 'read')
+            VALUES (1, {test_approver_user_db.id!r}, 'manager'),
+                   (1, {test_user_db.id!r}, 'read')
         """)
     )
 
     # Create sub-agent
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO sub_agents (id, name, owner_user_id, type, default_version)
-            VALUES (100, 'Test Agent', 'user-1', 'remote', 1)
+            VALUES (100, 'Test Agent', {test_approver_user_db.id!r}, 'remote', 1)
         """)
     )
 
@@ -93,13 +69,12 @@ async def test_add_group_default_agent(pg_session: AsyncSession):
     )
 
     await pg_session.commit()
-
     # Add as default agent
     await user_group_service.add_group_default_agent(
         db=pg_session,
         group_id=1,
         sub_agent_id=100,
-        actor_sub="user-1",
+        actor=test_approver_user_db,
     )
     await pg_session.commit()
 
@@ -123,9 +98,9 @@ async def test_add_group_default_agent(pg_session: AsyncSession):
     )
     activations = activations_result.fetchall()
     assert len(activations) == 2
-    assert activations[0][0] == "user-1"
+    assert activations[0][0] == test_approver_user_db.id
     assert activations[0][2] == "group"
-    assert activations[1][0] == "user-2"
+    assert activations[1][0] == test_user_db.id
     assert activations[1][2] == "group"
 
     # Verify notifications were sent
@@ -143,36 +118,12 @@ async def test_add_group_default_agent(pg_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_remove_group_default_agent(pg_session: AsyncSession):
+async def test_remove_group_default_agent(
+    pg_session: AsyncSession, test_user_db: User, test_approver_user_db: User, user_group_service: UserGroupService
+):
     """Test removing a single default agent deactivates it for all members."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
 
-    # Setup repositories and services
-    audit_service = AuditService()
-    user_group_repo = UserGroupRepository()
-    sub_agent_repo = SubAgentRepository()
-    sub_agent_repo.set_audit_service(audit_service)
-    notification_service = NotificationService()
-    sub_agent_service = SubAgentService(sub_agent_repository=sub_agent_repo, notification_service=notification_service)
-    user_group_service = UserGroupService(
-        user_group_repository=user_group_repo,
-        sub_agent_service=sub_agent_service,
-        notification_service=notification_service,
-    )
-
-    # Create test users and group
-    await pg_session.execute(
-        text("""
-            INSERT INTO users (id, sub, email, first_name, last_name, role, status)
-            VALUES ('user-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active'),
-                   ('user-2', 'sub-2', 'user2@test.com', 'User', 'Two', 'member', 'active')
-        """)
-    )
+    # Create group
     await pg_session.execute(
         text("""
             INSERT INTO user_groups (id, name, description)
@@ -180,18 +131,18 @@ async def test_remove_group_default_agent(pg_session: AsyncSession):
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_members (user_group_id, user_id, group_role)
-            VALUES (1, 'user-1', 'manager'),
-                   (1, 'user-2', 'read')
+            VALUES (1, {test_approver_user_db.id!r}, 'manager'),
+                   (1, {test_user_db.id!r}, 'read')
         """)
     )
 
     # Create sub-agent and make it a default
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO sub_agents (id, name, owner_user_id, type, default_version)
-            VALUES (100, 'Test Agent', 'user-1', 'remote', 1)
+            VALUES (100, 'Test Agent', {test_approver_user_db.id!r}, 'remote', 1)
         """)
     )
 
@@ -206,28 +157,28 @@ async def test_remove_group_default_agent(pg_session: AsyncSession):
     )
 
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_default_agents (user_group_id, sub_agent_id, created_by_user_id)
-            VALUES (1, 100, 'user-1')
+            VALUES (1, 100, {test_approver_user_db.id!r})
         """)
     )
 
     # Create activations for both users (use integer array not string array)
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_by, activated_by_groups)
-            VALUES ('user-1', 100, 'group', '[1]'::jsonb),
-                   ('user-2', 100, 'group', '[1]'::jsonb)
+            VALUES ({test_approver_user_db.id!r}, 100, 'group', '[1]'::jsonb),
+                   ({test_user_db.id!r}, 100, 'group', '[1]'::jsonb)
         """)
     )
     await pg_session.commit()
 
-    # Remove default agent
+    # Remove the default agent
     await user_group_service.remove_group_default_agent(
         db=pg_session,
         group_id=1,
         sub_agent_id=100,
-        actor_sub="user-1",
+        actor=test_approver_user_db,
     )
     await pg_session.commit()
 
@@ -264,35 +215,15 @@ async def test_remove_group_default_agent(pg_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_set_group_default_agents_optimized(pg_session: AsyncSession):
+async def test_set_group_default_agents_optimized(
+    pg_session: AsyncSession,
+    test_user_db: User,
+    user_group_service: UserGroupService,
+):
     """Test bulk update only inserts added and deletes removed agents."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
-
-    # Setup
-    audit_service = AuditService()
-    user_group_repo = UserGroupRepository()
-    sub_agent_repo = SubAgentRepository()
-    sub_agent_repo.set_audit_service(audit_service)
-    notification_service = NotificationService()
-    sub_agent_service = SubAgentService(sub_agent_repository=sub_agent_repo, notification_service=notification_service)
-    user_group_service = UserGroupService(
-        user_group_repository=user_group_repo,
-        sub_agent_service=sub_agent_service,
-        notification_service=notification_service,
-    )
 
     # Create test data
-    await pg_session.execute(
-        text("""
-            INSERT INTO users (id, sub, email, first_name, last_name, role, status)
-            VALUES ('user-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active')
-        """)
-    )
+
     await pg_session.execute(
         text("""
             INSERT INTO user_groups (id, name, description)
@@ -300,19 +231,19 @@ async def test_set_group_default_agents_optimized(pg_session: AsyncSession):
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_members (user_group_id, user_id, group_role)
-            VALUES (1, 'user-1', 'manager')
+            VALUES (1, {test_user_db.id!r}, 'manager')
         """)
     )
 
     # Create 3 sub-agents
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO sub_agents (id, name, owner_user_id, type, default_version)
-            VALUES (100, 'Agent 1', 'user-1', 'remote', 1),
-                   (101, 'Agent 2', 'user-1', 'remote', 1),
-                   (102, 'Agent 3', 'user-1', 'remote', 1)
+            VALUES (100, 'Agent 1', {test_user_db.id!r}, 'remote', 1),
+                   (101, 'Agent 2', {test_user_db.id!r}, 'remote', 1),
+                   (102, 'Agent 3', {test_user_db.id!r}, 'remote', 1)
         """)
     )
 
@@ -340,19 +271,19 @@ async def test_set_group_default_agents_optimized(pg_session: AsyncSession):
 
     # Set initial defaults: [100, 101]
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_default_agents (user_group_id, sub_agent_id, created_by_user_id)
-            VALUES (1, 100, 'user-1'),
-                   (1, 101, 'user-1')
+            VALUES (1, 100, {test_user_db.id!r}),
+                   (1, 101, {test_user_db.id!r})
         """)
     )
 
     # Create activations for initial defaults (use integer array not string array)
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_by, activated_by_groups)
-            VALUES ('user-1', 100, 'group', '[1]'::jsonb),
-                   ('user-1', 101, 'group', '[1]'::jsonb)
+            VALUES ({test_user_db.id!r}, 100, 'group', '[1]'::jsonb),
+                   ({test_user_db.id!r}, 101, 'group', '[1]'::jsonb)
         """)
     )
     await pg_session.commit()
@@ -362,7 +293,7 @@ async def test_set_group_default_agents_optimized(pg_session: AsyncSession):
         db=pg_session,
         group_id=1,
         sub_agent_ids=[101, 102],
-        actor_sub="user-1",
+        actor=test_user_db,
     )
     await pg_session.commit()
 
@@ -379,9 +310,9 @@ async def test_set_group_default_agents_optimized(pg_session: AsyncSession):
 
     # Verify activations: 101 should still exist, 100 removed, 102 added
     activations_result = await pg_session.execute(
-        text("""
+        text(f"""
             SELECT sub_agent_id FROM user_sub_agent_activations
-            WHERE user_id = 'user-1'
+            WHERE user_id = {test_user_db.id!r}
             ORDER BY sub_agent_id
         """)
     )
@@ -402,35 +333,14 @@ async def test_set_group_default_agents_optimized(pg_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_add_group_default_agent_idempotent(pg_session: AsyncSession):
+async def test_add_group_default_agent_idempotent(
+    pg_session: AsyncSession,
+    test_user_db: User,
+    user_group_service: UserGroupService,
+    sub_agent_service: SubAgentService,
+):
     """Test adding an already-default agent is idempotent."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
 
-    # Setup
-    audit_service = AuditService()
-    user_group_repo = UserGroupRepository()
-    sub_agent_repo = SubAgentRepository()
-    sub_agent_repo.set_audit_service(audit_service)
-    notification_service = NotificationService()
-    sub_agent_service = SubAgentService(sub_agent_repository=sub_agent_repo, notification_service=notification_service)
-    user_group_service = UserGroupService(
-        user_group_repository=user_group_repo,
-        sub_agent_service=sub_agent_service,
-        notification_service=notification_service,
-    )
-
-    # Create test data
-    await pg_session.execute(
-        text("""
-            INSERT INTO users (id, sub, email, first_name, last_name, role, status)
-            VALUES ('user-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active')
-        """)
-    )
     await pg_session.execute(
         text("""
             INSERT INTO user_groups (id, name, description)
@@ -438,15 +348,15 @@ async def test_add_group_default_agent_idempotent(pg_session: AsyncSession):
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_members (user_group_id, user_id, group_role)
-            VALUES (1, 'user-1', 'manager')
+            VALUES (1, {test_user_db.id!r}, 'manager')
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO sub_agents (id, name, owner_user_id, type, default_version)
-            VALUES (100, 'Test Agent', 'user-1', 'remote', 1)
+            VALUES (100, 'Test Agent', {test_user_db.id!r}, 'remote', 1)
         """)
     )
 
@@ -467,9 +377,9 @@ async def test_add_group_default_agent_idempotent(pg_session: AsyncSession):
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO user_group_default_agents (user_group_id, sub_agent_id, created_by_user_id)
-            VALUES (1, 100, 'user-1')
+            VALUES (1, 100, {test_user_db.id!r})
         """)
     )
     await pg_session.commit()
@@ -479,7 +389,7 @@ async def test_add_group_default_agent_idempotent(pg_session: AsyncSession):
         db=pg_session,
         group_id=1,
         sub_agent_id=100,
-        actor_sub="user-1",
+        actor=test_user_db,
     )
     await pg_session.commit()
 
@@ -494,35 +404,12 @@ async def test_add_group_default_agent_idempotent(pg_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_remove_group_default_agent_idempotent(pg_session: AsyncSession):
+async def test_remove_group_default_agent_idempotent(
+    pg_session: AsyncSession, test_user_db: User, user_group_service: UserGroupService
+):
     """Test removing a non-default agent is idempotent."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
-
-    # Setup
-    audit_service = AuditService()
-    user_group_repo = UserGroupRepository()
-    sub_agent_repo = SubAgentRepository()
-    sub_agent_repo.set_audit_service(audit_service)
-    notification_service = NotificationService()
-    sub_agent_service = SubAgentService(sub_agent_repository=sub_agent_repo, notification_service=notification_service)
-    user_group_service = UserGroupService(
-        user_group_repository=user_group_repo,
-        sub_agent_service=sub_agent_service,
-        notification_service=notification_service,
-    )
 
     # Create test data (without default agent)
-    await pg_session.execute(
-        text("""
-            INSERT INTO users (id, sub, email, first_name, last_name, role, status)
-            VALUES ('user-1', 'sub-1', 'user1@test.com', 'User', 'One', 'member', 'active')
-        """)
-    )
     await pg_session.execute(
         text("""
             INSERT INTO user_groups (id, name, description)
@@ -530,9 +417,9 @@ async def test_remove_group_default_agent_idempotent(pg_session: AsyncSession):
         """)
     )
     await pg_session.execute(
-        text("""
+        text(f"""
             INSERT INTO sub_agents (id, name, owner_user_id, type, default_version)
-            VALUES (100, 'Test Agent', 'user-1', 'remote', 1)
+            VALUES (100, 'Test Agent', {test_user_db.id!r}, 'remote', 1)
         """)
     )
 
@@ -553,7 +440,7 @@ async def test_remove_group_default_agent_idempotent(pg_session: AsyncSession):
         db=pg_session,
         group_id=1,
         sub_agent_id=100,
-        actor_sub="user-1",
+        actor=test_user_db,
     )
     await pg_session.commit()
 

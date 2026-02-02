@@ -7,7 +7,6 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 
 
 @pytest_asyncio.fixture

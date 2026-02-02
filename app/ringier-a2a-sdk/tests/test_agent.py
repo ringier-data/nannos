@@ -43,7 +43,7 @@ class TestBaseAgent:
 
         # Test stream method
         user_config = UserConfig(
-            user_id="test-user", access_token=SecretStr("test-token"), name="Test User", email="test@example.com"
+            user_sub="test-user", access_token=SecretStr("test-token"), name="Test User", email="test@example.com"
         )
 
         # Create a mock task
@@ -77,18 +77,18 @@ class TestBaseAgent:
 
     @pytest.mark.asyncio
     async def test_stream_sets_context_variables(self):
-        """Test that stream() sets user_id and access_token in context variables."""
+        """Test that stream() sets user_sub and access_token in context variables."""
         from unittest.mock import Mock
 
         from ringier_a2a_sdk.cost_tracking.logger import (
             get_request_access_token,
-            get_request_user_id,
+            get_request_user_sub,
         )
 
         class ConcreteAgent(BaseAgent):
             def __init__(self):
                 super().__init__()
-                self.captured_user_id = None
+                self.captured_user_sub = None
                 self.captured_token = None
 
             async def close(self):
@@ -96,7 +96,7 @@ class TestBaseAgent:
 
             async def _stream_impl(self, query: str, user_config: UserConfig, task):
                 # Capture context variables during stream execution
-                self.captured_user_id = get_request_user_id()
+                self.captured_user_sub = get_request_user_sub()
                 self.captured_token = get_request_access_token()
 
                 yield AgentStreamResponse(state=TaskState.completed, content="Done")
@@ -105,7 +105,7 @@ class TestBaseAgent:
 
         # Create user config with credentials
         user_config = UserConfig(
-            user_id="test-user-123",
+            user_sub="test-user-123",
             access_token=SecretStr("test-token-abc"),
             name="Test User",
             email="test@example.com",
@@ -122,13 +122,13 @@ class TestBaseAgent:
             responses.append(response)
 
         # Verify context variables were set during stream execution
-        assert agent.captured_user_id == "test-user-123"
+        assert agent.captured_user_sub == "test-user-123"
         assert agent.captured_token == "test-token-abc"
         assert len(responses) == 1
 
     @pytest.mark.asyncio
     async def test_get_request_credentials_helper(self):
-        """Test that get_request_credentials() returns both user_id and access_token."""
+        """Test that get_request_credentials() returns both user_sub and access_token."""
         from unittest.mock import Mock
 
         from ringier_a2a_sdk.cost_tracking.logger import get_request_credentials
@@ -150,7 +150,7 @@ class TestBaseAgent:
         agent = ConcreteAgent()
 
         user_config = UserConfig(
-            user_id="user-456", access_token=SecretStr("token-xyz"), name="Test User", email="test@example.com"
+            user_sub="sub-456", access_token=SecretStr("token-xyz"), name="Test User", email="test@example.com"
         )
 
         task = Mock()
@@ -161,8 +161,8 @@ class TestBaseAgent:
             pass
 
         # Verify tuple unpacking works
-        user_id, token = agent.captured_credentials
-        assert user_id == "user-456"
+        user_sub, token = agent.captured_credentials
+        assert user_sub == "sub-456"
         assert token == "token-xyz"
 
     @pytest.mark.asyncio
@@ -182,27 +182,27 @@ class TestBaseAgent:
 
             async def _stream_impl(self, query: str, user_config: UserConfig, task):
                 # Capture credentials at start
-                user_id, token = get_request_credentials()
+                user_sub, token = get_request_credentials()
 
                 # Simulate some async work
                 await asyncio.sleep(0.01)
 
                 # Verify credentials are still the same after async operations
-                user_id_after, token_after = get_request_credentials()
+                user_sub_after, token_after = get_request_credentials()
 
                 yield AgentStreamResponse(
-                    state=TaskState.completed, content=f"user={user_id},{token}|after={user_id_after},{token_after}"
+                    state=TaskState.completed, content=f"user={user_sub},{token}|after={user_sub_after},{token_after}"
                 )
 
         agent = ConcreteAgent()
 
         # Create two different user configs
         user_config_1 = UserConfig(
-            user_id="user-1", access_token=SecretStr("token-1"), name="User 1", email="user1@example.com"
+            user_sub="sub-1", access_token=SecretStr("token-1"), name="User 1", email="user1@example.com"
         )
 
         user_config_2 = UserConfig(
-            user_id="user-2", access_token=SecretStr("token-2"), name="User 2", email="user2@example.com"
+            user_sub="sub-2", access_token=SecretStr("token-2"), name="User 2", email="user2@example.com"
         )
 
         task1 = Mock()
@@ -227,8 +227,8 @@ class TestBaseAgent:
 
         # Execute both streams concurrently
         results = await asyncio.gather(
-            run_stream(user_config_1, task1, "user-1", "token-1"),
-            run_stream(user_config_2, task2, "user-2", "token-2"),
+            run_stream(user_config_1, task1, "sub-1", "token-1"),
+            run_stream(user_config_2, task2, "sub-2", "token-2"),
         )
 
         # Both should complete successfully with isolated contexts
@@ -259,7 +259,7 @@ class TestBaseAgent:
         agent = ConcreteAgent()
 
         # User config without access_token
-        user_config = UserConfig(user_id="user-no-token", name="Test User", email="test@example.com")
+        user_config = UserConfig(user_sub="sub-no-token", name="Test User", email="test@example.com")
 
         task = Mock()
         task.id = "task-1"
@@ -268,9 +268,9 @@ class TestBaseAgent:
         async for _ in agent.stream("test", user_config, task):
             pass
 
-        # User ID should be set, but token should be None
-        user_id, token = agent.captured_credentials
-        assert user_id == "user-no-token"
+        # User sub should be set, but token should be None
+        user_sub, token = agent.captured_credentials
+        assert user_sub == "sub-no-token"
         assert token is None
 
     def test_base_agent_requires_stream_implementation(self):

@@ -13,6 +13,7 @@ from uuid6 import uuid7
 from ..authorization import check_action_allowed, check_capability
 from ..models.notification import NotificationData, NotificationType
 from ..models.secret import Secret, SecretCreate, SecretType
+from ..models.user import User
 from ..services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -158,9 +159,9 @@ class SecretsService:
     async def create_secret(
         self,
         db: AsyncSession,
-        user_id: str,
         data: SecretCreate,
-    ) -> Secret:
+        actor: User,
+    ) -> Secret | None:
         """Create a new secret.
 
         Stores the actual secret value in SSM Parameter Store as SecureString
@@ -168,8 +169,8 @@ class SecretsService:
 
         Args:
             db: Database session
-            user_id: Owner user ID
             data: Secret creation data
+            actor: User performing the action (for audit logging)
 
         Returns:
             Created secret (without the actual secret value)
@@ -184,7 +185,7 @@ class SecretsService:
             SELECT id FROM secrets
             WHERE owner_user_id = :user_id AND name = :name AND deleted_at IS NULL
         """)
-        result = await db.execute(check_query, {"user_id": user_id, "name": data.name})
+        result = await db.execute(check_query, {"user_id": actor.id, "name": data.name})
         if result.scalar_one_or_none():
             raise ValueError(f"Secret with name '{data.name}' already exists")
 
@@ -196,18 +197,18 @@ class SecretsService:
             async with self.session.create_client("ssm", region_name=self.region_name) as ssm_client:
                 await ssm_client.put_parameter(  # type: ignore
                     Name=ssm_parameter_name,
-                    Description=f"Secret for user {user_id}: {data.name}",
+                    Description=f"Secret for user {actor.id}: {data.name}",
                     Value=data.secret_value,
                     Type="SecureString",
                     KeyId=self.kms_key_id,
                     Overwrite=False,
                     Tags=[
-                        {"Key": "owner_user_id", "Value": user_id},
+                        {"Key": "owner_user_id", "Value": actor.id},
                         {"Key": "secret_type", "Value": data.secret_type.value},
                         {"Key": "managed_by", "Value": "playground-backend"},
                     ],
                 )
-            logger.info(f"Created SSM parameter {ssm_parameter_name} for user {user_id}")
+            logger.info(f"Created SSM parameter {ssm_parameter_name} for user {actor.id}")
         except ClientError as e:
             logger.error(f"Failed to create SSM parameter: {e}")
             raise ValueError(f"Failed to store secret in SSM Parameter Store: {e}")
@@ -215,9 +216,9 @@ class SecretsService:
         # Store metadata in database with automatic audit
         secret_id = await self.repo.create(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             fields={
-                "owner_user_id": user_id,
+                "owner_user_id": actor.id,
                 "name": data.name,
                 "description": data.description,
                 "secret_type": data.secret_type.value,
@@ -230,7 +231,7 @@ class SecretsService:
         await db.commit()
 
         # Fetch and return the created secret
-        return await self.get_secret(db, secret_id, user_id, is_admin=False, admin_mode=False)  # type: ignore
+        return await self.get_secret(db, secret_id, actor.id, is_admin=False, admin_mode=False)
 
     async def get_secret(
         self,
@@ -345,7 +346,7 @@ class SecretsService:
         self,
         db: AsyncSession,
         secret_id: int,
-        user_id: str,
+        actor: User,
         is_admin: bool = False,
         admin_mode: bool = False,
     ) -> bool:
@@ -356,7 +357,7 @@ class SecretsService:
         Args:
             db: Database session
             secret_id: Secret ID
-            user_id: Requesting user ID
+            actor: User performing the deletion
             is_admin: Whether user is a system administrator
             admin_mode: Whether admin mode is enabled
 
@@ -368,7 +369,7 @@ class SecretsService:
             PermissionError: If user doesn't have access to delete
         """
         # Check access first
-        has_access = await self.check_user_access(db, secret_id, user_id, "write", is_admin, admin_mode)
+        has_access = await self.check_user_access(db, secret_id, actor.id, "write", is_admin, admin_mode)
         if not has_access:
             raise PermissionError("You don't have permission to delete this secret")
         # Check if secret is referenced by any sub-agents
@@ -382,7 +383,7 @@ class SecretsService:
             raise ValueError(f"Cannot delete secret: still referenced by {count} sub-agent(s)")
 
         # Get secret metadata (already access-controlled)
-        secret = await self.get_secret(db, secret_id, user_id, is_admin, admin_mode)
+        secret = await self.get_secret(db, secret_id, actor.id, is_admin, admin_mode)
         if not secret:
             return False
 
@@ -396,51 +397,10 @@ class SecretsService:
             # Continue with soft delete even if SSM deletion fails
 
         # Soft delete in database with automatic audit
-        await self.repo.delete(db=db, actor_sub=user_id, entity_id=secret_id, soft=True)
+        await self.repo.delete(db=db, actor=actor, entity_id=secret_id, soft=True)
         await db.commit()
 
         return True
-
-    async def get_secret_value(
-        self,
-        db: AsyncSession,
-        secret_id: int,
-        user_id: str,
-        is_admin: bool = False,
-        admin_mode: bool = False,
-    ) -> str:
-        """Fetch the actual secret value from SSM Parameter Store.
-
-        This is used by the orchestrator to retrieve secrets at runtime.
-        Enforces access control before retrieving the secret value.
-
-        Args:
-            db: Database session
-            secret_id: Secret ID
-            user_id: User ID requesting the secret
-            is_admin: Whether user is a system administrator
-            admin_mode: Whether admin mode is enabled
-
-        Returns:
-            Decrypted secret value
-
-        Raises:
-            ValueError: If parameter not found or access denied
-            PermissionError: If user doesn't have access
-        """
-        # Get secret metadata with access control
-        secret = await self.get_secret(db, secret_id, user_id, is_admin, admin_mode)
-        if not secret:
-            raise PermissionError("You don't have permission to access this secret")
-
-        ssm_parameter_name = secret.ssm_parameter_name
-        try:
-            async with self.session.create_client("ssm", region_name=self.region_name) as ssm_client:
-                response = await ssm_client.get_parameter(Name=ssm_parameter_name, WithDecryption=True)  # type: ignore
-            return response["Parameter"]["Value"]
-        except ClientError as e:
-            logger.error(f"Failed to get SSM parameter {ssm_parameter_name}: {e}")
-            raise ValueError(f"Failed to retrieve secret from SSM Parameter Store: {e}")
 
     async def get_permissions(self, db: AsyncSession, secret_id: int) -> list[dict]:
         """Get all group permissions for a secret.
@@ -484,7 +444,7 @@ class SecretsService:
         db: AsyncSession,
         secret_id: int,
         group_permissions: list[dict],
-        user_id: str,
+        actor: User,
         is_admin: bool = False,
     ) -> bool:
         """Update group permissions for a secret.
@@ -493,7 +453,7 @@ class SecretsService:
             db: Database session
             secret_id: Secret ID
             group_permissions: List of dicts with user_group_id and permissions
-            user_id: User ID performing the update
+            actor: User performing the update
             is_admin: Whether user is admin (for access control)
 
         Returns:
@@ -506,7 +466,7 @@ class SecretsService:
         has_access = await self.check_user_access(
             db=db,
             secret_id=secret_id,
-            user_id=user_id,
+            user_id=actor.id,
             action="write",
             is_admin=is_admin,
             admin_mode=is_admin,  # Admin mode required for permission management
@@ -532,13 +492,13 @@ class SecretsService:
         }
 
         # Get secret name for notifications
-        secret = await self.get_secret(db, secret_id, user_id, is_admin, is_admin)
+        secret = await self.get_secret(db, secret_id, actor.id, is_admin, is_admin)
         secret_name = secret.name if secret else f"Secret {secret_id}"
 
         # Use repository for update with automatic audit logging
         await self.repo.update_permissions(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             secret_id=secret_id,
             group_permissions=group_permissions,
         )

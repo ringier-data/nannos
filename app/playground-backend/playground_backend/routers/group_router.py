@@ -146,7 +146,7 @@ async def add_members(
 
     members = await user_group_service.add_members(
         db,
-        actor_sub=user.sub,
+        actor=user,
         group_id=group_id,
         user_ids=request_body.user_ids,
         role=request_body.role,
@@ -186,7 +186,7 @@ async def update_member_role(
 
     member = await user_group_service.update_member_role(
         db,
-        actor_sub=user.sub,
+        actor=user,
         group_id=group_id,
         user_id=user_id,
         role=request_body.role,
@@ -232,7 +232,7 @@ async def remove_members(
     try:
         members = await user_group_service.remove_members(
             db,
-            actor_sub=user.sub,
+            actor=user,
             group_id=group_id,
             user_ids=request_body.user_ids,
         )
@@ -309,7 +309,7 @@ async def set_group_default_agents(
             db=db,
             group_id=group_id,
             sub_agent_ids=sub_agent_ids,
-            actor_sub=user.sub,
+            actor=user,
         )
         await db.commit()
 
@@ -350,7 +350,7 @@ async def add_group_default_agent(
             db=db,
             group_id=group_id,
             sub_agent_id=sub_agent_id,
-            actor_sub=user.sub,
+            actor=user,
         )
         await db.commit()
 
@@ -390,7 +390,7 @@ async def remove_group_default_agent(
             db=db,
             group_id=group_id,
             sub_agent_id=sub_agent_id,
-            actor_sub=user.sub,
+            actor=user,
         )
         await db.commit()
 

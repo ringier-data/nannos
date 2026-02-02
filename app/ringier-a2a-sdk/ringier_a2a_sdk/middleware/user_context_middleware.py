@@ -61,7 +61,7 @@ class UserContextFromRequestStateMiddleware:
         user_data = state.get("user")
 
         if user_data:
-            user_id = user_data.get("sub")  # 'sub' claim is the user ID
+            user_sub = user_data.get("sub")  # OIDC subject identifier
 
             # Extract playground sub-agent config hash from header if present
             sub_agent_config_hash = None
@@ -76,7 +76,7 @@ class UserContextFromRequestStateMiddleware:
 
             # Store in context variable (async-safe, request-isolated)
             user_context = {
-                "user_id": user_id,
+                "user_sub": user_sub,  # OIDC subject identifier (can change with IDP migration)
                 "email": user_data.get("email"),
                 "name": user_data.get("name"),
                 "token": user_data.get("token"),
@@ -87,7 +87,7 @@ class UserContextFromRequestStateMiddleware:
             }
             current_user_context.set(user_context)
             logger.info(
-                f"[USER_CONTEXT] Extracted from scope.state: user_id={user_id}, "
+                f"[USER_CONTEXT] Extracted from scope.state: user_sub={user_sub}, "
                 f"sub_agent_id={sub_agent_id}, groups={user_context.get('groups', [])}"
             )
         else:

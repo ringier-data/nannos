@@ -77,18 +77,18 @@ class CostTrackingCallback(BaseCallbackHandler):
                     # The langsmith_run_id is sufficient for now
                     langsmith_trace_id = None
 
-                    # Extract user_id, conversation_id, and sub_agent_id from tags
+                    # Extract user_sub, conversation_id, and sub_agent_id from tags
                     # LangGraph passes these via tags in config (unified for local and remote agents)
                     tags = kwargs.get("tags", [])
-                    user_id = None
+                    user_sub = None
                     conversation_id = None
                     sub_agent_id = None
 
                     logger.debug(f"[COST TRACKING] Processing LLM callback with tags: {tags}")
 
                     for tag in tags:
-                        if tag.startswith("user:"):
-                            user_id = tag.split(":", 1)[1]
+                        if tag.startswith("user_sub:"):
+                            user_sub = tag.split(":", 1)[1]
                         elif tag.startswith("conversation:"):
                             conversation_id = tag.split(":", 1)[1]
                         elif tag.startswith("sub_agent:"):
@@ -97,14 +97,14 @@ class CostTrackingCallback(BaseCallbackHandler):
                             except (ValueError, IndexError) as e:
                                 logger.warning(f"Failed to parse sub_agent_id from tag '{tag}': {e}")
 
-                    if not user_id:
-                        logger.warning("No user_id found in callback tags, skipping cost tracking")
+                    if not user_sub:
+                        logger.warning("No user_sub found in callback tags, skipping cost tracking")
                         continue
 
                     # Queue for async logging with extracted sub_agent_id from tags
                     # This provides unified tracking for both local and remote agents
                     self.cost_logger.log_cost_async(
-                        user_id=user_id,
+                        user_sub=user_sub,
                         provider=provider,
                         model_name=model_name,
                         billing_unit_breakdown=billing_unit_breakdown,
@@ -117,7 +117,7 @@ class CostTrackingCallback(BaseCallbackHandler):
 
                     logger.info(
                         f"[COST TRACKING] Queued for {provider}/{model_name}: "
-                        f"{sum(billing_unit_breakdown.values())} units (user={user_id}, "
+                        f"{sum(billing_unit_breakdown.values())} units (user={user_sub}, "
                         f"conversation={conversation_id}, sub_agent={sub_agent_id})"
                     )
 

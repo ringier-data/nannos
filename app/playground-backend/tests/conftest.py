@@ -18,6 +18,7 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from yarl import URL
 
 from playground_backend.config import (
@@ -30,12 +31,13 @@ from playground_backend.controllers.auth_controller import AuthController
 from playground_backend.db.session import get_db_session
 from playground_backend.dependencies import require_auth, require_auth_or_bearer_token
 from playground_backend.models.session import StoredSession
-from playground_backend.models.user import User, UserStatus
+from playground_backend.models.user import User, UserRole, UserStatus
 from playground_backend.repositories.secrets_repository import SecretsRepository
 from playground_backend.repositories.sub_agent_repository import SubAgentRepository
 from playground_backend.repositories.user_group_repository import UserGroupRepository
 from playground_backend.repositories.user_repository import UserRepository
 from playground_backend.services.audit_service import AuditService
+from playground_backend.services.notification_service import NotificationService
 from playground_backend.services.oauth_service import OAuthService
 from playground_backend.services.secrets_service import SecretsService
 from playground_backend.services.session_service import SessionService
@@ -291,6 +293,13 @@ async def session_service(mock_config, dynamodb_tables):
 
 
 @pytest.fixture
+def notification_service():
+    """Create NotificationService mock for testing."""
+    service = NotificationService()
+    return service
+
+
+@pytest.fixture
 def user_service():
     """Create UserService instance with injected dependencies."""
     audit_service = AuditService()
@@ -303,13 +312,14 @@ def user_service():
 
 
 @pytest.fixture
-def secrets_service():
+def secrets_service(notification_service):
     """Create SecretsService instance with injected dependencies."""
     audit_service = AuditService()
     secrets_repo = SecretsRepository()
     secrets_repo.set_audit_service(audit_service)
     service = SecretsService()
     service.set_repository(secrets_repo)
+    service.set_notification_service(notification_service)
     return service
 
 
@@ -325,20 +335,13 @@ def sub_agent_service():
 
 
 @pytest.fixture
-def notification_service():
-    """Create NotificationService mock for testing."""
-    from playground_backend.services.notification_service import NotificationService
-
-    service = NotificationService()
-    return service
-
-
-@pytest.fixture
-def user_group_service():
+def user_group_service(sub_agent_service: SubAgentService, notification_service: NotificationService):
     """Create UserGroupService instance with injected dependencies."""
     service = UserGroupService()
     user_group_repo = UserGroupRepository()
     service.set_repository(user_group_repo)
+    service.set_sub_agent_service(sub_agent_service)
+    service.set_notification_service(notification_service)
     audit_service = AuditService()
     user_group_repo.set_audit_service(audit_service)
     return service
@@ -351,21 +354,155 @@ def user_settings_service():
     return service
 
 
+# Fixtures for repositories with DI
+@pytest.fixture
+def user_repository() -> UserRepository:
+    repo = UserRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
+@pytest.fixture
+def sub_agent_repository() -> SubAgentRepository:
+    repo = SubAgentRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
+@pytest.fixture
+def secrets_repository() -> SecretsRepository:
+    repo = SecretsRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
 # User fixtures
 @pytest.fixture
 def test_user() -> User:
-    """Create a test user."""
+    """Create a test user (member role) for use as actor in tests."""
     return User(
         id="test-user-id",
-        sub="test-user-id",
+        sub="test-user-sub",
         email="test@example.com",
         first_name="Test",
         last_name="User",
         company_name="Test Company",
         is_administrator=False,
+        role=UserRole.MEMBER,
+        status=UserStatus.ACTIVE,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
+
+
+@pytest.fixture
+def test_admin_user() -> User:
+    """Create a test admin user for use as actor in tests."""
+    return User(
+        id="admin-user-id",
+        sub="admin-user-sub",
+        email="admin@example.com",
+        first_name="Admin",
+        last_name="User",
+        company_name="Test Company",
+        is_administrator=True,
+        role=UserRole.ADMIN,
+        status=UserStatus.ACTIVE,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.fixture
+def test_approver_user() -> User:
+    """Create a test approver user for use as actor in tests."""
+    return User(
+        id="test-approver-id",
+        sub="test-approver-sub",
+        email="approver@example.com",
+        first_name="Test",
+        last_name="Approver",
+        company_name="Test Company",
+        is_administrator=False,
+        role=UserRole.APPROVER,
+        status=UserStatus.ACTIVE,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest_asyncio.fixture
+async def test_user_db(pg_session: AsyncSession, test_user: User, user_repository: UserRepository) -> User:
+    """Create test user in database."""
+    await user_repository.create(
+        db=pg_session,
+        actor=test_user,
+        fields={
+            "id": test_user.id,
+            "sub": test_user.sub,
+            "email": test_user.email,
+            "first_name": test_user.first_name,
+            "last_name": test_user.last_name,
+            "is_administrator": test_user.is_administrator,
+            "role": test_user.role,
+            "status": test_user.status,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        },
+        returning="id",
+    )
+    await pg_session.commit()
+    return test_user
+
+
+@pytest_asyncio.fixture
+async def test_admin_user_db(pg_session: AsyncSession, test_admin_user: User, user_repository: UserRepository) -> User:
+    """Create test user in database."""
+    await user_repository.create(
+        db=pg_session,
+        actor=test_admin_user,
+        fields={
+            "id": test_admin_user.id,
+            "sub": test_admin_user.sub,
+            "email": test_admin_user.email,
+            "first_name": test_admin_user.first_name,
+            "last_name": test_admin_user.last_name,
+            "is_administrator": test_admin_user.is_administrator,
+            "role": test_admin_user.role,
+            "status": test_admin_user.status,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        },
+        returning="id",
+    )
+    await pg_session.commit()
+    return test_admin_user
+
+
+@pytest_asyncio.fixture
+async def test_approver_user_db(
+    pg_session: AsyncSession, test_approver_user: User, user_repository: UserRepository
+) -> User:
+    """Create test user in database."""
+    await user_repository.create(
+        db=pg_session,
+        actor=test_approver_user,
+        fields={
+            "id": test_approver_user.id,
+            "sub": test_approver_user.sub,
+            "email": test_approver_user.email,
+            "first_name": test_approver_user.first_name,
+            "last_name": test_approver_user.last_name,
+            "is_administrator": test_approver_user.is_administrator,
+            "role": test_approver_user.role,
+            "status": test_approver_user.status,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        },
+        returning="id",
+    )
+    await pg_session.commit()
+    return test_approver_user
 
 
 @pytest_asyncio.fixture
@@ -393,22 +530,6 @@ async def add_user_to_db(pg_session):
         await pg_session.commit()
 
     return _add_user
-
-
-@pytest.fixture
-def test_admin_user() -> User:
-    """Create a test admin user."""
-    return User(
-        id="admin-user-id",
-        sub="admin-user-id",
-        email="admin@example.com",
-        first_name="Admin",
-        last_name="User",
-        company_name="Test Company",
-        is_administrator=True,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
 
 
 # Oidc mock responses

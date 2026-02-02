@@ -46,7 +46,7 @@ export function NotificationInbox() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to mark notifications as read';
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to mark notifications as read';
       toast.error(message);
     },
   });
@@ -63,7 +63,7 @@ export function NotificationInbox() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to mark all as read';
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to mark all as read';
       toast.error(message);
     },
   });

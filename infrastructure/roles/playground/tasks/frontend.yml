@@ -51,6 +51,8 @@
     VITE_ORCHESTRATOR_BASE_DOMAIN: "{{ orchestrator_agent_fqdn }}"
     VITE_LANGSMITH_ORGANIZATION_ID: "eacaca37-6472-40d5-80b4-9206d058caef"
     VITE_LANGSMITH_PROJECT_ID: "{{ langsmith_project_id }}"
+    VITE_KEYCLOAK_BASE_URL: "{{ oidc_domain }}"
+    VITE_KEYCLOAK_REALM: "{{ keycloak_realm_name }}"
   command: npm run build
 
 - name: 'sync playground-frontend build to S3'

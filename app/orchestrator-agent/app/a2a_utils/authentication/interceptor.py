@@ -1,5 +1,4 @@
-"""
-Smart Token Interceptor for A2A Agent-to-Agent Communication.
+"""Smart Token Interceptor for A2A Agent-to-Agent Communication.
 
 Automatically detects authentication requirements from AgentCard security configuration
 and exchanges user tokens for target-specific tokens before passing to sub-agents.
@@ -36,6 +35,8 @@ from a2a.types import AgentCard
 
 if TYPE_CHECKING:
     from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
+
+    from ..models.config import UserConfig
 
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         self,
         user_token: str,
         oauth2_client: "OidcOAuth2Client",
-        user_context: Optional[dict[str, Any]] = None,
+        user_config: Optional["UserConfig"] = None,
         sub_agent_id: Optional[int] = None,
     ):
         """
@@ -92,11 +93,11 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         Args:
             user_token: User's authenticated access token
             oauth2_client: OAuth2 client for token operations
-            user_context: Optional user context dict with user_id, email, name
+            user_config: Optional UserConfig containing user context for token exchange
             sub_agent_id: Optional sub-agent ID for cost tracking attribution
         """
         self.user_token = user_token
-        self.user_context = user_context or {}
+        self.user_config = user_config
         self.oauth2_client = oauth2_client
         self.sub_agent_id = sub_agent_id
         self._exchanged_tokens: dict[str, str] = {}  # Cache: target_client_id -> token

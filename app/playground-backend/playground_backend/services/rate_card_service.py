@@ -7,13 +7,16 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..models.user import User
+from ..repositories.rate_card_repository import RateCardRepository
+
 logger = logging.getLogger(__name__)
 
 
 class RateCardService:
     """Service for managing rate cards and calculating LLM costs."""
 
-    def __init__(self, rate_card_repository=None):
+    def __init__(self, rate_card_repository: RateCardRepository | None = None):
         """Initialize rate card service.
 
         Args:
@@ -24,7 +27,7 @@ class RateCardService:
         self._rate_cache: dict[tuple[str, str, str], tuple[Decimal, datetime]] = {}
         self._cache_ttl_seconds = 300  # 5 minutes
 
-    def set_repository(self, rate_card_repository):
+    def set_repository(self, rate_card_repository: RateCardRepository) -> None:
         """Set the rate card repository (dependency injection)."""
         self._repository = rate_card_repository
 
@@ -271,7 +274,7 @@ class RateCardService:
     async def create_model_rate_card(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         provider: str,
         model_name: str,
         pricing: dict[str, Any],  # Can be dict[str, Decimal] (old) or dict[str, RateCardPricingEntry] (new)
@@ -298,7 +301,7 @@ class RateCardService:
 
         entry_ids = await self.repository.create_model_rate_card(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             provider=provider,
             model_name=model_name,
             model_name_pattern=model_name_pattern,
@@ -318,7 +321,7 @@ class RateCardService:
     async def copy_model_rates(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         source_provider: str,
         source_model: str,
         target_provider: str,
@@ -331,7 +334,7 @@ class RateCardService:
 
         Args:
             db: Database session
-            actor_sub: User performing the copy
+            actor: User performing the copy
             source_provider: Source provider
             source_model: Source model
             target_provider: Target provider
@@ -346,7 +349,7 @@ class RateCardService:
 
         entry_ids = await self.repository.copy_model_rates(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             source_provider=source_provider,
             source_model=source_model,
             target_provider=target_provider,
