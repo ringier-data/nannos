@@ -128,7 +128,7 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
                     email=payload.get("email", ""),
                     first_name=payload.get("given_name", ""),
                     last_name=payload.get("family_name", ""),
-                    company_name=payload.get("company_name", ""),
+                    company_name=payload.get("company_name"),
                 )
 
             logger.info(f"Bearer token validated for user: {user.email} (sub={sub})")

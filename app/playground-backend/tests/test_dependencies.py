@@ -264,7 +264,7 @@ class TestRequireAuthOrBearerToken:
                 email="",
                 first_name="",
                 last_name="",
-                company_name="",
+                company_name=None,
             )
 
     @pytest.mark.asyncio
