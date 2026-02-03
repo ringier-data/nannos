@@ -45,13 +45,10 @@ from ..middleware import (
 from ..models import AgentSettings, FinalResponseSchema
 from ..models.config import GraphRuntimeContext, ModelType
 from .file_tools import create_presigned_url_tool
-from .model_factory import create_model
+from .model_factory import DEFAULT_MODEL, create_model
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
-
-# Default model when none specified
-DEFAULT_MODEL: ModelType = "claude-sonnet-4.5"
 
 
 class GraphFactory:

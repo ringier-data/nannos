@@ -4,7 +4,7 @@ A local sub-agent for analyzing files (images, PDFs, text) using multimodal capa
 This is a built-in capability, not an external A2A service, providing:
 
 1. Clean LangSmith observability (separate agent trace)
-2. Ability to use a cheaper/specialized vision model
+2. Ability to use a cheaper/specialized vision model (default: gpt-4o-mini)
 3. Consistent sub-agent interface with the rest of the system
 
 The sub-agent accepts any HTTPS URL directly (public URLs work as-is).
@@ -16,9 +16,14 @@ For images/PDFs, it passes URLs directly to the vision model.
 
 This module uses LocalA2ARunnable to provide the same response format
 as remote A2A agents, ensuring consistent middleware behavior.
+
+Configuration:
+- Model can be set via FILE_ANALYZER_MODEL environment variable
+- Default: gpt-4o-mini (cost-optimized for vision tasks)
 """
 
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -32,7 +37,7 @@ from langchain_core.messages import (
 )
 from langsmith import traceable
 
-from app.core.model_factory import create_model
+from app.core.model_factory import ModelType, create_model, is_valid_model
 
 from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
 
@@ -46,6 +51,10 @@ FILE_ANALYZER_DESCRIPTION = (
     "Example: 'What is shown in https://example.com/image.png?' "
     "Works with any HTTPS URL - no presigning needed. Only S3 URIs (s3://...) need presigning first."
 )
+
+# Default model for file analysis (cost-optimized for vision tasks)
+# Can be overridden via FILE_ANALYZER_MODEL environment variable
+DEFAULT_FILE_ANALYZER_MODEL: ModelType = "gpt-4o-mini"
 
 # Regex to extract URLs from text
 # Uses negative lookbehind to exclude trailing punctuation (periods, commas, etc.)
@@ -154,9 +163,28 @@ async def _detect_file_type(url: str, client: httpx.AsyncClient) -> str:
 
 
 def _create_file_analyzer_model():
-    """Create the model for file analysis."""
-
-    return create_model("gpt-4o-mini", config=None, thinking=False)
+    """Create the model for file analysis.
+    
+    Uses gpt-4o-mini by default for cost optimization on vision tasks.
+    Can be overridden via FILE_ANALYZER_MODEL environment variable.
+    
+    Returns:
+        BaseChatModel: The configured model for file analysis.
+    """
+    # Get model from environment or use default
+    model_name = os.getenv("FILE_ANALYZER_MODEL", DEFAULT_FILE_ANALYZER_MODEL)
+    
+    # Validate model if overridden
+    if model_name != DEFAULT_FILE_ANALYZER_MODEL:
+        if not is_valid_model(model_name):
+            logger.warning(
+                f"Invalid FILE_ANALYZER_MODEL '{model_name}'. "
+                f"Falling back to default: {DEFAULT_FILE_ANALYZER_MODEL}"
+            )
+            model_name = DEFAULT_FILE_ANALYZER_MODEL
+    
+    logger.info(f"Creating file analyzer model: {model_name}")
+    return create_model(model_name, config=None, thinking=False)  # type: ignore
 
 
 class FileAnalyzerRunnable(LocalA2ARunnable):

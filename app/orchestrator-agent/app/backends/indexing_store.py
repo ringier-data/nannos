@@ -19,7 +19,7 @@ from deepagents.backends.store import StoreBackend
 from langchain.tools import ToolRuntime
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
-from ..core.model_factory import create_model
+from ..core.model_factory import DEFAULT_MODEL, create_model
 from ..core.semantic_chunking import chunk_with_context
 
 logger = logging.getLogger(__name__)
@@ -125,8 +125,8 @@ class IndexingStoreBackend(StoreBackend):
                 "source": "filesystem",
             }
 
-        # Create model for contextualization
-        model = create_model("claude-sonnet-4.5", self.agent_settings, thinking=False)
+        # Create model for contextualization (use DEFAULT_MODEL for consistency)
+        model = create_model(DEFAULT_MODEL, self.agent_settings, thinking=False)
 
         # Perform semantic chunking with contextualization
         chunks = await chunk_with_context(content, metadata, model)  # type: ignore[arg-type]

@@ -10,22 +10,37 @@ Key Components:
 - AgentDiscoveryService: Dynamic sub-agent and tool discovery
 - GraphFactory: Centralized graph creation and management
 - create_model: Utility function for creating LangChain models
+- Model configuration utilities: get_available_models, is_valid_model, get_default_model
 
 Usage:
     from app.core.agent import OrchestratorDeepAgent
     from app.core.executor import AgentExecutor
     from app.core.discovery import AgentDiscoveryService
     from app.core.graph_factory import GraphFactory
-    from app.core.model_factory import create_model
+    from app.core.model_factory import create_model, get_available_models, is_valid_model
 """
 
 # DO NOT import OrchestratorDeepAgent, AgentExecutor, or GraphFactory here
 # They create circular imports. Import them directly from their modules where needed.
-from .discovery import AgentDiscoveryService, ToolDiscoveryService
-from .model_factory import create_model
+# DO NOT import from discovery here either - causes circular import via models
+# Import model_factory utilities directly when needed
+
+from .model_factory import (
+    DEFAULT_MODEL,
+    MODEL_CONFIG,
+    ModelType,
+    create_model,
+    get_available_models,
+    get_default_model,
+    is_valid_model,
+)
 
 __all__ = [
-    "AgentDiscoveryService",
-    "ToolDiscoveryService",
     "create_model",
+    "get_available_models",
+    "is_valid_model",
+    "get_default_model",
+    "DEFAULT_MODEL",
+    "MODEL_CONFIG",
+    "ModelType",
 ]

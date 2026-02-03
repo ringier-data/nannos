@@ -57,6 +57,39 @@ MODEL_CONFIG = {
 
 logger = logging.getLogger(__name__)
 
+# Default model when none specified (configurable via environment variable)
+DEFAULT_MODEL: ModelType = os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")  # type: ignore
+
+
+def get_available_models() -> list[ModelType]:
+    """Get list of all available model types.
+    
+    Returns:
+        List of all supported model types.
+    """
+    return list(MODEL_CONFIG.keys())  # type: ignore
+
+
+def is_valid_model(model_name: str) -> bool:
+    """Check if a model name is valid.
+    
+    Args:
+        model_name: Model name to validate.
+        
+    Returns:
+        True if the model name is valid, False otherwise.
+    """
+    return model_name in MODEL_CONFIG
+
+
+def get_default_model() -> ModelType:
+    """Get the default model type.
+    
+    Returns:
+        The default model type (configurable via DEFAULT_MODEL env var).
+    """
+    return DEFAULT_MODEL
+
 
 def create_model(
     model_type: ModelType, config: Any, thinking: bool = False, callbacks: list | None = None

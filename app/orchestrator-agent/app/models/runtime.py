@@ -18,7 +18,7 @@ from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
 from ..a2a_utils.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
 from ..core.document_store_tools import create_document_store_tools
-from ..core.model_factory import ModelType, create_model
+from ..core.model_factory import ModelType, create_model, get_default_model, is_valid_model
 from ..core.s3_service import S3Service
 from .config import GraphRuntimeContext, UserConfig
 
@@ -120,7 +120,7 @@ def build_runtime_context(
             logger.info(
                 f"Added {len(filtered_static_tools)} static tools to orchestrator_tools for sub-agents: {tool_names}"
             )
-        orchestrator_model_type = user_config.model or "gpt4o"  # Default orchestrator model
+        orchestrator_model_type = user_config.model or get_default_model()
 
         # Import agent creation functions here to avoid circular imports
         from ..agents.dynamic_agent import create_dynamic_local_subagent
@@ -149,7 +149,7 @@ def build_runtime_context(
                     subagent_model_type: ModelType
                     if config.model_name:
                         # Validate and use the specified model
-                        if config.model_name in ["gpt4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-haiku-4-5"]:
+                        if is_valid_model(config.model_name):
                             subagent_model_type = config.model_name  # type: ignore
                             logger.info(f"Sub-agent '{config.name}' using custom model: {config.model_name}")
                         else:
