@@ -6,10 +6,10 @@ from urllib.parse import urlencode
 from authlib.integrations.starlette_client import OAuth, OAuthError, StarletteOAuth2App
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import URL
 
 from ..config import config
-from ..db import get_async_session_factory
 from ..services.session_service import SessionService
 from ..services.user_service import UserService
 from ..utils.cookie_signer import sign_cookie
@@ -125,7 +125,7 @@ class AuthController:
             logger.error(f"Failed to initiate OAuth flow: {e}")
             raise HTTPException(status_code=500, detail="Failed to initiate login") from e
 
-    async def get_login_callback(self, request: Request, response: Response) -> RedirectResponse:
+    async def get_login_callback(self, request: Request, response: Response, db: AsyncSession) -> RedirectResponse:
         """Handle the OIDC login callback.
 
         Query params:
@@ -187,8 +187,7 @@ class AuthController:
             raise HTTPException(status_code=400, detail="Missing user information")
 
         # Upsert user with database session
-        session_factory = get_async_session_factory()
-        async with session_factory() as db:
+        try:
             user = await self.user_service.upsert_user(
                 db=db,
                 sub=sub,
@@ -197,8 +196,11 @@ class AuthController:
                 last_name=family_name,
                 company_name=company_name,
             )
-            await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to upsert user: {e}")
+            raise
 
+        logger.info(f"User {user.id} logged in successfully")
         # Get tokens for session
         access_token = token.get("access_token", "")
         refresh_token = token.get("refresh_token", "")

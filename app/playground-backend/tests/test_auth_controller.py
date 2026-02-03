@@ -6,6 +6,8 @@ import pytest
 from authlib.integrations.starlette_client import OAuthError
 from fastapi import HTTPException
 
+from playground_backend.controllers.auth_controller import AuthController
+
 
 @pytest.mark.asyncio
 class TestAuthController:
@@ -26,7 +28,7 @@ class TestAuthController:
         # Should call authorize_redirect
         mock_oauth.authorize_redirect.assert_called_once()
 
-    async def test_get_login_invalid_redirect(self, auth_controller, create_mock_request):
+    async def test_get_login_invalid_redirect(self, auth_controller: AuthController, create_mock_request):
         """Test login endpoint with invalid redirect URL."""
         request = create_mock_request(query_params={"redirectTo": "javascript:alert(1)"})
 
@@ -37,13 +39,13 @@ class TestAuthController:
 
     async def test_get_login_callback_success(
         self,
-        auth_controller,
+        auth_controller: AuthController,
         create_mock_request,
         create_mock_response,
         mock_config,
         oidc_userinfo_response,
         mock_oauth,
-        mock_db_session_factory,
+        pg_session,
     ):
         """Test successful login callback."""
         redirect_to = f"https://{mock_config.base_domain}/"
@@ -64,14 +66,14 @@ class TestAuthController:
         }
         mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
 
-        result = await auth_controller.get_login_callback(request, response)
+        result = await auth_controller.get_login_callback(request, response, db=pg_session)
 
         # Should redirect to original URL
         assert result.status_code == 303
         assert redirect_to in result.headers["location"]
 
     async def test_get_login_callback_missing_code(
-        self, auth_controller, create_mock_request, create_mock_response, mock_oauth
+        self, auth_controller: AuthController, create_mock_request, create_mock_response, mock_oauth, pg_session
     ):
         """Test login callback without code."""
         request = create_mock_request()
@@ -83,12 +85,12 @@ class TestAuthController:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await auth_controller.get_login_callback(request, response)
+            await auth_controller.get_login_callback(request, response, db=pg_session)
 
         assert exc_info.value.status_code == 400
 
     async def test_get_login_callback_missing_state(
-        self, auth_controller, create_mock_request, create_mock_response, mock_oauth
+        self, auth_controller: AuthController, create_mock_request, create_mock_response, mock_oauth, pg_session
     ):
         """Test login callback without state."""
         request = create_mock_request()
@@ -100,12 +102,12 @@ class TestAuthController:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await auth_controller.get_login_callback(request, response)
+            await auth_controller.get_login_callback(request, response, db=pg_session)
 
         assert exc_info.value.status_code == 400
 
     async def test_get_login_callback_invalid_state(
-        self, auth_controller, create_mock_request, create_mock_response, mock_oauth
+        self, auth_controller: AuthController, create_mock_request, create_mock_response, mock_oauth, pg_session
     ):
         """Test login callback with invalid state."""
         request = create_mock_request()
@@ -117,17 +119,18 @@ class TestAuthController:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await auth_controller.get_login_callback(request, response)
+            await auth_controller.get_login_callback(request, response, db=pg_session)
 
         assert exc_info.value.status_code == 400
 
     async def test_get_login_callback_token_exchange_failure(
         self,
-        auth_controller,
+        auth_controller: AuthController,
         create_mock_request,
         create_mock_response,
         mock_config,
         mock_oauth,
+        pg_session,
     ):
         """Test login callback when token exchange fails."""
         request = create_mock_request()
@@ -137,11 +140,11 @@ class TestAuthController:
         mock_oauth.authorize_access_token = AsyncMock(side_effect=Exception("Token exchange failed"))
 
         with pytest.raises(HTTPException) as exc_info:
-            await auth_controller.get_login_callback(request, response)
+            await auth_controller.get_login_callback(request, response, db=pg_session)
 
         assert exc_info.value.status_code == 500
 
-    async def test_get_logout(self, auth_controller, create_mock_request, mock_config):
+    async def test_get_logout(self, auth_controller: AuthController, create_mock_request, mock_config, pg_session):
         """Test logout endpoint."""
         request = create_mock_request(
             query_params={"redirectTo": f"https://{mock_config.base_domain}/"},
@@ -154,7 +157,7 @@ class TestAuthController:
         assert request.session["logout_redirect_to"] == f"https://{mock_config.base_domain}/"
         assert response.status_code == 303
 
-    async def test_get_logout_callback(self, auth_controller, create_mock_request, mock_config):
+    async def test_get_logout_callback(self, auth_controller: AuthController, create_mock_request, mock_config):
         """Test logout callback."""
         redirect_to = f"https://{mock_config.base_domain}/"
         request = create_mock_request()
@@ -169,7 +172,9 @@ class TestAuthController:
         # Should clear redirect from session
         assert "logout_redirect_to" not in request.session
 
-    async def test_get_logout_callback_no_state(self, auth_controller, create_mock_request, mock_config):
+    async def test_get_logout_callback_no_state(
+        self, auth_controller: AuthController, create_mock_request, mock_config
+    ):
         """Test logout callback without state."""
         request = create_mock_request(query_params={})
 
@@ -179,12 +184,12 @@ class TestAuthController:
         assert response.status_code == 303
         assert mock_config.base_domain in response.headers["location"]
 
-    async def test_is_valid_redirect_url_https(self, auth_controller, mock_config):
+    async def test_is_valid_redirect_url_https(self, auth_controller: AuthController, mock_config):
         """Test URL validation for HTTPS URLs."""
         valid_url = f"https://{mock_config.base_domain}/dashboard"
         assert auth_controller._is_valid_redirect_url(valid_url)
 
-    async def test_is_valid_redirect_url_different_domain(self, auth_controller):
+    async def test_is_valid_redirect_url_different_domain(self, auth_controller: AuthController):
         """Test URL validation rejects different domains in non-local mode."""
         from unittest.mock import patch
 
@@ -195,46 +200,46 @@ class TestAuthController:
             invalid_url = "https://evil.com/phishing"
             assert not auth_controller._is_valid_redirect_url(invalid_url)
 
-    async def test_is_valid_redirect_url_http_in_dev(self, auth_controller):
+    async def test_is_valid_redirect_url_http_in_dev(self, auth_controller: AuthController):
         """Test URL validation allows HTTP in dev mode."""
         # Controller should be in dev mode from test config
         valid_url = "http://localhost:9999/dashboard"
         assert auth_controller._is_valid_redirect_url(valid_url)
 
-    async def test_is_valid_redirect_url_javascript(self, auth_controller):
+    async def test_is_valid_redirect_url_javascript(self, auth_controller: AuthController):
         """Test URL validation rejects javascript: URLs."""
         invalid_url = "javascript:alert(1)"
         assert not auth_controller._is_valid_redirect_url(invalid_url)
 
-    async def test_is_valid_redirect_url_rejects_login_callback(self, auth_controller, mock_config):
+    async def test_is_valid_redirect_url_rejects_login_callback(self, auth_controller: AuthController, mock_config):
         """Test URL validation rejects redirect to login-callback to prevent loops."""
         invalid_url = f"http://{mock_config.base_domain}/api/v1/auth/login-callback"
         assert not auth_controller._is_valid_redirect_url(invalid_url)
 
-    async def test_is_valid_redirect_url_rejects_login(self, auth_controller, mock_config):
+    async def test_is_valid_redirect_url_rejects_login(self, auth_controller: AuthController, mock_config):
         """Test URL validation rejects redirect to login to prevent loops."""
         invalid_url = f"http://{mock_config.base_domain}/api/v1/auth/login"
         assert not auth_controller._is_valid_redirect_url(invalid_url)
 
-    async def test_is_valid_redirect_url_rejects_logout_callback(self, auth_controller, mock_config):
+    async def test_is_valid_redirect_url_rejects_logout_callback(self, auth_controller: AuthController, mock_config):
         """Test URL validation rejects redirect to logout-callback to prevent loops."""
         invalid_url = f"http://{mock_config.base_domain}/api/v1/auth/logout-callback"
         assert not auth_controller._is_valid_redirect_url(invalid_url)
 
-    async def test_is_valid_redirect_url_rejects_logout(self, auth_controller, mock_config):
+    async def test_is_valid_redirect_url_rejects_logout(self, auth_controller: AuthController, mock_config):
         """Test URL validation rejects redirect to logout to prevent loops."""
         invalid_url = f"http://{mock_config.base_domain}/api/v1/auth/logout"
         assert not auth_controller._is_valid_redirect_url(invalid_url)
 
     async def test_get_login_callback_clears_session_redirect_to(
         self,
-        auth_controller,
+        auth_controller: AuthController,
         create_mock_request,
         create_mock_response,
         mock_config,
         oidc_userinfo_response,
         mock_oauth,
-        mock_db_session_factory,
+        pg_session,
     ):
         """Test that login callback clears redirect_to from session to prevent reuse."""
         redirect_to = f"https://{mock_config.base_domain}/dashboard"
@@ -255,20 +260,20 @@ class TestAuthController:
         }
         mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
 
-        await auth_controller.get_login_callback(request, response)
+        await auth_controller.get_login_callback(request, response, db=pg_session)
 
         # redirect_to should be cleared from session
         assert "redirect_to" not in request.session
 
     async def test_get_login_callback_uses_default_redirect_when_invalid(
         self,
-        auth_controller,
+        auth_controller: AuthController,
         create_mock_request,
         create_mock_response,
         mock_config,
         oidc_userinfo_response,
         mock_oauth,
-        mock_db_session_factory,
+        pg_session,
     ):
         """Test that login callback uses default redirect when stored redirect_to is invalid."""
         # Store an invalid redirect_to (contains auth path)
@@ -290,7 +295,7 @@ class TestAuthController:
         }
         mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
 
-        result = await auth_controller.get_login_callback(request, response)
+        result = await auth_controller.get_login_callback(request, response, db=pg_session)
 
         # Should redirect to default URL, not the invalid one
         assert result.status_code == 303
@@ -299,13 +304,13 @@ class TestAuthController:
 
     async def test_get_login_callback_uses_default_redirect_when_missing(
         self,
-        auth_controller,
+        auth_controller: AuthController,
         create_mock_request,
         create_mock_response,
         mock_config,
         oidc_userinfo_response,
         mock_oauth,
-        mock_db_session_factory,
+        pg_session,
     ):
         """Test that login callback uses default redirect when redirect_to is missing from session."""
         request = create_mock_request()
@@ -325,7 +330,7 @@ class TestAuthController:
         }
         mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
 
-        result = await auth_controller.get_login_callback(request, response)
+        result = await auth_controller.get_login_callback(request, response, db=pg_session)
 
         # Should redirect to default URL
         assert result.status_code == 303
@@ -333,10 +338,11 @@ class TestAuthController:
 
     async def test_get_login_callback_clears_session_on_oauth_error(
         self,
-        auth_controller,
+        auth_controller: AuthController,
         create_mock_request,
         create_mock_response,
         mock_oauth,
+        pg_session,
     ):
         """Test that login callback clears session on OAuth error to prevent state reuse."""
         request = create_mock_request()
@@ -352,17 +358,18 @@ class TestAuthController:
         )
 
         with pytest.raises(HTTPException):
-            await auth_controller.get_login_callback(request, response)
+            await auth_controller.get_login_callback(request, response, db=pg_session)
 
         # Session should be cleared on error
         assert len(request.session) == 0
 
     async def test_get_login_callback_clears_session_on_generic_error(
         self,
-        auth_controller,
+        auth_controller: AuthController,
         create_mock_request,
         create_mock_response,
         mock_oauth,
+        pg_session,
     ):
         """Test that login callback clears session on generic error to prevent state reuse."""
         request = create_mock_request()
@@ -374,12 +381,14 @@ class TestAuthController:
         mock_oauth.authorize_access_token = AsyncMock(side_effect=Exception("Unexpected error"))
 
         with pytest.raises(HTTPException):
-            await auth_controller.get_login_callback(request, response)
+            await auth_controller.get_login_callback(request, response, db=pg_session)
 
         # Session should be cleared on error
         assert len(request.session) == 0
 
-    async def test_get_login_rejects_redirect_to_callback_url(self, auth_controller, create_mock_request, mock_config):
+    async def test_get_login_rejects_redirect_to_callback_url(
+        self, auth_controller: AuthController, create_mock_request, mock_config
+    ):
         """Test login endpoint rejects redirectTo containing login-callback path."""
         invalid_redirect = f"http://{mock_config.base_domain}/api/v1/auth/login-callback"
         request = create_mock_request(query_params={"redirectTo": invalid_redirect})
@@ -389,7 +398,9 @@ class TestAuthController:
 
         assert exc_info.value.status_code == 422
 
-    async def test_get_login_rejects_redirect_to_login_url(self, auth_controller, create_mock_request, mock_config):
+    async def test_get_login_rejects_redirect_to_login_url(
+        self, auth_controller: AuthController, create_mock_request, mock_config
+    ):
         """Test login endpoint rejects redirectTo containing login path."""
         invalid_redirect = f"http://{mock_config.base_domain}/api/v1/auth/login?foo=bar"
         request = create_mock_request(query_params={"redirectTo": invalid_redirect})

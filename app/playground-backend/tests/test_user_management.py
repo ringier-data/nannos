@@ -215,7 +215,7 @@ class TestUserServiceExtended:
     async def test_update_user_groups(
         self, user_service: UserService, user_group_service: UserGroupService, pg_session: AsyncSession
     ):
-        """Test updating user's group memberships."""
+        """Test updating user's group memberships using proper user_group_service methods."""
         # Create user
         test_user = await user_service.upsert_user(
             db=pg_session,
@@ -234,16 +234,20 @@ class TestUserServiceExtended:
             db=pg_session, group_id=group1.id, user_ids=[test_user.id], role="read", actor=test_user
         )
 
-        # Update to only group2 using 'set' operation
-        result = await user_service.update_user_groups(
+        # Remove from group1 and add to group2 (simulating 'set' operation)
+        await user_group_service.remove_members(
             db=pg_session,
-            user_id=test_user.id,
+            group_id=group1.id,
+            user_ids=[test_user.id],
             actor=test_user,
-            group_ids=[group2.id],
-            operation="set",
         )
-
-        assert result is not None
+        await user_group_service.add_members(
+            db=pg_session,
+            group_id=group2.id,
+            user_ids=[test_user.id],
+            role="read",
+            actor=test_user,
+        )
 
         # Verify user is now in group2 only
         user = await user_service.get_user_with_groups(pg_session, user_id=test_user.id)

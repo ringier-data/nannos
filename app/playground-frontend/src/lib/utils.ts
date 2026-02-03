@@ -19,14 +19,35 @@ export function getErrorMessage(error: unknown): string {
   }
   
   if (error && typeof error === 'object') {
-    // FastAPI/backend error format
-    if ('detail' in error && typeof (error as { detail: unknown }).detail === 'string') {
-      return (error as { detail: string }).detail;
+    const errorObj = error as Record<string, unknown>;
+    
+    // Try nested response.data.detail (common in axios/fetch wrappers)
+    if (errorObj.response && typeof errorObj.response === 'object') {
+      const response = errorObj.response as Record<string, unknown>;
+      if (response.data && typeof response.data === 'object') {
+        const data = response.data as Record<string, unknown>;
+        if (typeof data.detail === 'string') {
+          return data.detail;
+        }
+      }
+    }
+    
+    // Try direct data.detail (generated SDK format)
+    if (errorObj.data && typeof errorObj.data === 'object') {
+      const data = errorObj.data as Record<string, unknown>;
+      if (typeof data.detail === 'string') {
+        return data.detail;
+      }
+    }
+    
+    // FastAPI/backend error format (top-level detail)
+    if (typeof errorObj.detail === 'string') {
+      return errorObj.detail;
     }
     
     // Generic message field
-    if ('message' in error && typeof (error as { message: unknown }).message === 'string') {
-      return (error as { message: string }).message;
+    if (typeof errorObj.message === 'string') {
+      return errorObj.message;
     }
     
     // Try to stringify if it's a meaningful object

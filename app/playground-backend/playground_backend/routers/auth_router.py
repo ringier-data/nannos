@@ -78,7 +78,7 @@ async def login(request: Request) -> RedirectResponse:
 
 
 @router.get("/login-callback")
-async def login_callback(request: Request, response: Response) -> RedirectResponse:
+async def login_callback(request: Request, response: Response, db: DbSession) -> RedirectResponse:
     """Handle OIDC login callback.
 
     Query Parameters:
@@ -89,7 +89,7 @@ async def login_callback(request: Request, response: Response) -> RedirectRespon
         Redirect to the originally requested page with session cookie set
     """
     auth_controller = get_auth_controller(request)
-    return await auth_controller.get_login_callback(request, response)
+    return await auth_controller.get_login_callback(request, response, db=db)
 
 
 @router.get("/logout")

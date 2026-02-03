@@ -49,6 +49,79 @@ from playground_backend.services.user_settings_service import UserSettingsServic
 logger = logging.getLogger(__name__)
 
 
+# Docker network cleanup fixture
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_docker_networks():
+    """Clean up Docker networks before and after test session to prevent address pool exhaustion.
+
+    Only removes networks that match test patterns or are associated with test containers.
+    """
+    docker_client = docker.from_env()
+
+    def cleanup():
+        """Remove unused Docker networks related to tests."""
+        try:
+            # Get all networks
+            networks = docker_client.networks.list()
+            removed_count = 0
+
+            # Test images we create containers from
+            test_images = [
+                "docker.rcplus.io/pgvector/pgvector:pg16",
+                "amazon/dynamodb-local",
+            ]
+
+            for network in networks:
+                # Skip default networks
+                if network.name in ["bridge", "host", "none"]:
+                    continue
+
+                # Only clean up networks that match our test patterns
+                is_test_network = network.name.startswith("test-network-") or network.name.startswith(
+                    "build-db-container-network"
+                )
+
+                if not is_test_network:
+                    # Check if any containers in the network use our test images
+                    try:
+                        network.reload()
+                        for container in network.containers:
+                            if any(image_name in container.image.tags for image_name in test_images):
+                                is_test_network = True
+                                break
+                    except Exception:
+                        pass
+
+                if not is_test_network:
+                    continue
+
+                # Remove if unused
+                try:
+                    network.reload()  # Refresh network data
+                    if not network.containers:
+                        network.remove()
+                        removed_count += 1
+                        logger.debug(f"Removed unused test Docker network: {network.name}")
+                except docker.errors.NotFound:
+                    # Network already removed
+                    pass
+                except Exception as e:
+                    logger.debug(f"Could not remove network {network.name}: {e}")
+
+            if removed_count > 0:
+                logger.info(f"Cleaned up {removed_count} unused test Docker network(s)")
+        except Exception as e:
+            logger.warning(f"Failed to clean up Docker networks: {e}")
+
+    # Clean up before tests
+    cleanup()
+
+    yield
+
+    # Clean up after tests
+    cleanup()
+
+
 # Mock boto3 credentials for all tests
 @pytest.fixture(autouse=True)
 def mock_boto3_credentials():
@@ -114,31 +187,6 @@ def mock_config(test_config, monkeypatch):
     monkeypatch.setattr(playground_backend.services.session_service, "config", test_config)
 
     return test_config
-
-
-@pytest.fixture
-def mock_db_session_factory(monkeypatch):
-    """Mock get_async_session_factory for auth controller tests that don't need a real database."""
-    import playground_backend.controllers.auth_controller as auth_module
-
-    # Create a mock session that acts as an async context manager
-    mock_session = MagicMock()
-    mock_session.commit = AsyncMock()
-
-    # Create an async context manager for the session
-    class MockSessionContext:
-        async def __aenter__(self):
-            return mock_session
-
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-    # Create the factory that returns the context manager
-    mock_factory = MagicMock(return_value=MockSessionContext())
-
-    monkeypatch.setattr(auth_module, "get_async_session_factory", lambda: mock_factory)
-
-    return mock_session
 
 
 # DynamoDB Local fixtures

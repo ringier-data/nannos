@@ -1,9 +1,10 @@
 """User service for managing users in PostgreSQL."""
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -323,61 +324,6 @@ class UserService:
             logger.error(f"Failed to update user status: {e}")
             raise
 
-    async def update_user_groups(
-        self,
-        db: AsyncSession,
-        user_id: str,
-        actor: User,
-        group_ids: list[int],
-        operation: Literal["set", "add", "remove"],
-    ) -> UserWithGroups | None:
-        """Update a user's group memberships.
-
-        Args:
-            db: Database session
-            user_id: The user's ID to update
-            actor: User performing the action
-            group_ids: List of group IDs
-            operation: 'set' replaces all, 'add' adds to existing, 'remove' removes
-
-        Returns:
-            Updated user with groups or None if user not found
-        """
-        # Verify user exists
-        user = await self.get_user(db, user_id)
-        if user is None:
-            return None
-
-        try:
-            if operation == "set":
-                # Use repository for full replacement (with audit)
-                await self.repo.update_groups(db, user_id, actor, group_ids)
-            elif operation == "add":
-                for group_id in group_ids:
-                    await db.execute(
-                        text("""
-                            INSERT INTO user_group_members (user_id, user_group_id, group_role)
-                            VALUES (:user_id, :group_id, 'read')
-                            ON CONFLICT (user_id, user_group_id) DO NOTHING
-                        """),
-                        {"user_id": user_id, "group_id": group_id},
-                    )
-            elif operation == "remove":
-                for group_id in group_ids:
-                    await db.execute(
-                        text("""
-                            DELETE FROM user_group_members
-                            WHERE user_id = :user_id AND user_group_id = :group_id
-                        """),
-                        {"user_id": user_id, "group_id": group_id},
-                    )
-
-            logger.info(f"Updated groups for user {user_id}: {operation} {group_ids}")
-            return await self.get_user_with_groups(db, user_id)
-        except Exception as e:
-            logger.error(f"Failed to update user groups: {e}")
-            raise
-
     async def bulk_update_users(
         self, db: AsyncSession, actor: User, operations: list[BulkUserOperation]
     ) -> list[BulkOperationResult]:
@@ -441,63 +387,51 @@ class UserService:
 
         return results
 
-    async def upsert_user(
+    async def _upsert_user_internal(
         self,
         db: AsyncSession,
         sub: str,
         email: str,
         first_name: str,
         last_name: str,
-        company_name: str | None = None,
+        company_name: str | None,
+        retries_left: int = 1,
     ) -> User:
-        """Create or update a user using PostgreSQL upsert.
-
-        This uses INSERT ... ON CONFLICT to atomically create or update.
-        OIDC-sourced fields are always updated, while user-editable fields
-        (is_administrator) are only set on initial creation.
-
-        Args:
-            db: The database session
-            sub: The user's sub from OIDC
-            email: The user's email
-            first_name: The user's first name
-            last_name: The user's last name
-            company_name: The user's company name (optional)
-
-        Returns:
-            The created or updated user
+        """Internal method to upsert user with retry on IntegrityError.
+        There is the chance that multiple concurrent upserts could violate unique constraints
+        in this case raising IntegrityError is not appropriate, because in theory one of them
+        should succeed. Thus we retry once.
         """
-        now = datetime.now(tz=timezone.utc)
+        email = email.lower().strip()
+        # Check if user exists before upsert
+        check_query = text("SELECT id, sub, email FROM users WHERE email = :email OR sub = :sub")
+        results = await db.execute(check_query, {"email": email, "sub": sub})
+        rows = results.mappings().all()
+        if len(rows) > 1:
+            raise ValueError(f"Multiple users found with email {email} or sub {sub}")
 
-        query = text("""
-            INSERT INTO users (id, sub, email, first_name, last_name, company_name,
-                               is_administrator, role, status, created_at, updated_at)
-            VALUES (:id, :sub, :email, :first_name, :last_name, :company_name,
-                    FALSE, 'member', 'active', :now, :now)
-            ON CONFLICT (id) DO UPDATE SET
-                sub = EXCLUDED.sub,
-                email = EXCLUDED.email,
-                first_name = EXCLUDED.first_name,
-                last_name = EXCLUDED.last_name,
-                company_name = EXCLUDED.company_name,
-                updated_at = EXCLUDED.updated_at
-            RETURNING id, sub, email, first_name, last_name, company_name,
-                      is_administrator, role, status, deleted_at, created_at, updated_at
-        """)
-
+        row = rows[0] if rows else None
+        user_id = row["id"] if row else None
+        old_sub = row["sub"] if row else None
+        old_email = row["email"] if row else None
         try:
-            email = email.lower().strip()
-            # Check if user exists before upsert
-            check_query = text("SELECT id, sub, email FROM users WHERE email = :email OR sub = :sub")
-            results = await db.execute(check_query, {"email": email, "sub": sub})
-            rows = results.mappings().all()
-            if len(rows) > 1:
-                raise ValueError(f"Multiple users found with email {email} or sub {sub}")
+            now = datetime.now(tz=timezone.utc)
 
-            row = rows[0] if rows else None
-            user_id = row["id"] if row else None
-            old_sub = row["sub"] if row else None
-            old_email = row["email"] if row else None
+            query = text("""
+                INSERT INTO users (id, sub, email, first_name, last_name, company_name,
+                                is_administrator, role, status, created_at, updated_at)
+                VALUES (:id, :sub, :email, :first_name, :last_name, :company_name,
+                        FALSE, 'member', 'active', :now, :now)
+                ON CONFLICT (id) DO UPDATE SET
+                    sub = EXCLUDED.sub,
+                    email = EXCLUDED.email,
+                    first_name = EXCLUDED.first_name,
+                    last_name = EXCLUDED.last_name,
+                    company_name = EXCLUDED.company_name,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING id, sub, email, first_name, last_name, company_name,
+                        is_administrator, role, status, deleted_at, created_at, updated_at
+            """)
 
             result = await db.execute(
                 query,
@@ -588,6 +522,64 @@ class UserService:
                     )
 
             return user
+        except IntegrityError as e:
+            if retries_left > 0 and "users_sub_key" in str(e):
+                logger.warning(f"IntegrityError during upsert for user {sub}: {e}. Retrying once.")
+                await db.rollback()
+                await asyncio.sleep(1)
+                return await self._upsert_user_internal(
+                    db=db,
+                    sub=sub,
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    company_name=company_name,
+                    retries_left=retries_left - 1,
+                )
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"Failed to upsert user {sub}: {e}")
+            raise
+
+    async def upsert_user(
+        self,
+        db: AsyncSession,
+        sub: str,
+        email: str,
+        first_name: str,
+        last_name: str,
+        company_name: str | None = None,
+    ) -> User:
+        """Create or update a user using PostgreSQL upsert.
+
+        This uses INSERT ... ON CONFLICT to atomically create or update.
+        OIDC-sourced fields are always updated, while user-editable fields
+        (is_administrator) are only set on initial creation.
+
+        Args:
+            db: The database session
+            sub: The user's sub from OIDC
+            email: The user's email
+            first_name: The user's first name
+            last_name: The user's last name
+            company_name: The user's company name (optional)
+
+        Returns:
+            The created or updated user
+        """
+
+        try:
+            return await self._upsert_user_internal(
+                db=db,
+                sub=sub,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                company_name=company_name,
+                retries_left=1,
+            )
+
         except IntegrityError as e:
             # Handle unique email constraint violation
             if "idx_users_email_unique" in str(e):
