@@ -1,11 +1,11 @@
 """User service for managing users in PostgreSQL."""
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
-from rcplus_alloy_common.retry import retry
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -322,61 +322,6 @@ class UserService:
             return None
         except Exception as e:
             logger.error(f"Failed to update user status: {e}")
-            raise
-
-    async def update_user_groups(
-        self,
-        db: AsyncSession,
-        user_id: str,
-        actor: User,
-        group_ids: list[int],
-        operation: Literal["set", "add", "remove"],
-    ) -> UserWithGroups | None:
-        """Update a user's group memberships.
-
-        Args:
-            db: Database session
-            user_id: The user's ID to update
-            actor: User performing the action
-            group_ids: List of group IDs
-            operation: 'set' replaces all, 'add' adds to existing, 'remove' removes
-
-        Returns:
-            Updated user with groups or None if user not found
-        """
-        # Verify user exists
-        user = await self.get_user(db, user_id)
-        if user is None:
-            return None
-
-        try:
-            if operation == "set":
-                # Use repository for full replacement (with audit)
-                await self.repo.update_groups(db, user_id, actor, group_ids)
-            elif operation == "add":
-                for group_id in group_ids:
-                    await db.execute(
-                        text("""
-                            INSERT INTO user_group_members (user_id, user_group_id, group_role)
-                            VALUES (:user_id, :group_id, 'read')
-                            ON CONFLICT (user_id, user_group_id) DO NOTHING
-                        """),
-                        {"user_id": user_id, "group_id": group_id},
-                    )
-            elif operation == "remove":
-                for group_id in group_ids:
-                    await db.execute(
-                        text("""
-                            DELETE FROM user_group_members
-                            WHERE user_id = :user_id AND user_group_id = :group_id
-                        """),
-                        {"user_id": user_id, "group_id": group_id},
-                    )
-
-            logger.info(f"Updated groups for user {user_id}: {operation} {group_ids}")
-            return await self.get_user_with_groups(db, user_id)
-        except Exception as e:
-            logger.error(f"Failed to update user groups: {e}")
             raise
 
     async def bulk_update_users(

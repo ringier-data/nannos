@@ -329,6 +329,22 @@ export type HttpValidationError = {
 };
 
 /**
+ * ImpersonateResponse
+ *
+ * Response model for impersonation endpoints.
+ */
+export type ImpersonateResponse = {
+    /**
+     * Success
+     */
+    success: boolean;
+    /**
+     * Message
+     */
+    message: string;
+};
+
+/**
  * ImpersonateStartRequest
  *
  * Request model for starting user impersonation.
@@ -1436,10 +1452,6 @@ export type UsageLogBatchCreate = {
  */
 export type UsageLogCreate = {
     /**
-     * User Id
-     */
-    user_id: string;
-    /**
      * Conversation Id
      */
     conversation_id?: string | null;
@@ -1622,6 +1634,15 @@ export type UserGroupMembership = {
 };
 
 /**
+ * UserGroupRoleUpdate
+ *
+ * Request to update user's role in a group.
+ */
+export type UserGroupRoleUpdate = {
+    role: RoleEnum;
+};
+
+/**
  * UserGroupUpdate
  *
  * Request to update a user group.
@@ -1692,6 +1713,7 @@ export type UserGroupsUpdate = {
      */
     group_ids: Array<number>;
     operation: OperationEnum;
+    role?: RoleEnum;
 };
 
 /**
@@ -2086,6 +2108,47 @@ export type ToggleAdminModeApiV1AuthAdminModePostResponses = {
 };
 
 export type ToggleAdminModeApiV1AuthAdminModePostResponse = ToggleAdminModeApiV1AuthAdminModePostResponses[keyof ToggleAdminModeApiV1AuthAdminModePostResponses];
+
+export type StartImpersonationApiV1AuthImpersonateStartPostData = {
+    body: ImpersonateStartRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/impersonate/start';
+};
+
+export type StartImpersonationApiV1AuthImpersonateStartPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type StartImpersonationApiV1AuthImpersonateStartPostError = StartImpersonationApiV1AuthImpersonateStartPostErrors[keyof StartImpersonationApiV1AuthImpersonateStartPostErrors];
+
+export type StartImpersonationApiV1AuthImpersonateStartPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: ImpersonateResponse;
+};
+
+export type StartImpersonationApiV1AuthImpersonateStartPostResponse = StartImpersonationApiV1AuthImpersonateStartPostResponses[keyof StartImpersonationApiV1AuthImpersonateStartPostResponses];
+
+export type StopImpersonationApiV1AuthImpersonateStopPostData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/impersonate/stop';
+};
+
+export type StopImpersonationApiV1AuthImpersonateStopPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: ImpersonateResponse;
+};
+
+export type StopImpersonationApiV1AuthImpersonateStopPostResponse = StopImpersonationApiV1AuthImpersonateStopPostResponses[keyof StopImpersonationApiV1AuthImpersonateStopPostResponses];
 
 export type GetConversationsByUserApiV1ConversationsGetData = {
     body?: never;
@@ -3164,6 +3227,40 @@ export type UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses = {
 };
 
 export type UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponse = UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses[keyof UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses];
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutData = {
+    body: UserGroupRoleUpdate;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/users/{user_id}/groups/{group_id}/role';
+};
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutError = UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutErrors[keyof UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutErrors];
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponses = {
+    /**
+     * Successful Response
+     */
+    200: UserDetailResponse;
+};
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponse = UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponses[keyof UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponses];
 
 export type UpdateUserRoleApiV1AdminUsersUserIdRolePutData = {
     body: UserRoleUpdate;

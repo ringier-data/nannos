@@ -10,11 +10,11 @@ import {
   updateUserApiV1AdminUsersUserIdPatchMutation,
   updateUserRoleApiV1AdminUsersUserIdRolePutMutation,
   listGroupsApiV1AdminGroupsGetOptions,
+  updateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { UserStatus, OperationEnum, UserRole } from '@/api/generated';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import {
   Select,
   SelectContent,
@@ -25,9 +25,24 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { UserStatusBadge } from '@/components/admin/UserStatusBadge';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { useAuth } from '@/contexts/AuthContext';
+
+type GroupRole = 'read' | 'write' | 'manager';
 
 export function UserDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -41,6 +56,8 @@ export function UserDetailPage() {
     status: UserStatus;
   } | null>(null);
   const [selectedGroupToAdd, setSelectedGroupToAdd] = useState<string>('');
+  const [selectedRole, setSelectedRole] = useState<GroupRole>('read');
+  const [editingRoleGroupId, setEditingRoleGroupId] = useState<number | null>(null);
 
   const { data: userData, isLoading } = useQuery({
     ...getUserApiV1AdminUsersUserIdGetOptions({
@@ -71,7 +88,11 @@ export function UserDetailPage() {
     ...updateUserGroupsApiV1AdminUsersUserIdGroupsPutMutation(),
     onSuccess: () => {
       toast.success('User groups updated');
-      queryClient.invalidateQueries({ queryKey: ['getUserApiV1AdminUsersUserIdGet'] });
+      queryClient.invalidateQueries({ 
+        queryKey: getUserApiV1AdminUsersUserIdGetOptions({
+          path: { user_id: id! },
+        }).queryKey
+      });
       queryClient.invalidateQueries({ queryKey: ['listUsersApiV1AdminUsersGet'] });
     },
     onError: () => {
@@ -79,24 +100,38 @@ export function UserDetailPage() {
     },
   });
 
+  const groupRoleMutation = useMutation({
+    ...updateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutMutation(),
+    onSuccess: () => {
+      toast.success('Group role updated');
+      setEditingRoleGroupId(null);
+      queryClient.invalidateQueries({ 
+        queryKey: getUserApiV1AdminUsersUserIdGetOptions({
+          path: { user_id: id! },
+        }).queryKey
+      });
+      queryClient.invalidateQueries({ queryKey: ['listUsersApiV1AdminUsersGet'] });
+    },
+    onError: () => {
+      toast.error('Failed to update group role');
+    },
+  });
+
   const adminUpdateMutation = useMutation({
     ...updateUserApiV1AdminUsersUserIdPatchMutation(),
     onMutate: async (variables) => {
-      // Cancel any outgoing refetches
       await queryClient.cancelQueries({ 
         queryKey: getUserApiV1AdminUsersUserIdGetOptions({
           path: { user_id: id! },
         }).queryKey
       });
 
-      // Snapshot the previous value
       const previousUser = queryClient.getQueryData(
         getUserApiV1AdminUsersUserIdGetOptions({
           path: { user_id: id! },
         }).queryKey
       );
 
-      // Optimistically update to the new value
       queryClient.setQueryData(
         getUserApiV1AdminUsersUserIdGetOptions({
           path: { user_id: id! },
@@ -113,7 +148,6 @@ export function UserDetailPage() {
         }
       );
 
-      // Return a context object with the snapshotted value
       return { previousUser };
     },
     onSuccess: () => {
@@ -123,7 +157,6 @@ export function UserDetailPage() {
     },
     onError: (_error, _variables, context) => {
       toast.error('Failed to update user');
-      // Roll back to the previous value if the mutation fails
       if (context?.previousUser) {
         queryClient.setQueryData(
           getUserApiV1AdminUsersUserIdGetOptions({
@@ -188,9 +221,19 @@ export function UserDetailPage() {
       body: {
         group_ids: [groupId],
         operation: 'add' as OperationEnum,
+        role: selectedRole,
       },
     });
     setSelectedGroupToAdd('');
+    setSelectedRole('read');
+  };
+
+  const handleUpdateGroupRole = (groupId: number, newRole: GroupRole) => {
+    if (!id) return;
+    groupRoleMutation.mutate({
+      path: { user_id: id, group_id: groupId },
+      body: { role: newRole },
+    });
   };
 
   const handleRemoveGroup = (groupId: number) => {
@@ -200,6 +243,7 @@ export function UserDetailPage() {
       body: {
         group_ids: [groupId],
         operation: 'remove' as OperationEnum,
+        role: 'read',
       },
     });
   };
@@ -382,13 +426,15 @@ export function UserDetailPage() {
       <Card>
         <CardHeader>
           <CardTitle>Group Memberships</CardTitle>
-          <CardDescription>Manage user's group memberships</CardDescription>
+          <CardDescription>Manage user's group memberships and roles</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center gap-2">
+          {/* Add to Group */}
+          <div className="flex items-center gap-2 p-3 border rounded-lg bg-card">
+            <div className="text-sm text-muted-foreground min-w-[80px]">Add to:</div>
             <Select value={selectedGroupToAdd} onValueChange={setSelectedGroupToAdd}>
-              <SelectTrigger className="w-[300px]">
-                <SelectValue placeholder="Select a group to add" />
+              <SelectTrigger className="w-[200px]">
+                <SelectValue placeholder="Select group" />
               </SelectTrigger>
               <SelectContent>
                 {availableGroups.length === 0 ? (
@@ -404,34 +450,102 @@ export function UserDetailPage() {
                 )}
               </SelectContent>
             </Select>
+            <div className="text-sm text-muted-foreground">with role:</div>
+            <Select value={selectedRole} onValueChange={(val) => setSelectedRole(val as GroupRole)}>
+              <SelectTrigger className="w-[130px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="read">Read</SelectItem>
+                <SelectItem value="write">Write</SelectItem>
+                <SelectItem value="manager">Manager</SelectItem>
+              </SelectContent>
+            </Select>
             <Button
               onClick={handleAddGroup}
               disabled={!selectedGroupToAdd || groupsMutation.isPending}
+              size="sm"
             >
               <Plus className="h-4 w-4 mr-1" />
               Add
             </Button>
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            {user.groups?.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No group memberships</p>
-            ) : (
-              user.groups?.map((group) => (
-                <Badge key={group.group_id} variant="secondary" className="gap-1">
-                  {group.group_name}
-                  <span className="text-xs text-muted-foreground">({group.group_role})</span>
-                  <button
-                    className="ml-1 hover:text-destructive"
-                    onClick={() => handleRemoveGroup(group.group_id)}
-                    disabled={groupsMutation.isPending}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </Badge>
-              ))
-            )}
-          </div>
+          {/* Current Memberships */}
+          {user.groups?.length === 0 ? (
+            <div className="text-center py-12 text-sm text-muted-foreground">
+              No group memberships yet
+            </div>
+          ) : (
+            <div className="rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Group</TableHead>
+                    <TableHead className="w-[180px]">Role</TableHead>
+                    <TableHead className="w-[80px]"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {user.groups?.map((group) => (
+                    <TableRow key={group.group_id}>
+                      <TableCell className="font-medium">{group.group_name}</TableCell>
+                      <TableCell>
+                        <Popover
+                          open={editingRoleGroupId === group.group_id}
+                          onOpenChange={(open) => {
+                            setEditingRoleGroupId(open ? group.group_id : null);
+                          }}
+                        >
+                          <PopoverTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-3 capitalize"
+                              disabled={groupsMutation.isPending || groupRoleMutation.isPending}
+                            >
+                              {group.group_role}
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-[160px] p-2" align="start">
+                            <div className="space-y-1">
+                              {(['read', 'write', 'manager'] as GroupRole[]).map((role) => (
+                                <Button
+                                  key={role}
+                                  variant={group.group_role === role ? 'secondary' : 'ghost'}
+                                  size="sm"
+                                  className="w-full justify-start capitalize"
+                                  onClick={() => {
+                                    if (role !== group.group_role) {
+                                      handleUpdateGroupRole(group.group_id, role);
+                                    }
+                                    setEditingRoleGroupId(null);
+                                  }}
+                                >
+                                  {role}
+                                </Button>
+                              ))}
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 hover:text-destructive"
+                          onClick={() => handleRemoveGroup(group.group_id)}
+                          disabled={groupsMutation.isPending || groupRoleMutation.isPending}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
         </CardContent>
       </Card>
 

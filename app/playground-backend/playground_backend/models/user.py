@@ -97,12 +97,19 @@ class UserGroupsUpdate(BaseModel):
 
     group_ids: list[int]
     operation: Literal["set", "add", "remove"]
+    role: Literal["read", "write", "manager"] = "read"
 
 
 class UserRoleUpdate(BaseModel):
     """Request to update user's role."""
 
     role: UserRole
+
+
+class UserGroupRoleUpdate(BaseModel):
+    """Request to update user's role in a group."""
+
+    role: Literal["read", "write", "manager"]
 
 
 class BulkUserOperation(BaseModel):

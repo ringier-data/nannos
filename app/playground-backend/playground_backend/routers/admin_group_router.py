@@ -16,6 +16,9 @@ from ..models.user_group import (
     UserGroupListResponse,
     UserGroupUpdate,
 )
+from ..services.keycloak_admin_service import (
+    KeycloakSyncError,
+)
 from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-groups"])
@@ -111,6 +114,11 @@ async def create_group(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except KeycloakSyncError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to sync with Keycloak",
         )
     except Exception as e:
         if "unique constraint" in str(e).lower() or "duplicate" in str(e).lower():
