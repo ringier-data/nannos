@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
 from .config import config
-from .db import get_async_session_factory
+from .db.session import DbSession
 from .models.user import User, UserRole, UserStatus
 from .services.user_service import UserService
 
@@ -61,7 +61,7 @@ def require_auth(request: Request) -> User:
     return request.state.user
 
 
-async def require_auth_or_bearer_token(request: Request) -> User:
+async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
     """Dependency to require authentication via session OR Bearer JWT token.
 
     First checks for session-based user authentication (request.state.user).
@@ -118,10 +118,7 @@ async def require_auth_or_bearer_token(request: Request) -> User:
             # Look up user in database using service from app state
             user_service = get_user_service(request)
 
-            async_session_factory = get_async_session_factory()
-            async with async_session_factory() as db:
-                user = await user_service.get_user_by_sub(db, sub)
-
+            user = await user_service.get_user_by_sub(db, sub)
             if not user:
                 # since we trust the token is valid, we can auto-onboard the user based on the token claims
                 logger.info(f"User not found for sub={sub}, auto-onboarding")
