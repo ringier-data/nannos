@@ -19,6 +19,7 @@ AGENT_CREATOR_ENV="local"
 ALLOY_ENV="local"
 LOG_DIR="./logs"
 HELP=false
+DEBUG_MODE=false
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 # Environment URLs
@@ -95,6 +96,10 @@ while [[ $# -gt 0 ]]; do
             LOG_DIR="$2"
             shift 2
             ;;
+        --debug)
+            DEBUG_MODE=true
+            shift
+            ;;
         -h|--help)
             HELP=true
             shift
@@ -120,17 +125,21 @@ Options:
   --agent-creator ENV     Agent Creator environment (local|dev|stg|prod) [default: local]
   --alloy ENV            Alloy Agent environment (local|dev|stg|prod) [default: local]
   --log-dir DIR          Directory for log files [default: ./logs]
+  --debug                Enable debug mode (starts Python services with debugpy)
   -h, --help             Show this help message
 
 Examples:
   # Run everything locally
   ./start-dev.sh
 
+  # Run everything locally with debug mode (for VS Code debugging)
+  ./start-dev.sh --debug
+
   # Run frontend locally, backend on dev, rest local
   ./start-dev.sh --backend dev
 
-  # Run frontend locally, all backends on staging
-  ./start-dev.sh --backend stg --orchestrator stg --agent-creator stg
+  # Run frontend locally, all backends on staging with debug
+  ./start-dev.sh --backend stg --orchestrator stg --agent-creator stg --debug
 
   # Follow logs for a specific component
   tail -f logs/frontend.log
@@ -264,21 +273,37 @@ ensure_ports_available() {
     # Check backend port if running locally
     if [ "$BACKEND_ENV" = "local" ]; then
         check_port 5001 "Backend"
+        # Check debug port if in debug mode
+        if [ "$DEBUG_MODE" = true ]; then
+            check_port 5678 "Backend Debug"
+        fi
     fi
     
     # Check orchestrator port if running locally
     if [ "$ORCHESTRATOR_ENV" = "local" ]; then
         check_port 10001 "Orchestrator"
+        # Check debug port if in debug mode
+        if [ "$DEBUG_MODE" = true ]; then
+            check_port 5679 "Orchestrator Debug"
+        fi
     fi
     
     # Check agent creator port if running locally
     if [ "$AGENT_CREATOR_ENV" = "local" ]; then
         check_port 8080 "Agent Creator"
+        # Check debug port if in debug mode
+        if [ "$DEBUG_MODE" = true ]; then
+            check_port 5680 "Agent Creator Debug"
+        fi
     fi
     
     # Check alloy port if running locally
     if [ "$ALLOY_ENV" = "local" ]; then
         check_port 5004 "Alloy"
+        # Check debug port if in debug mode
+        if [ "$DEBUG_MODE" = true ]; then
+            check_port 5681 "Alloy Debug"
+        fi
     fi
     
     # Always check frontend port (always runs locally)
@@ -317,6 +342,7 @@ echo -e "${BLUE}Development Environment Setup${NC}"
 echo -e "${BLUE}================================${NC}"
 echo -e "Frontend:        ${GREEN}local${NC} (always)"
 echo -e "Backend:         ${GREEN}${BACKEND_ENV}${NC} (${BACKEND_URLS[$BACKEND_ENV]})"
+echo -e "Debug Mode:      ${GREEN}${DEBUG_MODE}${NC}"
 echo -e "Orchestrator:    ${GREEN}${ORCHESTRATOR_ENV}${NC} (${ORCHESTRATOR_DOMAINS[$ORCHESTRATOR_ENV]})"
 echo -e "Agent Creator:   ${GREEN}${AGENT_CREATOR_ENV}${NC} (${AGENT_CREATOR_URLS[$AGENT_CREATOR_ENV]})"
 echo -e "Alloy Agent:    ${GREEN}${ALLOY_ENV}${NC} (${ALLOY_URLS[$ALLOY_ENV]})"
@@ -447,7 +473,13 @@ if [ "$BACKEND_ENV" = "local" ]; then
     
     popd > /dev/null
     
-    start_component "backend" "app/playground-backend" "uv run --env-file .env python app.py"
+    # Start backend with or without debugpy
+    if [ "$DEBUG_MODE" = true ]; then
+        echo -e "${YELLOW}Backend will listen for debugger on port 5678${NC}"
+        start_component "backend" "app/playground-backend" "uv run --env-file .env python -m debugpy --listen 0.0.0.0:5678 app.py"
+    else
+        start_component "backend" "app/playground-backend" "uv run --env-file .env python app.py"
+    fi
     
     # Wait for backend to be ready
     echo -e "${YELLOW}Waiting for backend to be ready...${NC}"
@@ -565,7 +597,13 @@ if [ "$ORCHESTRATOR_ENV" = "local" ]; then
     
     popd > /dev/null
     
-    start_component "orchestrator" "app/orchestrator-agent" "uv run --env-file .env python main.py --host localhost --reload"
+    # Start orchestrator with or without debugpy
+    if [ "$DEBUG_MODE" = true ]; then
+        echo -e "${YELLOW}Orchestrator will listen for debugger on port 5679${NC}"
+        start_component "orchestrator" "app/orchestrator-agent" "uv run --env-file .env python -m debugpy --listen 0.0.0.0:5679 main.py --host localhost --reload"
+    else
+        start_component "orchestrator" "app/orchestrator-agent" "uv run --env-file .env python main.py --host localhost --reload"
+    fi
     
     # Wait for orchestrator to be ready
     echo -e "${YELLOW}Waiting for orchestrator to be ready...${NC}"
@@ -620,7 +658,13 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
 
     popd > /dev/null
     
-    start_component "agent-creator" "app/agent-creator" "uv run --env-file .env python main.py --reload"
+    # Start agent-creator with or without debugpy
+    if [ "$DEBUG_MODE" = true ]; then
+        echo -e "${YELLOW}Agent Creator will listen for debugger on port 5680${NC}"
+        start_component "agent-creator" "app/agent-creator" "uv run --env-file .env python -m debugpy --listen 0.0.0.0:5680 main.py --reload"
+    else
+        start_component "agent-creator" "app/agent-creator" "uv run --env-file .env python main.py --reload"
+    fi
     
     # Wait for agent-creator to be ready
     echo -e "${YELLOW}Waiting for agent-creator to be ready...${NC}"
@@ -668,7 +712,13 @@ if [ "$ALLOY_ENV" = "local" ]; then
 
     popd > /dev/null
     
-    start_component "alloy" "app/alloy-agent" "uv run --env-file .env python main.py"
+    # Start alloy-agent with or without debugpy
+    if [ "$DEBUG_MODE" = true ]; then
+        echo -e "${YELLOW}Alloy Agent will listen for debugger on port 5681${NC}"
+        start_component "alloy" "app/alloy-agent" "uv run --env-file .env python -m debugpy --listen 0.0.0.0:5681 main.py"
+    else
+        start_component "alloy" "app/alloy-agent" "uv run --env-file .env python main.py"
+    fi
     
     # Wait for alloy-agent to be ready
     echo -e "${YELLOW}Waiting for alloy-agent to be ready...${NC}"
