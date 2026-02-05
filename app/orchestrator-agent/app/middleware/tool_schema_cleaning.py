@@ -18,6 +18,12 @@ This middleware is simpler than DynamicToolDispatchMiddleware because:
 - It only cleans schemas, doesn't dispatch execution
 - Used in sub-agents where tools are pre-defined
 
+Progressive Retry Strategy:
+- Try MINIMAL cleanup first (only None values - documented requirement)
+- On INVALID_ARGUMENT error, retry with MODERATE (+ ALL enums - global state limit)
+- On INVALID_ARGUMENT error, retry with AGGRESSIVE (+ format/min/max/array constraints)
+- Log which level succeeds to track patterns (usually succeeds at MODERATE for 80+ tools)
+
 See app/utils.py (Tool Schema Cleaning section) for detailed explanation.
 """
 
@@ -27,8 +33,9 @@ from typing import Any, Awaitable, Callable, cast
 from langchain.agents.middleware.types import AgentMiddleware, ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 
-from ..utils import validate_and_clean_tool_dict
+from ..utils import CleanupLevel, validate_and_clean_tool_dict
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +84,7 @@ class ToolSchemaCleaningMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        """Async version of wrap_model_call.
+        """Async version of wrap_model_call with progressive retry.
 
         Args:
             request: Model request with tools
@@ -89,20 +96,45 @@ class ToolSchemaCleaningMiddleware(AgentMiddleware):
         if not request.tools:
             return await handler(request)
 
-        # Convert tools to cleaned dict format
-        cleaned_tools = self._clean_tools(request.tools)
+        # Try progressive cleanup levels on INVALID_ARGUMENT errors
+        # MODERATE removes all enums (solves global state space limit with 80+ tools)
+        for level in [CleanupLevel.MINIMAL, CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE]:
+            try:
+                cleaned_tools = self._clean_tools(request.tools, level)
+                result = await handler(request.override(tools=cast(list[BaseTool | dict], cleaned_tools)))
+                return result
+            except Exception as e:
+                # Check if it's a Gemini INVALID_ARGUMENT error
+                is_schema_error = (
+                    ChatGoogleGenerativeAIError
+                    and isinstance(e, ChatGoogleGenerativeAIError)
+                    and "INVALID_ARGUMENT" in str(e)
+                    and "schema" in str(e).lower()
+                )
 
-        # Override request with cleaned tools (dict format bypasses validation)
-        # Cast needed because list is invariant in Python typing
-        return await handler(request.override(tools=cast(list[BaseTool | dict], cleaned_tools)))
+                if is_schema_error and level != CleanupLevel.AGGRESSIVE:
+                    # Log and retry with next level
+                    tool_count = len(request.tools)
+                    logger.warning(
+                        f"Schema validation failed with {level.value} cleanup, retrying with next level. "
+                        f"Tool count: {tool_count}, Error: {str(e)[:200]}"
+                    )
+                    continue
+                else:
+                    # Not a schema error or already tried aggressive - re-raise
+                    raise
 
-    def _clean_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
+        # Should not reach here, but for type checker
+        raise RuntimeError("All cleanup levels exhausted")
+
+    def _clean_tools(self, tools: list[Any], level: CleanupLevel = CleanupLevel.MINIMAL) -> list[dict[str, Any]]:
         """Convert tools to cleaned dict format.
 
         Creates dict representations without modifying original BaseTool instances.
 
         Args:
             tools: List of BaseTool instances or dicts
+            level: Cleanup level to apply
 
         Returns:
             List of cleaned tool dicts
@@ -114,14 +146,22 @@ class ToolSchemaCleaningMiddleware(AgentMiddleware):
                 # Convert to dict (creates a copy, doesn't modify original)
                 tool_dict = convert_to_openai_tool(tool)
                 # Clean the dict schema for Gemini
-                tool_dict = validate_and_clean_tool_dict(tool_dict)
+                tool_dict = validate_and_clean_tool_dict(tool_dict, level)
                 cleaned_tools.append(tool_dict)
             elif isinstance(tool, dict):
                 # Already in dict format, just clean
-                tool_dict = validate_and_clean_tool_dict(tool)
+                tool_dict = validate_and_clean_tool_dict(tool, level)
                 cleaned_tools.append(tool_dict)
             else:
                 # Unknown format, pass through
                 cleaned_tools.append(tool)
 
         return cleaned_tools
+
+    def _get_tool_name(self, tool: Any) -> str:
+        """Extract tool name for logging."""
+        if isinstance(tool, BaseTool):
+            return tool.name
+        elif isinstance(tool, dict):
+            return tool.get("function", {}).get("name", "unknown")
+        return "unknown"

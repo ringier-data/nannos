@@ -1,9 +1,28 @@
 """Shared utility functions for the orchestrator agent."""
 
 import logging
+from enum import Enum
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class CleanupLevel(Enum):
+    """Progressive schema cleanup levels for Gemini compatibility.
+
+    MINIMAL: Only remove None values (documented Gemini requirement)
+    MODERATE: Also remove ALL enum constraints (global state space limit)
+    AGGRESSIVE: Also remove format, min/max bounds, and array constraints
+
+    Testing revealed Gemini has a GLOBAL state space limit across all tools:
+    - Individual complex tools work fine with enums
+    - 80+ tools combined hit the limit (cumulative enum state)
+    - Removing ALL enums from all tools solves the issue
+    """
+
+    MINIMAL = "minimal"
+    MODERATE = "moderate"
+    AGGRESSIVE = "aggressive"
 
 
 # Language code to display name mapping
@@ -87,47 +106,73 @@ OpenAI and Claude models accept these schemas, but Gemini does not.
 
 THE SOLUTION:
 -------------
-Clean dict schemas at model-binding time (not at tool creation time):
-  - Remove properties with None values
-  - Remove empty dicts and {"default": None}
-  - Remove properties containing any None values
-  - Sync required array with cleaned properties
+Progressive retry with three cleanup levels:
+
+1. MINIMAL (documented requirement): Remove only None values and empty dicts
+   - This is the ONLY documented Gemini requirement
+   - Based on official docs: https://ai.google.dev/gemini-api/docs/function-calling
+   
+2. MODERATE (global state limit): Also remove ALL enum constraints
+   - Testing proved Gemini has a CUMULATIVE enum state limit across all tools
+   - Individual complex tools work fine with enums
+   - 80+ tools combined exceed the global state space threshold
+   - Applied on retry if MINIMAL fails
+   
+3. AGGRESSIVE (last resort): Also remove format, min/max bounds, array constraints
+   - Applied as final fallback if MODERATE fails
+   - Removes all remaining schema constraints
+   - Only needed in rare edge cases
 
 This is handled by middleware (DynamicToolDispatchMiddleware and ToolSchemaCleaningMiddleware)
-which intercepts model calls and cleans the dict representations of tools before sending
-them to the model, while keeping the original BaseTool instances intact for execution.
+which intercepts model calls and progressively retries with more aggressive cleaning
+when INVALID_ARGUMENT schema errors occur, while keeping the original BaseTool instances
+intact for execution.
 
-WHY AT MODEL-BINDING TIME:
---------------------------
-- Cleaning at tool creation breaks tool execution (tools need their full schema)
-- Cleaning at model-binding time allows us to send clean schemas to the model
-  while keeping the original tools intact for ToolNode execution
-- Prevents "tool not found" errors that occur when tool schemas are modified in-place
+WHY PROGRESSIVE RETRY:
+----------------------
+- Start with minimal cleaning (only documented requirements)
+- MODERATE removes enums
+- AGGRESSIVE is rarely needed (only extreme edge cases)
+- Log which cleanup level succeeds to track patterns
+- Based on empirical testing: enum removal solves the issue
 
 USAGE:
 ------
 For orchestrator:
-    # Handled automatically by DynamicToolDispatchMiddleware
-    tool_dict = convert_to_openai_tool(tool)
-    tool_dict = validate_and_clean_tool_dict(tool_dict)
-
+    # Handled automatically by DynamicToolDispatchMiddleware with retry
+    
 For sub-agents:
-    # Handled automatically by ToolSchemaCleaningMiddleware
-    tools = [tool1, tool2, ...]  # Keep as BaseTool instances
+    # Handled automatically by ToolSchemaCleaningMiddleware with retry
 
-TODO: This should be fixed upstream in langchain-google-genai or langchain-core
+FINDINGS:
+---------
+Empirical testing revealed Gemini's actual constraint:
+- NOT per-tool complexity (individual complex tools work fine)
+- NOT specific enum values or constraints
+- GLOBAL cumulative enum state across ALL tools in a request
+- With 80+ GitHub tools, total enum combinations exceed Gemini's threshold
+- Solution: Remove ALL enums (MODERATE level) for large tool sets
+
 ===========================================================================
 """
 
 
-def clean_schema_properties(properties: dict[str, Any]) -> dict[str, Any]:
-    """Recursively remove invalid property schemas.
+def clean_schema_properties(
+    properties: dict[str, Any],
+    level: CleanupLevel = CleanupLevel.MINIMAL,
+    tool_name: str | None = None,
+    depth: int = 0,
+) -> dict[str, Any]:
+    """Recursively remove invalid property schemas with progressive cleanup levels.
 
-    Removes properties with None values, empty dicts, or None in their values
-    from dict schemas. This ensures Gemini compatibility.
+    MINIMAL: Only removes None values, empty dicts (documented Gemini requirement)
+    MODERATE: Also removes ALL enum constraints (global state space limit)
+    AGGRESSIVE: Also removes format, min/max bounds, array length constraints
 
     Args:
         properties: Properties dict from JSON Schema
+        level: Cleanup level to apply
+        tool_name: Name of the tool (for logging only, not used for targeting)
 
     Returns:
         Cleaned properties dict
@@ -137,22 +182,19 @@ def clean_schema_properties(properties: dict[str, Any]) -> dict[str, Any]:
 
     cleaned = {}
     for key, value in properties.items():
-        # Skip None values entirely
+        # MINIMAL: Remove None values (documented Gemini requirement)
         if value is None:
             logger.debug(f"Removing property '{key}' with None value")
             continue
 
-        # Skip empty dicts
         if isinstance(value, dict) and len(value) == 0:
             logger.debug(f"Removing property '{key}' with empty dict")
             continue
 
-        # Skip dicts with only {"default": None}
         if isinstance(value, dict) and value == {"default": None}:
             logger.debug(f"Removing property '{key}' with default: None")
             continue
 
-        # Skip if the dict contains any top-level None values
         if isinstance(value, dict) and any(v is None for k, v in value.items()):
             logger.debug(f"Removing property '{key}' containing None values: {value}")
             continue
@@ -160,10 +202,51 @@ def clean_schema_properties(properties: dict[str, Any]) -> dict[str, Any]:
         # Recursively clean nested schemas
         if isinstance(value, dict):
             value_copy = dict(value)
+
+            # MODERATE & AGGRESSIVE: Remove ALL enums (global state space limit)
+            if level in (CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE) and "enum" in value_copy:
+                logger.debug(
+                    f"[{level.value}] Removing 'enum' constraint from property '{key}' ({len(value_copy['enum'])} values)"
+                )
+                del value_copy["enum"]
+
+            # AGGRESSIVE: Also remove format and min/max constraints
+            if level == CleanupLevel.AGGRESSIVE:
+                if "format" in value_copy:
+                    logger.debug(f"[{level.value}] Removing 'format' constraint from property '{key}'")
+                    del value_copy["format"]
+                for constraint in [
+                    "minimum",
+                    "maximum",
+                    "exclusiveMinimum",
+                    "exclusiveMaximum",
+                    "minItems",
+                    "maxItems",
+                ]:
+                    if constraint in value_copy:
+                        logger.debug(f"[{level.value}] Removing '{constraint}' constraint from property '{key}'")
+                        del value_copy[constraint]
+
+            # Recursively clean nested properties
             if "properties" in value_copy:
-                value_copy["properties"] = clean_schema_properties(value_copy["properties"])
-            if "items" in value_copy and isinstance(value_copy["items"], dict) and "properties" in value_copy["items"]:
-                value_copy["items"]["properties"] = clean_schema_properties(value_copy["items"]["properties"])
+                value_copy["properties"] = clean_schema_properties(
+                    value_copy["properties"], level, tool_name, depth + 1
+                )
+            if "items" in value_copy and isinstance(value_copy["items"], dict):
+                if "properties" in value_copy["items"]:
+                    value_copy["items"]["properties"] = clean_schema_properties(
+                        value_copy["items"]["properties"], level, tool_name, depth + 1
+                    )
+
+                # Remove enum from array items (MODERATE & AGGRESSIVE)
+                if level in (CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE) and "enum" in value_copy["items"]:
+                    logger.debug(f"[{level.value}] Removing 'enum' from array items in property '{key}'")
+                    del value_copy["items"]["enum"]
+
+                # Remove format from array items (AGGRESSIVE only)
+                if level == CleanupLevel.AGGRESSIVE and "format" in value_copy["items"]:
+                    del value_copy["items"]["format"]
+
             cleaned[key] = value_copy
         else:
             cleaned[key] = value
@@ -171,7 +254,9 @@ def clean_schema_properties(properties: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
-def validate_and_clean_tool_dict(tool_dict: dict[str, Any]) -> dict[str, Any]:
+def validate_and_clean_tool_dict(
+    tool_dict: dict[str, Any], level: CleanupLevel = CleanupLevel.MINIMAL
+) -> dict[str, Any]:
     """Validate and clean tool dict schema for Gemini compatibility.
 
     Ensures parameters has valid JSON Schema structure and cleans properties
@@ -179,6 +264,7 @@ def validate_and_clean_tool_dict(tool_dict: dict[str, Any]) -> dict[str, Any]:
 
     Args:
         tool_dict: Tool in OpenAI dict format
+        level: Cleanup level to apply
 
     Returns:
         Tool dict with validated and cleaned parameters schema
@@ -190,6 +276,9 @@ def validate_and_clean_tool_dict(tool_dict: dict[str, Any]) -> dict[str, Any]:
     function_dict = tool_dict["function"]
     parameters = function_dict.get("parameters")
 
+    # Extract tool name for TARGETED enum removal
+    tool_name = function_dict.get("name")
+
     # Ensure parameters has valid structure
     if parameters is None or not isinstance(parameters, dict):
         function_dict["parameters"] = {"type": "object", "properties": {}}
@@ -199,7 +288,7 @@ def validate_and_clean_tool_dict(tool_dict: dict[str, Any]) -> dict[str, Any]:
     # Clean invalid properties and sync required array
     if "properties" in function_dict["parameters"]:
         original_props = function_dict["parameters"]["properties"]
-        cleaned_props = clean_schema_properties(original_props)
+        cleaned_props = clean_schema_properties(original_props, level, tool_name)
         function_dict["parameters"]["properties"] = cleaned_props
 
         # Remove cleaned properties from required array
