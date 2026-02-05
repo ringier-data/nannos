@@ -13,12 +13,11 @@ from deepagents import CompiledSubAgent
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from ..a2a_utils.models import LocalSubAgentConfig
-from ..core.model_factory import ModelType
+from ..models.base import ModelType, ThinkingLevel
 
 logger = logging.getLogger(__name__)
 
 # Message formatting literal for type safety
-MessageFormatting = Literal["markdown", "slack", "plain"]
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
@@ -176,6 +175,14 @@ class UserConfig(BaseModel):
     local_subagents: Optional[list[LocalSubAgentConfig]] = Field(
         default=None,
         description="User-configured local sub-agents",
+    )
+    enable_thinking: Optional[bool] = Field(
+        default=None,
+        description="Enable extended thinking for orchestrator (overrides environment variable)",
+    )
+    thinking_level: Optional[ThinkingLevel] = Field(
+        default=None,
+        description="Thinking depth level: minimal/low/medium/high (only for Claude Sonnet and Gemini models)",
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

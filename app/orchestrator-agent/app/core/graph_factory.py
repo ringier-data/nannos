@@ -42,10 +42,11 @@ from ..middleware import (
     TodoStatusMiddleware,
     UserPreferencesMiddleware,
 )
-from ..models import AgentSettings, FinalResponseSchema
-from ..models.config import GraphRuntimeContext, ModelType
+from ..models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
+from ..models.config import AgentSettings, GraphRuntimeContext
+from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
-from .model_factory import DEFAULT_MODEL, create_model
+from .model_factory import create_model
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class GraphFactory:
     - DynamicToolDispatchMiddleware handles tool binding and dispatch
 
     Usage:
-        factory = GraphFactory(config, thinking=False)
+        factory = GraphFactory(config, thinking_level=None)
         graph = factory.get_graph("claude-sonnet-4.5")
         # Use graph.astream(..., context=runtime_context)
     """
@@ -75,7 +76,6 @@ class GraphFactory:
     def __init__(
         self,
         config: AgentSettings,
-        thinking: bool = False,
         a2a_middleware: Optional[A2ATaskTrackingMiddleware] = None,
         cost_logger: Optional[CostLogger] = None,
     ):
@@ -83,17 +83,15 @@ class GraphFactory:
 
         Args:
             config: Agent settings with model config, checkpoint config, etc.
-            thinking: Enable thinking mode for Claude models
             a2a_middleware: Optional A2A task tracking middleware (shared with discovery)
             cost_logger: Optional CostLogger instance for cost tracking callbacks
         """
         self.config = config
-        self.thinking = thinking
         self.cost_logger = cost_logger
 
         # Model and graph caches
-        self._models: dict[str, BaseChatModel] = {}
-        self._graphs: dict[str, CompiledStateGraph] = {}
+        self._models: dict[tuple[str, str | None], BaseChatModel] = {}
+        self._graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
 
         # Static tools cache (created once per model type, reused)
         self._static_tools_cache: list[BaseTool] = []
@@ -289,7 +287,7 @@ class GraphFactory:
             await self._connection_pool.close()
             logger.info("Closed AsyncConnectionPool for document store")
 
-    def _create_model(self, model_type: ModelType) -> BaseChatModel:
+    def _create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
         """Create a model instance for the given model type.
 
         Args:
@@ -303,10 +301,13 @@ class GraphFactory:
         if self.cost_logger:
             callbacks.append(CostTrackingCallback(self.cost_logger))
 
-        return create_model(model_type, self.config, self.thinking, callbacks=callbacks if callbacks else None)
+        return create_model(model_type, self.config, thinking_level, callbacks=callbacks if callbacks else None)
 
-    def _get_or_create_model(self, model_type: ModelType) -> BaseChatModel:
-        """Get or create a model instance (cached).
+    def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
+        """Get or create a model instance
+
+        It will be cached by model_type AND thinking_level, even though ideally we could
+        use with_config on the same model instance, but those parameters are not configurable that way yet.
 
         Args:
             model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
@@ -314,10 +315,12 @@ class GraphFactory:
         Returns:
             BaseChatModel: The model instance (cached or newly created)
         """
-        if model_type not in self._models:
-            logger.info(f"Creating model instance for: {model_type}")
-            self._models[model_type] = self._create_model(model_type)
-        return self._models[model_type]
+        # Create compound cache key: (model_type, thinking_level)
+        cache_key = (model_type, thinking_level)
+        if cache_key not in self._models:
+            logger.info(f"Creating model instance for: {model_type} with thinking_level={thinking_level}")
+            self._models[cache_key] = self._create_model(model_type, thinking_level)
+        return self._models[cache_key]
 
     def _create_middleware_stack(self) -> list[Any]:
         """Create the complete middleware stack for a graph.
@@ -372,7 +375,7 @@ class GraphFactory:
             self._create_middleware_stack()
         return self._static_tools_cache
 
-    def _create_graph(self, model_type: ModelType) -> CompiledStateGraph:
+    def _create_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
         """Create a graph for the given model type.
 
         Args:
@@ -381,7 +384,7 @@ class GraphFactory:
         Returns:
             CompiledStateGraph: The newly created graph
         """
-        model = self._get_or_create_model(model_type)
+        model = self._get_or_create_model(model_type, thinking_level)
 
         # Bind built-in tools for Gemini models
         # Google Search and Code Execution are always enabled for Gemini
@@ -443,7 +446,9 @@ class GraphFactory:
 
         return compiled_graph
 
-    def get_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:
+    def get_graph(
+        self, model_type: ModelType | None = None, thinking_level: ThinkingLevel | None = None
+    ) -> CompiledStateGraph:
         """Get or create a graph for the given model type.
 
         Args:
@@ -454,8 +459,9 @@ class GraphFactory:
         """
         effective_model: ModelType = model_type or DEFAULT_MODEL
 
-        if effective_model not in self._graphs:
-            logger.info(f"Creating graph for model: {effective_model}")
-            self._graphs[effective_model] = self._create_graph(effective_model)
+        cache_key = (effective_model, thinking_level)
 
-        return self._graphs[effective_model]
+        if cache_key not in self._graphs:
+            logger.info(f"Creating graph for model: {effective_model}, thinking_level={thinking_level}")
+            self._graphs[cache_key] = self._create_graph(effective_model, thinking_level)
+        return self._graphs[cache_key]

@@ -72,6 +72,15 @@ class FoundryScope(str, Enum):
     MEDIASETS_WRITE = "api:use-mediasets-write"
 
 
+class ThinkingLevel(str, Enum):
+    """Thinking depth level for extended thinking mode."""
+
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class FoundryAgentConfiguration(BaseModel):
     """Configuration for Foundry agents."""
 
@@ -128,6 +137,10 @@ class SubAgentConfigVersion(BaseModel):
             "or {'price_per_million_requests': 0.05}"
         ),
     )
+
+    # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)
+    enable_thinking: bool | None = None
+    thinking_level: ThinkingLevel | None = ThinkingLevel.LOW
 
     change_summary: str | None = None
     status: SubAgentStatus = SubAgentStatus.DRAFT
@@ -201,6 +214,10 @@ class SubAgentCreate(BaseModel):
         ),
     )
 
+    # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)
+    enable_thinking: bool | None = None
+    thinking_level: ThinkingLevel | None = None
+
 
 class SubAgentUpdate(BaseModel):
     """Request model for updating a sub-agent."""
@@ -233,6 +250,10 @@ class SubAgentUpdate(BaseModel):
             "or {'price_per_million_requests': 0.05}"
         ),
     )
+
+    # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)
+    enable_thinking: bool | None = None
+    thinking_level: ThinkingLevel | None = None
 
     change_summary: str | None = None  # For version history
 

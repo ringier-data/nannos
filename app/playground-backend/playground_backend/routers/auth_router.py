@@ -17,7 +17,7 @@ from ..services.audit_service import AuditService
 from ..services.session_service import SessionService
 from ..services.user_group_service import UserGroupService
 from ..services.user_service import UserService
-from ..services.user_settings_service import UserSettingsService
+from ..services.user_settings_service import _UNSET, UserSettingsService
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,9 @@ async def update_current_user_settings(
     """Update the current authenticated user's settings.
 
     Args:
-        request: Fields to update (language, timezone, custom_prompt)
+        update_request: Fields to update (language, timezone, custom_prompt, etc.)
+                       Fields not provided will keep current values.
+                       Fields explicitly set to null will be cleared.
 
     Returns:
         Updated user settings.
@@ -190,14 +192,26 @@ async def update_current_user_settings(
     Raises:
         401 Unauthorized: If the user is not authenticated.
     """
+
     user_settings_service = get_user_settings_service(request)
+
+    # Use model_fields_set to detect which fields were explicitly provided
+    # If field is in model_fields_set, pass its value (including None)
+    # If field is not in model_fields_set, pass _UNSET to keep current value
     settings = await user_settings_service.upsert_settings(
         db,
         user.id,
-        language=update_request.language,
-        timezone_str=update_request.timezone,
-        custom_prompt=update_request.custom_prompt,
-        mcp_tools=update_request.mcp_tools,
+        language=update_request.language if "language" in update_request.model_fields_set else _UNSET,
+        timezone_str=update_request.timezone if "timezone" in update_request.model_fields_set else _UNSET,
+        custom_prompt=update_request.custom_prompt if "custom_prompt" in update_request.model_fields_set else _UNSET,
+        mcp_tools=update_request.mcp_tools if "mcp_tools" in update_request.model_fields_set else _UNSET,
+        preferred_model=update_request.preferred_model
+        if "preferred_model" in update_request.model_fields_set
+        else _UNSET,
+        enable_thinking=update_request.enable_thinking
+        if "enable_thinking" in update_request.model_fields_set
+        else _UNSET,
+        thinking_level=update_request.thinking_level if "thinking_level" in update_request.model_fields_set else _UNSET,
     )
     await db.commit()
     return UserSettingsResponse(data=settings)

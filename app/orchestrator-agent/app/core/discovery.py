@@ -18,8 +18,7 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ..a2a_utils.config import A2AClientConfig
 from ..a2a_utils.factory import make_a2a_async_runnable
 from ..middleware import A2ATaskTrackingMiddleware
-from ..models import AgentSettings
-from ..models.config import UserConfig
+from ..models.config import AgentSettings, UserConfig
 
 logger = logging.getLogger(__name__)
 

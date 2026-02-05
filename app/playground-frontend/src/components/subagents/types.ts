@@ -21,6 +21,8 @@ export interface RemoteAgentConfiguration {
 export interface LocalAgentConfiguration {
   system_prompt: string;
   mcp_tools?: string[];
+  enable_thinking?: boolean;
+  thinking_level?: string | null;
 }
 
 export interface FoundryAgentConfiguration {

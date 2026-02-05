@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from ..a2a_utils.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
+from ..core.model_factory import ThinkingLevel
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class UserSettings(BaseModel):
     mcp_tools: list[str]
     created_at: datetime
     updated_at: datetime
+    preferred_model: str | None = None
+    enable_thinking: bool | None = None
+    thinking_level: ThinkingLevel | None = None
 
     class Config:
         json_encoders = {datetime: lambda v: v.isoformat()}
@@ -50,6 +54,8 @@ class SubAgentConfigVersion(BaseModel):
     version: int
     description: str | None = None  # Agent skill set description - crucial for orchestrator routing
     model: str | None = None  # LLM model to use (e.g., 'gpt-4', 'claude-3-opus')
+    enable_thinking: bool | None = None  # Enable extended thinking mode
+    thinking_level: ThinkingLevel | None = None  # Thinking depth level
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url
     system_prompt: str | None = None  # For local sub-agents: the system prompt
@@ -118,6 +124,9 @@ class User(BaseModel):
     local_subagents: list[LocalSubAgentConfig] = Field(default_factory=list)  # Local sub-agents
     sub_agent_config_hash: str | None = None  # Playground mode: version hash for testing
     playground_subagent_name: str | None = None  # Playground mode: name for system prompt
+    preferred_model: str | None = None  # User-level preferred model override
+    enable_thinking: bool | None = None  # User-level thinking enable override
+    thinking_level: ThinkingLevel | None = None  # User-level thinking level override
 
 
 class RegistryService:
@@ -347,6 +356,8 @@ class RegistryService:
                             system_prompt=system_prompt,
                             mcp_tools=mcp_tools if mcp_tools else None,
                             model_name=cv.model,
+                            enable_thinking=cv.enable_thinking,
+                            thinking_level=cv.thinking_level,
                             sub_agent_id=sa.id,  # Include playground backend ID for tracking
                         )
                     )
@@ -385,4 +396,7 @@ class RegistryService:
             local_subagents=local_subagents,
             language=settings.language,
             custom_prompt=settings.custom_prompt,
+            preferred_model=settings.preferred_model,
+            enable_thinking=settings.enable_thinking,
+            thinking_level=settings.thinking_level,
         )

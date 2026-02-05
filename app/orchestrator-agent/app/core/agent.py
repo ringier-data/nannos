@@ -14,7 +14,7 @@ Architecture:
 
 import logging
 from collections.abc import AsyncIterable
-from typing import Any
+from typing import Any, Optional
 
 from a2a.types import Part, TaskState
 from langchain.messages import HumanMessage
@@ -22,12 +22,14 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
+from ..core.graph_factory import GraphFactory
 from ..handlers import StreamHandler
-from ..models import AgentFrameworkAuthError, AgentSettings, AgentStreamResponse, UserConfig, build_runtime_context
-from ..models.config import GraphRuntimeContext, ModelType
+from ..models import AgentFrameworkAuthError, AgentStreamResponse
+from ..models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
+from ..models.config import AgentSettings, GraphRuntimeContext, UserConfig
+from ..utils import build_runtime_context
 from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
-from .graph_factory import DEFAULT_MODEL, GraphFactory
 from .s3_service import get_s3_service
 
 logger = logging.getLogger(__name__)
@@ -85,17 +87,17 @@ class OrchestratorDeepAgent:
     def __init__(
         self,
         model: ModelType | None = None,
-        thinking: bool = False,
+        thinking_level: ThinkingLevel | None = None,
         cost_logger=None,
     ):
         self.config = AgentSettings()
-        self.thinking = thinking
+        self._default_thinking_level: ThinkingLevel | None = thinking_level or DEFAULT_THINKING_LEVEL
         self._default_model_type: ModelType = model or DEFAULT_MODEL
 
         # Initialize GraphFactory - centralizes all graph-related concerns
         # (model creation, checkpointer, middleware, graph caching)
         # Pass cost_logger during initialization for proper dependency injection
-        self._graph_factory = GraphFactory(config=self.config, thinking=thinking, cost_logger=cost_logger)
+        self._graph_factory = GraphFactory(config=self.config, cost_logger=cost_logger)
 
         # Initialize client credentials auth for agent-to-agent communication
         self.oauth2_client = OidcOAuth2Client(
@@ -110,7 +112,9 @@ class OrchestratorDeepAgent:
         self.tool_discovery_service = ToolDiscoveryService(self.config, oauth2_client=self.oauth2_client)
         self.agent_discovery_service = AgentDiscoveryService(self.config, oauth2_client=self.oauth2_client)
 
-    def _get_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:
+    def _get_graph(
+        self, model_type: ModelType | None = None, thinking_level: ThinkingLevel | None = None
+    ) -> CompiledStateGraph:
         """Get a graph for the specified model type.
 
         Delegates to GraphFactory which handles model creation, caching,
@@ -122,7 +126,7 @@ class OrchestratorDeepAgent:
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
         """
-        return self._graph_factory.get_graph(model_type)
+        return self._graph_factory.get_graph(model_type, thinking_level=thinking_level)
 
     def build_runtime_context(self, user_config: UserConfig) -> GraphRuntimeContext:
         """Build GraphRuntimeContext from enriched user config.
@@ -160,7 +164,9 @@ class OrchestratorDeepAgent:
             backend_url=backend_url,
         )
 
-    async def get_or_create_graph(self, model_type: ModelType) -> CompiledStateGraph:
+    async def get_or_create_graph(
+        self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]
+    ) -> CompiledStateGraph:
         """Get or create a graph for the given user configuration.
 
         Architecture: ONE universal graph per model type with dynamic tool injection.
@@ -175,7 +181,7 @@ class OrchestratorDeepAgent:
         """
         # Get the graph (created lazily if needed)
         # Tools/subagents are NOT passed here - they come from GraphRuntimeContext at runtime
-        return self._get_graph(model_type)
+        return self._get_graph(model_type, thinking_level)
 
     async def stream(
         self,
@@ -244,7 +250,10 @@ class OrchestratorDeepAgent:
             # Get or create graph for this model type
             # Graph is shared across users, isolated by thread_id and customized by GraphRuntimeContext
             graph = await self.get_or_create_graph(
-                model_type=user_config.model if user_config.model else self._default_model_type
+                model_type=user_config.model if user_config.model else self._default_model_type,
+                thinking_level=(
+                    user_config.thinking_level if user_config.enable_thinking else self._default_thinking_level
+                ),
             )
         except AgentFrameworkAuthError as e:
             logger.error(f"Authorization error while initializing: {e}")

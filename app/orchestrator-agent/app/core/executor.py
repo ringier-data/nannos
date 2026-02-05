@@ -23,7 +23,8 @@ from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
 
 from app.models.responses import AgentStreamResponse
 
-from ..models.config import ModelType, UserConfig
+from ..models.base import ModelType
+from ..models.config import UserConfig
 
 # from google.adk.sessions import InMemorySessionService
 from .agent import OrchestratorDeepAgent
@@ -38,12 +39,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
     """OrchestratorDeepAgent Executor Example."""
 
     def __init__(self, cost_logger=None):
+        # Read orchestrator thinking configuration from environment
         self.agent = OrchestratorDeepAgent(cost_logger=cost_logger)
         self.registry_service = RegistryService()
 
     async def _get_user_from_registry(
         self, sub: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
-    ):
+    ) -> User:
         """Fetch user from registry using the provided sub.
 
         Args:
@@ -77,6 +79,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         message_formatting: Literal["markdown", "slack", "plain"],
         slack_user_handle: str | None,
         sub_agent_config_hash: str | None,
+        enable_thinking: bool | None = None,
+        thinking_level: str | None = None,
     ) -> UserConfig:
         """Build complete UserConfig with all data and discovered capabilities.
 
@@ -91,6 +95,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             message_formatting: Message formatting style
             slack_user_handle: Optional Slack user handle
             sub_agent_config_hash: Optional playground mode config hash
+            preferred_model: Optional preferred model from registry
+            enable_thinking: Optional thinking configuration from client
+            thinking_level: Optional thinking level from client
 
         Returns:
             UserConfig: Fully initialized with static data and discovered tools/agents
@@ -112,6 +119,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             local_subagents=user.local_subagents,
             agent_metadata=user.agent_metadata,
             tool_names=user.tool_names,
+            enable_thinking=enable_thinking,
+            thinking_level=thinking_level,
         )
 
         # Discover capabilities (tools and sub-agents)
@@ -222,9 +231,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # Merge metadata with message-level taking priority
         request_metadata = {**params_metadata, **message_metadata}
 
-        model_choice = request_metadata.get("model")
-        if model_choice:
-            logger.info(f"Model preference from client metadata: {model_choice}")
+        model_choice = user.preferred_model or request_metadata.get("model")
+        enable_thinking = user.enable_thinking or request_metadata.get("enableThinking") in ("true", "1", "yes")
+        thinking_level = user.thinking_level or request_metadata.get("thinkingLevel")
 
         # Check budget guard before processing request
         budget_guard = get_budget_guard()
@@ -274,6 +283,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 message_formatting=message_formatting,
                 slack_user_handle=slack_user_handle,
                 sub_agent_config_hash=sub_agent_config_hash,
+                enable_thinking=enable_thinking,
+                thinking_level=thinking_level,
             )
 
             # NOTE: we decide to use channel_id as part of the filesystem namespace since if one has access to the
@@ -303,7 +314,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Get or create graph for this user's configuration
             # ZERO-TRUST: Pass verified user_sub and user_token from call_context
             graph = await self.agent.get_or_create_graph(
-                model_type=user_config.model if user_config.model else self.agent._default_model_type
+                model_type=user_config.model if user_config.model else self.agent._default_model_type,
+                thinking_level=user_config.thinking_level
+                if user_config.enable_thinking
+                else self.agent._default_thinking_level,
             )
             current_state = graph.get_state(config)  # type: ignore
 

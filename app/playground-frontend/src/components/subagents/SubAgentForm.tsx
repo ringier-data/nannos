@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Globe, Terminal, ChevronDown, Info, CheckCircle2, Lightbulb, Server, Code2, Database, Key, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -26,13 +26,15 @@ import {
 } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { MODEL_OPTIONS } from '@/config/models';
+import { MODEL_OPTIONS, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
 import type {
   SubAgent,
   SubAgentType,
   SubAgentFormData,
 } from './types';
+import type { OrchestratorThinkingLevel } from '@/api/generated/types.gen';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
+import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
 import { useQuery } from '@tanstack/react-query';
 import { listSecretsApiV1SecretsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
@@ -68,6 +70,14 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
   );
   const [mcpTools, setMcpTools] = useState<string[]>(
     config?.mcp_tools ?? []
+  );
+  
+  // Extended thinking configuration (local agents only)
+  const [enableThinking, setEnableThinking] = useState(
+    config?.enable_thinking ?? false
+  );
+  const [thinkingLevel, setThinkingLevel] = useState<OrchestratorThinkingLevel | null>(
+    (config?.thinking_level as OrchestratorThinkingLevel) ?? null
   );
 
   // Foundry configuration
@@ -118,6 +128,21 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
   const selectedSecret = availableSecrets.find(
     (secret) => secret.id === foundryClientSecretRef
   );
+
+  // Automatically disable thinking when model doesn't support it
+  useEffect(() => {
+    if (model && !modelSupportsThinking(model)) {
+      setEnableThinking(false);
+    }
+    // Reset thinking level to 'low' if current level is not available for this model
+    if (model && enableThinking) {
+      const availableLevels = getAvailableThinkingLevels(model);
+      const isCurrentLevelAvailable = availableLevels.some(opt => opt.value === thinkingLevel);
+      if (!isCurrentLevelAvailable) {
+        setThinkingLevel('low'); // Default to 'low' which is supported by all models
+      }
+    }
+  }, [model, enableThinking, thinkingLevel]);
 
   const validate = (): string | null => {
     if (!name.trim()) {
@@ -201,6 +226,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       configuration = {
         system_prompt: systemPrompt.trim(),
         ...(mcpTools.length > 0 && { mcp_tools: mcpTools }),
+        enable_thinking: enableThinking,
+        thinking_level: thinkingLevel ?? undefined, // Convert null to undefined for API
       };
     } else if (type === 'foundry') {
       configuration = {
@@ -245,6 +272,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
     if (newType === 'remote') {
       setSystemPrompt('');
       setMcpTools([]);
+      setEnableThinking(false);
+      setThinkingLevel('low');
       setFoundryHostname('');
       setFoundryClientId('');
       setFoundryClientSecretRef(null);
@@ -267,6 +296,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       setAgentUrl('');
       setSystemPrompt('');
       setMcpTools([]);
+      setEnableThinking(false);
+      setThinkingLevel('low');
     }
   };
 
@@ -704,6 +735,24 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                       <span>The system prompt that defines the agent's behavior</span>
                     </p>
                   </div>
+
+                  {/* Extended Thinking Configuration */}
+                  <ExtendedThinkingConfig
+                    model={model}
+                    enableThinking={enableThinking}
+                    thinkingLevel={thinkingLevel}
+                    onEnableThinkingChange={(checked) => {
+                      setEnableThinking(checked);
+                      if (!checked) {
+                        setThinkingLevel(null);
+                      } else if (thinkingLevel === null) {
+                        setThinkingLevel('low');
+                      }
+                    }}
+                    onThinkingLevelChange={setThinkingLevel}
+                    disabled={isSubmitting}
+                    showAsCard={false}
+                  />
                 </>
               )}
             </CardContent>

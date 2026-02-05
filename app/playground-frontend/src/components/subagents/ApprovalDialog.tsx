@@ -57,6 +57,10 @@ function formatVersionForDiff(version: SubAgentConfigVersion | null | undefined)
   // Model section
   sections.push('=== MODEL ===');
   sections.push(version.model || '(default)');
+  sections.push(version.enable_thinking ? `Enable Thinking: true` : `Enable Thinking: false`);
+  if (version.enable_thinking){
+    sections.push(`Thinking Level: ${version.thinking_level || '(default)'}`);
+  }
   sections.push('');
   
   // Configuration section - different for local vs remote agents

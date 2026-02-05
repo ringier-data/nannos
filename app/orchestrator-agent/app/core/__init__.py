@@ -26,9 +26,7 @@ Usage:
 # Import model_factory utilities directly when needed
 
 from .model_factory import (
-    DEFAULT_MODEL,
     MODEL_CONFIG,
-    ModelType,
     create_model,
     get_available_models,
     get_default_model,
@@ -40,7 +38,5 @@ __all__ = [
     "get_available_models",
     "is_valid_model",
     "get_default_model",
-    "DEFAULT_MODEL",
     "MODEL_CONFIG",
-    "ModelType",
 ]
