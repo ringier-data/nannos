@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Plus, X, Save, UserPlus } from 'lucide-react';
+import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
+import { config } from '@/config';
 import {
   getGroupApiV1AdminGroupsGroupIdGetOptions,
   getGroupApiV1GroupsGroupIdGetOptions,
@@ -128,7 +129,7 @@ export function GroupDetailPage() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to update group';
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to update group';
       toast.error(message);
     },
   });
@@ -152,7 +153,7 @@ export function GroupDetailPage() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to add members';
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to add members';
       toast.error(message);
     },
   });
@@ -175,7 +176,7 @@ export function GroupDetailPage() {
       });
     },
     onError: (error: any) => {
-      const detail = error?.response?.data?.detail || error?.detail || error?.message;
+      const detail = error?.detail || error?.response?.data?.detail || error?.message;
       let message = 'Failed to remove members';
       
       if (detail) {
@@ -198,7 +199,7 @@ export function GroupDetailPage() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to update role';
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to update role';
       toast.error(message);
     },
   });
@@ -214,7 +215,7 @@ export function GroupDetailPage() {
       });
     },
     onError: (error: any) => {
-      const message = error?.response?.data?.detail || 'Failed to update default agent';
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to update default agent';
       toast.error(message);
     },
   });
@@ -318,6 +319,16 @@ export function GroupDetailPage() {
           <h1 className="text-2xl font-bold tracking-tight">{group.name}</h1>
           <p className="text-muted-foreground">{group.description || 'No description'}</p>
         </div>
+        {isAdminView && group.keycloak_group_id && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.open(`${config.keycloakBaseUrl}/admin/master/console/#/${config.keycloakRealm}/groups/${group.keycloak_group_id}`, '_blank')}
+          >
+            <ExternalLink className="h-4 w-4 mr-2" />
+            Open in Keycloak
+          </Button>
+        )}
         {!isEditing && isAdminView && (
           <Button onClick={startEditing}>Edit Group</Button>
         )}

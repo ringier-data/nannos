@@ -10,7 +10,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
-from ..models.sub_agent import ActivationSource
+from ..models.sub_agent import ActivationSource, ThinkingLevel
+from ..models.user import User
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,6 @@ class ApprovalContext:
 
     sub_agent_id: int
     version: int
-    admin_user_id: str
-    admin_sub: str
     action: Literal["approve", "reject"]
     rejection_reason: str | None = None
     release_number: int | None = None
@@ -100,6 +99,7 @@ class SubAgentRepository(AuditedRepository):
     async def approve_version(
         self,
         db: AsyncSession,
+        actor: User,
         context: ApprovalContext,
     ) -> None:
         """
@@ -133,7 +133,7 @@ class SubAgentRepository(AuditedRepository):
                 {
                     "sub_agent_id": context.sub_agent_id,
                     "version": context.version,
-                    "admin_id": context.admin_user_id,
+                    "admin_id": actor.id,
                     "now": now,
                     "release_number": context.release_number,
                 },
@@ -156,7 +156,7 @@ class SubAgentRepository(AuditedRepository):
             # Auto-audit with detailed changes
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=context.admin_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(context.sub_agent_id),
                 action=AuditAction.APPROVE,
@@ -172,7 +172,7 @@ class SubAgentRepository(AuditedRepository):
 
             logger.info(
                 f"Approved sub-agent {context.sub_agent_id} version {context.version} "
-                f"as release {context.release_number} by {context.admin_sub}"
+                f"as release {context.release_number} by {actor.id}"
             )
 
         except Exception as e:
@@ -183,6 +183,7 @@ class SubAgentRepository(AuditedRepository):
         self,
         db: AsyncSession,
         context: ApprovalContext,
+        actor: User,
     ) -> None:
         """
         Reject a version.
@@ -209,7 +210,7 @@ class SubAgentRepository(AuditedRepository):
                 {
                     "sub_agent_id": context.sub_agent_id,
                     "version": context.version,
-                    "admin_id": context.admin_user_id,
+                    "admin_id": actor.id,
                     "reason": context.rejection_reason,
                 },
             )
@@ -223,7 +224,7 @@ class SubAgentRepository(AuditedRepository):
             # Auto-audit
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=context.admin_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(context.sub_agent_id),
                 action=AuditAction.REJECT,
@@ -239,7 +240,7 @@ class SubAgentRepository(AuditedRepository):
 
             logger.info(
                 f"Rejected sub-agent {context.sub_agent_id} version {context.version} "
-                f"by {context.admin_sub}: {context.rejection_reason}"
+                f"by {actor.id}: {context.rejection_reason}"
             )
 
         except Exception as e:
@@ -249,7 +250,7 @@ class SubAgentRepository(AuditedRepository):
     async def update_permissions(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         group_permissions: list[dict],
     ) -> None:
@@ -258,7 +259,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
             group_permissions: List of dicts with user_group_id and permissions
         """
@@ -299,7 +300,7 @@ class SubAgentRepository(AuditedRepository):
             # Custom audit for permission change
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(sub_agent_id),
                 action=AuditAction.PERMISSION_UPDATE,
@@ -309,7 +310,7 @@ class SubAgentRepository(AuditedRepository):
                 },
             )
 
-            logger.info(f"Updated permissions for sub-agent {sub_agent_id} by {actor_sub}")
+            logger.info(f"Updated permissions for sub-agent {sub_agent_id} by {actor.sub}")
 
         except Exception as e:
             logger.error(f"Failed to update permissions for sub-agent {sub_agent_id}: {e}")
@@ -318,7 +319,7 @@ class SubAgentRepository(AuditedRepository):
     async def bulk_activate_sub_agent(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         user_ids: list[str],
         sub_agent_id: int,
         activated_by: ActivationSource = ActivationSource.USER,
@@ -329,7 +330,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             user_ids: List of user IDs
             sub_agent_id: Sub-agent ID
             activated_by: Source of activation ('user', 'group', 'admin')
@@ -417,7 +418,7 @@ class SubAgentRepository(AuditedRepository):
             # Bulk audit log
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(sub_agent_id),
                 action=AuditAction.ACTIVATE,
@@ -433,7 +434,7 @@ class SubAgentRepository(AuditedRepository):
             )
 
             logger.info(
-                f"Bulk activated sub-agent {sub_agent_id} for {len(affected_user_ids)} users by {actor_sub} "
+                f"Bulk activated sub-agent {sub_agent_id} for {len(affected_user_ids)} users by {actor.sub} "
                 f"(source: {activated_by}, group_id: {group_id})"
             )
 
@@ -446,7 +447,7 @@ class SubAgentRepository(AuditedRepository):
     async def bulk_deactivate_sub_agent(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         user_ids: list[str],
         sub_agent_id: int,
         group_id: int | None = None,
@@ -456,7 +457,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             user_ids: List of user IDs
             sub_agent_id: Sub-agent ID
             group_id: Optional group ID to remove from activated_by_groups
@@ -530,7 +531,7 @@ class SubAgentRepository(AuditedRepository):
             # Bulk audit log
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(sub_agent_id),
                 action=AuditAction.DEACTIVATE,
@@ -544,7 +545,7 @@ class SubAgentRepository(AuditedRepository):
             )
 
             logger.info(
-                f"Bulk deactivated sub-agent {sub_agent_id} for {len(affected_user_ids)} users by {actor_sub} (group_id: {group_id})"
+                f"Bulk deactivated sub-agent {sub_agent_id} for {len(affected_user_ids)} users by {actor.sub} (group_id: {group_id})"
             )
 
             return affected_user_ids
@@ -556,7 +557,7 @@ class SubAgentRepository(AuditedRepository):
     async def update_sub_agent(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         fields: dict[str, Any],
     ) -> None:
@@ -565,13 +566,13 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
             fields: Fields to update (name, is_public)
         """
         await self.update(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_id=sub_agent_id,
             fields=fields,
             fetch_before=True,
@@ -580,7 +581,7 @@ class SubAgentRepository(AuditedRepository):
     async def update_current_version(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         version: int,
     ) -> None:
@@ -589,7 +590,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
             version: New current version number
         """
@@ -604,7 +605,7 @@ class SubAgentRepository(AuditedRepository):
 
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_type=self.entity_type,
             entity_id=str(sub_agent_id),
             action=AuditAction.UPDATE,
@@ -616,7 +617,7 @@ class SubAgentRepository(AuditedRepository):
     async def update_sub_agent_timestamp(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
     ) -> None:
         """
@@ -624,7 +625,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
         """
         now = datetime.now(timezone.utc)
@@ -636,7 +637,7 @@ class SubAgentRepository(AuditedRepository):
     async def delete_version(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         version: int,
     ) -> None:
@@ -645,7 +646,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
             version: Version number to delete
         """
@@ -661,7 +662,7 @@ class SubAgentRepository(AuditedRepository):
 
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_type=self.entity_type,
             entity_id=str(sub_agent_id),
             action=AuditAction.DELETE,
@@ -673,7 +674,7 @@ class SubAgentRepository(AuditedRepository):
     async def update_current_version_to_previous(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
     ) -> None:
         """
@@ -681,7 +682,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
         """
 
@@ -700,7 +701,7 @@ class SubAgentRepository(AuditedRepository):
 
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_type=self.entity_type,
             entity_id=str(sub_agent_id),
             action=AuditAction.UPDATE,
@@ -712,7 +713,7 @@ class SubAgentRepository(AuditedRepository):
     async def submit_version_for_approval(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         version: int,
         change_summary: str | None = None,
@@ -722,7 +723,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
             version: Version number
             change_summary: Optional change summary
@@ -742,13 +743,13 @@ class SubAgentRepository(AuditedRepository):
                 "sub_agent_id": sub_agent_id,
                 "version": version,
                 "change_summary": change_summary,
-                "submitted_by_user_id": actor_sub,
+                "submitted_by_user_id": actor.id,  # FIX: Use actor.id for FK, not actor.sub!
             },
         )
 
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,  # Use actor for audit
             entity_type=self.entity_type,
             entity_id=str(sub_agent_id),
             action=AuditAction.SUBMIT_FOR_APPROVAL,
@@ -760,7 +761,7 @@ class SubAgentRepository(AuditedRepository):
     async def set_default_version(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         version: int,
     ) -> None:
@@ -769,7 +770,7 @@ class SubAgentRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
             version: Version number to set as default
         """
@@ -785,7 +786,7 @@ class SubAgentRepository(AuditedRepository):
 
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_type=self.entity_type,
             entity_id=str(sub_agent_id),
             action=AuditAction.SET_DEFAULT,
@@ -797,7 +798,7 @@ class SubAgentRepository(AuditedRepository):
     async def create_config_version(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         sub_agent_id: int,
         version: int,
         version_hash: str,
@@ -816,13 +817,15 @@ class SubAgentRepository(AuditedRepository):
         foundry_scopes: list[str] | None = None,
         foundry_version: str | None = None,
         pricing_config: dict | None = None,
+        enable_thinking: bool | None = None,
+        thinking_level: ThinkingLevel | None = None,
     ) -> int:
         """
         Create a new configuration version with automatic audit logging.
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             sub_agent_id: Sub-agent ID
             version: Version number
             version_hash: Hash of the version
@@ -840,6 +843,9 @@ class SubAgentRepository(AuditedRepository):
             foundry_query_api_name: Foundry query API name
             foundry_scopes: List of Foundry scopes
             foundry_version: Foundry version
+            pricing_config: Agent-specific pricing configuration
+            enable_thinking: Whether extended thinking is enabled
+            thinking_level: Thinking depth level
 
         Returns:
             The ID of the newly created version
@@ -852,11 +858,13 @@ class SubAgentRepository(AuditedRepository):
             INSERT INTO sub_agent_config_versions
             (sub_agent_id, version, version_hash, description, model, system_prompt, agent_url, mcp_tools, 
              foundry_hostname, foundry_client_id, foundry_client_secret_ref, foundry_ontology_rid, 
-             foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, change_summary, status, created_at)
+             foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, enable_thinking, 
+             thinking_level, change_summary, status, created_at)
             VALUES (:sub_agent_id, :version, :version_hash, :description, :model, :system_prompt, :agent_url, 
                     CAST(:mcp_tools AS jsonb), :foundry_hostname, :foundry_client_id, :foundry_client_secret_ref, 
                     :foundry_ontology_rid, :foundry_query_api_name, CAST(:foundry_scopes AS text[]), 
-                    :foundry_version, CAST(:pricing_config AS jsonb), :change_summary, :status, :now)
+                    :foundry_version, CAST(:pricing_config AS jsonb), :enable_thinking, 
+                    CAST(:thinking_level AS thinking_level), :change_summary, :status, :now)
             RETURNING id
         """)
         result = await db.execute(
@@ -878,6 +886,8 @@ class SubAgentRepository(AuditedRepository):
                 "foundry_scopes": foundry_scopes,
                 "foundry_version": foundry_version,
                 "pricing_config": json.dumps(pricing_config) if pricing_config else None,
+                "enable_thinking": enable_thinking,
+                "thinking_level": thinking_level,
                 "change_summary": change_summary,
                 "status": status,
                 "now": now,
@@ -903,13 +913,15 @@ class SubAgentRepository(AuditedRepository):
             "foundry_scopes": foundry_scopes,
             "foundry_version": foundry_version,
             "pricing_config": pricing_config,
+            "enable_thinking": enable_thinking,
+            "thinking_level": thinking_level,
             "change_summary": change_summary,
             "status": status,
         }
 
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             entity_type=self.entity_type,
             entity_id=str(sub_agent_id),
             action=AuditAction.CREATE,

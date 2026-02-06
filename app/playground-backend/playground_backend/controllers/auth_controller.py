@@ -3,12 +3,13 @@
 import logging
 from urllib.parse import urlencode
 
-from authlib.integrations.starlette_client import OAuth, OAuthError
+from authlib.integrations.starlette_client import OAuth, OAuthError, StarletteOAuth2App
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import URL
 
 from ..config import config
-from ..db import get_async_session_factory
 from ..services.session_service import SessionService
 from ..services.user_service import UserService
 from ..utils.cookie_signer import sign_cookie
@@ -59,11 +60,14 @@ class AuthController:
         self.base_domain = config.base_domain
         self.is_dev = config.is_local() or config.is_dev()
 
-    def _is_valid_redirect_url(self, url: str | None) -> bool:
+    def _is_valid_redirect_url(self, url: str | None | URL) -> bool:
         """Validate that the redirect URL is safe."""
         try:
             if not url:
                 return False
+
+            if isinstance(url, URL):
+                url = str(url)
 
             # Always reject dangerous URL schemes (even in local mode)
             if not url.startswith(("http://", "https://")):
@@ -115,12 +119,13 @@ class AuthController:
         # Use Authlib to handle the OAuth flow (PKCE is automatic)
         redirect_uri = request.url_for("login_callback")
         try:
-            return await oauth.oidc.authorize_redirect(request, redirect_uri)
+            oidc_app: StarletteOAuth2App = oauth.oidc  # type: ignore
+            return await oidc_app.authorize_redirect(request, redirect_uri)
         except Exception as e:
             logger.error(f"Failed to initiate OAuth flow: {e}")
             raise HTTPException(status_code=500, detail="Failed to initiate login") from e
 
-    async def get_login_callback(self, request: Request, response: Response) -> RedirectResponse:
+    async def get_login_callback(self, request: Request, response: Response, db: AsyncSession) -> RedirectResponse:
         """Handle the OIDC login callback.
 
         Query params:
@@ -132,7 +137,7 @@ class AuthController:
         logger.info("Login callback invoked")
 
         # Get redirect_to from session and validate it
-        redirect_to: str | None = request.session.get("redirect_to")
+        redirect_to: str | None | URL = request.session.get("redirect_to")
         logger.debug(f"Retrieved redirect_to from session: {redirect_to}")
 
         # Clear redirect_to from session immediately to prevent reuse
@@ -148,7 +153,8 @@ class AuthController:
 
         # Use Authlib to handle token exchange and validation
         try:
-            token = await oauth.oidc.authorize_access_token(request)
+            oidc_app: StarletteOAuth2App = oauth.oidc  # type: ignore
+            token = await oidc_app.authorize_access_token(request)
         except OAuthError as e:
             logger.error(f"OAuth error in callback: {e.error} - {e.description}")
             # Clear any remaining session state on error
@@ -181,8 +187,7 @@ class AuthController:
             raise HTTPException(status_code=400, detail="Missing user information")
 
         # Upsert user with database session
-        session_factory = get_async_session_factory()
-        async with session_factory() as db:
+        try:
             user = await self.user_service.upsert_user(
                 db=db,
                 sub=sub,
@@ -191,8 +196,11 @@ class AuthController:
                 last_name=family_name,
                 company_name=company_name,
             )
-            await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to upsert user: {e}")
+            raise
 
+        logger.info(f"User {user.id} logged in successfully")
         # Get tokens for session
         access_token = token.get("access_token", "")
         refresh_token = token.get("refresh_token", "")
@@ -210,6 +218,8 @@ class AuthController:
         )
 
         # Create redirect response
+        if redirect_to is None:
+            redirect_to = request.url_for("index")
         redirect_response = RedirectResponse(url=redirect_to, status_code=303)
 
         # Sign the session ID to prevent tampering
@@ -254,9 +264,9 @@ class AuthController:
         request.session["logout_redirect_to"] = str(redirect_to)
 
         # Get end_session_endpoint from Authlib's loaded server metadata
-        oidc_client = oauth.oidc  # type: ignore[attr-defined]
-        await oidc_client.load_server_metadata()  # type: ignore[attr-defined]
-        end_session_endpoint = oidc_client.server_metadata.get("end_session_endpoint")  # type: ignore[attr-defined]
+        oidc_app: StarletteOAuth2App = oauth.oidc  # type: ignore
+        await oidc_app.load_server_metadata()
+        end_session_endpoint = oidc_app.server_metadata.get("end_session_endpoint")
 
         # Build logout URL
         logout_params = {

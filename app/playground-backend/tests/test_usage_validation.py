@@ -14,7 +14,6 @@ class TestBillingUnitValidation:
     def test_valid_standard_token_types(self):
         """Test that standard LLM token types are accepted."""
         log = UsageLogCreate(
-            user_id="test-user",
             provider="openai",
             model_name="gpt-4",
             billing_unit_breakdown={
@@ -31,7 +30,6 @@ class TestBillingUnitValidation:
     def test_valid_custom_billing_units(self):
         """Test that custom billing units with valid names are accepted."""
         log = UsageLogCreate(
-            user_id="test-user",
             provider="my_service",
             model_name="api-v2",
             billing_unit_breakdown={
@@ -60,7 +58,6 @@ class TestBillingUnitValidation:
 
         for name in valid_names:
             log = UsageLogCreate(
-                user_id="test-user",
                 provider="test",
                 model_name="test",
                 billing_unit_breakdown={name: 1},
@@ -85,7 +82,6 @@ class TestBillingUnitValidation:
             # Different validation errors for different issues
             with pytest.raises(ValidationError):
                 UsageLogCreate(
-                    user_id="test-user",
                     provider="test",
                     model_name="test",
                     billing_unit_breakdown={invalid_name: 1},
@@ -99,7 +95,6 @@ class TestBillingUnitValidation:
         for reserved in reserved_names:
             with pytest.raises(ValidationError, match="is reserved"):
                 UsageLogCreate(
-                    user_id="test-user",
                     provider="test",
                     model_name="test",
                     billing_unit_breakdown={reserved: 1},
@@ -112,7 +107,6 @@ class TestBillingUnitValidation:
 
         with pytest.raises(ValidationError, match="must be between 3 and 64 characters"):
             UsageLogCreate(
-                user_id="test-user",
                 provider="test",
                 model_name="test",
                 billing_unit_breakdown={too_long_name: 1},
@@ -123,7 +117,6 @@ class TestBillingUnitValidation:
         """Test that zero or negative unit counts are rejected."""
         with pytest.raises(ValidationError, match="must be positive"):
             UsageLogCreate(
-                user_id="test-user",
                 provider="test",
                 model_name="test",
                 billing_unit_breakdown={"input_tokens": 0},
@@ -132,7 +125,6 @@ class TestBillingUnitValidation:
 
         with pytest.raises(ValidationError, match="must be positive"):
             UsageLogCreate(
-                user_id="test-user",
                 provider="test",
                 model_name="test",
                 billing_unit_breakdown={"input_tokens": -100},
@@ -142,7 +134,6 @@ class TestBillingUnitValidation:
     def test_mixed_token_and_custom_units(self):
         """Test that token types and custom billing units can coexist."""
         log = UsageLogCreate(
-            user_id="test-user",
             provider="hybrid_service",
             model_name="llm-with-tools",
             billing_unit_breakdown={
@@ -161,7 +152,6 @@ class TestBillingUnitValidation:
     def test_edge_case_minimum_length(self):
         """Test minimum valid length (3 characters)."""
         log = UsageLogCreate(
-            user_id="test-user",
             provider="test",
             model_name="test",
             billing_unit_breakdown={"abc": 1},
@@ -173,7 +163,6 @@ class TestBillingUnitValidation:
         """Test maximum valid length (64 characters)."""
         max_length_name = "a" * 64
         log = UsageLogCreate(
-            user_id="test-user",
             provider="test",
             model_name="test",
             billing_unit_breakdown={max_length_name: 1},
@@ -185,7 +174,6 @@ class TestBillingUnitValidation:
         """Test that uppercase letters are rejected (must be lowercase)."""
         with pytest.raises(ValidationError, match="Invalid billing unit name"):
             UsageLogCreate(
-                user_id="test-user",
                 provider="test",
                 model_name="test",
                 billing_unit_breakdown={"Input_Tokens": 1},
@@ -195,7 +183,6 @@ class TestBillingUnitValidation:
     def test_multiple_underscores(self):
         """Test that multiple consecutive underscores are allowed."""
         log = UsageLogCreate(
-            user_id="test-user",
             provider="test",
             model_name="test",
             billing_unit_breakdown={"api__calls__v2": 1},

@@ -39,7 +39,7 @@ class UserConfig(BaseModel):
     Note: access_token is optional for downstream agents that use orchestrator JWT auth.
     """
 
-    user_id: str = Field(..., description="User identifier")
+    user_sub: str = Field(..., description="OIDC subject identifier for the user")
     access_token: Optional[SecretStr] = Field(
         default=None, description="User authentication token (optional for downstream agents)"
     )

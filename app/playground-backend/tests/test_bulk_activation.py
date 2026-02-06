@@ -4,13 +4,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from playground_backend.models.notification import ActivationSource
+from playground_backend.models.sub_agent import ActivationSource
+from playground_backend.models.user import User
 from playground_backend.repositories.sub_agent_repository import SubAgentRepository
 from playground_backend.services.audit_service import AuditService
 
 
 @pytest.mark.asyncio
-async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession):
+async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession, test_user: User):
     """Test bulk activation with group tracking."""
     repo = SubAgentRepository()
     audit_service = AuditService()
@@ -54,7 +55,7 @@ async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession
     user_ids = ["user-1", "user-2", "user-3"]
     user_ids = await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=1,
         activated_by=ActivationSource.GROUP,
@@ -83,7 +84,7 @@ async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession
 
 
 @pytest.mark.asyncio
-async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession):
+async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession, test_user: User):
     """Test bulk activation for user-initiated activation."""
     repo = SubAgentRepository()
     audit_service = AuditService()
@@ -111,7 +112,7 @@ async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession)
     # Bulk activate for single user (common case from API)
     user_ids = await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="user-1",
+        actor=test_user,
         user_ids=["user-1"],
         sub_agent_id=2,
         activated_by=ActivationSource.USER,
@@ -135,7 +136,7 @@ async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession)
 
 
 @pytest.mark.asyncio
-async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession):
+async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession, test_user: User):
     """Test bulk activation handles conflicts (idempotency)."""
     repo = SubAgentRepository()
     audit_service = AuditService()
@@ -173,7 +174,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession):
     # First activation
     user_ids_activated1 = await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=3,
         activated_by=ActivationSource.GROUP,
@@ -184,7 +185,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession):
     # Second activation (should update, not fail)
     user_ids_activated2 = await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=3,
         activated_by=ActivationSource.GROUP,
@@ -197,7 +198,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession):
+async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession, test_user: User):
     """Test bulk deactivation removes group from JSONB array."""
     repo = SubAgentRepository()
     audit_service = AuditService()
@@ -236,7 +237,7 @@ async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession)
     # Activate from group 3
     await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=4,
         activated_by=ActivationSource.GROUP,
@@ -246,7 +247,7 @@ async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession)
     # Activate from group 4 (adds to array)
     await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=4,
         activated_by=ActivationSource.GROUP,
@@ -268,7 +269,7 @@ async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession)
     # Deactivate from group 3
     user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=4,
         group_id=3,
@@ -290,7 +291,7 @@ async def test_bulk_deactivate_sub_agent_removes_group(pg_session: AsyncSession)
 
 
 @pytest.mark.asyncio
-async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession):
+async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession, test_user: User):
     """Test bulk deactivation deletes row when removing last group."""
     repo = SubAgentRepository()
     audit_service = AuditService()
@@ -328,7 +329,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession)
     # Activate from single group
     await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=5,
         activated_by=ActivationSource.GROUP,
@@ -339,7 +340,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession)
     # Deactivate (should delete)
     user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=5,
         group_id=5,
@@ -359,7 +360,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession)
 
 
 @pytest.mark.asyncio
-async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession):
+async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession, test_user: User):
     """Test bulk deactivation without group_id (full delete)."""
     repo = SubAgentRepository()
     audit_service = AuditService()
@@ -390,7 +391,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession):
     # Activate as user
     await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="user-1",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=6,
         activated_by=ActivationSource.USER,
@@ -400,7 +401,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession):
     # Full deactivation
     user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
-        actor_sub="user-1",
+        actor=test_user,
         user_ids=user_ids,
         sub_agent_id=6,
         group_id=None,  # Full delete
@@ -420,7 +421,7 @@ async def test_bulk_deactivate_full_deactivation(pg_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_bulk_methods_with_empty_list(pg_session: AsyncSession):
+async def test_bulk_methods_with_empty_list(pg_session: AsyncSession, test_user: User):
     """Test bulk methods handle empty user list gracefully."""
     repo = SubAgentRepository()
 
@@ -444,7 +445,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession):
     # Empty activation
     user_ids_activated = await repo.bulk_activate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=[],
         sub_agent_id=7,
         activated_by=ActivationSource.GROUP,
@@ -455,7 +456,7 @@ async def test_bulk_methods_with_empty_list(pg_session: AsyncSession):
     # Empty deactivation
     user_ids_deactivated = await repo.bulk_deactivate_sub_agent(
         db=pg_session,
-        actor_sub="admin-123",
+        actor=test_user,
         user_ids=[],
         sub_agent_id=7,
         group_id=1,

@@ -1,12 +1,16 @@
 """User service for managing users in PostgreSQL."""
 
+import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import (
     BulkOperationResult,
     BulkUserOperation,
@@ -15,6 +19,8 @@ from ..models.user import (
     UserStatus,
     UserWithGroups,
 )
+from ..repositories.user_repository import UserRepository
+from ..services.audit_service import AuditService
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +28,7 @@ logger = logging.getLogger(__name__)
 class UserService:
     """Manages users in PostgreSQL."""
 
-    def __init__(self, user_repository=None, audit_service=None):
+    def __init__(self, user_repository: UserRepository | None = None, audit_service: AuditService | None = None):
         """Initialize user service.
 
         Args:
@@ -34,23 +40,23 @@ class UserService:
         self._repo = user_repository
         self._audit_service = audit_service
 
-    def set_repository(self, user_repository):
+    def set_repository(self, user_repository: UserRepository):
         """Set the user repository (dependency injection)."""
         self._repo = user_repository
 
-    def set_audit_service(self, audit_service):
+    def set_audit_service(self, audit_service: AuditService):
         """Set the audit service (dependency injection)."""
         self._audit_service = audit_service
 
     @property
-    def repo(self):
+    def repo(self) -> UserRepository:
         """Get the user repository, raising error if not set."""
         if self._repo is None:
             raise RuntimeError("UserRepository not injected. Call set_repository() during initialization.")
         return self._repo
 
     @property
-    def audit_service(self):
+    def audit_service(self) -> AuditService:
         """Get the audit service, raising error if not set."""
         if self._audit_service is None:
             raise RuntimeError("AuditService not injected. Call set_audit_service() during initialization.")
@@ -96,6 +102,48 @@ class UserService:
             )
         except Exception as e:
             logger.error(f"Failed to get user: {e}")
+            return None
+
+    async def get_user_by_sub(self, db: AsyncSession, sub: str) -> User | None:
+        """Retrieve a user by OIDC subject (sub).
+
+        Args:
+            db: The database session
+            sub: The user's OIDC subject
+
+        Returns:
+            The user or None if not found
+        """
+        try:
+            query = text("""
+                SELECT id, sub, email, first_name, last_name, company_name,
+                       is_administrator, role, status, deleted_at, created_at, updated_at
+                FROM users
+                WHERE sub = :sub
+            """)
+            result = await db.execute(query, {"sub": sub})
+            row = result.mappings().first()
+
+            if row is None:
+                logger.debug(f"User not found by sub: {sub}")
+                return None
+
+            return User(
+                id=row["id"],
+                sub=row["sub"],
+                email=row["email"],
+                first_name=row["first_name"],
+                last_name=row["last_name"],
+                company_name=row["company_name"],
+                is_administrator=row["is_administrator"],
+                role=row["role"],
+                status=UserStatus(row["status"]),
+                deleted_at=row["deleted_at"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+        except Exception as e:
+            logger.error(f"Failed to get user by sub: {e}")
             return None
 
     async def get_user_with_groups(self, db: AsyncSession, user_id: str) -> UserWithGroups | None:
@@ -243,15 +291,13 @@ class UserService:
             logger.error(f"Failed to list users: {e}")
             raise
 
-    async def update_user_status(
-        self, db: AsyncSession, user_id: str, actor_sub: str, status: UserStatus
-    ) -> User | None:
+    async def update_user_status(self, db: AsyncSession, user_id: str, actor: User, status: UserStatus) -> User | None:
         """Update a user's status and optionally soft delete.
 
         Args:
             db: Database session
-            user_id: The user's ID
-            actor_sub: ID of user performing the action
+            user_id: The user's ID to update
+            actor: User performing the action
             status: New status
 
         Returns:
@@ -259,7 +305,7 @@ class UserService:
         """
         try:
             # Update status via repository (with audit)
-            await self.repo.update_status(db, user_id, actor_sub, status.value)
+            await self.repo.update_status(db, user_id, actor, status.value)
 
             # Handle soft delete if needed
             if status == UserStatus.DELETED:
@@ -278,69 +324,14 @@ class UserService:
             logger.error(f"Failed to update user status: {e}")
             raise
 
-    async def update_user_groups(
-        self,
-        db: AsyncSession,
-        user_id: str,
-        actor_sub: str,
-        group_ids: list[int],
-        operation: Literal["set", "add", "remove"],
-    ) -> UserWithGroups | None:
-        """Update a user's group memberships.
-
-        Args:
-            db: Database session
-            user_id: The user's ID
-            actor_sub: ID of user performing the action
-            group_ids: List of group IDs
-            operation: 'set' replaces all, 'add' adds to existing, 'remove' removes
-
-        Returns:
-            Updated user with groups or None if user not found
-        """
-        # Verify user exists
-        user = await self.get_user(db, user_id)
-        if user is None:
-            return None
-
-        try:
-            if operation == "set":
-                # Use repository for full replacement (with audit)
-                await self.repo.update_groups(db, user_id, actor_sub, group_ids)
-            elif operation == "add":
-                for group_id in group_ids:
-                    await db.execute(
-                        text("""
-                            INSERT INTO user_group_members (user_id, user_group_id, group_role)
-                            VALUES (:user_id, :group_id, 'read')
-                            ON CONFLICT (user_id, user_group_id) DO NOTHING
-                        """),
-                        {"user_id": user_id, "group_id": group_id},
-                    )
-            elif operation == "remove":
-                for group_id in group_ids:
-                    await db.execute(
-                        text("""
-                            DELETE FROM user_group_members
-                            WHERE user_id = :user_id AND user_group_id = :group_id
-                        """),
-                        {"user_id": user_id, "group_id": group_id},
-                    )
-
-            logger.info(f"Updated groups for user {user_id}: {operation} {group_ids}")
-            return await self.get_user_with_groups(db, user_id)
-        except Exception as e:
-            logger.error(f"Failed to update user groups: {e}")
-            raise
-
     async def bulk_update_users(
-        self, db: AsyncSession, actor_sub: str, operations: list[BulkUserOperation]
+        self, db: AsyncSession, actor: User, operations: list[BulkUserOperation]
     ) -> list[BulkOperationResult]:
         """Perform bulk user status updates.
 
         Args:
             db: Database session
-            actor_sub: ID of user performing the action
+            actor: User performing the action
             operations: List of operations to perform
 
         Returns:
@@ -368,7 +359,7 @@ class UserService:
                     continue
 
                 # Use repository for status update (with automatic audit per user)
-                success = await self.repo.bulk_update_status(db, op.user_id, actor_sub, new_status.value)
+                success = await self.repo.bulk_update_status(db, op.user_id, actor, new_status.value)
 
                 if not success:
                     results.append(
@@ -396,6 +387,161 @@ class UserService:
 
         return results
 
+    async def _upsert_user_internal(
+        self,
+        db: AsyncSession,
+        sub: str,
+        email: str,
+        first_name: str,
+        last_name: str,
+        company_name: str | None,
+        retries_left: int = 1,
+    ) -> User:
+        """Internal method to upsert user with retry on IntegrityError.
+        There is the chance that multiple concurrent upserts could violate unique constraints
+        in this case raising IntegrityError is not appropriate, because in theory one of them
+        should succeed. Thus we retry once.
+        """
+        email = email.lower().strip()
+        # Check if user exists before upsert
+        check_query = text("SELECT id, sub, email FROM users WHERE email = :email OR sub = :sub")
+        results = await db.execute(check_query, {"email": email, "sub": sub})
+        rows = results.mappings().all()
+        if len(rows) > 1:
+            raise ValueError(f"Multiple users found with email {email} or sub {sub}")
+
+        row = rows[0] if rows else None
+        user_id = row["id"] if row else None
+        old_sub = row["sub"] if row else None
+        old_email = row["email"] if row else None
+        try:
+            now = datetime.now(tz=timezone.utc)
+
+            query = text("""
+                INSERT INTO users (id, sub, email, first_name, last_name, company_name,
+                                is_administrator, role, status, created_at, updated_at)
+                VALUES (:id, :sub, :email, :first_name, :last_name, :company_name,
+                        FALSE, 'member', 'active', :now, :now)
+                ON CONFLICT (id) DO UPDATE SET
+                    sub = EXCLUDED.sub,
+                    email = EXCLUDED.email,
+                    first_name = EXCLUDED.first_name,
+                    last_name = EXCLUDED.last_name,
+                    company_name = EXCLUDED.company_name,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING id, sub, email, first_name, last_name, company_name,
+                        is_administrator, role, status, deleted_at, created_at, updated_at
+            """)
+
+            result = await db.execute(
+                query,
+                {
+                    "id": user_id if user_id else str(uuid.uuid4()),
+                    "sub": sub,
+                    "email": email,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "company_name": company_name,
+                    "now": now,
+                },
+            )
+            row = result.mappings().first()
+
+            if row is None:
+                raise RuntimeError(f"upsert returned None for user {sub}")
+
+            # Create User object from the upserted data (for audit actor)
+            user = User(
+                id=row["id"],
+                sub=row["sub"],
+                email=row["email"],
+                first_name=row["first_name"],
+                last_name=row["last_name"],
+                company_name=row["company_name"],
+                is_administrator=row["is_administrator"],
+                role=row["role"],
+                status=UserStatus(row["status"]),
+                deleted_at=row["deleted_at"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+
+            # Audit creation or identifier/email changes (user is actor for self-service operations)
+            if user_id is None:
+                # New user creation
+                await self.audit_service.log_action(
+                    db=db,
+                    actor=user,  # User creates themselves via OIDC
+                    entity_type=AuditEntityType.USER,
+                    entity_id=row["id"],
+                    action=AuditAction.CREATE,
+                    changes={
+                        "after": {
+                            "email": email,
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "company_name": company_name,
+                        }
+                    },
+                )
+                logger.info(f"Created new user (audited): {sub}")
+            else:
+                if sub != old_sub:
+                    # Audit sub change if it differs from previous
+                    await self.audit_service.log_action(
+                        db=db,
+                        actor=user,
+                        entity_type=AuditEntityType.USER,
+                        entity_id=user_id,
+                        action=AuditAction.UPDATE,
+                        changes={
+                            "before": {
+                                "old_sub": old_sub,
+                            },
+                            "after": {
+                                "new_sub": sub,
+                            },
+                        },
+                    )
+                if email != old_email:
+                    # Audit email change if it differs from previous
+                    await self.audit_service.log_action(
+                        db=db,
+                        actor=user,
+                        entity_type=AuditEntityType.USER,
+                        entity_id=user_id,
+                        action=AuditAction.UPDATE,
+                        changes={
+                            "before": {
+                                "old_email": old_email,
+                            },
+                            "after": {
+                                "new_email": email,
+                            },
+                        },
+                    )
+
+            return user
+        except IntegrityError as e:
+            if retries_left > 0 and "users_sub_key" in str(e):
+                logger.warning(f"IntegrityError during upsert for user {sub}: {e}. Retrying once.")
+                await db.rollback()
+                await asyncio.sleep(1)
+                return await self._upsert_user_internal(
+                    db=db,
+                    sub=sub,
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    company_name=company_name,
+                    retries_left=retries_left - 1,
+                )
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"Failed to upsert user {sub}: {e}")
+            raise
+
     async def upsert_user(
         self,
         db: AsyncSession,
@@ -422,84 +568,25 @@ class UserService:
         Returns:
             The created or updated user
         """
-        now = datetime.now(tz=timezone.utc)
-
-        query = text("""
-            INSERT INTO users (id, sub, email, first_name, last_name, company_name,
-                               is_administrator, role, status, created_at, updated_at)
-            VALUES (:id, :sub, :email, :first_name, :last_name, :company_name,
-                    FALSE, 'member', 'active', :now, :now)
-            ON CONFLICT (id) DO UPDATE SET
-                sub = EXCLUDED.sub,
-                email = EXCLUDED.email,
-                first_name = EXCLUDED.first_name,
-                last_name = EXCLUDED.last_name,
-                company_name = EXCLUDED.company_name,
-                updated_at = EXCLUDED.updated_at
-            RETURNING id, sub, email, first_name, last_name, company_name,
-                      is_administrator, role, status, deleted_at, created_at, updated_at
-        """)
 
         try:
-            # Check if user exists before upsert
-            check_query = text("SELECT id FROM users WHERE id = :id")
-            check_result = await db.execute(check_query, {"id": sub})
-            user_exists = check_result.scalar_one_or_none() is not None
-
-            result = await db.execute(
-                query,
-                {
-                    "id": sub,
-                    "sub": sub,
-                    "email": email,
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "company_name": company_name,
-                    "now": now,
-                },
+            return await self._upsert_user_internal(
+                db=db,
+                sub=sub,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                company_name=company_name,
+                retries_left=1,
             )
-            row = result.mappings().first()
 
-            if row is None:
-                raise RuntimeError(f"upsert returned None for user {sub}")
-
-            # Audit only if this was a new user creation (not an update)
-            if not user_exists:
-                from ..models.audit import AuditAction, AuditEntityType
-
-                await self.audit_service.log_action(
-                    db=db,
-                    actor_sub=sub,  # User creates themselves via OIDC
-                    entity_type=AuditEntityType.USER,
-                    entity_id=sub,
-                    action=AuditAction.CREATE,
-                    changes={
-                        "after": {
-                            "email": email,
-                            "first_name": first_name,
-                            "last_name": last_name,
-                            "company_name": company_name,
-                        }
-                    },
-                )
-                logger.info(f"Created new user (audited): {sub}")
-            else:
-                logger.info(f"Updated existing user: {sub}")
-
-            return User(
-                id=row["id"],
-                sub=row["sub"],
-                email=row["email"],
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                company_name=row["company_name"],
-                is_administrator=row["is_administrator"],
-                role=row["role"],
-                status=UserStatus(row["status"]),
-                deleted_at=row["deleted_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
+        except IntegrityError as e:
+            # Handle unique email constraint violation
+            if "idx_users_email_unique" in str(e):
+                logger.error(f"Email already exists for a different user: {email}")
+                raise ValueError(f"Email {email} is already registered to a different account")
+            logger.error(f"Database integrity error during user upsert: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to upsert user: {e}")
             raise
@@ -508,7 +595,7 @@ class UserService:
         self,
         db: AsyncSession,
         user_id: str,
-        actor_sub: str,
+        actor: User,
         is_administrator: bool | None = None,
     ) -> User | None:
         """Update admin-controlled user fields.
@@ -528,7 +615,7 @@ class UserService:
 
         try:
             # Update via repository (with audit)
-            await self.repo.update_admin_fields(db, user_id, actor_sub, is_administrator)
+            await self.repo.update_admin_fields(db, user_id, actor, is_administrator)
             logger.info(f"Updated admin fields for user {user_id}")
             return await self.get_user(db, user_id)
         except ValueError:
@@ -542,7 +629,7 @@ class UserService:
         self,
         db: AsyncSession,
         user_id: str,
-        actor_sub: str,
+        actor: User,
         role: str,
     ) -> User | None:
         """Update a user's role.
@@ -550,7 +637,7 @@ class UserService:
         Args:
             db: Database session
             user_id: The user's ID
-            actor_sub: ID of user performing the action
+            actor: User performing the action
             role: New role (viewer, developer, approver, admin)
 
         Returns:
@@ -558,7 +645,7 @@ class UserService:
         """
         try:
             # Update via repository (with audit)
-            await self.repo.update_role(db, user_id, actor_sub, role)
+            await self.repo.update_role(db, user_id, actor, role)
             logger.info(f"Updated role for user {user_id} to {role}")
             return await self.get_user(db, user_id)
         except ValueError:

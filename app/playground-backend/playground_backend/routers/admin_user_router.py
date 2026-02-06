@@ -17,12 +17,14 @@ from ..models.user import (
     User,
     UserAdminUpdate,
     UserDetailResponse,
+    UserGroupRoleUpdate,
     UserGroupsUpdate,
     UserListResponse,
     UserRoleUpdate,
     UserStatusUpdate,
 )
 from ..services.audit_service import AuditService
+from ..services.user_group_service import UserGroupService
 from ..services.user_service import UserService
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,11 @@ def get_user_service(request: Request) -> UserService:
 def get_audit_service(request: Request) -> AuditService:
     """Get audit service from app state."""
     return request.app.state.audit_service
+
+
+def get_user_group_service(request: Request) -> UserGroupService:
+    """Get user group service from app state."""
+    return request.app.state.user_group_service
 
 
 @router.get("", response_model=UserListResponse)
@@ -119,7 +126,7 @@ async def update_user(
     updated_user = await user_service.update_user_admin_fields(
         db,
         user_id,
-        admin.sub,  # actor_sub for audit
+        actor=admin,
         is_administrator=update_request.is_administrator,
     )
 
@@ -153,9 +160,12 @@ async def update_user_groups(
     """Update a user's group memberships.
 
     Admin only endpoint.
+    Uses user_group_service to ensure Keycloak sync.
     """
     user_service = get_user_service(request)
-    # Get current user state for audit
+    user_group_service = get_user_group_service(request)
+
+    # Verify user exists
     current_user = await user_service.get_user_with_groups(db, user_id)
     if current_user is None:
         raise HTTPException(
@@ -163,24 +173,134 @@ async def update_user_groups(
             detail="User not found",
         )
 
-    # Update groups
-    updated_user = await user_service.update_user_groups(
-        db,
-        user_id,
-        admin.sub,  # actor_sub for audit
-        update_request.group_ids,
-        update_request.operation,
-    )
+    # Get current group IDs
+    current_group_ids = {g.group_id for g in current_user.groups}
+    target_group_ids = set(update_request.group_ids)
 
-    if updated_user is None:
+    try:
+        if update_request.operation == "set":
+            # Calculate groups to add and remove
+            groups_to_add = list(target_group_ids - current_group_ids)
+            groups_to_remove = list(current_group_ids - target_group_ids)
+
+            # Remove members from groups they should no longer be in
+            for group_id in groups_to_remove:
+                await user_group_service.remove_members(
+                    db=db,
+                    actor=admin,
+                    group_id=group_id,
+                    user_ids=[user_id],
+                )
+
+            # Add member to new groups
+            for group_id in groups_to_add:
+                await user_group_service.add_members(
+                    db=db,
+                    actor=admin,
+                    group_id=group_id,
+                    user_ids=[user_id],
+                    role=update_request.role,
+                )
+
+        elif update_request.operation == "add":
+            # Add to specified groups
+            groups_to_add = list(target_group_ids - current_group_ids)
+            for group_id in groups_to_add:
+                await user_group_service.add_members(
+                    db=db,
+                    actor=admin,
+                    group_id=group_id,
+                    user_ids=[user_id],
+                    role=update_request.role,
+                )
+
+        elif update_request.operation == "remove":
+            # Remove from specified groups
+            groups_to_remove = list(target_group_ids & current_group_ids)
+            for group_id in groups_to_remove:
+                await user_group_service.remove_members(
+                    db=db,
+                    actor=admin,
+                    group_id=group_id,
+                    user_ids=[user_id],
+                )
+
+        await db.commit()
+
+        # Return updated user with groups
+        updated_user = await user_service.get_user_with_groups(db, user_id)
+        if updated_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        return UserDetailResponse(data=updated_user)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
+
+
+@router.put("/{user_id}/groups/{group_id}/role", response_model=UserDetailResponse)
+async def update_user_group_role(
+    user_id: str,
+    group_id: int,
+    request: Request,
+    update_request: UserGroupRoleUpdate,
+    db: DbSession,
+    admin: User = Depends(require_admin),
+) -> UserDetailResponse:
+    """Update a user's role in a specific group.
+
+    Admin only endpoint.
+    """
+    user_service = get_user_service(request)
+    user_group_service = get_user_group_service(request)
+
+    # Verify user exists
+    user = await user_service.get_user(db, user_id)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
 
-    await db.commit()
+    # Update the member's role in the group
+    try:
+        member = await user_group_service.update_member_role(
+            db=db,
+            actor=admin,
+            group_id=group_id,
+            user_id=user_id,
+            role=update_request.role,
+        )
 
-    return UserDetailResponse(data=updated_user)
+        if member is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User is not a member of this group",
+            )
+
+        await db.commit()
+
+        # Return updated user with groups
+        user_with_groups = await user_service.get_user_with_groups(db, user_id)
+        if user_with_groups is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        return UserDetailResponse(data=user_with_groups)
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
 
 
 @router.put("/{user_id}/role", response_model=UserDetailResponse)
@@ -208,7 +328,7 @@ async def update_user_role(
     updated_user = await user_service.update_user_role(
         db,
         user_id,
-        admin.sub,
+        admin,
         update_request.role.value,  # actor_sub for audit
     )
 
@@ -256,8 +376,8 @@ async def update_user_status(
     updated_user = await user_service.update_user_status(
         db,
         user_id,
-        admin.sub,
-        update_request.status,  # actor_sub for audit
+        actor=admin,
+        status=update_request.status,  # actor_sub for audit
     )
 
     if updated_user is None:
@@ -293,8 +413,8 @@ async def bulk_update_users(
     user_service = get_user_service(request)
     results = await user_service.bulk_update_users(
         db,
-        admin.sub,
-        bulk_request.operations,  # actor_sub for audit
+        actor=admin,
+        operations=bulk_request.operations,
     )
     await db.commit()
 
@@ -335,7 +455,7 @@ async def start_impersonation(
     audit_service = get_audit_service(request)
     await audit_service.log_action(
         db=db,
-        actor_sub=admin.sub,
+        actor=admin,
         entity_type=AuditEntityType.SESSION,
         entity_id=impersonate_request.target_user_id,
         action=AuditAction.IMPERSONATION_START,
@@ -384,7 +504,7 @@ async def stop_impersonation(
     audit_service = get_audit_service(request)
     await audit_service.log_action(
         db=db,
-        actor_sub=actor_user.sub,
+        actor=actor_user,
         entity_type=AuditEntityType.SESSION,
         entity_id=actor_user.sub,
         action=AuditAction.IMPERSONATION_END,

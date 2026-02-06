@@ -5,10 +5,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AlertCircle, Sparkles } from 'lucide-react';
 import { useChat } from '../contexts';
 import { useSessionId } from '../hooks/useLocalStorage';
 import type { Settings } from '../types';
-import { MODEL_OPTIONS } from '@/config/models';
+import { MODEL_OPTIONS, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
 import { config } from '@/config';
 
 interface SettingsModalProps {
@@ -36,6 +39,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     AGENT_URL_OPTIONS.find((o) => o.value === settings?.agentUrl) ? '' : settings?.agentUrl || ''
   );
   const [model, setModel] = useState(settings?.model || 'gpt4o');
+  const [enableThinking, setEnableThinking] = useState(settings?.enableThinking || false);
+  const [thinkingLevel, setThinkingLevel] = useState(settings?.thinkingLevel || 'low');
   const [isSaving, setIsSaving] = useState(false);
 
   // Reset form when modal opens
@@ -50,8 +55,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         setCustomUrl(settings.agentUrl || '');
       }
       setModel(settings.model || 'gpt4o');
+      setEnableThinking(settings.enableThinking || false);
+      setThinkingLevel(settings.thinkingLevel || 'low');
     }
   }, [isOpen, settings]);
+
+  // Auto-reset thinking level when model changes if current level is not available
+  useEffect(() => {
+    const availableLevels = getAvailableThinkingLevels(model);
+    if (!availableLevels.find((opt) => opt.value === thinkingLevel)) {
+      setThinkingLevel(availableLevels[0]?.value || 'low');
+    }
+  }, [model, thinkingLevel]);
 
   const handleSave = async () => {
     const agentUrl = agentUrlSelect === 'custom' ? customUrl.trim() : agentUrlSelect;
@@ -71,7 +86,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     setIsSaving(true);
 
     try {
-      const newSettings: Settings = { agentUrl, model };
+      const newSettings: Settings = { 
+        agentUrl, 
+        model,
+        enableThinking,
+        thinkingLevel
+      };
       const success = await updateSettings(newSettings);
       if (success) {
         toast.success('Settings saved successfully');
@@ -141,6 +161,60 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </Select>
             <p className="text-xs text-muted-foreground">Select the LLM model for the orchestrator to use</p>
           </div>
+
+          {/* Extended Thinking Configuration */}
+          {modelSupportsThinking(model) && (
+            <div className="space-y-3 pt-2 border-t">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="enableThinking" className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4" />
+                    Extended Thinking
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    Enable extended thinking for complex reasoning
+                  </p>
+                </div>
+                <Switch
+                  id="enableThinking"
+                  checked={enableThinking}
+                  onCheckedChange={setEnableThinking}
+                />
+              </div>
+
+              {enableThinking && (
+                <>
+                  <div className="space-y-2">
+                    <Label htmlFor="thinkingLevel">Thinking Level</Label>
+                    <Select value={thinkingLevel} onValueChange={setThinkingLevel}>
+                      <SelectTrigger id="thinkingLevel">
+                        <SelectValue placeholder="Select thinking level" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {getAvailableThinkingLevels(model).map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            <div className="flex flex-col">
+                              <span>{option.label}</span>
+                              <span className="text-xs text-muted-foreground">{option.description}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {(thinkingLevel === 'medium' || thinkingLevel === 'high') && (
+                    <Alert>
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertDescription className="text-xs">
+                        Higher thinking levels increase response time and costs.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         <DialogFooter className="flex items-center justify-between sm:justify-between">

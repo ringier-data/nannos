@@ -17,7 +17,7 @@ from ..services.audit_service import AuditService
 from ..services.session_service import SessionService
 from ..services.user_group_service import UserGroupService
 from ..services.user_service import UserService
-from ..services.user_settings_service import UserSettingsService
+from ..services.user_settings_service import _UNSET, UserSettingsService
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ async def login(request: Request) -> RedirectResponse:
 
 
 @router.get("/login-callback")
-async def login_callback(request: Request, response: Response) -> RedirectResponse:
+async def login_callback(request: Request, response: Response, db: DbSession) -> RedirectResponse:
     """Handle OIDC login callback.
 
     Query Parameters:
@@ -89,7 +89,7 @@ async def login_callback(request: Request, response: Response) -> RedirectRespon
         Redirect to the originally requested page with session cookie set
     """
     auth_controller = get_auth_controller(request)
-    return await auth_controller.get_login_callback(request, response)
+    return await auth_controller.get_login_callback(request, response, db=db)
 
 
 @router.get("/logout")
@@ -182,7 +182,9 @@ async def update_current_user_settings(
     """Update the current authenticated user's settings.
 
     Args:
-        request: Fields to update (language, timezone, custom_prompt)
+        update_request: Fields to update (language, timezone, custom_prompt, etc.)
+                       Fields not provided will keep current values.
+                       Fields explicitly set to null will be cleared.
 
     Returns:
         Updated user settings.
@@ -190,14 +192,26 @@ async def update_current_user_settings(
     Raises:
         401 Unauthorized: If the user is not authenticated.
     """
+
     user_settings_service = get_user_settings_service(request)
+
+    # Use model_fields_set to detect which fields were explicitly provided
+    # If field is in model_fields_set, pass its value (including None)
+    # If field is not in model_fields_set, pass _UNSET to keep current value
     settings = await user_settings_service.upsert_settings(
         db,
         user.id,
-        language=update_request.language,
-        timezone_str=update_request.timezone,
-        custom_prompt=update_request.custom_prompt,
-        mcp_tools=update_request.mcp_tools,
+        language=update_request.language if "language" in update_request.model_fields_set else _UNSET,
+        timezone_str=update_request.timezone if "timezone" in update_request.model_fields_set else _UNSET,
+        custom_prompt=update_request.custom_prompt if "custom_prompt" in update_request.model_fields_set else _UNSET,
+        mcp_tools=update_request.mcp_tools if "mcp_tools" in update_request.model_fields_set else _UNSET,
+        preferred_model=update_request.preferred_model
+        if "preferred_model" in update_request.model_fields_set
+        else _UNSET,
+        enable_thinking=update_request.enable_thinking
+        if "enable_thinking" in update_request.model_fields_set
+        else _UNSET,
+        thinking_level=update_request.thinking_level if "thinking_level" in update_request.model_fields_set else _UNSET,
     )
     await db.commit()
     return UserSettingsResponse(data=settings)
@@ -248,7 +262,7 @@ async def toggle_admin_mode(
     # Log the admin mode toggle for audit
     await audit_service.log_action(
         db=db,
-        actor_sub=user.sub,
+        actor=user,
         entity_type=AuditEntityType.SESSION,
         entity_id=user.sub,
         action=AuditAction.ADMIN_MODE_ACTIVATED,
@@ -259,3 +273,142 @@ async def toggle_admin_mode(
     logger.info(f"Admin mode {'enabled' if toggle_request.enabled else 'disabled'} by {user.email}")
 
     return AdminModeToggleResponse(success=True, enabled=toggle_request.enabled)
+
+
+class ImpersonateStartRequest(BaseModel):
+    """Request model for starting user impersonation."""
+
+    target_user_id: str
+
+
+class ImpersonateResponse(BaseModel):
+    """Response model for impersonation endpoints."""
+
+    success: bool
+    message: str
+
+
+@router.post("/impersonate/start", response_model=ImpersonateResponse)
+async def start_impersonation(
+    impersonate_request: ImpersonateStartRequest,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> ImpersonateResponse:
+    """Start impersonating another user (admin only).
+
+    This endpoint allows administrators to impersonate other users for support and troubleshooting.
+    Requires admin mode to be enabled and logs the impersonation start for audit purposes.
+
+    Args:
+        impersonate_request: Request containing the target user ID to impersonate
+
+    Returns:
+        Success response with impersonation details.
+
+    Raises:
+        401 Unauthorized: If the user is not authenticated.
+        403 Forbidden: If the user is not an administrator or admin mode is not enabled.
+        404 Not Found: If the target user does not exist.
+    """
+    from ..dependencies import get_admin_mode
+
+    # Require admin with admin mode enabled
+    admin_mode = get_admin_mode(request)
+    if not user.is_administrator or not admin_mode:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin mode must be enabled to impersonate users",
+        )
+
+    # Validate target user exists
+    user_service = get_user_service(request)
+    target_user = await user_service.get_user(db, impersonate_request.target_user_id)
+    if not target_user:
+        raise HTTPException(
+            status_code=404,
+            detail=f"User {impersonate_request.target_user_id} not found",
+        )
+
+    # Log the impersonation start
+    audit_service = get_audit_service(request)
+    await audit_service.log_action(
+        db=db,
+        actor=user,
+        entity_type=AuditEntityType.SESSION,
+        entity_id=impersonate_request.target_user_id,
+        action=AuditAction.IMPERSONATION_START,
+        changes={
+            "admin_user_id": user.id,
+            "admin_email": user.email,
+            "target_user_id": target_user.id,
+            "target_email": target_user.email,
+        },
+    )
+    await db.commit()
+
+    logger.info(
+        f"Impersonation started: {user.email} (admin) -> {target_user.email} (target_user_id: {target_user.id})"
+    )
+
+    return ImpersonateResponse(
+        success=True,
+        message=f"Successfully started impersonating {target_user.email}",
+    )
+
+
+@router.post("/impersonate/stop", response_model=ImpersonateResponse)
+async def stop_impersonation(
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+) -> ImpersonateResponse:
+    """Stop impersonating a user (admin only).
+
+    This endpoint stops the current impersonation session and logs the event for audit purposes.
+    The user parameter will be the original admin user if called from impersonation context,
+    or the admin themselves if impersonation already ended.
+
+    Args:
+        request: FastAPI request
+
+    Returns:
+        Success response.
+
+    Raises:
+        401 Unauthorized: If the user is not authenticated.
+        403 Forbidden: If the user is not an administrator.
+    """
+    if not user.is_administrator:
+        raise HTTPException(
+            status_code=403,
+            detail="Only administrators can stop impersonation",
+        )
+
+    # Check if there's an original user in request state (means impersonation is active)
+    original_user = getattr(request.state, "original_user", None)
+
+    # Determine who to log as (original admin if impersonating, current user otherwise)
+    actor_user = original_user if original_user else user
+
+    # Log the impersonation stop
+    audit_service = get_audit_service(request)
+    await audit_service.log_action(
+        db=db,
+        actor=actor_user,
+        entity_type=AuditEntityType.SESSION,
+        entity_id=actor_user.sub,
+        action=AuditAction.IMPERSONATION_END,
+        changes={
+            "admin_user_id": actor_user.id,
+            "admin_email": actor_user.email,
+        },
+    )
+    await db.commit()
+
+    logger.info(f"Impersonation stopped by {actor_user.email}")
+
+    return ImpersonateResponse(
+        success=True,
+        message="Successfully stopped impersonation",
+    )

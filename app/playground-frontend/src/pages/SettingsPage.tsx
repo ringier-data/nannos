@@ -6,6 +6,7 @@ import {
   getCurrentUserSettingsApiV1AuthMeSettingsGetOptions,
   updateCurrentUserSettingsApiV1AuthMeSettingsPatchMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
+import type { OrchestratorThinkingLevel } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
@@ -22,6 +23,8 @@ import { SubAgentActivationList } from '@/components/settings/SubAgentActivation
 import { UserPermissionsTable } from '@/components/settings/UserPermissionsTable';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
 import { SecretsVaultList } from '@/components/settings/SecretsVaultList';
+import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
+import { MODEL_OPTIONS, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
 
 const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
@@ -52,6 +55,9 @@ export function SettingsPage() {
   const [timezone, setTimezone] = useState<string>('Europe/Zurich');
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [mcpTools, setMcpTools] = useState<string[]>([]);
+  const [preferredModel, setPreferredModel] = useState<string | null>(null);
+  const [enableThinking, setEnableThinking] = useState<boolean>(false);
+  const [thinkingLevel, setThinkingLevel] = useState<OrchestratorThinkingLevel | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
   const { data: settingsData, isLoading } = useQuery({
@@ -67,6 +73,9 @@ export function SettingsPage() {
       setTimezone(settings.timezone ?? 'Europe/Zurich');
       setCustomPrompt(settings.custom_prompt ?? '');
       setMcpTools(settings.mcp_tools ?? []);
+      setPreferredModel(settings.preferred_model ?? null);
+      setEnableThinking(settings.enable_thinking ?? false);
+      setThinkingLevel(settings.enable_thinking ? (settings.thinking_level ?? 'low') : null);
       setHasChanges(false);
     }
   }, [settings]);
@@ -103,6 +112,40 @@ export function SettingsPage() {
     setHasChanges(true);
   };
 
+  const handlePreferredModelChange = (value: string | null) => {
+    setPreferredModel(value);
+    // Auto-reset thinking if new model doesn't support it
+    if (value && !modelSupportsThinking(value)) {
+      setEnableThinking(false);
+      setThinkingLevel(null);
+    }
+    // Auto-reset thinking level if not available for new model
+    if (value && enableThinking) {
+      const availableLevels = getAvailableThinkingLevels(value);
+      if (!availableLevels.find(opt => opt.value === thinkingLevel)) {
+        setThinkingLevel(availableLevels[0]?.value || 'low');
+      }
+    }
+    setHasChanges(true);
+  };
+
+  const handleEnableThinkingChange = (checked: boolean) => {
+    setEnableThinking(checked);
+    // Reset thinking level when disabling thinking
+    if (!checked) {
+      setThinkingLevel(null);
+    } else if (thinkingLevel === null) {
+      // Set default when enabling
+      setThinkingLevel('low');
+    }
+    setHasChanges(true);
+  };
+
+  const handleThinkingLevelChange = (value: string) => {
+    setThinkingLevel(value as OrchestratorThinkingLevel);
+    setHasChanges(true);
+  };
+
   // Get all available IANA timezones
   const TIMEZONE_OPTIONS = useMemo(() => {
     try {
@@ -132,6 +175,9 @@ export function SettingsPage() {
         timezone,
         custom_prompt: customPrompt || null,
         mcp_tools: mcpTools,
+        preferred_model: preferredModel,
+        enable_thinking: enableThinking,
+        thinking_level: thinkingLevel,
       },
     });
   };
@@ -186,6 +232,41 @@ export function SettingsPage() {
       {/* Tab Content */}
       {activeTab === 'preferences' && (
         <div className="space-y-6">
+          <div className="space-y-4 pb-4 border-b">
+            <h3 className="text-lg font-semibold">Model Preferences</h3>
+            
+            <div className="space-y-2">
+              <Label htmlFor="preferred-model">Preferred Model</Label>
+              <Select value={preferredModel || 'default'} onValueChange={(val) => handlePreferredModelChange(val === 'default' ? null : val)}>
+                <SelectTrigger id="preferred-model" className="w-full max-w-xs">
+                  <SelectValue placeholder="Use default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">Use default (determined by agent)</SelectItem>
+                  {MODEL_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-sm text-muted-foreground">
+                Set your preferred LLM model for the orchestrator. Leave as default to use agent-specific configuration.
+              </p>
+            </div>
+
+            <ExtendedThinkingConfig
+              model={preferredModel}
+              enableThinking={enableThinking}
+              thinkingLevel={thinkingLevel}
+              onEnableThinkingChange={handleEnableThinkingChange}
+              onThinkingLevelChange={handleThinkingLevelChange}
+            />
+          </div>
+
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold">General Preferences</h3>
+          
           <div className="space-y-2">
             <Label htmlFor="language">Language</Label>
             <Select value={language} onValueChange={handleLanguageChange}>
@@ -240,6 +321,7 @@ export function SettingsPage() {
             <p className="text-sm text-muted-foreground">
               Add a custom prompt that will be prepended to your conversations with AI agents.
             </p>
+          </div>
           </div>
 
           <div className="flex justify-end">

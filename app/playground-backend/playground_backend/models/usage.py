@@ -135,7 +135,6 @@ class UsageLog(BaseModel):
 class UsageLogCreate(BaseModel):
     """Create a new usage log."""
 
-    user_id: str
     conversation_id: str | None = None
     sub_agent_id: int | None = None
     sub_agent_config_version_id: int | None = None

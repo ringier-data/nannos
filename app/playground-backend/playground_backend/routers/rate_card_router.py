@@ -129,7 +129,7 @@ async def create_rate_card_entry(
     try:
         entry_id = await rate_card_service.repository.create_entry(
             db=db,
-            actor_sub=current_user.sub,
+            actor=current_user,
             provider=entry_data.provider,
             model_name=entry_data.model_name,
             billing_unit=entry_data.billing_unit,
@@ -171,7 +171,7 @@ async def create_model_rate_card(
     try:
         entry_ids = await rate_card_service.create_model_rate_card(
             db=db,
-            actor_sub=current_user.sub,
+            actor=current_user,
             provider=model_data.provider,
             model_name=model_data.model_name,
             pricing=model_data.pricing,
@@ -222,7 +222,7 @@ async def copy_model_rates(
     try:
         entry_ids = await rate_card_service.copy_model_rates(
             db=db,
-            actor_sub=current_user.sub,
+            actor=current_user,
             source_provider=source_provider,
             source_model=source_model,
             target_provider=target_provider,
@@ -275,7 +275,7 @@ async def expire_rate_card_entry(
     try:
         await rate_card_service.repository.expire_rate(
             db=db,
-            actor_sub=current_user.sub,
+            actor=current_user,
             rate_id=rate_id,
             effective_until=effective_until,
         )

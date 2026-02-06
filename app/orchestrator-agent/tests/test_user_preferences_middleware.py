@@ -54,6 +54,7 @@ class TestUserPreferencesMiddleware:
         """Create a user context with English language."""
         return GraphRuntimeContext(
             user_id="user123",
+            user_sub="sub123",
             name="Test User",
             email="test@example.com",
             language="en",
@@ -64,6 +65,7 @@ class TestUserPreferencesMiddleware:
         """Create a user context with German language."""
         return GraphRuntimeContext(
             user_id="user456",
+            user_sub="sub456",
             name="Test User DE",
             email="test.de@example.com",
             language="de",
@@ -74,6 +76,7 @@ class TestUserPreferencesMiddleware:
         """Create a user context with no language (empty string)."""
         return GraphRuntimeContext(
             user_id="user789",
+            user_sub="sub789",
             name="Test User Empty",
             email="test.empty@example.com",
             language="",
@@ -109,6 +112,7 @@ class TestUserPreferencesMiddleware:
         """Should include custom_prompt in addendum when set."""
         user_context = GraphRuntimeContext(
             user_id="user123",
+            user_sub="sub123",
             name="Test User",
             email="test@example.com",
             language="en",
@@ -131,6 +135,7 @@ class TestUserPreferencesMiddleware:
         """Should not include custom_prompt section when set to empty string."""
         user_context = GraphRuntimeContext(
             user_id="user123",
+            user_sub="sub123",
             name="Test User",
             email="test@example.com",
             language="en",

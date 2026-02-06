@@ -8,6 +8,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from playground_backend.models.user import UserStatus
+
 # Ensure code chooses auto credentials path during imports (avoid boto3 local credentials)
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
@@ -33,7 +35,7 @@ def mock_conversations():
             user_id="0490f8d6-67ee-439b-8178-6ed66a72b0c9",
             started_at=datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc),
             last_message_at=datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc),
-            status="active",
+            status=UserStatus.ACTIVE,
             message_count=5,
             metadata={"k": "v"},
             title="Test Conversation 1",

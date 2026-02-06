@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.user import User
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ class RateCardRepository(AuditedRepository):
     async def create_entry(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         provider: str,
         model_name: str,
         billing_unit: str,
@@ -93,7 +94,7 @@ class RateCardRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: User creating the entry
+            actor: User creating the entry
             provider: Provider name (e.g., 'bedrock', 'openai')
             model_name: Model name (e.g., 'claude-sonnet-4.5')
             billing_unit: Billing unit (e.g., 'input_tokens', 'requests')
@@ -134,7 +135,7 @@ class RateCardRepository(AuditedRepository):
         # Log audit
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             action=AuditAction.CREATE,
             entity_type=AuditEntityType.RATE_CARD,
             entity_id=str(rate_card_id),
@@ -158,7 +159,7 @@ class RateCardRepository(AuditedRepository):
     async def create_model_rate_card(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         provider: str,
         model_name: str,
         model_name_pattern: str | None,
@@ -170,7 +171,7 @@ class RateCardRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: User creating the entries
+            actor: User creating the entries
             provider: Provider name
             model_name: Model name
             model_name_pattern: Optional regex pattern for matching model variants
@@ -197,7 +198,7 @@ class RateCardRepository(AuditedRepository):
 
             entry_id = await self.create_entry(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 provider=provider,
                 model_name=model_name,
                 billing_unit=billing_unit,
@@ -210,7 +211,7 @@ class RateCardRepository(AuditedRepository):
 
         logger.info(
             f"Created {len(entry_ids)} rate card entries for {provider}/{model_name} "
-            f"effective from {effective_from} by {actor_sub}"
+            f"effective from {effective_from} by {actor.sub}"
         )
 
         return entry_ids
@@ -436,7 +437,7 @@ class RateCardRepository(AuditedRepository):
     async def expire_rate(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         rate_id: int,
         effective_until: datetime,
     ) -> None:
@@ -477,7 +478,7 @@ class RateCardRepository(AuditedRepository):
         # Log audit
         await self.audit_service.log_action(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             action=AuditAction.UPDATE,
             entity_type=AuditEntityType.RATE_CARD,
             entity_id=str(entry_before["rate_card_id"]),
@@ -498,7 +499,7 @@ class RateCardRepository(AuditedRepository):
     async def copy_model_rates(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         source_provider: str,
         source_model: str,
         target_provider: str,
@@ -511,11 +512,12 @@ class RateCardRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: User performing the copy
+            actor: User performing the copy
             source_provider: Source provider name
             source_model: Source model name
             target_provider: Target provider name
             target_model: Target model name
+            target_model_pattern: Target model name pattern
             effective_from: When the new rates become effective
 
         Returns:
@@ -530,7 +532,7 @@ class RateCardRepository(AuditedRepository):
         # Create entries for target
         return await self.create_model_rate_card(
             db=db,
-            actor_sub=actor_sub,
+            actor=actor,
             provider=target_provider,
             model_name=target_model,
             model_name_pattern=target_model_pattern,

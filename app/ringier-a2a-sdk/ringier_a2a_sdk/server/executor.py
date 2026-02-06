@@ -83,10 +83,10 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
-        # ZERO-TRUST: Extract verified user_id from call_context (set by AuthRequestContextBuilder)
+        # ZERO-TRUST: Extract verified user_sub from call_context (set by AuthRequestContextBuilder)
         if context.call_context and hasattr(context.call_context, "state"):
             try:
-                user_id = context.call_context.state["user_id"]
+                user_sub = context.call_context.state["user_sub"]
                 user_name = context.call_context.state["user_name"]
                 user_email = context.call_context.state["user_email"]
                 # user_token is optional - not available in orchestrator JWT auth flow
@@ -100,13 +100,13 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             logger.error("[ZERO-TRUST] No user context found in call_context - authentication may have failed")
             raise ServerError(error=InvalidParamsError())
 
-        logger.info(f"[ZERO-TRUST] Executing with verified user_id: {user_id}, sub_agent_id: {sub_agent_id}")
+        logger.info(f"[ZERO-TRUST] Executing with verified user_sub: {user_sub}, sub_agent_id: {sub_agent_id}")
 
         try:
             # Create config for agent execution
             # Note: access_token is None for orchestrator JWT auth (agent uses orchestrator's JWT)
             user_config = UserConfig(
-                user_id=user_id,
+                user_sub=user_sub,
                 access_token=user_token,  # May be None in JWT auth flow
                 name=user_name,
                 email=user_email,

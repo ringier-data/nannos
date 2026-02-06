@@ -89,7 +89,7 @@ class FoundryLocalAgentRunnable(CostTrackingMixin, LocalA2ARunnable):
                 scopes=["api:use-ontologies-write"],
                 version=None,
             ),
-            user={"sub": "123", "email": "user@example.com"}
+            user={"id": "123", "email": "user@example.com"}
         )
         ```
     """
@@ -354,7 +354,7 @@ class FoundryLocalAgentRunnable(CostTrackingMixin, LocalA2ARunnable):
         # sub_agent_id is automatically used from CostLogger instance attribute
         logger.debug(f"Reporting Foundry agent usage: {billing_unit_breakdown}")
         await self.report_llm_usage(
-            user_id=self.user.get("sub", "unknown"),
+            user_sub=self.user.get("sub", "unknown"),
             billing_unit_breakdown=billing_unit_breakdown,
             provider="foundry",
             model_name=self.config.query_api_name,
@@ -427,7 +427,7 @@ def create_foundry_local_subagent(
 
     Args:
         config: LocalFoundrySubAgentConfig with name, description, and Foundry settings
-        user: User context dict with user_id, email, name
+        user: User context dict with user_sub, email, name
         backend_url: Backend URL for cost tracking (optional)
         sub_agent_id: Sub-agent ID for cost attribution (optional)
 

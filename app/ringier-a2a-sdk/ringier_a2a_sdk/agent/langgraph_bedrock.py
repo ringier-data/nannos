@@ -364,7 +364,7 @@ class LangGraphBedrockAgent(BaseAgent):
                 )
                 return
 
-            logger.info(f"Processing query for user {user_config.user_id}")
+            logger.info(f"Processing query for user {user_config.user_sub}")
 
             # Execute graph with thread isolation
             # CRITICAL: Use UNIQUE thread_id to isolate sub-agent checkpoints from orchestrator.
@@ -384,7 +384,7 @@ class LangGraphBedrockAgent(BaseAgent):
             # interpreting checkpoint_ns as a subgraph identifier (see LangGraph pregel/main.py:1244)
             checkpoint_ns = self._get_checkpoint_namespace()
             config = self.create_runnable_config(
-                user_id=user_config.user_id,
+                user_sub=user_config.user_sub,
                 conversation_id=task.context_id,
                 thread_id=f"{task.context_id}::{checkpoint_ns}",  # Unique thread_id for isolation
                 checkpoint_ns=checkpoint_ns,

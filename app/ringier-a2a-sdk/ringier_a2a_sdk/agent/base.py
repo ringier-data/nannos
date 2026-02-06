@@ -13,15 +13,15 @@ logger = logging.getLogger(__name__)
 
 # Context variables for request-scoped credentials (used by cost tracking)
 try:
-    from ..cost_tracking.logger import set_request_access_token, set_request_user_id
+    from ..cost_tracking.logger import set_request_access_token, set_request_user_sub
 
     _has_cost_tracking = True
     _set_request_access_token = set_request_access_token
-    _set_request_user_id = set_request_user_id
+    _set_request_user_sub = set_request_user_sub
 except ImportError:
     _has_cost_tracking = False
     _set_request_access_token = None  # type: ignore
-    _set_request_user_id = None  # type: ignore
+    _set_request_user_sub = None  # type: ignore
     logger.debug("Cost tracking not available")
 
 
@@ -66,12 +66,12 @@ class BaseAgent(CostTrackingMixin, ABC):
         In case the agent want to report additional usage, it can override this method.
 
         Args:
-            user_config: User configuration including user_id
+            user_config: User configuration including user_sub
             task: The task context for the current interaction
         """
         if self._cost_tracking_enabled:
             await self.report_llm_usage(
-                user_id=user_config.user_id,
+                user_sub=user_config.user_sub,
                 billing_unit_breakdown={
                     "requests": 1,
                 },
@@ -92,7 +92,7 @@ class BaseAgent(CostTrackingMixin, ABC):
 
         Args:
             query: The user's natural language query
-            user_config: User configuration including user_id and access_token
+            user_config: User configuration including user_sub and access_token
             task: The task context for the current interaction
 
         Yields:
@@ -106,13 +106,12 @@ class BaseAgent(CostTrackingMixin, ABC):
         self._update_sub_agent_id_from_config(user_config)
 
         # Set request-scoped credentials for cost tracking and tool interceptors
-        if _has_cost_tracking and _set_request_user_id and _set_request_access_token:
-            _set_request_user_id(user_config.user_id)
+        if _has_cost_tracking and _set_request_user_sub and _set_request_access_token:
+            _set_request_user_sub(user_config.user_sub)
             if user_config.access_token:
                 access_token = user_config.access_token.get_secret_value()
                 _set_request_access_token(access_token)
-            logger.debug(f"Set request credentials for user {user_config.user_id}")
-
+            logger.debug(f"Set request credentials for user {user_config.user_sub}")
         # Delegate to agent-specific implementation
         # Note: sub_agent_id is available via current_sub_agent_id ContextVar for adding to LangGraph tags
         async for response in self._stream_impl(query, user_config, task):
@@ -128,7 +127,7 @@ class BaseAgent(CostTrackingMixin, ABC):
 
         Args:
             query: The user's natural language query
-            user_config: User configuration including user_id and access_token
+            user_config: User configuration including user_sub and access_token
             task: The task context for the current interaction
 
         Yields:

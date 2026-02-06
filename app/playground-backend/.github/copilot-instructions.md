@@ -70,7 +70,7 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 2. **Service layer integration**:
    - Services should use repositories for all data mutations
-   - Pass the `actor_sub` (user ID) to repository methods
+   - Pass the `actor: User` (user object containing the subject identifier) to repository methods
    - Repositories handle audit logging automatically
 
 3. **Audit logging is automatic** when using repositories:
@@ -103,10 +103,10 @@ class MyEntityService:
     def __init__(self):
         self.repo = MyEntityRepository()
     
-    async def create_entity(self, db: AsyncSession, user_id: str, data: dict):
+    async def create_entity(self, db: AsyncSession, actor: User, data: dict):
         entity_id = await self.repo.create(
             db=db,
-            actor_sub=user_id,
+            actor=actor,
             data=data
         )
         return entity_id

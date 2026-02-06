@@ -4,9 +4,9 @@ from ringier_a2a_sdk.cost_tracking.logger import (
     CostLogger,
     get_request_access_token,
     get_request_credentials,
-    get_request_user_id,
+    get_request_user_sub,
     set_request_access_token,
-    set_request_user_id,
+    set_request_user_sub,
 )
 
 from .models import AgentStreamResponse, BaseAgentStreamResponse, UserConfig
@@ -30,8 +30,8 @@ __all__ = [
     "CostLogger",
     "CostTrackingCallback",
     "set_request_access_token",
-    "set_request_user_id",
+    "set_request_user_sub",
     "get_request_access_token",
-    "get_request_user_id",
+    "get_request_user_sub",
     "get_request_credentials",
 ]

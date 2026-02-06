@@ -329,6 +329,22 @@ export type HttpValidationError = {
 };
 
 /**
+ * ImpersonateResponse
+ *
+ * Response model for impersonation endpoints.
+ */
+export type ImpersonateResponse = {
+    /**
+     * Success
+     */
+    success: boolean;
+    /**
+     * Message
+     */
+    message: string;
+};
+
+/**
  * ImpersonateStartRequest
  *
  * Request model for starting user impersonation.
@@ -429,6 +445,13 @@ export type NotificationListResponse = {
  * Notification type enum matching database enum.
  */
 export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_permission_changed' | 'group_added' | 'group_removed' | 'role_updated' | 'approval_requested' | 'approval_completed' | 'approval_rejected' | 'agent_shared' | 'agent_access_revoked' | 'secret_shared' | 'secret_access_revoked' | 'secret_permission_changed' | 'system_announcement';
+
+/**
+ * OrchestratorThinkingLevel
+ *
+ * Thinking depth level for extended thinking mode.
+ */
+export type OrchestratorThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
 
 /**
  * OwnerStatus
@@ -931,6 +954,11 @@ export type SubAgentConfigVersion = {
         [key: string]: unknown;
     } | null;
     /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean;
+    thinking_level?: ThinkingLevel | null;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -1032,6 +1060,11 @@ export type SubAgentCreate = {
     pricing_config?: {
         [key: string]: unknown;
     } | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: ThinkingLevel | null;
 };
 
 /**
@@ -1258,6 +1291,11 @@ export type SubAgentUpdate = {
         [key: string]: unknown;
     } | null;
     /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: ThinkingLevel | null;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -1278,6 +1316,13 @@ export type SubAgentVersionApproval = {
      */
     rejection_reason?: string | null;
 };
+
+/**
+ * ThinkingLevel
+ *
+ * Thinking depth level for extended thinking mode.
+ */
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
 
 /**
  * UnreadCountResponse
@@ -1435,10 +1480,6 @@ export type UsageLogBatchCreate = {
  * Create a new usage log.
  */
 export type UsageLogCreate = {
-    /**
-     * User Id
-     */
-    user_id: string;
     /**
      * Conversation Id
      */
@@ -1622,6 +1663,15 @@ export type UserGroupMembership = {
 };
 
 /**
+ * UserGroupRoleUpdate
+ *
+ * Request to update user's role in a group.
+ */
+export type UserGroupRoleUpdate = {
+    role: RoleEnum;
+};
+
+/**
  * UserGroupUpdate
  *
  * Request to update a user group.
@@ -1692,6 +1742,7 @@ export type UserGroupsUpdate = {
      */
     group_ids: Array<number>;
     operation: OperationEnum;
+    role?: RoleEnum;
 };
 
 /**
@@ -1793,6 +1844,15 @@ export type UserSettings = {
      */
     mcp_tools?: Array<string>;
     /**
+     * Preferred Model
+     */
+    preferred_model?: string | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean;
+    thinking_level?: OrchestratorThinkingLevel | null;
+    /**
      * Created At
      */
     created_at?: string;
@@ -1815,6 +1875,10 @@ export type UserSettingsResponse = {
  * UserSettingsUpdate
  *
  * Request to update user settings (partial update).
+ *
+ * Uses model_fields_set to distinguish:
+ * - Field not provided in request (not in model_fields_set, keeps current value)
+ * - Field explicitly set to None (in model_fields_set, clears the value)
  */
 export type UserSettingsUpdate = {
     /**
@@ -1833,6 +1897,15 @@ export type UserSettingsUpdate = {
      * Mcp Tools
      */
     mcp_tools?: Array<string> | null;
+    /**
+     * Preferred Model
+     */
+    preferred_model?: string | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: OrchestratorThinkingLevel | null;
 };
 
 /**
@@ -2086,6 +2159,47 @@ export type ToggleAdminModeApiV1AuthAdminModePostResponses = {
 };
 
 export type ToggleAdminModeApiV1AuthAdminModePostResponse = ToggleAdminModeApiV1AuthAdminModePostResponses[keyof ToggleAdminModeApiV1AuthAdminModePostResponses];
+
+export type StartImpersonationApiV1AuthImpersonateStartPostData = {
+    body: ImpersonateStartRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/impersonate/start';
+};
+
+export type StartImpersonationApiV1AuthImpersonateStartPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type StartImpersonationApiV1AuthImpersonateStartPostError = StartImpersonationApiV1AuthImpersonateStartPostErrors[keyof StartImpersonationApiV1AuthImpersonateStartPostErrors];
+
+export type StartImpersonationApiV1AuthImpersonateStartPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: ImpersonateResponse;
+};
+
+export type StartImpersonationApiV1AuthImpersonateStartPostResponse = StartImpersonationApiV1AuthImpersonateStartPostResponses[keyof StartImpersonationApiV1AuthImpersonateStartPostResponses];
+
+export type StopImpersonationApiV1AuthImpersonateStopPostData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/impersonate/stop';
+};
+
+export type StopImpersonationApiV1AuthImpersonateStopPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: ImpersonateResponse;
+};
+
+export type StopImpersonationApiV1AuthImpersonateStopPostResponse = StopImpersonationApiV1AuthImpersonateStopPostResponses[keyof StopImpersonationApiV1AuthImpersonateStopPostResponses];
 
 export type GetConversationsByUserApiV1ConversationsGetData = {
     body?: never;
@@ -3164,6 +3278,40 @@ export type UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses = {
 };
 
 export type UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponse = UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses[keyof UpdateUserGroupsApiV1AdminUsersUserIdGroupsPutResponses];
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutData = {
+    body: UserGroupRoleUpdate;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/users/{user_id}/groups/{group_id}/role';
+};
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutError = UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutErrors[keyof UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutErrors];
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponses = {
+    /**
+     * Successful Response
+     */
+    200: UserDetailResponse;
+};
+
+export type UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponse = UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponses[keyof UpdateUserGroupRoleApiV1AdminUsersUserIdGroupsGroupIdRolePutResponses];
 
 export type UpdateUserRoleApiV1AdminUsersUserIdRolePutData = {
     body: UserRoleUpdate;

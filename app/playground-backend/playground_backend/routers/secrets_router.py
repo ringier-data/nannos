@@ -53,8 +53,8 @@ async def create_secret(
     try:
         secret = await secrets_service.create_secret(
             db=db,
-            user_id=current_user.id,
             data=secret_data,
+            actor=current_user,
         )
         return secret
     except Exception as e:
@@ -202,7 +202,7 @@ async def delete_secret(
         await secrets_service.delete_secret(
             db=db,
             secret_id=secret_id,
-            user_id=current_user.id,
+            actor=current_user,
             is_admin=current_user.is_administrator,
             admin_mode=False,
         )
@@ -293,7 +293,7 @@ async def update_secret_permissions(
         ]
 
         success = await secrets_service.update_permissions(
-            db, secret_id, group_permissions, current_user.id, is_admin=current_user.is_administrator
+            db, secret_id, group_permissions, actor=current_user, is_admin=current_user.is_administrator
         )
         if not success:
             raise HTTPException(

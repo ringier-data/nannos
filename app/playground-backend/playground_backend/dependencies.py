@@ -3,11 +3,14 @@
 import logging
 
 from fastapi import HTTPException, Request, status
+from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
 from .config import config
+from .db.session import DbSession
 from .models.user import User, UserRole, UserStatus
+from .services.user_service import UserService
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,11 @@ def get_impersonated_user_id(request: Request) -> str | None:
     return request.headers.get(IMPERSONATE_USER_HEADER) or None
 
 
+def get_user_service(request: Request) -> UserService:
+    """Get UserService instance from FastAPI app state."""
+    return request.app.state.user_service
+
+
 def require_auth(request: Request) -> User:
     """Dependency to require authentication.
 
@@ -53,7 +61,7 @@ def require_auth(request: Request) -> User:
     return request.state.user
 
 
-async def require_auth_or_bearer_token(request: Request) -> User:
+async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
     """Dependency to require authentication via session OR Bearer JWT token.
 
     First checks for session-based user authentication (request.state.user).
@@ -86,10 +94,6 @@ async def require_auth_or_bearer_token(request: Request) -> User:
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1]
-
-        # Import JWT validation
-        from ringier_a2a_sdk.auth import JWTValidationError, JWTValidator
-
         try:
             # Validate the user's access token against OIDC provider
             validator = JWTValidator(
@@ -101,9 +105,9 @@ async def require_auth_or_bearer_token(request: Request) -> User:
             )
 
             payload = await validator.validate(token)
-            user_id = payload.get("sub")
+            sub = payload.get("sub")
 
-            if not user_id:
+            if not sub:
                 logger.warning("Token missing 'sub' claim")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -112,22 +116,22 @@ async def require_auth_or_bearer_token(request: Request) -> User:
                 )
 
             # Look up user in database using service from app state
-            user_service = request.app.state.user_service
-            from .db import get_async_session_factory
+            user_service = get_user_service(request)
 
-            async_session_factory = get_async_session_factory()
-            async with async_session_factory() as db:
-                user = await user_service.get_user(db, user_id)
-
+            user = await user_service.get_user_by_sub(db, sub)
             if not user:
-                logger.warning(f"User not found for sub={user_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="User not found",
-                    headers={"WWW-Authenticate": "Bearer"},
+                # since we trust the token is valid, we can auto-onboard the user based on the token claims
+                logger.info(f"User not found for sub={sub}, auto-onboarding")
+                user = await user_service.upsert_user(
+                    db,
+                    sub=sub,
+                    email=payload.get("email", ""),
+                    first_name=payload.get("given_name", ""),
+                    last_name=payload.get("family_name", ""),
+                    company_name=payload.get("company_name"),
                 )
 
-            logger.info(f"Bearer token validated for user: {user.email} (sub={user_id})")
+            logger.info(f"Bearer token validated for user: {user.email} (sub={sub})")
             return user
 
         except JWTValidationError as e:

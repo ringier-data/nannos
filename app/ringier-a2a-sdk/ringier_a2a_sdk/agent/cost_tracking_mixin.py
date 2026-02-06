@@ -39,7 +39,7 @@ class CostTrackingMixin:
             async def stream(self, query, user_config, task):
                 # Manual reporting (works with any LLM framework)
                 await self.report_llm_usage(
-                    user_id=user_config.user_id,
+                    user_sub=user_config.user_sub,
                     provider="openai",
                     model_name="gpt-4",
                     billing_unit_breakdown={"input_tokens": 100, "output_tokens": 50},
@@ -108,7 +108,7 @@ class CostTrackingMixin:
 
     async def report_llm_usage(
         self,
-        user_id: str,
+        user_sub: str,
         billing_unit_breakdown: Dict[str, int],
         provider: Optional[str] = None,
         model_name: Optional[str] = None,
@@ -125,7 +125,7 @@ class CostTrackingMixin:
         (set by SubAgentIdMiddleware). For local agents, it's extracted from LangGraph tags.
 
         Args:
-            user_id: User ID from user_config
+            user_sub: User sub from user_config (database ID for stable attribution)
             billing_unit_breakdown: Dict of billing units to counts
                 Example: {"input_tokens": 100, "output_tokens": 50}
             provider: Optional Provider name ("openai", "bedrock_converse", etc.).
@@ -141,7 +141,7 @@ class CostTrackingMixin:
             ```python
             # After calling any LLM
             await self.report_llm_usage(
-                user_id=user_config.user_id,
+                user_sub=user_config.user_sub,
                 provider="openai",
                 model_name="gpt-4o-2024-08-06",
                 billing_unit_breakdown={
@@ -165,7 +165,7 @@ class CostTrackingMixin:
                 logger.debug(f"[COST TRACKING] Using sub_agent_id from ContextVar: {sub_agent_id_from_contextvar}")
 
         self._cost_logger.log_cost_async(
-            user_id=user_id,
+            user_sub=user_sub,
             provider=provider,
             model_name=model_name,
             billing_unit_breakdown=billing_unit_breakdown,
@@ -202,7 +202,7 @@ class CostTrackingMixin:
 
     def create_runnable_config(
         self,
-        user_id: str,
+        user_sub: str,
         conversation_id: str,
         thread_id: Optional[str] = None,
         checkpoint_ns: Optional[str] = None,
@@ -217,7 +217,7 @@ class CostTrackingMixin:
         across agents.
 
         Args:
-            user_id: User ID for cost attribution
+            user_sub: User sub for cost attribution
             conversation_id: Conversation ID for cost attribution
             thread_id: Thread ID for checkpointing (defaults to conversation_id)
             checkpoint_ns: Checkpoint namespace for isolation (e.g., "agent-creator")
@@ -230,7 +230,7 @@ class CostTrackingMixin:
         Usage:
             ```python
             config = self.create_runnable_config(
-                user_id=user_config.user_id,
+                user_sub=user_config.user_sub,
                 conversation_id=task.context_id,
                 thread_id=task.context_id,
                 checkpoint_ns="agent-creator",
@@ -240,13 +240,14 @@ class CostTrackingMixin:
             ```
 
         Note:
-            - Automatically adds user:{user_id} and conversation:{conversation_id} tags
+            - Automatically adds user_sub:{user_sub} and conversation:{conversation_id} tags
             - Automatically adds sub_agent:{sub_agent_id} tag if available from ContextVar
             - Includes callbacks from get_langchain_callbacks() for automatic cost tracking
         """
         # Construct cost tracking tags
+
         tags = [
-            f"user:{user_id}",
+            f"user_sub:{user_sub}",
             f"conversation:{conversation_id}",
         ]
 

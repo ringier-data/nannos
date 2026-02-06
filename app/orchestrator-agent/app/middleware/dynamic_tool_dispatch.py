@@ -42,12 +42,13 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from langsmith import traceable
 
 from ..models.config import GraphRuntimeContext
-from ..utils import validate_and_clean_tool_dict
+from ..utils import CleanupLevel, validate_and_clean_tool_dict
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         return enhanced_tool
 
     def _get_tools_as_dicts(
-        self, user_context: GraphRuntimeContext, original_tools: list[Any] | None = None
+        self,
+        user_context: GraphRuntimeContext,
+        original_tools: list[Any] | None = None,
+        level: CleanupLevel = CleanupLevel.MINIMAL,
     ) -> list[dict[str, Any]]:
         """Get all tools available to the user as OpenAI-format dicts.
 
@@ -189,6 +193,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         Args:
             user_context: User context containing tool_registry and subagent_registry
             original_tools: Original tools from the request (from create_agent/create_deep_agent)
+            level: Cleanup level to apply to schemas
 
         Returns:
             List of tools in OpenAI function calling dict format
@@ -205,7 +210,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     # Create a cleaned COPY for model binding (don't modify original)
                     # NOTE: clean_tool_schema modifies in-place, so we don't use it for registry tools
                     tool_dict = convert_to_openai_tool(tool)
-                    tool_dict = validate_and_clean_tool_dict(tool_dict)
+                    tool_dict = validate_and_clean_tool_dict(tool_dict, level)
                     # Enhance task tool with A2A agents (description + enum)
                     if tool.name == "task":
                         tool_dict = self._enhance_task_tool_schema(tool_dict, user_context)
@@ -215,7 +220,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 name = tool.get("function", {}).get("name") or tool.get("name")
                 if name and name not in seen_names:
                     # Validate and clean schema
-                    tool = validate_and_clean_tool_dict(tool)
+                    tool = validate_and_clean_tool_dict(tool, level)
                     # Enhance task tool with A2A agents (description + enum)
                     if name == "task":
                         tool = self._enhance_task_tool_schema(tool, user_context)
@@ -227,7 +232,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             if tool.name not in seen_names:
                 # Create a cleaned COPY for model binding (don't modify original)
                 tool_dict = convert_to_openai_tool(tool)
-                tool_dict = validate_and_clean_tool_dict(tool_dict)
+                tool_dict = validate_and_clean_tool_dict(tool_dict, level)
                 tool_dicts.append(tool_dict)
                 seen_names.add(tool.name)
 
@@ -241,11 +246,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             if isinstance(tool, BaseTool):
                 # Convert to dict for model binding (creates a copy, doesn't modify original)
                 tool_dict = convert_to_openai_tool(tool)
-                tool_dict = validate_and_clean_tool_dict(tool_dict)
+                tool_dict = validate_and_clean_tool_dict(tool_dict, level)
                 tool_dicts.append(tool_dict)
             elif isinstance(tool, dict):
                 # Already in dict format, but still validate and clean
-                tool_dict = validate_and_clean_tool_dict(tool)
+                tool_dict = validate_and_clean_tool_dict(tool, level)
                 tool_dicts.append(tool_dict)
             seen_names.add(name)
 
@@ -396,7 +401,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.wrap_model_call: "
-            f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_id}: "
+            f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_sub}: "
             f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
         )
 
@@ -409,7 +414,21 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        """Async version of wrap_model_call.
+        """Async version of wrap_model_call with progressive retry.
+
+        Progressive cleanup sequence:
+        - MINIMAL: Remove None values only
+        - MODERATE: + Remove ALL enums
+        - AGGRESSIVE: + Remove format/min/max/array constraints
+
+        Args:
+            request: Model request with tools
+            handler: Async callback to execute the model
+
+        Returns:
+            Model response
+        """
+        """Async version of wrap_model_call with progressive retry.
 
         Args:
             request: Model request (tools may be empty or placeholder)
@@ -423,19 +442,43 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             logger.warning("DynamicToolDispatchMiddleware: No GraphRuntimeContext, passing through")
             return await handler(request)
 
-        # Get merged tools: original request tools + static tools + user tools + task tool
-        # Pass original request.tools to preserve tools from create_deep_agent (e.g., write_todos)
-        tool_dicts = self._get_tools_as_dicts(user_context, original_tools=request.tools)
+        # Try progressive cleanup levels on INVALID_ARGUMENT errors
+        # MODERATE removes all enums (solves global state space limit with 80+ tools)
+        for level in [CleanupLevel.MINIMAL, CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE]:
+            tool_dicts = self._get_tools_as_dicts(user_context, original_tools=request.tools, level=level)
+            try:
+                logger.debug(
+                    f"DynamicToolDispatchMiddleware.awrap_model_call: "
+                    f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_sub} "
+                    f"(cleanup={level.value}): "
+                    f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
+                )
 
-        logger.debug(
-            f"DynamicToolDispatchMiddleware.awrap_model_call: "
-            f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_id}: "
-            f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
-        )
+                result = await handler(request.override(tools=cast(list[BaseTool | dict], tool_dicts)))
+                return result
+            except Exception as e:
+                # Check if it's a Gemini INVALID_ARGUMENT error
+                is_schema_error = (
+                    ChatGoogleGenerativeAIError
+                    and isinstance(e, ChatGoogleGenerativeAIError)
+                    and "INVALID_ARGUMENT" in str(e)
+                    and "schema" in str(e).lower()
+                )
 
-        # Override request with user's tools (dict format bypasses validation)
-        # Cast needed because list is invariant in Python typing
-        return await handler(request.override(tools=tool_dicts))
+                if is_schema_error and level != CleanupLevel.AGGRESSIVE:
+                    # Log and retry with next level
+                    tool_count = len(tool_dicts)
+                    logger.warning(
+                        f"Schema validation failed with {level.value} cleanup, retrying with next level. "
+                        f"User: {user_context.user_sub}, Tool count: {tool_count}, Error: {str(e)[:200]}"
+                    )
+                    continue
+                else:
+                    # Not a schema error or already tried aggressive - re-raise
+                    raise
+
+        # Should not reach here, but for type checker
+        raise RuntimeError("All cleanup levels exhausted")
 
     # =========================================================================
     # Tool Call Interception - Dynamic Dispatch WITHOUT execute()
@@ -695,7 +738,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         if tool is None:
             logger.error(
                 f"DynamicToolDispatchMiddleware: Tool '{tool_name}' not found "
-                f"in ToolNode or user registry for user {user_context.user_id}"
+                f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
                 content=f"Error: Tool '{tool_name}' is not available",
@@ -706,7 +749,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.wrap_tool_call: "
-            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_id}"
+            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_sub}"
         )
 
         # Invoke the dynamic tool directly
@@ -802,7 +845,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         if tool is None:
             logger.error(
                 f"DynamicToolDispatchMiddleware: Tool '{tool_name}' not found "
-                f"in ToolNode or user registry for user {user_context.user_id}"
+                f"in ToolNode or user registry for user {user_context.user_sub}"
             )
             return ToolMessage(
                 content=f"Error: Tool '{tool_name}' is not available",
@@ -813,7 +856,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.awrap_tool_call: "
-            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_id}"
+            f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_sub}"
         )
 
         # Invoke the dynamic tool asynchronously

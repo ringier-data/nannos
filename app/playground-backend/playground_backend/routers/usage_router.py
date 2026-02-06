@@ -7,9 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..authorization import check_capability
 from ..db.session import DbSession
-from ..dependencies import require_auth
+from ..dependencies import require_auth, require_auth_or_bearer_token
 from ..models.usage import (
+    BillingUnitDetail,
     DetailedUsageReport,
+    UsageLog,
     UsageLogBatchCreate,
     UsageLogCreate,
     UsageLogsList,
@@ -33,18 +35,19 @@ async def log_usage(
     request: Request,
     log_data: UsageLogCreate,
     db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
 ):
     """
     Log a single usage entry.
 
-    Internal endpoint used by orchestrator for cost tracking.
-    No authentication required (called from backend service).
+    Requires Bearer token authentication. Token's sub claim must match the user_id in the log record.
+    Used by orchestrator and sub-agents for cost tracking.
     """
     usage_service = get_usage_service(request)
     try:
         usage_log_id = await usage_service.log_usage(
             db=db,
-            user_id=log_data.user_id,
+            user_id=current_user.id,
             provider=log_data.provider,
             model_name=log_data.model_name,
             billing_unit_breakdown=log_data.billing_unit_breakdown,
@@ -71,17 +74,22 @@ async def batch_log_usage(
     request: Request,
     batch_data: UsageLogBatchCreate,
     db: DbSession,
+    current_user: User = Depends(require_auth_or_bearer_token),
 ):
     """
     Batch log multiple usage entries.
 
-    Internal endpoint used by orchestrator for efficient cost tracking.
-    No authentication required (called from backend service).
+    Requires Bearer token authentication. Token's sub claim must match all user_ids in the batch.
+    Used by orchestrator and sub-agents for efficient cost tracking.
     """
     usage_service = get_usage_service(request)
+
     try:
-        # Convert Pydantic models to dicts
-        logs = [log.model_dump() for log in batch_data.logs]
+        logs = []
+        for log_obj in batch_data.logs:
+            log_dict = log_obj.model_dump()
+            log_dict["user_id"] = current_user.id
+            logs.append(log_dict)
 
         usage_log_ids = await usage_service.batch_log_usage(db=db, logs=logs)
         await db.commit()
@@ -186,9 +194,6 @@ async def get_my_usage_logs(
             page=page,
             limit=limit,
         )
-
-        # Convert to response models
-        from ..models.usage import BillingUnitDetail, UsageLog
 
         log_models = []
         for log in logs:

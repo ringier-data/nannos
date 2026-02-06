@@ -13,24 +13,14 @@ from deepagents import CompiledSubAgent
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from ..a2a_utils.models import LocalSubAgentConfig
+from ..models.base import ModelType, ThinkingLevel
 
 logger = logging.getLogger(__name__)
 
 # Message formatting literal for type safety
-MessageFormatting = Literal["markdown", "slack", "plain"]
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
-
-# Model type literal for type safety
-ModelType = Literal[
-    "gpt4o",
-    "gpt-4o-mini",
-    "claude-sonnet-4.5",
-    "claude-haiku-4-5",
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
-]
 
 
 @dataclass
@@ -52,7 +42,10 @@ class GraphRuntimeContext:
     """
 
     user_id: str
-    """User identifier for logging and isolation."""
+    """User's database ID (users.id - stable identifier for DB operations and isolation)."""
+
+    user_sub: str
+    """User's OIDC sub claim (subject identifier from identity provider - can change with IDP)."""
 
     name: str
     """User's display name for personalization."""
@@ -137,7 +130,10 @@ class UserConfig(BaseModel):
     Use build_runtime_context(user_config, runtime_deps) to create GraphRuntimeContext.
     """
 
-    user_id: str = Field(..., description="User identifier")
+    user_id: str = Field(
+        description="User's database ID (users.id - stable identifier for DB operations and isolation)",
+    )
+    user_sub: str = Field(..., description="User's OIDC sub claim (can change with IDP)")
     access_token: SecretStr = Field(..., description="User authentication token")
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
@@ -163,6 +159,14 @@ class UserConfig(BaseModel):
         default=None,
         description="Sub-agent config hash for playground testing mode (single sub-agent isolation)",
     )
+    agent_metadata: Optional[dict[str, dict[str, Any]]] = Field(
+        default=None,
+        description="Agent metadata from registry: Maps agent_url -> {sub_agent_id, name, description}",
+    )
+    tool_names: Optional[list[str]] = Field(
+        default=None,
+        description="MCP tool names enabled for orchestrator (from registry)",
+    )
     sub_agents: Optional[list[CompiledSubAgent]] = Field(
         default=None,
         description="Discovered remote A2A sub-agents (CompiledSubAgent TypedDicts with name, description, runnable)",
@@ -171,6 +175,14 @@ class UserConfig(BaseModel):
     local_subagents: Optional[list[LocalSubAgentConfig]] = Field(
         default=None,
         description="User-configured local sub-agents",
+    )
+    enable_thinking: Optional[bool] = Field(
+        default=None,
+        description="Enable extended thinking for orchestrator (overrides environment variable)",
+    )
+    thinking_level: Optional[ThinkingLevel] = Field(
+        default=None,
+        description="Thinking depth level: minimal/low/medium/high (only for Claude Sonnet and Gemini models)",
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

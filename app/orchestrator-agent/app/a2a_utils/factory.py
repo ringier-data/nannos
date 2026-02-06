@@ -1,12 +1,15 @@
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from a2a.types import AgentCard
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..authentication import SmartTokenInterceptor
+from .authentication.interceptor import SmartTokenInterceptor
 from .client_runnable import A2AClientRunnable
 from .config import A2AClientConfig
+
+if TYPE_CHECKING:
+    from ..models.config import UserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +19,7 @@ def make_a2a_async_runnable(
     oauth2_client: OidcOAuth2Client,
     *,
     user_token: Optional[str] = None,
-    user_context: Optional[dict[str, Any]] = None,
+    user_config: Optional["UserConfig"] = None,
     config: Optional[A2AClientConfig] = None,
 ) -> A2AClientRunnable:
     """
@@ -44,7 +47,7 @@ def make_a2a_async_runnable(
     Args:
         agent_card: The AgentCard describing the target agent
         user_token: User's authenticated access token (required for OAuth2 agents)
-        user_context: Optional user context dict with user_id, email, name
+        user_config: Optional UserConfig containing user context for token exchange
         config: Optional A2AClientConfig for advanced configuration
 
     Returns:
@@ -72,7 +75,7 @@ def make_a2a_async_runnable(
     if user_token:
         config.auth_interceptor = SmartTokenInterceptor(
             user_token=user_token,
-            user_context=user_context,
+            user_config=user_config,
             oauth2_client=oauth2_client,
             sub_agent_id=config.sub_agent_id,  # Pass sub_agent_id from config to interceptor
         )

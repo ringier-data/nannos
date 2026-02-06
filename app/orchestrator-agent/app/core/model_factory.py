@@ -9,7 +9,7 @@ other components that need to create models dynamically.
 import json
 import logging
 import os
-from typing import Any, Literal
+from typing import Any
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -19,15 +19,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import AzureChatOpenAI
 
-# Model type literal for type safety (duplicated here to avoid circular import)
-ModelType = Literal[
-    "gpt4o",
-    "gpt-4o-mini",
-    "claude-sonnet-4.5",
-    "claude-haiku-4-5",
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
-]
+from ..models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
 
 # Model-specific configuration
 MODEL_CONFIG = {
@@ -57,9 +49,68 @@ MODEL_CONFIG = {
 
 logger = logging.getLogger(__name__)
 
+# Default model when none specified (configurable via environment variable)
+
+
+def get_available_models() -> list[ModelType]:
+    """Get list of all available model types.
+
+    Returns:
+        List of all supported model types.
+    """
+    return list(MODEL_CONFIG.keys())  # type: ignore
+
+
+def is_valid_model(model_name: str) -> bool:
+    """Check if a model name is valid.
+
+    Args:
+        model_name: Model name to validate.
+
+    Returns:
+        True if the model name is valid, False otherwise.
+    """
+    return model_name in MODEL_CONFIG
+
+
+def get_default_model() -> ModelType:
+    """Get the default model type.
+
+    Returns:
+        The default model type (configurable via DEFAULT_MODEL env var).
+    """
+    return DEFAULT_MODEL
+
+
+def get_thinking_budget(thinking_level: ThinkingLevel) -> int:
+    """Map thinking level to Claude token budget.
+
+    Based on Anthropic's official documentation and recommendations:
+    - minimal: 1024 tokens (hard minimum, simple queries)
+    - low: 4096 tokens (standard agent tasks, balanced default)
+    - medium: 10000 tokens (complex reasoning, multi-step analysis)
+    - high: 16000 tokens (very complex problems, deep analysis)
+
+    Args:
+        thinking_level: The thinking depth level.
+
+    Returns:
+        Token budget for Claude extended thinking.
+    """
+    budget_map = {
+        "minimal": 1024,
+        "low": 4096,
+        "medium": 10000,
+        "high": 16000,
+    }
+    return budget_map[thinking_level]
+
 
 def create_model(
-    model_type: ModelType, config: Any, thinking: bool = False, callbacks: list | None = None
+    model_type: ModelType,
+    config: Any,
+    thinking_level: ThinkingLevel | None = None,
+    callbacks: list | None = None,
 ) -> BaseChatModel:
     """Create a model instance for the given model type.
 
@@ -69,7 +120,8 @@ def create_model(
     Args:
         model_type: The type of model to create
         config: Agent settings with model configuration
-        thinking: Enable thinking mode for Claude Sonnet and Gemini models
+        thinking_level: Thinking depth level (minimal/low/medium/high) for Claude Sonnet and Gemini models.
+                       If None, thinking is disabled.
         callbacks: Optional list of LangChain callbacks (e.g., for cost tracking)
 
     Returns:
@@ -101,16 +153,16 @@ def create_model(
             raise ValueError("GCP_PROJECT_ID environment variable is required for Gemini models")
 
         # Configure thinking mode if enabled
-        thinking_level = None
+        gemini_thinking_level = None
         include_thoughts = False
-        if thinking:
-            thinking_level = "low"  # Conservative default (minimal, low, medium, high)
+        if thinking_level:
+            gemini_thinking_level = thinking_level  # Pass level directly (minimal, low, medium, high)
             include_thoughts = True
-            logger.info(f"Gemini thinking mode enabled with level={thinking_level}")
+            logger.info(f"Gemini thinking mode enabled with level={gemini_thinking_level}")
 
         logger.info(
             f"Creating Gemini Vertex AI model: model={model_id}, project={gcp_project}, "
-            f"location={gcp_location}, thinking_level={thinking_level}"
+            f"location={gcp_location}, thinking_level={gemini_thinking_level}"
         )
 
         return ChatGoogleGenerativeAI(
@@ -119,18 +171,20 @@ def create_model(
             project=gcp_project,
             location=gcp_location,
             temperature=1.0,  # CRITICAL: Gemini 3.0+ requires 1.0 to prevent infinite loops
-            thinking_level=thinking_level,
+            thinking_level=gemini_thinking_level,
             include_thoughts=include_thoughts,
             callbacks=callbacks,
         )
     elif model_type in ("claude-sonnet-4.5", "claude-haiku-4-5"):
-        # Thinking mode only supported on Claude Sonnet, not Haiku
-        if thinking and model_type == "claude-sonnet-4.5":
-            thinking_params = {"type": "enabled", "budget_tokens": 1024}
+        # Both Claude Sonnet and Haiku support Extended Thinking
+        if thinking_level:
+            budget_tokens = get_thinking_budget(thinking_level)
+            thinking_params = {"type": "enabled", "budget_tokens": budget_tokens}
             temperature = 1.0
+            logger.info(
+                f"Claude {model_type} thinking enabled with level={thinking_level}, budget={budget_tokens} tokens"
+            )
         else:
-            if thinking and model_type == "claude-haiku-4-5":
-                logger.warning("Thinking mode is not supported for Claude Haiku model.")
             thinking_params = {"type": "disabled", "budget_tokens": 0}
             temperature = 0.0
 
@@ -177,7 +231,7 @@ def create_model(
         )
     else:
         # Default to gpt4o/gpt-4o-mini (Azure OpenAI)
-        if thinking:
+        if thinking_level:
             logger.warning("Thinking mode is only supported for Claude Sonnet and Gemini models.")
 
         # Get model-specific configuration

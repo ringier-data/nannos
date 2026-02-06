@@ -99,6 +99,8 @@ export interface AgentInfo {
 export interface Settings {
   agentUrl: string;
   model: string;
+  enableThinking?: boolean;
+  thinkingLevel?: string;
 }
 
 export interface AgentResponseData {

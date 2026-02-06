@@ -14,6 +14,8 @@ from a2a.types import Message, Task, TaskState
 from langchain.messages import AIMessage
 from pydantic import BaseModel, Discriminator, Field
 
+from ..models.base import ThinkingLevel
+
 
 class BaseLocalSubAgentConfig(BaseModel):
     """Base configuration for local sub-agents."""
@@ -120,6 +122,14 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
     mcp_tools: Optional[list[str]] = Field(
         default=None,
         description="Optional list of MCP tool names enabled for this sub-agent. If None, inherits orchestrator tools.",
+    )
+    enable_thinking: bool | None = Field(
+        default=None,
+        description="Enable extended thinking mode for Claude Sonnet and Gemini models",
+    )
+    thinking_level: ThinkingLevel | None = Field(
+        default=None,
+        description="Thinking depth level (minimal/low/medium/high) for extended thinking mode",
     )
 
 

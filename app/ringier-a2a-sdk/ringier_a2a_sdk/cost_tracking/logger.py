@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Context variables for dynamic access token and user ID (set per-request)
 # Private implementation detail - use public functions below
 _current_access_token: ContextVar[Optional[str]] = ContextVar("_current_access_token", default=None)
-_current_user_id: ContextVar[Optional[str]] = ContextVar("_current_user_id", default=None)
+_current_user_sub: ContextVar[Optional[str]] = ContextVar("_current_user_sub", default=None)
 
 
 def set_request_access_token(token: Optional[str]) -> None:
@@ -42,7 +42,7 @@ def set_request_access_token(token: Optional[str]) -> None:
     _current_access_token.set(token)
 
 
-def set_request_user_id(user_id: Optional[str]) -> None:
+def set_request_user_sub(user_sub: Optional[str]) -> None:
     """
     Set the user ID for the current async context (request).
 
@@ -50,9 +50,9 @@ def set_request_user_id(user_id: Optional[str]) -> None:
     within the current async context (e.g., for MCP credential injection).
 
     Args:
-        user_id: User identifier or None to clear
+        user_sub: User identifier or None to clear
     """
-    _current_user_id.set(user_id)
+    _current_user_sub.set(user_sub)
 
 
 def get_request_access_token() -> Optional[str]:
@@ -65,14 +65,14 @@ def get_request_access_token() -> Optional[str]:
     return _current_access_token.get()
 
 
-def get_request_user_id() -> Optional[str]:
+def get_request_user_sub() -> Optional[str]:
     """
     Get the user ID for the current async context (request).
 
     Returns:
-        The user ID set via set_request_user_id(), or None
+        The user ID set via set_request_user_sub(), or None
     """
-    return _current_user_id.get()
+    return _current_user_sub.get()
 
 
 def get_request_credentials() -> tuple[Optional[str], Optional[str]]:
@@ -80,9 +80,9 @@ def get_request_credentials() -> tuple[Optional[str], Optional[str]]:
     Get both user ID and access token for the current async context.
 
     Returns:
-        Tuple of (user_id, access_token) or (None, None)
+        Tuple of (user_sub, access_token) or (None, None)
     """
-    return get_request_user_id(), get_request_access_token()
+    return get_request_user_sub(), get_request_access_token()
 
 
 class CostLogger:
@@ -181,10 +181,16 @@ class CostLogger:
         token_groups = {}
         for record, token in batch:
             token_groups.setdefault(token, []).append(record)
+
         for token, records in token_groups.items():
             if not token:
-                logger.warning("No access token available, skipping cost tracking batch")
+                logger.warning(f"No access token available, skipping cost tracking batch for {len(records)} records")
                 continue
+
+            # Extract user_sub for context logging
+            user_subs = {r.get("user_sub") for r in records}
+            user_context = f"users={user_subs}" if len(user_subs) == 1 else f"{len(user_subs)} users"
+
             try:
                 url = urljoin(self.backend_url, "/api/v1/usage/batch-log")
                 async with httpx.AsyncClient() as client:
@@ -197,16 +203,34 @@ class CostLogger:
                         },
                         timeout=30.0,
                     )
+
                     if response.status_code == 201:
-                        logger.info(f"Successfully sent batch of {len(records)} cost records")
+                        logger.info(f"Successfully sent cost batch: {len(records)} records ({user_context})")
+                    elif response.status_code in (401, 403):
+                        # Authentication/authorization failures - likely token expired or user mismatch
+                        logger.error(
+                            f"Cost batch authentication failed ({response.status_code}): "
+                            f"{len(records)} records ({user_context}). "
+                            f"Response: {response.text}"
+                        )
+                        # Don't retry auth failures - they won't succeed without new token
                     else:
-                        logger.error(f"Failed to send cost batch: {response.status_code} - {response.text}")
-            except Exception as e:
-                logger.exception(f"Error sending cost batch: {e}")
+                        # Other errors - log with full context
+                        logger.error(
+                            f"Failed to send cost batch: {response.status_code} - "
+                            f"{len(records)} records ({user_context}). "
+                            f"Response: {response.text}"
+                        )
+            except httpx.TimeoutException as e:
+                logger.error(f"Cost batch timeout: {len(records)} records ({user_context}) - {e}")
+            except httpx.NetworkError as e:
+                logger.error(f"Cost batch network error: {len(records)} records ({user_context}) - {e}")
+            except Exception:
+                logger.exception(f"Unexpected error sending cost batch: {len(records)} records ({user_context})")
 
     def log_cost_async(
         self,
-        user_id: str,
+        user_sub: str,
         billing_unit_breakdown: Dict[str, int],
         provider: Optional[str] = None,
         model_name: Optional[str] = None,
@@ -220,7 +244,7 @@ class CostLogger:
         Queue a cost record for async batch sending.
 
         Args:
-            user_id: User ID who triggered the service call
+            user_sub: User sub who triggered the service call
             billing_unit_breakdown: Dict of billing units to counts (e.g., {'input_tokens': 100, 'output_tokens': 50})
             provider: Optional provider name ('bedrock_converse', 'openai', etc.).
                 Not required if mapping against agent specific rate cards.
@@ -242,7 +266,7 @@ class CostLogger:
         sub_agent_id = _sub_agent_id_from_tag if _sub_agent_id_from_tag is not None else self.sub_agent_id
 
         record = {
-            "user_id": user_id,
+            "user_sub": user_sub,
             "provider": provider,
             "model_name": model_name,
             "billing_unit_breakdown": billing_unit_breakdown,

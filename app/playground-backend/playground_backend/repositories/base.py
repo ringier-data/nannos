@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.user import User
 
 if TYPE_CHECKING:
     from ..services.audit_service import AuditService
@@ -82,7 +83,7 @@ class AuditedRepository:
     async def create(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         fields: dict[str, Any],
         returning: str = "id",
     ) -> Any:
@@ -91,7 +92,7 @@ class AuditedRepository:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             fields: Dictionary of column names and values to insert
             returning: Column name(s) to return (comma-separated)
 
@@ -101,7 +102,7 @@ class AuditedRepository:
         Example:
             entity_id = await repo.create(
                 db=db,
-                actor_sub=user.sub,
+                actor=user,
                 fields={"name": "Test", "owner_id": "123"},
                 returning="id"
             )
@@ -125,17 +126,17 @@ class AuditedRepository:
             # Extract entity ID from first column in RETURNING
             entity_id = row[returning.split(",")[0].strip()]
 
-            # Auto-audit
+            # Auto-audit (use actor.sub for audit logging)
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(entity_id),
                 action=AuditAction.CREATE,
                 changes={"after": _serialize_for_audit(fields)},
             )
 
-            logger.info(f"Created {self.entity_type.value} {entity_id} by {actor_sub}")
+            logger.info(f"Created {self.entity_type.value} {entity_id} by {actor.sub}")
 
             return entity_id
 
@@ -146,7 +147,7 @@ class AuditedRepository:
     async def update(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         entity_id: str | int,
         fields: dict[str, Any],
         fetch_before: bool = True,
@@ -157,7 +158,7 @@ class AuditedRepository:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             entity_id: ID of the entity to update
             fields: Dictionary of column names and new values
             fetch_before: Whether to fetch current state for audit (default True)
@@ -166,7 +167,7 @@ class AuditedRepository:
         Example:
             await repo.update(
                 db=db,
-                actor_sub=user.sub,
+                actor=user,
                 entity_id=123,
                 fields={"name": "Updated Name", "updated_at": now}
             )
@@ -203,16 +204,17 @@ class AuditedRepository:
 
             action = custom_action or AuditAction.UPDATE
 
+            # Use actor.sub for audit logging
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(entity_id),
                 action=action,
                 changes=changes,
             )
 
-            logger.info(f"Updated {self.entity_type.value} {entity_id} by {actor_sub}")
+            logger.info(f"Updated {self.entity_type.value} {entity_id} by {actor.sub}")
 
         except Exception as e:
             logger.error(f"Failed to update {self.entity_type.value} {entity_id}: {e}")
@@ -221,7 +223,7 @@ class AuditedRepository:
     async def delete(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         entity_id: str | int,
         soft: bool = True,
     ) -> None:
@@ -230,14 +232,14 @@ class AuditedRepository:
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             entity_id: ID of the entity to delete
             soft: Whether to soft delete (set deleted_at) or hard delete
 
         Example:
             await repo.delete(
                 db=db,
-                actor_sub=user.sub,
+                actor=user,
                 entity_id=123,
                 soft=True  # Soft delete
             )
@@ -255,17 +257,17 @@ class AuditedRepository:
                 query = text(f"DELETE FROM {self.table_name} WHERE id = :id")
                 await db.execute(query, {"id": entity_id})
 
-            # Auto-audit
+            # Auto-audit (use actor.sub for audit logging)
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(entity_id),
                 action=AuditAction.DELETE,
                 changes={"soft_delete": soft},
             )
 
-            logger.info(f"Deleted {self.entity_type.value} {entity_id} by {actor_sub}")
+            logger.info(f"Deleted {self.entity_type.value} {entity_id} by {actor.sub}")
 
         except Exception as e:
             logger.error(f"Failed to delete {self.entity_type.value} {entity_id}: {e}")

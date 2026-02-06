@@ -16,6 +16,9 @@ from ..models.user_group import (
     UserGroupListResponse,
     UserGroupUpdate,
 )
+from ..services.keycloak_admin_service import (
+    KeycloakSyncError,
+)
 from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-groups"])
@@ -93,7 +96,7 @@ async def create_group(
     try:
         group = await user_group_service.create_group(
             db,
-            actor_sub=admin.sub,
+            actor=admin,
             name=create_request.name,
             description=create_request.description,
         )
@@ -111,6 +114,11 @@ async def create_group(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except KeycloakSyncError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to sync with Keycloak",
         )
     except Exception as e:
         if "unique constraint" in str(e).lower() or "duplicate" in str(e).lower():
@@ -144,7 +152,7 @@ async def update_group(
 
         updated_group = await user_group_service.update_group(
             db,
-            actor_sub=admin.sub,
+            actor=admin,
             group_id=group_id,
             **update_kwargs,
         )
@@ -195,7 +203,7 @@ async def delete_group(
     try:
         success = await user_group_service.delete_group(
             db,
-            actor_sub=admin.sub,
+            actor=admin,
             group_id=group_id,
             force=force,
         )
@@ -228,7 +236,7 @@ async def bulk_delete_groups(
     user_group_service = get_user_group_service(request)
     results = await user_group_service.bulk_delete_groups(
         db,
-        actor_sub=admin.sub,
+        actor=admin,
         group_ids=delete_request.group_ids,
         force=delete_request.force,
     )

@@ -43,6 +43,7 @@ async def test_create_notification(pg_session: AsyncSession):
         {"id": notif_id},
     )
     row = result.mappings().first()
+    assert row is not None
 
     assert row["user_id"] == "user-1"
     assert row["type"] == "agent_activated"

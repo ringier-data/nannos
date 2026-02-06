@@ -7,7 +7,7 @@ from pydantic import SecretStr
 
 from app.a2a_utils.models import LocalLangGraphSubAgentConfig
 from app.models.config import GraphRuntimeContext, UserConfig
-from app.models.runtime import build_runtime_context
+from app.utils import build_runtime_context
 
 
 class TestBuildRuntimeContext:
@@ -17,6 +17,7 @@ class TestBuildRuntimeContext:
         """Test building runtime context with minimal user config."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -41,6 +42,7 @@ class TestBuildRuntimeContext:
 
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -61,6 +63,7 @@ class TestBuildRuntimeContext:
 
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -79,6 +82,7 @@ class TestBuildRuntimeContext:
 
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -100,6 +104,7 @@ class TestBuildRuntimeContext:
         """Test adding document store tools when dependencies provided."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -131,6 +136,7 @@ class TestBuildRuntimeContext:
 
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -163,6 +169,7 @@ class TestBuildRuntimeContext:
         """Test that user preferences are preserved in runtime context."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -185,6 +192,7 @@ class TestBuildRuntimeContext:
         """Test warning when local_subagents configured without agent_settings."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -212,6 +220,7 @@ class TestBuildRuntimeContext:
         """Test graceful degradation when sub-agent creation fails."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -252,6 +261,7 @@ class TestBuildRuntimeContext:
         """Test that sub-agents inherit orchestrator model when not specified."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -289,6 +299,7 @@ class TestRuntimeContextValidation:
         """Test handling of empty tool list."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -303,6 +314,7 @@ class TestRuntimeContextValidation:
         """Test handling of None tool list."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
@@ -317,6 +329,7 @@ class TestRuntimeContextValidation:
         """Test handling of empty sub-agents list."""
         user_config = UserConfig(
             user_id="user-123",
+            user_sub="sub-123",
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),

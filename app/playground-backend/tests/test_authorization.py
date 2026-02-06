@@ -13,6 +13,7 @@ from playground_backend.authorization import (
     SYSTEM_ROLE_CAPABILITIES,
     check_action_allowed,
 )
+from playground_backend.models.user import User
 from playground_backend.services.user_group_service import UserGroupService
 from playground_backend.services.user_service import UserService
 
@@ -253,96 +254,96 @@ class TestCheckUserPermission:
         query = text("""
             INSERT INTO users (id, sub, email, role, status, first_name, last_name)
             VALUES (:id, :sub, :email, :role, 'active', 'Test', 'User')
-            RETURNING id
+            RETURNING id, sub, email, role, status, first_name, last_name, created_at, updated_at
         """)
         result = await db_session.execute(query, {"id": sub, "sub": sub, "email": f"{sub}@example.com", "role": role})
         await db_session.commit()
-        row = result.first()
-        return row[0]
+        row = result.mappings().first()
+        return User(**row)
 
-    async def test_member_can_read_groups(self, user_group_service, db_session):
+    async def test_member_can_read_groups(self, user_group_service: UserGroupService, db_session):
         """Members should be able to read groups."""
-        user_id = await self._create_user_with_role(db_session, "member", "member-1")
+        user = await self._create_user_with_role(db_session, "member", "member-1")
 
-        has_permission = await user_group_service.check_user_permission(db_session, user_id, "groups", "read")
+        has_permission = await user_group_service.check_user_permission(db_session, user.id, "groups", "read")
 
         assert has_permission is True
 
-    async def test_member_cannot_write_groups(self, user_group_service, db_session):
+    async def test_member_cannot_write_groups(self, user_group_service: UserGroupService, db_session):
         """Members should not be able to write groups."""
-        user_id = await self._create_user_with_role(db_session, "member", "member-2")
+        user = await self._create_user_with_role(db_session, "member", "member-2")
 
-        has_permission = await user_group_service.check_user_permission(db_session, user_id, "groups", "write")
+        has_permission = await user_group_service.check_user_permission(db_session, user.id, "groups", "write")
 
         assert has_permission is False
 
-    async def test_member_can_read_write_sub_agents(self, user_group_service, db_session):
+    async def test_member_can_read_write_sub_agents(self, user_group_service: UserGroupService, db_session):
         """Members should have read/write capability for sub-agents (intersected with group role)."""
-        user_id = await self._create_user_with_role(db_session, "member", "member-3")
+        user = await self._create_user_with_role(db_session, "member", "member-3")
 
-        can_read = await user_group_service.check_user_permission(db_session, user_id, "sub_agents", "read")
-        can_write = await user_group_service.check_user_permission(db_session, user_id, "sub_agents", "write")
+        can_read = await user_group_service.check_user_permission(db_session, user.id, "sub_agents", "read")
+        can_write = await user_group_service.check_user_permission(db_session, user.id, "sub_agents", "write")
 
         assert can_read is True
         assert can_write is True
 
-    async def test_member_cannot_approve_sub_agents(self, user_group_service, db_session):
+    async def test_member_cannot_approve_sub_agents(self, user_group_service: UserGroupService, db_session):
         """Members should not have approve capability."""
-        user_id = await self._create_user_with_role(db_session, "member", "member-4")
+        user = await self._create_user_with_role(db_session, "member", "member-4")
 
-        has_permission = await user_group_service.check_user_permission(db_session, user_id, "sub_agents", "approve")
+        has_permission = await user_group_service.check_user_permission(db_session, user.id, "sub_agents", "approve")
 
         assert has_permission is False
 
-    async def test_approver_can_approve_sub_agents(self, user_group_service, db_session):
+    async def test_approver_can_approve_sub_agents(self, user_group_service: UserGroupService, db_session):
         """Approvers should have approve capability."""
-        user_id = await self._create_user_with_role(db_session, "approver", "approver-1")
+        user = await self._create_user_with_role(db_session, "approver", "approver-1")
 
-        has_permission = await user_group_service.check_user_permission(db_session, user_id, "sub_agents", "approve")
+        has_permission = await user_group_service.check_user_permission(db_session, user.id, "sub_agents", "approve")
 
         assert has_permission is True
 
-    async def test_admin_can_approve_sub_agents(self, user_group_service, db_session):
+    async def test_admin_can_approve_sub_agents(self, user_group_service: UserGroupService, db_session):
         """Admins should have approve.admin capability."""
-        user_id = await self._create_user_with_role(db_session, "admin", "admin-1")
+        user = await self._create_user_with_role(db_session, "admin", "admin-1")
 
         has_permission = await user_group_service.check_user_permission(
-            db_session, user_id, "sub_agents", "approve.admin"
+            db_session, user.id, "sub_agents", "approve.admin"
         )
 
         assert has_permission is True
 
-    async def test_admin_can_read_write_users(self, user_group_service, db_session):
+    async def test_admin_can_read_write_users(self, user_group_service: UserGroupService, db_session):
         """Admins should have read.admin/write.admin access to users."""
-        user_id = await self._create_user_with_role(db_session, "admin", "admin-2")
+        user = await self._create_user_with_role(db_session, "admin", "admin-2")
 
-        can_read = await user_group_service.check_user_permission(db_session, user_id, "users", "read.admin")
-        can_write = await user_group_service.check_user_permission(db_session, user_id, "users", "write.admin")
+        can_read = await user_group_service.check_user_permission(db_session, user.id, "users", "read.admin")
+        can_write = await user_group_service.check_user_permission(db_session, user.id, "users", "write.admin")
 
         assert can_read is True
         assert can_write is True
 
-    async def test_member_cannot_access_users(self, user_group_service, db_session):
+    async def test_member_cannot_access_users(self, user_group_service: UserGroupService, db_session):
         """Members should not have access to users resource."""
-        user_id = await self._create_user_with_role(db_session, "member", "member-5")
+        user = await self._create_user_with_role(db_session, "member", "member-5")
 
-        can_read = await user_group_service.check_user_permission(db_session, user_id, "users", "read")
-        can_write = await user_group_service.check_user_permission(db_session, user_id, "users", "write")
+        can_read = await user_group_service.check_user_permission(db_session, user.id, "users", "read")
+        can_write = await user_group_service.check_user_permission(db_session, user.id, "users", "write")
 
         assert can_read is False
         assert can_write is False
 
-    async def test_approver_cannot_access_users(self, user_group_service, db_session):
+    async def test_approver_cannot_access_users(self, user_group_service: UserGroupService, db_session):
         """Approvers should not have access to users resource."""
-        user_id = await self._create_user_with_role(db_session, "approver", "approver-2")
+        user = await self._create_user_with_role(db_session, "approver", "approver-2")
 
-        can_read = await user_group_service.check_user_permission(db_session, user_id, "users", "read")
-        can_write = await user_group_service.check_user_permission(db_session, user_id, "users", "write")
+        can_read = await user_group_service.check_user_permission(db_session, user.id, "users", "read")
+        can_write = await user_group_service.check_user_permission(db_session, user.id, "users", "write")
 
         assert can_read is False
         assert can_write is False
 
-    async def test_invalid_user_id(self, user_group_service, db_session):
+    async def test_invalid_user_id(self, user_group_service: UserGroupService, db_session):
         """Non-existent user should return False."""
         has_permission = await user_group_service.check_user_permission(
             db_session, "nonexistent-user", "groups", "read"
@@ -350,19 +351,19 @@ class TestCheckUserPermission:
 
         assert has_permission is False
 
-    async def test_invalid_resource(self, user_group_service, db_session):
+    async def test_invalid_resource(self, user_group_service: UserGroupService, db_session):
         """Invalid resource should return False."""
-        user_id = await self._create_user_with_role(db_session, "member", "member-6")
+        user = await self._create_user_with_role(db_session, "member", "member-6")
 
-        has_permission = await user_group_service.check_user_permission(db_session, user_id, "invalid_resource", "read")
+        has_permission = await user_group_service.check_user_permission(db_session, user.id, "invalid_resource", "read")
 
         assert has_permission is False
 
-    async def test_invalid_action(self, user_group_service, db_session):
+    async def test_invalid_action(self, user_group_service: UserGroupService, db_session):
         """Invalid action should return False."""
-        user_id = await self._create_user_with_role(db_session, "member", "member-7")
+        user = await self._create_user_with_role(db_session, "member", "member-7")
 
-        has_permission = await user_group_service.check_user_permission(db_session, user_id, "groups", "delete")
+        has_permission = await user_group_service.check_user_permission(db_session, user.id, "groups", "delete")
 
         assert has_permission is False
 
@@ -379,28 +380,30 @@ class TestCheckResourcePermission:
         query = text("""
             INSERT INTO users (id, sub, email, role, status, first_name, last_name)
             VALUES (:id, :sub, :email, :role, 'active', 'Test', 'User')
-            RETURNING id
+            RETURNING id, sub, email, role, status, first_name, last_name, created_at, updated_at
         """)
         result = await db_session.execute(query, {"id": sub, "sub": sub, "email": f"{sub}@example.com", "role": role})
         await db_session.commit()
-        row = result.first()
-        return row[0]
+        row = result.mappings().first()
+        return User(**row)
 
-    async def _create_group_with_member(self, user_group_service, db_session, user_id: str, group_role: str):
+    async def _create_group_with_member(
+        self, user_group_service: UserGroupService, db_session, actor: User, group_role: str
+    ):
         """Helper to create a group and add user as member."""
-        group = await user_group_service.create_group(db_session, actor_sub="test-admin", name=f"Test Group {user_id}")
+        group = await user_group_service.create_group(db_session, actor=actor, name=f"Test Group {actor.id}")
 
         # Add user to group with specific role
         query = text("""
             INSERT INTO user_group_members (user_group_id, user_id, group_role)
             VALUES (:group_id, :user_id, :group_role)
         """)
-        await db_session.execute(query, {"group_id": group.id, "user_id": user_id, "group_role": group_role})
+        await db_session.execute(query, {"group_id": group.id, "user_id": actor.id, "group_role": group_role})
         await db_session.commit()
 
         return group
 
-    async def _create_sub_agent(self, db_session, owner_id: str, is_public: bool = False):
+    async def _create_sub_agent(self, db_session, owner: User, is_public: bool = False):
         """Helper to create a sub-agent."""
         # Create sub_agent (metadata only)
         query = text("""
@@ -411,8 +414,8 @@ class TestCheckResourcePermission:
         result = await db_session.execute(
             query,
             {
-                "name": f"Test Agent {owner_id}",
-                "owner_id": owner_id,
+                "name": f"Test Agent {owner.id}",
+                "owner_id": owner.id,
                 "is_public": is_public,
             },
         )
@@ -442,199 +445,203 @@ class TestCheckResourcePermission:
         )
         await db_session.commit()
 
-    async def test_owner_has_full_access(self, user_group_service, db_session):
+    async def test_owner_has_full_access(self, user_group_service: UserGroupService, db_session):
         """Resource owners should have full access regardless of group membership."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-1")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-1")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
         can_read = await user_group_service.check_resource_permission(
-            db_session, owner_id, "sub_agents", sub_agent_id, "read"
+            db_session, owner.id, "sub_agents", sub_agent_id, "read"
         )
         can_write = await user_group_service.check_resource_permission(
-            db_session, owner_id, "sub_agents", sub_agent_id, "write"
+            db_session, owner.id, "sub_agents", sub_agent_id, "write"
         )
 
         assert can_read is True
         assert can_write is True
 
-    async def test_public_sub_agent_read_access(self, user_group_service, db_session):
+    async def test_public_sub_agent_read_access(self, user_group_service: UserGroupService, db_session):
         """Public sub-agents should allow read access to all users."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-2")
-        other_user_id = await self._create_user_with_role(db_session, "member", "other-1")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id, is_public=True)
+        owner = await self._create_user_with_role(db_session, "member", "owner-2")
+        other_user = await self._create_user_with_role(db_session, "member", "other-1")
+        sub_agent_id = await self._create_sub_agent(db_session, owner, is_public=True)
 
         can_read = await user_group_service.check_resource_permission(
-            db_session, other_user_id, "sub_agents", sub_agent_id, "read"
+            db_session, other_user.id, "sub_agents", sub_agent_id, "read"
         )
 
         assert can_read is True
 
-    async def test_public_sub_agent_no_write_access(self, user_group_service, db_session):
+    async def test_public_sub_agent_no_write_access(self, user_group_service: UserGroupService, db_session):
         """Public sub-agents should not allow write access without group membership."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-3")
-        other_user_id = await self._create_user_with_role(db_session, "member", "other-2")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id, is_public=True)
+        owner = await self._create_user_with_role(db_session, "member", "owner-3")
+        other_user = await self._create_user_with_role(db_session, "member", "other-2")
+        sub_agent_id = await self._create_sub_agent(db_session, owner, is_public=True)
 
         can_write = await user_group_service.check_resource_permission(
-            db_session, other_user_id, "sub_agents", sub_agent_id, "write"
+            db_session, other_user.id, "sub_agents", sub_agent_id, "write"
         )
 
         assert can_write is False
 
-    async def test_read_role_can_read_with_permission(self, user_group_service, db_session):
+    async def test_read_role_can_read_with_permission(self, user_group_service: UserGroupService, db_session):
         """User with 'read' group role can read when group has read permission."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-4")
-        user_id = await self._create_user_with_role(db_session, "member", "reader-1")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-4")
+        user = await self._create_user_with_role(db_session, "member", "reader-1")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, user_id, "read")
+        group = await self._create_group_with_member(user_group_service, db_session, user, "read")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read", "write"])
 
         can_read = await user_group_service.check_resource_permission(
-            db_session, user_id, "sub_agents", sub_agent_id, "read"
+            db_session, user.id, "sub_agents", sub_agent_id, "read"
         )
 
         assert can_read is True
 
-    async def test_read_role_cannot_write(self, user_group_service, db_session):
+    async def test_read_role_cannot_write(self, user_group_service: UserGroupService, db_session):
         """User with 'read' group role cannot write even when group has write permission."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-5")
-        user_id = await self._create_user_with_role(db_session, "member", "reader-2")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-5")
+        user = await self._create_user_with_role(db_session, "member", "reader-2")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, user_id, "read")
+        group = await self._create_group_with_member(user_group_service, db_session, user, "read")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read", "write"])
 
         can_write = await user_group_service.check_resource_permission(
-            db_session, user_id, "sub_agents", sub_agent_id, "write"
+            db_session, user.id, "sub_agents", sub_agent_id, "write"
         )
 
         assert can_write is False
 
-    async def test_write_role_can_read_write(self, user_group_service, db_session):
+    async def test_write_role_can_read_write(self, user_group_service: UserGroupService, db_session):
         """User with 'write' group role can read and write when group has permissions."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-6")
-        user_id = await self._create_user_with_role(db_session, "member", "writer-1")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-6")
+        user = await self._create_user_with_role(db_session, "member", "writer-1")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, user_id, "write")
+        group = await self._create_group_with_member(user_group_service, db_session, user, "write")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read", "write"])
 
         can_read = await user_group_service.check_resource_permission(
-            db_session, user_id, "sub_agents", sub_agent_id, "read"
+            db_session, user.id, "sub_agents", sub_agent_id, "read"
         )
         can_write = await user_group_service.check_resource_permission(
-            db_session, user_id, "sub_agents", sub_agent_id, "write"
+            db_session, user.id, "sub_agents", sub_agent_id, "write"
         )
 
         assert can_read is True
         assert can_write is True
 
-    async def test_write_role_cannot_write_without_group_permission(self, user_group_service, db_session):
+    async def test_write_role_cannot_write_without_group_permission(
+        self, user_group_service: UserGroupService, db_session
+    ):
         """User with 'write' role cannot write if group only has 'read' permission."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-7")
-        user_id = await self._create_user_with_role(db_session, "member", "writer-2")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-7")
+        user = await self._create_user_with_role(db_session, "member", "writer-2")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, user_id, "write")
+        group = await self._create_group_with_member(user_group_service, db_session, user, "write")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read"])
 
         can_write = await user_group_service.check_resource_permission(
-            db_session, user_id, "sub_agents", sub_agent_id, "write"
+            db_session, user.id, "sub_agents", sub_agent_id, "write"
         )
 
         assert can_write is False
 
-    async def test_approver_can_approve_with_group_access(self, user_group_service, db_session):
+    async def test_approver_can_approve_with_group_access(self, user_group_service: UserGroupService, db_session):
         """Approver can approve if they have write group role and group has write permission."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-8")
-        approver_id = await self._create_user_with_role(db_session, "approver", "approver-1")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-8")
+        approver = await self._create_user_with_role(db_session, "approver", "approver-1")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, approver_id, "write")
+        group = await self._create_group_with_member(user_group_service, db_session, approver, "write")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read", "write"])
 
         can_approve = await user_group_service.check_resource_permission(
-            db_session, approver_id, "sub_agents", sub_agent_id, "approve"
+            db_session, approver.id, "sub_agents", sub_agent_id, "approve"
         )
 
         assert can_approve is True
 
-    async def test_approver_cannot_approve_without_group_write_permission(self, user_group_service, db_session):
+    async def test_approver_cannot_approve_without_group_write_permission(
+        self, user_group_service: UserGroupService, db_session
+    ):
         """Approver cannot approve if group only has read permission."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-9")
-        approver_id = await self._create_user_with_role(db_session, "approver", "approver-2")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-9")
+        approver = await self._create_user_with_role(db_session, "approver", "approver-2")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, approver_id, "write")
+        group = await self._create_group_with_member(user_group_service, db_session, approver, "write")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read"])
 
         can_approve = await user_group_service.check_resource_permission(
-            db_session, approver_id, "sub_agents", sub_agent_id, "approve"
+            db_session, approver.id, "sub_agents", sub_agent_id, "approve"
         )
 
         assert can_approve is False
 
-    async def test_approver_cannot_approve_with_read_role(self, user_group_service, db_session):
+    async def test_approver_cannot_approve_with_read_role(self, user_group_service: UserGroupService, db_session):
         """Approver with 'read' group role cannot approve (needs write or manager)."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-10")
-        approver_id = await self._create_user_with_role(db_session, "approver", "approver-3")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-10")
+        approver = await self._create_user_with_role(db_session, "approver", "approver-3")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, approver_id, "read")
+        group = await self._create_group_with_member(user_group_service, db_session, approver, "read")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read", "write"])
 
         can_approve = await user_group_service.check_resource_permission(
-            db_session, approver_id, "sub_agents", sub_agent_id, "approve"
+            db_session, approver.id, "sub_agents", sub_agent_id, "approve"
         )
 
         assert can_approve is False
 
-    async def test_member_cannot_approve_even_with_manager_role(self, user_group_service, db_session):
+    async def test_member_cannot_approve_even_with_manager_role(self, user_group_service: UserGroupService, db_session):
         """Member (system role) cannot approve even with 'manager' group role."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-11")
-        member_id = await self._create_user_with_role(db_session, "member", "member-mgr-1")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-11")
+        member = await self._create_user_with_role(db_session, "member", "member-mgr-1")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, member_id, "manager")
+        group = await self._create_group_with_member(user_group_service, db_session, member, "manager")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read", "write"])
 
         can_approve = await user_group_service.check_resource_permission(
-            db_session, member_id, "sub_agents", sub_agent_id, "approve"
+            db_session, member.id, "sub_agents", sub_agent_id, "approve"
         )
 
         assert can_approve is False
 
-    async def test_no_access_without_group_membership(self, user_group_service, db_session):
+    async def test_no_access_without_group_membership(self, user_group_service: UserGroupService, db_session):
         """User without group membership should not have access."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-12")
-        other_user_id = await self._create_user_with_role(db_session, "member", "other-3")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-12")
+        other_user = await self._create_user_with_role(db_session, "member", "other-3")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
         can_read = await user_group_service.check_resource_permission(
-            db_session, other_user_id, "sub_agents", sub_agent_id, "read"
+            db_session, other_user.id, "sub_agents", sub_agent_id, "read"
         )
         can_write = await user_group_service.check_resource_permission(
-            db_session, other_user_id, "sub_agents", sub_agent_id, "write"
+            db_session, other_user.id, "sub_agents", sub_agent_id, "write"
         )
 
         assert can_read is False
         assert can_write is False
 
-    async def test_manager_role_full_access(self, user_group_service, db_session):
+    async def test_manager_role_full_access(self, user_group_service: UserGroupService, db_session):
         """Manager group role should have full read/write access."""
-        owner_id = await self._create_user_with_role(db_session, "member", "owner-13")
-        manager_id = await self._create_user_with_role(db_session, "member", "manager-1")
-        sub_agent_id = await self._create_sub_agent(db_session, owner_id)
+        owner = await self._create_user_with_role(db_session, "member", "owner-13")
+        manager = await self._create_user_with_role(db_session, "member", "manager-1")
+        sub_agent_id = await self._create_sub_agent(db_session, owner)
 
-        group = await self._create_group_with_member(user_group_service, db_session, manager_id, "manager")
+        group = await self._create_group_with_member(user_group_service, db_session, manager, "manager")
         await self._grant_sub_agent_permission(db_session, group.id, sub_agent_id, ["read", "write"])
 
         can_read = await user_group_service.check_resource_permission(
-            db_session, manager_id, "sub_agents", sub_agent_id, "read"
+            db_session, manager.id, "sub_agents", sub_agent_id, "read"
         )
         can_write = await user_group_service.check_resource_permission(
-            db_session, manager_id, "sub_agents", sub_agent_id, "write"
+            db_session, manager.id, "sub_agents", sub_agent_id, "write"
         )
 
         assert can_read is True

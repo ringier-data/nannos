@@ -18,6 +18,7 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from yarl import URL
 
 from playground_backend.config import (
@@ -30,12 +31,13 @@ from playground_backend.controllers.auth_controller import AuthController
 from playground_backend.db.session import get_db_session
 from playground_backend.dependencies import require_auth, require_auth_or_bearer_token
 from playground_backend.models.session import StoredSession
-from playground_backend.models.user import User, UserStatus
+from playground_backend.models.user import User, UserRole, UserStatus
 from playground_backend.repositories.secrets_repository import SecretsRepository
 from playground_backend.repositories.sub_agent_repository import SubAgentRepository
 from playground_backend.repositories.user_group_repository import UserGroupRepository
 from playground_backend.repositories.user_repository import UserRepository
 from playground_backend.services.audit_service import AuditService
+from playground_backend.services.notification_service import NotificationService
 from playground_backend.services.oauth_service import OAuthService
 from playground_backend.services.secrets_service import SecretsService
 from playground_backend.services.session_service import SessionService
@@ -45,6 +47,79 @@ from playground_backend.services.user_service import UserService
 from playground_backend.services.user_settings_service import UserSettingsService
 
 logger = logging.getLogger(__name__)
+
+
+# Docker network cleanup fixture
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_docker_networks():
+    """Clean up Docker networks before and after test session to prevent address pool exhaustion.
+
+    Only removes networks that match test patterns or are associated with test containers.
+    """
+    docker_client = docker.from_env()
+
+    def cleanup():
+        """Remove unused Docker networks related to tests."""
+        try:
+            # Get all networks
+            networks = docker_client.networks.list()
+            removed_count = 0
+
+            # Test images we create containers from
+            test_images = [
+                "docker.rcplus.io/pgvector/pgvector:pg16",
+                "amazon/dynamodb-local",
+            ]
+
+            for network in networks:
+                # Skip default networks
+                if network.name in ["bridge", "host", "none"]:
+                    continue
+
+                # Only clean up networks that match our test patterns
+                is_test_network = network.name.startswith("test-network-") or network.name.startswith(
+                    "build-db-container-network"
+                )
+
+                if not is_test_network:
+                    # Check if any containers in the network use our test images
+                    try:
+                        network.reload()
+                        for container in network.containers:
+                            if any(image_name in container.image.tags for image_name in test_images):
+                                is_test_network = True
+                                break
+                    except Exception:
+                        pass
+
+                if not is_test_network:
+                    continue
+
+                # Remove if unused
+                try:
+                    network.reload()  # Refresh network data
+                    if not network.containers:
+                        network.remove()
+                        removed_count += 1
+                        logger.debug(f"Removed unused test Docker network: {network.name}")
+                except docker.errors.NotFound:
+                    # Network already removed
+                    pass
+                except Exception as e:
+                    logger.debug(f"Could not remove network {network.name}: {e}")
+
+            if removed_count > 0:
+                logger.info(f"Cleaned up {removed_count} unused test Docker network(s)")
+        except Exception as e:
+            logger.warning(f"Failed to clean up Docker networks: {e}")
+
+    # Clean up before tests
+    cleanup()
+
+    yield
+
+    # Clean up after tests
+    cleanup()
 
 
 # Mock boto3 credentials for all tests
@@ -112,31 +187,6 @@ def mock_config(test_config, monkeypatch):
     monkeypatch.setattr(playground_backend.services.session_service, "config", test_config)
 
     return test_config
-
-
-@pytest.fixture
-def mock_db_session_factory(monkeypatch):
-    """Mock get_async_session_factory for auth controller tests that don't need a real database."""
-    import playground_backend.controllers.auth_controller as auth_module
-
-    # Create a mock session that acts as an async context manager
-    mock_session = MagicMock()
-    mock_session.commit = AsyncMock()
-
-    # Create an async context manager for the session
-    class MockSessionContext:
-        async def __aenter__(self):
-            return mock_session
-
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-    # Create the factory that returns the context manager
-    mock_factory = MagicMock(return_value=MockSessionContext())
-
-    monkeypatch.setattr(auth_module, "get_async_session_factory", lambda: mock_factory)
-
-    return mock_session
 
 
 # DynamoDB Local fixtures
@@ -291,6 +341,13 @@ async def session_service(mock_config, dynamodb_tables):
 
 
 @pytest.fixture
+def notification_service():
+    """Create NotificationService mock for testing."""
+    service = NotificationService()
+    return service
+
+
+@pytest.fixture
 def user_service():
     """Create UserService instance with injected dependencies."""
     audit_service = AuditService()
@@ -303,13 +360,14 @@ def user_service():
 
 
 @pytest.fixture
-def secrets_service():
+def secrets_service(notification_service):
     """Create SecretsService instance with injected dependencies."""
     audit_service = AuditService()
     secrets_repo = SecretsRepository()
     secrets_repo.set_audit_service(audit_service)
     service = SecretsService()
     service.set_repository(secrets_repo)
+    service.set_notification_service(notification_service)
     return service
 
 
@@ -325,20 +383,13 @@ def sub_agent_service():
 
 
 @pytest.fixture
-def notification_service():
-    """Create NotificationService mock for testing."""
-    from playground_backend.services.notification_service import NotificationService
-
-    service = NotificationService()
-    return service
-
-
-@pytest.fixture
-def user_group_service():
+def user_group_service(sub_agent_service: SubAgentService, notification_service: NotificationService):
     """Create UserGroupService instance with injected dependencies."""
     service = UserGroupService()
     user_group_repo = UserGroupRepository()
     service.set_repository(user_group_repo)
+    service.set_sub_agent_service(sub_agent_service)
+    service.set_notification_service(notification_service)
     audit_service = AuditService()
     user_group_repo.set_audit_service(audit_service)
     return service
@@ -351,21 +402,155 @@ def user_settings_service():
     return service
 
 
+# Fixtures for repositories with DI
+@pytest.fixture
+def user_repository() -> UserRepository:
+    repo = UserRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
+@pytest.fixture
+def sub_agent_repository() -> SubAgentRepository:
+    repo = SubAgentRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
+@pytest.fixture
+def secrets_repository() -> SecretsRepository:
+    repo = SecretsRepository()
+    repo.set_audit_service(AuditService())
+    return repo
+
+
 # User fixtures
 @pytest.fixture
 def test_user() -> User:
-    """Create a test user."""
+    """Create a test user (member role) for use as actor in tests."""
     return User(
         id="test-user-id",
-        sub="test-user-id",
+        sub="test-user-sub",
         email="test@example.com",
         first_name="Test",
         last_name="User",
         company_name="Test Company",
         is_administrator=False,
+        role=UserRole.MEMBER,
+        status=UserStatus.ACTIVE,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
+
+
+@pytest.fixture
+def test_admin_user() -> User:
+    """Create a test admin user for use as actor in tests."""
+    return User(
+        id="admin-user-id",
+        sub="admin-user-sub",
+        email="admin@example.com",
+        first_name="Admin",
+        last_name="User",
+        company_name="Test Company",
+        is_administrator=True,
+        role=UserRole.ADMIN,
+        status=UserStatus.ACTIVE,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.fixture
+def test_approver_user() -> User:
+    """Create a test approver user for use as actor in tests."""
+    return User(
+        id="test-approver-id",
+        sub="test-approver-sub",
+        email="approver@example.com",
+        first_name="Test",
+        last_name="Approver",
+        company_name="Test Company",
+        is_administrator=False,
+        role=UserRole.APPROVER,
+        status=UserStatus.ACTIVE,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest_asyncio.fixture
+async def test_user_db(pg_session: AsyncSession, test_user: User, user_repository: UserRepository) -> User:
+    """Create test user in database."""
+    await user_repository.create(
+        db=pg_session,
+        actor=test_user,
+        fields={
+            "id": test_user.id,
+            "sub": test_user.sub,
+            "email": test_user.email,
+            "first_name": test_user.first_name,
+            "last_name": test_user.last_name,
+            "is_administrator": test_user.is_administrator,
+            "role": test_user.role,
+            "status": test_user.status,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        },
+        returning="id",
+    )
+    await pg_session.commit()
+    return test_user
+
+
+@pytest_asyncio.fixture
+async def test_admin_user_db(pg_session: AsyncSession, test_admin_user: User, user_repository: UserRepository) -> User:
+    """Create test user in database."""
+    await user_repository.create(
+        db=pg_session,
+        actor=test_admin_user,
+        fields={
+            "id": test_admin_user.id,
+            "sub": test_admin_user.sub,
+            "email": test_admin_user.email,
+            "first_name": test_admin_user.first_name,
+            "last_name": test_admin_user.last_name,
+            "is_administrator": test_admin_user.is_administrator,
+            "role": test_admin_user.role,
+            "status": test_admin_user.status,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        },
+        returning="id",
+    )
+    await pg_session.commit()
+    return test_admin_user
+
+
+@pytest_asyncio.fixture
+async def test_approver_user_db(
+    pg_session: AsyncSession, test_approver_user: User, user_repository: UserRepository
+) -> User:
+    """Create test user in database."""
+    await user_repository.create(
+        db=pg_session,
+        actor=test_approver_user,
+        fields={
+            "id": test_approver_user.id,
+            "sub": test_approver_user.sub,
+            "email": test_approver_user.email,
+            "first_name": test_approver_user.first_name,
+            "last_name": test_approver_user.last_name,
+            "is_administrator": test_approver_user.is_administrator,
+            "role": test_approver_user.role,
+            "status": test_approver_user.status,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        },
+        returning="id",
+    )
+    await pg_session.commit()
+    return test_approver_user
 
 
 @pytest_asyncio.fixture
@@ -393,22 +578,6 @@ async def add_user_to_db(pg_session):
         await pg_session.commit()
 
     return _add_user
-
-
-@pytest.fixture
-def test_admin_user() -> User:
-    """Create a test admin user."""
-    return User(
-        id="admin-user-id",
-        sub="admin-user-id",
-        email="admin@example.com",
-        first_name="Admin",
-        last_name="User",
-        company_name="Test Company",
-        is_administrator=True,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
 
 
 # Oidc mock responses

@@ -6,6 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.user import User
 from .base import AuditedRepository
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class UserGroupRepository(AuditedRepository):
     async def add_members(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         member_additions: list[dict[str, str]],
     ) -> list[str]:
@@ -29,7 +30,7 @@ class UserGroupRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             group_id: Group ID
             member_additions: List of dicts with user_id and role
 
@@ -55,7 +56,7 @@ class UserGroupRepository(AuditedRepository):
             # Log audit
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(group_id),
                 action=AuditAction.ASSIGN,
@@ -64,7 +65,7 @@ class UserGroupRepository(AuditedRepository):
                 },
             )
 
-            logger.info(f"Added {len(member_additions)} members to group {group_id} by {actor_sub}")
+            logger.info(f"Added {len(member_additions)} members to group {group_id} by {actor.sub}")
             return [member["user_id"] for member in member_additions]
         except Exception as e:
             logger.error(f"Failed to add members to group {group_id}: {e}")
@@ -73,7 +74,7 @@ class UserGroupRepository(AuditedRepository):
     async def remove_members(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_ids: list[str],
     ) -> list[str]:
@@ -82,7 +83,7 @@ class UserGroupRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             group_id: Group ID
             user_ids: List of user IDs to remove
 
@@ -108,7 +109,7 @@ class UserGroupRepository(AuditedRepository):
             if removed:
                 await self.audit_service.log_action(
                     db=db,
-                    actor_sub=actor_sub,
+                    actor=actor,
                     entity_type=self.entity_type,
                     entity_id=str(group_id),
                     action=AuditAction.UNASSIGN,
@@ -117,7 +118,7 @@ class UserGroupRepository(AuditedRepository):
                     },
                 )
 
-            logger.info(f"Removed {len(removed)} members from group {group_id} by {actor_sub}")
+            logger.info(f"Removed {len(removed)} members from group {group_id} by {actor.sub}")
             return removed
 
         except Exception as e:
@@ -127,7 +128,7 @@ class UserGroupRepository(AuditedRepository):
     async def update_member_role(
         self,
         db: AsyncSession,
-        actor_sub: str,
+        actor: User,
         group_id: int,
         user_id: str,
         old_role: str,
@@ -138,7 +139,7 @@ class UserGroupRepository(AuditedRepository):
 
         Args:
             db: Database session
-            actor_sub: The sub of the user performing the action
+            actor: Actor context with user_id (for FK) and sub (for audit)
             group_id: Group ID
             user_id: User ID
             old_role: Previous role
@@ -158,7 +159,7 @@ class UserGroupRepository(AuditedRepository):
             # Log audit
             await self.audit_service.log_action(
                 db=db,
-                actor_sub=actor_sub,
+                actor=actor,
                 entity_type=self.entity_type,
                 entity_id=str(group_id),
                 action=AuditAction.UPDATE,
@@ -168,7 +169,7 @@ class UserGroupRepository(AuditedRepository):
                 },
             )
 
-            logger.info(f"Updated member {user_id} role to {new_role} in group {group_id} by {actor_sub}")
+            logger.info(f"Updated member {user_id} role to {new_role} in group {group_id} by {actor.id}")
 
         except Exception as e:
             logger.error(f"Failed to update member role in group {group_id}: {e}")

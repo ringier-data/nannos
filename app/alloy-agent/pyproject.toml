@@ -1,6 +1,6 @@
 [project]
 name = "naonous-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "A2A agent for managing BYOK campaign lifecycle on Alloy"
 requires-python = ">=3.12"
 dependencies = [
@@ -80,3 +80,8 @@ disallow_untyped_defs = true
 
 [tool.uv.sources]
 ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.20",
+]

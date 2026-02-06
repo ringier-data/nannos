@@ -105,8 +105,9 @@ export function GroupsPage() {
         }).queryKey
       });
     },
-    onError: () => {
-      toast.error('Failed to create group');
+    onError: (error: any) => {
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to create group';
+      toast.error(message);
     },
   });
 

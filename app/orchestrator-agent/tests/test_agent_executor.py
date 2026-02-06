@@ -35,7 +35,7 @@ class TestOrchestratorDeepAgentExecutor:
         context.message.task_id = None
         context.message.context_id = None
         context.call_context = Mock()
-        context.call_context.state = {"user_id": "test-user"}
+        context.call_context.state = {"user_sub": "test-user"}
 
         # Mock event queue
         event_queue = Mock(spec=EventQueue)
@@ -215,7 +215,7 @@ class TestZeroTrustUserIdExtraction:
         context.current_task = None
         context.message = Mock(spec=Message)
         context.call_context = Mock()
-        context.call_context.state = {"user_id": "verified-user-123"}
+        context.call_context.state = {"user_sub": "verified-user-123"}
 
         # Mock event queue
         event_queue = Mock(spec=EventQueue)
