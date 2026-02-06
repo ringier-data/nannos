@@ -1324,7 +1324,7 @@ wheels = [
 
 [[package]]
 name = "playground-backend"
-version = "0.2.0"
+version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["all"] },
@@ -1976,7 +1976,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "../ringier-a2a-sdk" }
 dependencies = [
     { name = "a2a-sdk" },
