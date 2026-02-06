@@ -72,15 +72,15 @@ class TestOrchestratorThinkingConfig:
         mock_user.thinking_level = "high"
 
         with patch.object(executor.registry_service, "get_user", return_value=mock_user):
-            # Build user config
+            # Build user config - updated signature requires user object
             user_config = await executor._build_user_config(
-                sub="sub-123",
-                access_token="test-token",
-                name="Test User",
-                email="test@example.com",
-                groups=[],
-                timezone="UTC",
-                language="en",
+                user=mock_user,
+                user_sub="sub-123",
+                user_token="test-token",
+                user_name="Test User",
+                user_email="test@example.com",
+                user_groups=[],
+                model_choice=None,
                 message_formatting="markdown",
                 slack_user_handle=None,
                 sub_agent_config_hash=None,
@@ -118,15 +118,15 @@ class TestOrchestratorThinkingConfig:
         mock_user.thinking_level = "low"  # User preference is "low"
 
         with patch.object(executor.registry_service, "get_user", return_value=mock_user):
-            # Build user config with metadata override
+            # Build user config with metadata override - updated signature
             user_config = await executor._build_user_config(
-                sub="sub-123",
-                access_token="test-token",
-                name="Test User",
-                email="test@example.com",
-                groups=[],
-                timezone="UTC",
-                language="en",
+                user=mock_user,
+                user_sub="sub-123",
+                user_token="test-token",
+                user_name="Test User",
+                user_email="test@example.com",
+                user_groups=[],
+                model_choice=None,
                 message_formatting="markdown",
                 slack_user_handle=None,
                 sub_agent_config_hash=None,
@@ -146,20 +146,13 @@ class TestGraphCreationWithThinking:
     async def test_get_or_create_graph_with_thinking_level(self):
         """Test that get_or_create_graph uses thinking_level parameter."""
         from app.core.agent import OrchestratorDeepAgent
-        from app.models.config import AgentSettings
-
-        mock_config = Mock(spec=AgentSettings)
-        mock_config.checkpoint_config = Mock()
-        mock_config.checkpoint_config.table_name = "test-table"
-        mock_config.checkpoint_config.s3_bucket = "test-bucket"
-        mock_config.get_bedrock_region.return_value = "eu-central-1"
 
         agent = OrchestratorDeepAgent()
 
         with patch("app.core.graph_factory.DynamoDBSaver"):
-            with patch.object(agent.graph_factory, "get_graph") as mock_get_graph:
+            with patch.object(agent, "_graph_factory") as mock_factory:
                 mock_graph = Mock()
-                mock_get_graph.return_value = mock_graph
+                mock_factory.get_graph.return_value = mock_graph
 
                 # Get graph with specific thinking level
                 graph = await agent.get_or_create_graph(
@@ -168,7 +161,7 @@ class TestGraphCreationWithThinking:
                 )
 
                 # Should call get_graph with both model_type and thinking_level
-                mock_get_graph.assert_called_once_with(
+                mock_factory.get_graph.assert_called_once_with(
                     "claude-sonnet-4.5",
                     thinking_level=ThinkingLevel.medium,
                 )
@@ -180,29 +173,37 @@ class TestGraphCreationWithThinking:
         from app.models.config import AgentSettings
 
         mock_config = Mock(spec=AgentSettings)
-        mock_config.checkpoint_config = Mock()
-        mock_config.checkpoint_config.table_name = "test-table"
-        mock_config.checkpoint_config.s3_bucket = "test-bucket"
+        mock_config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
+        mock_config.CHECKPOINT_S3_BUCKET_NAME = "test-bucket"
+        mock_config.CHECKPOINT_AWS_REGION = "eu-central-1"
+        mock_config.CHECKPOINT_TTL_DAYS = 30
+        mock_config.CHECKPOINT_COMPRESSION_ENABLED = True
+        mock_config.POSTGRES_USER = "test"
+        mock_config.POSTGRES_PASSWORD = "test"
+        mock_config.POSTGRES_HOST = "localhost"
+        mock_config.POSTGRES_PORT = 5432
+        mock_config.POSTGRES_DB = "test"
+        mock_config.MAX_RETRIES = 3
+        mock_config.BACKOFF_FACTOR = 2
         mock_config.get_bedrock_region.return_value = "eu-central-1"
 
         with patch("app.core.graph_factory.DynamoDBSaver"):
-            with patch("app.core.graph_factory.boto3.client"):
-                with patch("app.core.graph_factory.ChatBedrockConverse"):
-                    with patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent:
-                        mock_create_deep_agent.return_value = Mock()
+            with patch("app.core.graph_factory.BedrockEmbeddings"):
+                with patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent:
+                    mock_create_deep_agent.return_value = Mock()
 
-                        factory = GraphFactory(mock_config)
+                    factory = GraphFactory(mock_config)
 
-                        # Create graphs with different thinking levels
-                        graph_low = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.low)
-                        graph_high = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.high)
-                        graph_none = factory.get_graph("claude-sonnet-4.5", thinking_level=None)
+                    # Create graphs with different thinking levels
+                    graph_low = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.low)
+                    graph_high = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.high)
+                    graph_none = factory.get_graph("claude-sonnet-4.5", thinking_level=None)
 
-                        # Should have created 3 separate graphs
-                        assert len(factory._graphs) == 3
-                        assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._graphs
-                        assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._graphs
-                        assert ("claude-sonnet-4.5", None) in factory._graphs
+                    # Should have created 3 separate graphs
+                    assert len(factory._graphs) == 3
+                    assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._graphs
+                    assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._graphs
+                    assert ("claude-sonnet-4.5", None) in factory._graphs
 
 
 class TestExecutorThinkingFlow:
@@ -241,15 +242,15 @@ class TestExecutorThinkingFlow:
                 mock_graph.astream.return_value = AsyncMock()
                 mock_get_graph.return_value = mock_graph
 
-                # Build user config
+                # Build user config - updated signature
                 user_config = await executor._build_user_config(
-                    sub="sub-123",
-                    access_token="test-token",
-                    name="Test User",
-                    email="test@example.com",
-                    groups=[],
-                    timezone="UTC",
-                    language="en",
+                    user=mock_user,
+                    user_sub="sub-123",
+                    user_token="test-token",
+                    user_name="Test User",
+                    user_email="test@example.com",
+                    user_groups=[],
+                    model_choice=None,
                     message_formatting="markdown",
                     slack_user_handle=None,
                     sub_agent_config_hash=None,

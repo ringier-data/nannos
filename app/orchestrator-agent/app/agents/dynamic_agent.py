@@ -35,7 +35,7 @@ from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
@@ -449,9 +449,28 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
 
         # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
         # Use AutoStrategy for Bedrock models (more efficient)
+        # For bedrock models when thinking is enabled AutoStrategy doesn't work
         if self.model.__class__.__name__ == "AzureChatOpenAI":
             response_format = ToolStrategy(schema=SubAgentResponseSchema)
+        elif self.model.__class__.__name__ == "ChatBedrockConverse":
+            if self.config.thinking_level:
+                # AWS Bedrock doesn't allow to force tool usage via 'tool_choice = "any"' when thinking is enabled,
+                # therefore we softly enforce it by adding the response tool directly to the tools list while setting
+                # response_format to None
+                response_format = None
+                tools.append(
+                    StructuredTool.from_function(
+                        func=lambda **kwargs: SubAgentResponseSchema(**kwargs),
+                        name="SubAgentResponseSchema",
+                        description="ALWAYS use this tool to format your final response to the user.",
+                        args_schema=SubAgentResponseSchema,
+                        return_direct=True,
+                    )
+                )
+            else:
+                response_format = AutoStrategy(schema=SubAgentResponseSchema)
         else:
+            # Gemini and others
             response_format = AutoStrategy(schema=SubAgentResponseSchema)
 
         self._agent = create_agent(

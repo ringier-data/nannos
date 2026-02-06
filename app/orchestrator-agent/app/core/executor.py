@@ -233,7 +233,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         model_choice = user.preferred_model or request_metadata.get("model")
         enable_thinking = user.enable_thinking or request_metadata.get("enableThinking") in ("true", "1", "yes")
-        thinking_level = user.thinking_level or request_metadata.get("thinkingLevel")
+        thinking_level = user.thinking_level or request_metadata.get("thinkingLevel") if enable_thinking else None
+        logger.debug(
+            f"[THINKING CONFIG] model_choice={model_choice}, enable_thinking={enable_thinking}, thinking_level={thinking_level}"
+        )
 
         # Check budget guard before processing request
         budget_guard = get_budget_guard()
@@ -287,6 +290,27 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 thinking_level=thinking_level,
             )
 
+            # Extract message parts for multimodal support (text + files)
+            message_parts = context.message.parts if context.message else []
+
+            # Check if we need to resume from an interrupt
+            # Get or create graph for this user's configuration
+            # ZERO-TRUST: Pass verified user_sub and user_token from call_context
+            if user_config.enable_thinking is False:
+                thinking_level = None
+            elif user_config.enable_thinking is True and not user_config.thinking_level:
+                thinking_level = "low"  # Default to low if enabled but not specified
+            elif user_config.enable_thinking is True and user_config.thinking_level:
+                thinking_level = user_config.thinking_level
+            elif user_config.enable_thinking is None:
+                thinking_level = self.agent._default_thinking_level
+
+            model_type = user_config.model if user_config.model else self.agent._default_model_type
+            graph = await self.agent.get_or_create_graph(
+                model_type=model_type,
+                thinking_level=thinking_level,
+            )
+
             # NOTE: we decide to use channel_id as part of the filesystem namespace since if one has access to the
             # channel, she should have access to all files shared in that channel.
             # This is a design decision based on Slack's permission model.
@@ -299,6 +323,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "user_name": user_name,
                     "slack_thread_ts": request_metadata.get("slackThreadTs"),
                     "scope": "personal" if not slack_channel_id else "channel",
+                    "model_type": model_type,
+                    "thinking_level": thinking_level,
                 },
                 "tags": [
                     f"user_sub:{user_sub}",  # Keep OIDC sub in tags for tracing
@@ -307,18 +333,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 ],
             }
 
-            # Extract message parts for multimodal support (text + files)
-            message_parts = context.message.parts if context.message else []
-
-            # Check if we need to resume from an interrupt
-            # Get or create graph for this user's configuration
-            # ZERO-TRUST: Pass verified user_sub and user_token from call_context
-            graph = await self.agent.get_or_create_graph(
-                model_type=user_config.model if user_config.model else self.agent._default_model_type,
-                thinking_level=user_config.thinking_level
-                if user_config.enable_thinking
-                else self.agent._default_thinking_level,
-            )
             current_state = graph.get_state(config)  # type: ignore
 
             # Check if the graph is currently interrupted and this might be a resume request

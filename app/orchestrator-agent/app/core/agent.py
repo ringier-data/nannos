@@ -141,9 +141,10 @@ class OrchestratorDeepAgent:
         Returns:
             GraphRuntimeContext: Ready for graph invocation with all registries populated
         """
-        # Determine if we need Bedrock-specific static tools
-        # (FinalResponseSchema is only for Bedrock models)
-        static_tools = self._graph_factory.get_static_tools()
+
+        # Pass static tools from orchestrator to sub-agents (e.g., get_current_time). We do not pass the
+        # response tool since sub-agents have their own response strategy depending on their model.
+        static_tools = self._graph_factory.get_static_tools(with_response_tool=False)
 
         # Extract backend_url from cost_logger if available
         backend_url = None
@@ -250,10 +251,8 @@ class OrchestratorDeepAgent:
             # Get or create graph for this model type
             # Graph is shared across users, isolated by thread_id and customized by GraphRuntimeContext
             graph = await self.get_or_create_graph(
-                model_type=user_config.model if user_config.model else self._default_model_type,
-                thinking_level=(
-                    user_config.thinking_level if user_config.enable_thinking else self._default_thinking_level
-                ),
+                model_type=config["metadata"].get("model_type", self._default_model_type),
+                thinking_level=config["metadata"].get("thinking_level", self._default_thinking_level),
             )
         except AgentFrameworkAuthError as e:
             logger.error(f"Authorization error while initializing: {e}")

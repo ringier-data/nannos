@@ -50,9 +50,9 @@ class TestCreateModelWithThinking:
         mock_chat_bedrock.assert_called_once()
         call_kwargs = mock_chat_bedrock.call_args[1]
 
-        assert "thinking" in call_kwargs
-        assert call_kwargs["thinking"]["type"] == "enabled"
-        assert call_kwargs["thinking"]["budget_tokens"] == 1024
+        assert "thinking" in call_kwargs["additional_model_request_fields"]
+        assert call_kwargs["additional_model_request_fields"]["thinking"]["type"] == "enabled"
+        assert call_kwargs["additional_model_request_fields"]["thinking"]["budget_tokens"] == 1024
         assert call_kwargs["temperature"] == 1.0
 
     @patch("app.core.model_factory.boto3.client")
@@ -68,9 +68,9 @@ class TestCreateModelWithThinking:
         mock_chat_bedrock.assert_called_once()
         call_kwargs = mock_chat_bedrock.call_args[1]
 
-        assert "thinking" in call_kwargs
-        assert call_kwargs["thinking"]["type"] == "enabled"
-        assert call_kwargs["thinking"]["budget_tokens"] == 16000
+        assert "thinking" in call_kwargs["additional_model_request_fields"]
+        assert call_kwargs["additional_model_request_fields"]["thinking"]["type"] == "enabled"
+        assert call_kwargs["additional_model_request_fields"]["thinking"]["budget_tokens"] == 16000
         assert call_kwargs["temperature"] == 1.0
 
     @patch("app.core.model_factory.boto3.client")
@@ -86,9 +86,9 @@ class TestCreateModelWithThinking:
         mock_chat_bedrock.assert_called_once()
         call_kwargs = mock_chat_bedrock.call_args[1]
 
-        assert "thinking" in call_kwargs
-        assert call_kwargs["thinking"]["type"] == "enabled"
-        assert call_kwargs["thinking"]["budget_tokens"] == 4096
+        assert "thinking" in call_kwargs["additional_model_request_fields"]
+        assert call_kwargs["additional_model_request_fields"]["thinking"]["type"] == "enabled"
+        assert call_kwargs["additional_model_request_fields"]["thinking"]["budget_tokens"] == 4096
         assert call_kwargs["temperature"] == 1.0
 
     @patch("app.core.model_factory.boto3.client")
@@ -104,19 +104,21 @@ class TestCreateModelWithThinking:
         mock_chat_bedrock.assert_called_once()
         call_kwargs = mock_chat_bedrock.call_args[1]
 
-        assert "thinking" in call_kwargs
-        assert call_kwargs["thinking"]["type"] == "disabled"
-        assert call_kwargs["thinking"]["budget_tokens"] == 0
+        assert "thinking" not in call_kwargs
         assert call_kwargs["temperature"] == 0.0
 
+    @patch("app.core.model_factory.service_account.Credentials")
     @patch("app.core.model_factory.ChatGoogleGenerativeAI")
-    def test_gemini_with_thinking_medium(self, mock_gemini):
+    def test_gemini_with_thinking_medium(self, mock_gemini, mock_credentials):
         """Test Gemini model with medium thinking level."""
         config = Mock(spec=AgentSettings)
+        mock_creds = Mock()
+        mock_credentials.from_service_account_info.return_value = mock_creds
 
         with patch.dict(
             "os.environ",
             {
+                "GCP_KEY": '{"type": "service_account"}',  # Mock GCP credentials
                 "GCP_PROJECT_ID": "test-project",
                 "GCP_LOCATION": "us-central1",
             },
@@ -130,14 +132,18 @@ class TestCreateModelWithThinking:
         assert call_kwargs["include_thoughts"] is True
         assert call_kwargs["temperature"] == 1.0
 
+    @patch("app.core.model_factory.service_account.Credentials")
     @patch("app.core.model_factory.ChatGoogleGenerativeAI")
-    def test_gemini_without_thinking(self, mock_gemini):
+    def test_gemini_without_thinking(self, mock_gemini, mock_credentials):
         """Test Gemini model without thinking level."""
         config = Mock(spec=AgentSettings)
+        mock_creds = Mock()
+        mock_credentials.from_service_account_info.return_value = mock_creds
 
         with patch.dict(
             "os.environ",
             {
+                "GCP_KEY": '{"type": "service_account"}',  # Mock GCP credentials
                 "GCP_PROJECT_ID": "test-project",
                 "GCP_LOCATION": "us-central1",
             },
@@ -154,8 +160,8 @@ class TestCreateModelWithThinking:
     def test_gpt4o_ignores_thinking_level(self, mock_azure):
         """Test that GPT-4o ignores thinking level parameter (not supported)."""
         config = Mock(spec=AgentSettings)
-        config.get_azure_openai_endpoint.return_value = "https://test.openai.azure.com/"
-        config.get_azure_openai_api_key.return_value = "test-key"
+        config.AZURE_OPENAI_ENDPOINT = "https://test.openai.azure.com/"
+        config.AZURE_OPENAI_API_KEY = "test-key"
 
         with patch("app.core.model_factory.logger") as mock_logger:
             create_model("gpt4o", config, thinking_level=ThinkingLevel.low)
@@ -179,25 +185,35 @@ class TestThinkingLevelCaching:
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
+        config.CHECKPOINT_S3_BUCKET_NAME = "test-bucket"
+        config.CHECKPOINT_AWS_REGION = "eu-central-1"
+        config.CHECKPOINT_TTL_DAYS = 30
+        config.CHECKPOINT_COMPRESSION_ENABLED = True
+        config.POSTGRES_USER = "test"
+        config.POSTGRES_PASSWORD = "test"
+        config.POSTGRES_HOST = "localhost"
+        config.POSTGRES_PORT = 5432
+        config.POSTGRES_DB = "test"
+        config.MAX_RETRIES = 3
+        config.BACKOFF_FACTOR = 2
         config.get_bedrock_region.return_value = "eu-central-1"
-        config.checkpoint_config = Mock()
-        config.checkpoint_config.table_name = "test-table"
-        config.checkpoint_config.s3_bucket = "test-bucket"
         mock_boto_client.return_value = Mock()
 
         with patch("app.core.graph_factory.DynamoDBSaver"):
-            factory = GraphFactory(config)
+            with patch("app.core.graph_factory.BedrockEmbeddings"):
+                factory = GraphFactory(config)
 
-            # Create model with low thinking
-            model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
+                # Create model with low thinking
+                model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
 
-            # Create model with high thinking
-            model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.high)
+                # Create model with high thinking
+                model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.high)
 
-            # Should have created two separate instances
-            assert len(factory._models) == 2
-            assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._models
-            assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._models
+                # Should have created two separate instances
+                assert len(factory._models) == 2
+                assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._models
+                assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._models
 
     @patch("app.core.model_factory.boto3.client")
     @patch("app.core.model_factory.ChatBedrockConverse")
@@ -206,19 +222,29 @@ class TestThinkingLevelCaching:
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
+        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
+        config.CHECKPOINT_S3_BUCKET_NAME = "test-bucket"
+        config.CHECKPOINT_AWS_REGION = "eu-central-1"
+        config.CHECKPOINT_TTL_DAYS = 30
+        config.CHECKPOINT_COMPRESSION_ENABLED = True
+        config.POSTGRES_USER = "test"
+        config.POSTGRES_PASSWORD = "test"
+        config.POSTGRES_HOST = "localhost"
+        config.POSTGRES_PORT = 5432
+        config.POSTGRES_DB = "test"
+        config.MAX_RETRIES = 3
+        config.BACKOFF_FACTOR = 2
         config.get_bedrock_region.return_value = "eu-central-1"
-        config.checkpoint_config = Mock()
-        config.checkpoint_config.table_name = "test-table"
-        config.checkpoint_config.s3_bucket = "test-bucket"
         mock_boto_client.return_value = Mock()
 
         with patch("app.core.graph_factory.DynamoDBSaver"):
-            factory = GraphFactory(config)
+            with patch("app.core.graph_factory.BedrockEmbeddings"):
+                factory = GraphFactory(config)
 
-            # Create model with low thinking twice
-            model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
-            model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
+                # Create model with low thinking twice
+                model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
+                model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
 
-            # Should reuse the same instance
-            assert model1 is model2
-            assert len(factory._models) == 1
+                # Should reuse the same instance
+                assert model1 is model2
+                assert len(factory._models) == 1

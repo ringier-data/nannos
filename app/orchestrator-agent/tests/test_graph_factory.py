@@ -156,7 +156,7 @@ class TestStaticTools:
 
         # Verify it's a list of tools
         assert isinstance(tools, list)
-        assert len(tools) == 2
+        assert len(tools) == 2  # FinalResponseSchema only added when with_response_tool=True
 
         # Get tool names
         tool_names = [tool.name for tool in tools]

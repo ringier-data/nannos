@@ -24,7 +24,7 @@ from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_aws import BedrockEmbeddings
 from langchain_core.language_models import BaseChatModel
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph_checkpoint_aws import DynamoDBSaver
@@ -325,24 +325,9 @@ class GraphFactory:
     def _create_middleware_stack(self) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
-
         Returns:
             Complete middleware stack with DynamicToolDispatchMiddleware first
         """
-        # Static tools available to all models (cached to avoid recreation)
-        if not self._static_tools_cache:
-            static_tools: list[BaseTool] = []
-
-            # Add time tool for current time and relative date calculations
-            static_tools.append(create_time_tool())
-
-            # Add presigned URL tool for dispatching files to sub-agents
-            static_tools.append(create_presigned_url_tool())
-
-            self._static_tools_cache = static_tools
-        else:
-            static_tools = self._static_tools_cache
-
         # DynamicToolDispatchMiddleware must be first to intercept model calls
         # Add Static tools directly to the graph (not via middleware) in case you want
         # FinalResponseSchema's return_direct=True to be respected by the model
@@ -364,16 +349,37 @@ class GraphFactory:
             self._todo_middleware,
         ]
 
-    def get_static_tools(self) -> list[BaseTool]:
+    def get_static_tools(self, with_response_tool: bool = False) -> list[BaseTool]:
         """Get static tools for the given model type.
 
         Returns:
             List of static tools (cached)
         """
         if not self._static_tools_cache:
-            # Trigger middleware creation to populate cache
-            self._create_middleware_stack()
-        return self._static_tools_cache
+            static_tools: list[BaseTool] = []
+
+            # Add time tool for current time and relative date calculations
+            static_tools.append(create_time_tool())
+
+            # Add presigned URL tool for dispatching files to sub-agents
+            static_tools.append(create_presigned_url_tool())
+            # if bedrock and thinking is enabled we need to add the final response tool to handle structured output
+            if with_response_tool:
+                static_tools.append(
+                    StructuredTool.from_function(
+                        func=lambda **kwargs: FinalResponseSchema(**kwargs),
+                        name="FinalResponseSchema",
+                        description="ALWAYS use this tool to format your final response to the user.",
+                        args_schema=FinalResponseSchema,
+                        return_direct=True,  # Ensure the model's output is returned directly without additional parsing
+                    )
+                )
+
+            self._static_tools_cache = static_tools
+        else:
+            static_tools = self._static_tools_cache
+
+        return static_tools
 
     def _create_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
         """Create a graph for the given model type.
@@ -397,8 +403,6 @@ class GraphFactory:
                 ]
             )
 
-        middleware = self._create_middleware_stack()
-
         # Ensure store is initialized before creating graph (required for longterm memory)
         # Access the store property to trigger lazy initialization
         store_instance = self.store
@@ -418,18 +422,29 @@ class GraphFactory:
             )
 
         backend = create_backend
-        static_tools_list = self.get_static_tools()
 
         # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
-        # Use AutoStrategy for Bedrock and Gemini models (more efficient, handles structured output natively)
+        # Use AutoStrategy for Bedrock without extended thinking and Gemini models (more efficient, handles structured output natively)
+        # For bedrock models with extended thinking use None and add FinalResponseSchema to static tools
+        requires_response_tool = False
         if model_type in ("gpt4o", "gpt-4o-mini"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
+        elif model_type in ("claude-sonnet-4.5", "claude-haiku-4-5"):
+            # if thinking is enabled we need to set response_format to None since the bedrock api can't handle
+            # forcing structured output when enabling thinking
+            if thinking_level:
+                response_format = None
+                requires_response_tool = True
+            else:
+                response_format = AutoStrategy(schema=FinalResponseSchema)
         else:
             response_format = AutoStrategy(schema=FinalResponseSchema)
+        middleware = self._create_middleware_stack()
+        static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
 
         compiled_graph = create_deep_agent(
             model=model,
-            tools=static_tools_list,  # Include static tools with FinalResponseSchema
+            tools=static_tools_list,
             subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
             system_prompt=self.config.SYSTEM_INSTRUCTION,
             checkpointer=self._checkpointer,
