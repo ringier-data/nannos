@@ -56,7 +56,7 @@ export function SettingsPage() {
   const [customPrompt, setCustomPrompt] = useState<string>('');
   const [mcpTools, setMcpTools] = useState<string[]>([]);
   const [preferredModel, setPreferredModel] = useState<string | null>(null);
-  const [enableThinking, setEnableThinking] = useState<boolean>(false);
+  const [enableThinking, setEnableThinking] = useState<boolean | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<OrchestratorThinkingLevel | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
@@ -74,7 +74,7 @@ export function SettingsPage() {
       setCustomPrompt(settings.custom_prompt ?? '');
       setMcpTools(settings.mcp_tools ?? []);
       setPreferredModel(settings.preferred_model ?? null);
-      setEnableThinking(settings.enable_thinking ?? false);
+      setEnableThinking(settings.enable_thinking ?? null);
       setThinkingLevel(settings.enable_thinking ? (settings.thinking_level ?? 'low') : null);
       setHasChanges(false);
     }
@@ -114,16 +114,23 @@ export function SettingsPage() {
 
   const handlePreferredModelChange = (value: string | null) => {
     setPreferredModel(value);
-    // Auto-reset thinking if new model doesn't support it
-    if (value && !modelSupportsThinking(value)) {
-      setEnableThinking(false);
+    
+    // When set to "default" (null), also reset thinking settings to null
+    if (value === null) {
+      setEnableThinking(null);
       setThinkingLevel(null);
-    }
-    // Auto-reset thinking level if not available for new model
-    if (value && enableThinking) {
-      const availableLevels = getAvailableThinkingLevels(value);
-      if (!availableLevels.find(opt => opt.value === thinkingLevel)) {
-        setThinkingLevel(availableLevels[0]?.value || 'low');
+    } else {
+      // Auto-reset thinking if new model doesn't support it
+      if (!modelSupportsThinking(value)) {
+        setEnableThinking(null);
+        setThinkingLevel(null);
+      }
+      // Auto-reset thinking level if not available for new model
+      if (enableThinking) {
+        const availableLevels = getAvailableThinkingLevels(value);
+        if (!availableLevels.find(opt => opt.value === thinkingLevel)) {
+          setThinkingLevel(availableLevels[0]?.value || 'low');
+        }
       }
     }
     setHasChanges(true);
@@ -169,6 +176,9 @@ export function SettingsPage() {
   }, []);
 
   const handleSave = () => {
+    // When preferred_model is null (default), also send thinking settings as null to use agent defaults
+    const shouldUseDefaults = preferredModel === null;
+    
     updateMutation.mutate({
       body: {
         language,
@@ -176,8 +186,8 @@ export function SettingsPage() {
         custom_prompt: customPrompt || null,
         mcp_tools: mcpTools,
         preferred_model: preferredModel,
-        enable_thinking: enableThinking,
-        thinking_level: thinkingLevel,
+        enable_thinking: shouldUseDefaults ? null : enableThinking,
+        thinking_level: shouldUseDefaults ? null : thinkingLevel,
       },
     });
   };

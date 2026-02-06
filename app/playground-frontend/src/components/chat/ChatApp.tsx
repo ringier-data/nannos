@@ -11,7 +11,6 @@ import {
   ConnectionStatus,
   TaskPanel,
   SettingsModal,
-  ProfilePopover,
 } from './components';
 
 export function ChatApp() {
@@ -49,7 +48,6 @@ export function ChatApp() {
           <h2 className="text-sm font-semibold">{agentName}</h2>
           <div className="flex items-center gap-1">
             <ConnectionStatus />
-            <ProfilePopover />
             <Button
               variant="ghost"
               size="icon"

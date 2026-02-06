@@ -15,7 +15,7 @@ interface ExtendedThinkingConfigProps {
   /**
    * Whether extended thinking is enabled
    */
-  enableThinking: boolean;
+  enableThinking: boolean | null;
   
   /**
    * Current thinking level
@@ -76,7 +76,7 @@ export function ExtendedThinkingConfig({
         </div>
         <Switch
           id="enable-thinking"
-          checked={enableThinking}
+          checked={enableThinking ?? false}
           onCheckedChange={onEnableThinkingChange}
           disabled={disabled}
           className="mt-1"

@@ -52,8 +52,8 @@ class UserSettingsService:
                     custom_prompt=None,
                     mcp_tools=[],
                     preferred_model=None,
-                    enable_thinking=False,
-                    thinking_level="low",
+                    enable_thinking=None,
+                    thinking_level=None,
                 )
 
             return UserSettings(
@@ -63,7 +63,7 @@ class UserSettingsService:
                 custom_prompt=row["custom_prompt"],
                 mcp_tools=row["mcp_tools"] if row["mcp_tools"] is not None else [],
                 preferred_model=row["preferred_model"],
-                enable_thinking=row["enable_thinking"] if row["enable_thinking"] is not None else False,
+                enable_thinking=row["enable_thinking"],
                 thinking_level=row["thinking_level"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
@@ -164,7 +164,7 @@ class UserSettingsService:
                 custom_prompt=row["custom_prompt"],
                 mcp_tools=row["mcp_tools"] if row["mcp_tools"] is not None else [],
                 preferred_model=row["preferred_model"],
-                enable_thinking=row["enable_thinking"] if row["enable_thinking"] is not None else False,
+                enable_thinking=row["enable_thinking"],
                 thinking_level=row["thinking_level"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],

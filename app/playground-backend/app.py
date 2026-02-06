@@ -14,7 +14,7 @@ import bleach
 import httpx
 import socketio
 import yaml
-from a2a.client import A2ACardResolver
+from a2a.client import A2ACardResolver, A2AClientHTTPError
 from a2a.client.client import ClientEvent
 from a2a.types import (
     Message,
@@ -808,9 +808,18 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         )
 
         response_stream = a2a_client.send_message(message)
-        async for stream_result in response_stream:
-            await _process_a2a_response(stream_result, sid, message_id, message.context_id)
-
+        try:
+            async for stream_result in response_stream:
+                await _process_a2a_response(stream_result, sid, message_id, message.context_id)
+        except A2AClientHTTPError as http_err:
+            logger.error(f"Runtime error during message send: {http_err}", exc_info=True)
+            error_response = create_error_response(
+                SocketError.MSG_SEND_FAILED,
+                details={"reason": f"HTTP error during message send: {http_err}"},
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
         return create_success_response({"id": message_id})
 
     except ConversationOwnershipError as e:
