@@ -10,7 +10,7 @@ dependencies = [
     "uvicorn>=0.38.0",
     "click>=8.1.8",
     # DeepAgents and LangChain
-    "deepagents>=0.3.0,<0.4.0",
+    "deepagents>=0.3.11,<0.4.0",
     "langchain>=1.0.0",
     "langchain-aws>=1.1.0",
     # Checkpointing
@@ -34,6 +34,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "debugpy>=1.8.20",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",

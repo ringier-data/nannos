@@ -48,6 +48,12 @@ function formatVersionForDiff(version: SubAgentConfigVersion | null): string {
     sections.push('Type: Local Agent');
     sections.push('');
     sections.push(`model: ${version.model || '(default)'}`);
+    if (version.enable_thinking !== undefined) {
+      sections.push(`enable_thinking: ${version.enable_thinking}`);
+    }
+    if (version.enable_thinking) {
+      sections.push(`thinking_level: ${version.thinking_level || '(default)'}`);
+    }
     sections.push('');
     sections.push('system_prompt:');
     sections.push('"""');

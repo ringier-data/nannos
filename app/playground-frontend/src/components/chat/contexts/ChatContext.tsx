@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import type { AgentResponseData, Conversation, Message, Settings, Task, TaskHistoryEntry } from '../types';
 import { useSocket } from './SocketContext';
 import { useLocalStorage, useSessionId } from '../hooks/useLocalStorage';
@@ -9,6 +10,7 @@ import {
   ADMIN_MODE_HEADER,
   IMPERSONATE_USER_HEADER,
 } from '../../../api/apiInstanceConfig';
+import { getCurrentUserSettingsApiV1AuthMeSettingsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
 
 interface ChatContextType {
   // State
@@ -50,6 +52,13 @@ interface ChatProviderProps {
 export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const sessionId = useSessionId();
   const { isConnected, isSocketReady, initializeClient, sendMessage: socketSendMessage, onAgentResponse } = useSocket();
+
+  // Load user settings to use as defaults
+  const { data: userSettingsData } = useQuery({
+    ...getCurrentUserSettingsApiV1AuthMeSettingsGetOptions(),
+  });
+  
+  const userSettings = userSettingsData?.data;
 
   // State
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -535,10 +544,20 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         updateConversation(conversationId, { title });
       }
 
-      // Build metadata
+      // Build metadata - prefer local settings, fallback to user preferences from database
       const metadata: Record<string, string> = {};
-      if (settings?.model) {
-        metadata.model = settings.model;
+      const effectiveModel = settings?.model || userSettings?.preferred_model;
+      const effectiveEnableThinking = settings?.enableThinking ?? userSettings?.enable_thinking;
+      const effectiveThinkingLevel = settings?.thinkingLevel || userSettings?.thinking_level;
+      
+      if (effectiveModel) {
+        metadata.model = effectiveModel;
+      }
+      if (effectiveEnableThinking !== undefined) {
+        metadata.enableThinking = String(effectiveEnableThinking);
+      }
+      if (effectiveThinkingLevel) {
+        metadata.thinkingLevel = effectiveThinkingLevel;
       }
 
       // Get context ID if available
@@ -558,7 +577,8 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       activeConversationId,
       isConnected,
       messagesMap,
-      settings?.model,
+      settings,
+      userSettings,
       contextIdsMap,
       sessionId,
       addMessage,

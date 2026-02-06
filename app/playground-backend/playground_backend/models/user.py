@@ -7,6 +7,15 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class OrchestratorThinkingLevel(str, Enum):
+    """Thinking depth level for extended thinking mode."""
+
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class UserStatus(str, Enum):
     """User status enum."""
 
@@ -150,6 +159,9 @@ class UserSettings(BaseModel):
     timezone: str = "Europe/Zurich"
     custom_prompt: str | None = None
     mcp_tools: list[str] = Field(default_factory=list)
+    preferred_model: str | None = None
+    enable_thinking: bool = False
+    thinking_level: OrchestratorThinkingLevel | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -158,12 +170,20 @@ class UserSettings(BaseModel):
 
 
 class UserSettingsUpdate(BaseModel):
-    """Request to update user settings (partial update)."""
+    """Request to update user settings (partial update).
+
+    Uses model_fields_set to distinguish:
+    - Field not provided in request (not in model_fields_set, keeps current value)
+    - Field explicitly set to None (in model_fields_set, clears the value)
+    """
 
     language: str | None = None
     timezone: str | None = None
     custom_prompt: str | None = None
     mcp_tools: list[str] | None = None
+    preferred_model: str | None = None
+    enable_thinking: bool | None = None
+    thinking_level: OrchestratorThinkingLevel | None = None
 
 
 class UserSettingsResponse(BaseModel):

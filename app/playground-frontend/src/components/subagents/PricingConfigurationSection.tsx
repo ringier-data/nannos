@@ -145,7 +145,7 @@ export function PricingConfigurationSection({
             <CollapsibleTrigger className="flex w-full items-center justify-between hover:opacity-80 transition-opacity [&[data-state=open]>svg]:rotate-180">
               <div className="text-left">
                 <CardTitle className="flex items-center gap-2">
-                  💰 Pricing Configuration (Optional)
+                  Pricing Configuration (Optional)
                   {filledEntriesCount > 0 && (
                     <span className="text-sm font-normal text-muted-foreground">
                       ({filledEntriesCount} entries)

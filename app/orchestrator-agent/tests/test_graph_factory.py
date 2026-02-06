@@ -24,7 +24,7 @@ from app.middleware import (
     TodoStatusMiddleware,
     UserPreferencesMiddleware,
 )
-from app.models import AgentSettings
+from app.models.config import AgentSettings
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ class TestGraphFactoryInitialization:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_initialization_creates_checkpointer(self, mock_dynamodb_saver, mock_config):
         """Test GraphFactory creates a shared DynamoDB checkpointer."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         mock_dynamodb_saver.assert_called_once()
         assert factory._checkpointer is not None
@@ -65,7 +65,7 @@ class TestGraphFactoryInitialization:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_initialization_creates_middleware_instances(self, mock_dynamodb_saver, mock_config):
         """Test GraphFactory creates middleware instances."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         assert factory._a2a_middleware is not None
         assert factory._auth_middleware is not None
@@ -75,7 +75,7 @@ class TestGraphFactoryInitialization:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_a2a_middleware_property(self, mock_dynamodb_saver, mock_config):
         """Test a2a_middleware property returns the middleware instance."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         assert factory.a2a_middleware is factory._a2a_middleware
 
@@ -91,7 +91,7 @@ class TestGraphCreation:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_graph_cache_dictionary_initialized(self, mock_dynamodb, mock_config):
         """Test that the graph cache dictionary is initialized on factory creation."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         # Verify cache is initialized as empty dict
         assert factory._graphs == {}
@@ -104,7 +104,7 @@ class TestMiddlewareStack:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_middleware_stack_order(self, mock_dynamodb, mock_config):
         """Test that middleware stack is assembled in the correct order."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         stack = factory._create_middleware_stack()
 
@@ -121,7 +121,7 @@ class TestMiddlewareStack:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_middleware_stack_dynamic_tool_dispatch_config(self, mock_dynamodb, mock_config):
         """Test that DynamicToolDispatchMiddleware is configured correctly."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         stack = factory._create_middleware_stack()
         dynamic_middleware = stack[0]
@@ -137,7 +137,7 @@ class TestStaticTools:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_get_static_tools_returns_cached_tools(self, mock_dynamodb, mock_config):
         """Test that get_static_tools returns the same cached list on repeated calls."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         tools1 = factory.get_static_tools()
         tools2 = factory.get_static_tools()
@@ -150,13 +150,13 @@ class TestStaticTools:
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_static_tools_include_time_and_file(self, mock_dynamodb, mock_config):
         """Test that static tools list includes expected tools."""
-        factory = GraphFactory(config=mock_config, thinking=False)
+        factory = GraphFactory(config=mock_config)
 
         tools = factory.get_static_tools()
 
         # Verify it's a list of tools
         assert isinstance(tools, list)
-        assert len(tools) == 2
+        assert len(tools) == 2  # FinalResponseSchema only added when with_response_tool=True
 
         # Get tool names
         tool_names = [tool.name for tool in tools]

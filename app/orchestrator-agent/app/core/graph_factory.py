@@ -24,7 +24,7 @@ from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_aws import BedrockEmbeddings
 from langchain_core.language_models import BaseChatModel
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph_checkpoint_aws import DynamoDBSaver
@@ -42,10 +42,11 @@ from ..middleware import (
     TodoStatusMiddleware,
     UserPreferencesMiddleware,
 )
-from ..models import AgentSettings, FinalResponseSchema
-from ..models.config import GraphRuntimeContext, ModelType
+from ..models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
+from ..models.config import AgentSettings, GraphRuntimeContext
+from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
-from .model_factory import DEFAULT_MODEL, create_model
+from .model_factory import create_model
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class GraphFactory:
     - DynamicToolDispatchMiddleware handles tool binding and dispatch
 
     Usage:
-        factory = GraphFactory(config, thinking=False)
+        factory = GraphFactory(config, thinking_level=None)
         graph = factory.get_graph("claude-sonnet-4.5")
         # Use graph.astream(..., context=runtime_context)
     """
@@ -75,7 +76,6 @@ class GraphFactory:
     def __init__(
         self,
         config: AgentSettings,
-        thinking: bool = False,
         a2a_middleware: Optional[A2ATaskTrackingMiddleware] = None,
         cost_logger: Optional[CostLogger] = None,
     ):
@@ -83,17 +83,15 @@ class GraphFactory:
 
         Args:
             config: Agent settings with model config, checkpoint config, etc.
-            thinking: Enable thinking mode for Claude models
             a2a_middleware: Optional A2A task tracking middleware (shared with discovery)
             cost_logger: Optional CostLogger instance for cost tracking callbacks
         """
         self.config = config
-        self.thinking = thinking
         self.cost_logger = cost_logger
 
         # Model and graph caches
-        self._models: dict[str, BaseChatModel] = {}
-        self._graphs: dict[str, CompiledStateGraph] = {}
+        self._models: dict[tuple[str, str | None], BaseChatModel] = {}
+        self._graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
 
         # Static tools cache (created once per model type, reused)
         self._static_tools_cache: list[BaseTool] = []
@@ -289,7 +287,7 @@ class GraphFactory:
             await self._connection_pool.close()
             logger.info("Closed AsyncConnectionPool for document store")
 
-    def _create_model(self, model_type: ModelType) -> BaseChatModel:
+    def _create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
         """Create a model instance for the given model type.
 
         Args:
@@ -303,10 +301,13 @@ class GraphFactory:
         if self.cost_logger:
             callbacks.append(CostTrackingCallback(self.cost_logger))
 
-        return create_model(model_type, self.config, self.thinking, callbacks=callbacks if callbacks else None)
+        return create_model(model_type, self.config, thinking_level, callbacks=callbacks if callbacks else None)
 
-    def _get_or_create_model(self, model_type: ModelType) -> BaseChatModel:
-        """Get or create a model instance (cached).
+    def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
+        """Get or create a model instance
+
+        It will be cached by model_type AND thinking_level, even though ideally we could
+        use with_config on the same model instance, but those parameters are not configurable that way yet.
 
         Args:
             model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
@@ -314,32 +315,19 @@ class GraphFactory:
         Returns:
             BaseChatModel: The model instance (cached or newly created)
         """
-        if model_type not in self._models:
-            logger.info(f"Creating model instance for: {model_type}")
-            self._models[model_type] = self._create_model(model_type)
-        return self._models[model_type]
+        # Create compound cache key: (model_type, thinking_level)
+        cache_key = (model_type, thinking_level)
+        if cache_key not in self._models:
+            logger.info(f"Creating model instance for: {model_type} with thinking_level={thinking_level}")
+            self._models[cache_key] = self._create_model(model_type, thinking_level)
+        return self._models[cache_key]
 
     def _create_middleware_stack(self) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
-
         Returns:
             Complete middleware stack with DynamicToolDispatchMiddleware first
         """
-        # Static tools available to all models (cached to avoid recreation)
-        if not self._static_tools_cache:
-            static_tools: list[BaseTool] = []
-
-            # Add time tool for current time and relative date calculations
-            static_tools.append(create_time_tool())
-
-            # Add presigned URL tool for dispatching files to sub-agents
-            static_tools.append(create_presigned_url_tool())
-
-            self._static_tools_cache = static_tools
-        else:
-            static_tools = self._static_tools_cache
-
         # DynamicToolDispatchMiddleware must be first to intercept model calls
         # Add Static tools directly to the graph (not via middleware) in case you want
         # FinalResponseSchema's return_direct=True to be respected by the model
@@ -361,18 +349,39 @@ class GraphFactory:
             self._todo_middleware,
         ]
 
-    def get_static_tools(self) -> list[BaseTool]:
+    def get_static_tools(self, with_response_tool: bool = False) -> list[BaseTool]:
         """Get static tools for the given model type.
 
         Returns:
             List of static tools (cached)
         """
         if not self._static_tools_cache:
-            # Trigger middleware creation to populate cache
-            self._create_middleware_stack()
-        return self._static_tools_cache
+            static_tools: list[BaseTool] = []
 
-    def _create_graph(self, model_type: ModelType) -> CompiledStateGraph:
+            # Add time tool for current time and relative date calculations
+            static_tools.append(create_time_tool())
+
+            # Add presigned URL tool for dispatching files to sub-agents
+            static_tools.append(create_presigned_url_tool())
+            # if bedrock and thinking is enabled we need to add the final response tool to handle structured output
+            if with_response_tool:
+                static_tools.append(
+                    StructuredTool.from_function(
+                        func=lambda **kwargs: FinalResponseSchema(**kwargs),
+                        name="FinalResponseSchema",
+                        description="ALWAYS use this tool to format your final response to the user.",
+                        args_schema=FinalResponseSchema,
+                        return_direct=True,  # Ensure the model's output is returned directly without additional parsing
+                    )
+                )
+
+            self._static_tools_cache = static_tools
+        else:
+            static_tools = self._static_tools_cache
+
+        return static_tools
+
+    def _create_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
         """Create a graph for the given model type.
 
         Args:
@@ -381,7 +390,7 @@ class GraphFactory:
         Returns:
             CompiledStateGraph: The newly created graph
         """
-        model = self._get_or_create_model(model_type)
+        model = self._get_or_create_model(model_type, thinking_level)
 
         # Bind built-in tools for Gemini models
         # Google Search and Code Execution are always enabled for Gemini
@@ -393,8 +402,6 @@ class GraphFactory:
                     {"code_execution": {}},
                 ]
             )
-
-        middleware = self._create_middleware_stack()
 
         # Ensure store is initialized before creating graph (required for longterm memory)
         # Access the store property to trigger lazy initialization
@@ -415,18 +422,29 @@ class GraphFactory:
             )
 
         backend = create_backend
-        static_tools_list = self.get_static_tools()
 
         # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
-        # Use AutoStrategy for Bedrock and Gemini models (more efficient, handles structured output natively)
+        # Use AutoStrategy for Bedrock without extended thinking and Gemini models (more efficient, handles structured output natively)
+        # For bedrock models with extended thinking use None and add FinalResponseSchema to static tools
+        requires_response_tool = False
         if model_type in ("gpt4o", "gpt-4o-mini"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
+        elif model_type in ("claude-sonnet-4.5", "claude-haiku-4-5"):
+            # if thinking is enabled we need to set response_format to None since the bedrock api can't handle
+            # forcing structured output when enabling thinking
+            if thinking_level:
+                response_format = None
+                requires_response_tool = True
+            else:
+                response_format = AutoStrategy(schema=FinalResponseSchema)
         else:
             response_format = AutoStrategy(schema=FinalResponseSchema)
+        middleware = self._create_middleware_stack()
+        static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
 
         compiled_graph = create_deep_agent(
             model=model,
-            tools=static_tools_list,  # Include static tools with FinalResponseSchema
+            tools=static_tools_list,
             subagents=[],  # Sub-agents come from GraphRuntimeContext via middleware
             system_prompt=self.config.SYSTEM_INSTRUCTION,
             checkpointer=self._checkpointer,
@@ -443,7 +461,9 @@ class GraphFactory:
 
         return compiled_graph
 
-    def get_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:
+    def get_graph(
+        self, model_type: ModelType | None = None, thinking_level: ThinkingLevel | None = None
+    ) -> CompiledStateGraph:
         """Get or create a graph for the given model type.
 
         Args:
@@ -454,8 +474,9 @@ class GraphFactory:
         """
         effective_model: ModelType = model_type or DEFAULT_MODEL
 
-        if effective_model not in self._graphs:
-            logger.info(f"Creating graph for model: {effective_model}")
-            self._graphs[effective_model] = self._create_graph(effective_model)
+        cache_key = (effective_model, thinking_level)
 
-        return self._graphs[effective_model]
+        if cache_key not in self._graphs:
+            logger.info(f"Creating graph for model: {effective_model}, thinking_level={thinking_level}")
+            self._graphs[cache_key] = self._create_graph(effective_model, thinking_level)
+        return self._graphs[cache_key]

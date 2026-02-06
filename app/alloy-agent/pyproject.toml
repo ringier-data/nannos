@@ -80,3 +80,8 @@ disallow_untyped_defs = true
 
 [tool.uv.sources]
 ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.20",
+]

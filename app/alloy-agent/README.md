@@ -48,13 +48,60 @@ Key configuration options:
 
 ### Local Development
 
+#### Quick Start
+
 ```bash
 # Install dependencies
 make install
 
-# Or with development tools
-make dev
+# Run from repository root
+cd ../..
+./start-dev.sh
+
+# Or run specific environment
+./start-dev.sh --alloy dev
+
+# Follow logs
+tail -f logs/alloy.log
 ```
+
+#### Debug Mode
+
+Start services with debugging enabled:
+
+```bash
+./start-dev.sh --debug
+```
+
+This starts the Alloy Agent with debugpy listening on **port 5681**.
+
+**Attach VS Code Debugger:**
+1. Press ⇧⌘D (macOS) or Ctrl+Shift+D (Windows/Linux)
+2. Select "Attach: Alloy Agent" or "Debug: All Services"
+3. Press F5 to attach
+
+**Set Breakpoints:**
+- Open any Python file
+- Click in the gutter (left of line numbers) to set breakpoints
+- Code execution will pause when breakpoints are hit
+
+**Debug Ports:**
+- Backend: 5678
+- Orchestrator: 5679
+- Agent Creator: 5680
+- Alloy Agent: 5681
+
+#### Standalone Development
+
+```bash
+# Using make
+make run
+
+# Or directly with uv
+uv run python main.py
+```
+
+The server will start on `http://localhost:5004` (or configured PORT).
 
 ### Docker
 
@@ -64,35 +111,6 @@ make docker-build
 
 # Run container
 make docker-run
-```
-
-## Running the Agent
-
-### Local
-
-```bash
-# Using make
-make run
-
-# Or directly
-python main.py
-```
-
-The server will start on `http://localhost:5004` (or configured PORT).
-
-### Using start-dev.sh
-
-From the repository root:
-
-```bash
-# Run all services locally (including naonous-agent)
-./start-dev.sh
-
-# Run naonous-agent on dev environment
-./start-dev.sh --naonous dev
-
-# Follow logs
-tail -f logs/naonous.log
 ```
 
 ## API Endpoints

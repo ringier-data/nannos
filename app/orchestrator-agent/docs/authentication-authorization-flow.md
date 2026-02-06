@@ -346,7 +346,7 @@ class GraphFactory:
     - DynamicToolDispatchMiddleware handles tool binding and dispatch
     """
     
-    def __init__(self, config, thinking=False, a2a_middleware=None):
+    def __init__(self, config, a2a_middleware=None):
         # Model and graph caches
         self._models: dict[str, BaseChatModel] = {}
         self._graphs: dict[str, CompiledStateGraph] = {}

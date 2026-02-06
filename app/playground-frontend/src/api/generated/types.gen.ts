@@ -447,6 +447,13 @@ export type NotificationListResponse = {
 export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_permission_changed' | 'group_added' | 'group_removed' | 'role_updated' | 'approval_requested' | 'approval_completed' | 'approval_rejected' | 'agent_shared' | 'agent_access_revoked' | 'secret_shared' | 'secret_access_revoked' | 'secret_permission_changed' | 'system_announcement';
 
 /**
+ * OrchestratorThinkingLevel
+ *
+ * Thinking depth level for extended thinking mode.
+ */
+export type OrchestratorThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
+
+/**
  * OwnerStatus
  *
  * Owner status enum matching database enum.
@@ -947,6 +954,11 @@ export type SubAgentConfigVersion = {
         [key: string]: unknown;
     } | null;
     /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean;
+    thinking_level?: ThinkingLevel | null;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -1048,6 +1060,11 @@ export type SubAgentCreate = {
     pricing_config?: {
         [key: string]: unknown;
     } | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: ThinkingLevel | null;
 };
 
 /**
@@ -1274,6 +1291,11 @@ export type SubAgentUpdate = {
         [key: string]: unknown;
     } | null;
     /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: ThinkingLevel | null;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -1294,6 +1316,13 @@ export type SubAgentVersionApproval = {
      */
     rejection_reason?: string | null;
 };
+
+/**
+ * ThinkingLevel
+ *
+ * Thinking depth level for extended thinking mode.
+ */
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
 
 /**
  * UnreadCountResponse
@@ -1815,6 +1844,15 @@ export type UserSettings = {
      */
     mcp_tools?: Array<string>;
     /**
+     * Preferred Model
+     */
+    preferred_model?: string | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean;
+    thinking_level?: OrchestratorThinkingLevel | null;
+    /**
      * Created At
      */
     created_at?: string;
@@ -1837,6 +1875,10 @@ export type UserSettingsResponse = {
  * UserSettingsUpdate
  *
  * Request to update user settings (partial update).
+ *
+ * Uses model_fields_set to distinguish:
+ * - Field not provided in request (not in model_fields_set, keeps current value)
+ * - Field explicitly set to None (in model_fields_set, clears the value)
  */
 export type UserSettingsUpdate = {
     /**
@@ -1855,6 +1897,15 @@ export type UserSettingsUpdate = {
      * Mcp Tools
      */
     mcp_tools?: Array<string> | null;
+    /**
+     * Preferred Model
+     */
+    preferred_model?: string | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: OrchestratorThinkingLevel | null;
 };
 
 /**

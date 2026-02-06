@@ -106,7 +106,9 @@ export const getCurrentUserSettingsApiV1AuthMeSettingsGet = <ThrowOnError extend
  * Update the current authenticated user's settings.
  *
  * Args:
- * request: Fields to update (language, timezone, custom_prompt)
+ * update_request: Fields to update (language, timezone, custom_prompt, etc.)
+ * Fields not provided will keep current values.
+ * Fields explicitly set to null will be cleared.
  *
  * Returns:
  * Updated user settings.

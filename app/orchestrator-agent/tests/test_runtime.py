@@ -7,7 +7,7 @@ from pydantic import SecretStr
 
 from app.a2a_utils.models import LocalLangGraphSubAgentConfig
 from app.models.config import GraphRuntimeContext, UserConfig
-from app.models.runtime import build_runtime_context
+from app.utils import build_runtime_context
 
 
 class TestBuildRuntimeContext:

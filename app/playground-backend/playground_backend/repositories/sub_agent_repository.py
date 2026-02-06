@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
-from ..models.sub_agent import ActivationSource
+from ..models.sub_agent import ActivationSource, ThinkingLevel
 from ..models.user import User
 from .base import AuditedRepository
 
@@ -817,6 +817,8 @@ class SubAgentRepository(AuditedRepository):
         foundry_scopes: list[str] | None = None,
         foundry_version: str | None = None,
         pricing_config: dict | None = None,
+        enable_thinking: bool | None = None,
+        thinking_level: ThinkingLevel | None = None,
     ) -> int:
         """
         Create a new configuration version with automatic audit logging.
@@ -841,6 +843,9 @@ class SubAgentRepository(AuditedRepository):
             foundry_query_api_name: Foundry query API name
             foundry_scopes: List of Foundry scopes
             foundry_version: Foundry version
+            pricing_config: Agent-specific pricing configuration
+            enable_thinking: Whether extended thinking is enabled
+            thinking_level: Thinking depth level
 
         Returns:
             The ID of the newly created version
@@ -853,11 +858,13 @@ class SubAgentRepository(AuditedRepository):
             INSERT INTO sub_agent_config_versions
             (sub_agent_id, version, version_hash, description, model, system_prompt, agent_url, mcp_tools, 
              foundry_hostname, foundry_client_id, foundry_client_secret_ref, foundry_ontology_rid, 
-             foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, change_summary, status, created_at)
+             foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, enable_thinking, 
+             thinking_level, change_summary, status, created_at)
             VALUES (:sub_agent_id, :version, :version_hash, :description, :model, :system_prompt, :agent_url, 
                     CAST(:mcp_tools AS jsonb), :foundry_hostname, :foundry_client_id, :foundry_client_secret_ref, 
                     :foundry_ontology_rid, :foundry_query_api_name, CAST(:foundry_scopes AS text[]), 
-                    :foundry_version, CAST(:pricing_config AS jsonb), :change_summary, :status, :now)
+                    :foundry_version, CAST(:pricing_config AS jsonb), :enable_thinking, 
+                    CAST(:thinking_level AS thinking_level), :change_summary, :status, :now)
             RETURNING id
         """)
         result = await db.execute(
@@ -879,6 +886,8 @@ class SubAgentRepository(AuditedRepository):
                 "foundry_scopes": foundry_scopes,
                 "foundry_version": foundry_version,
                 "pricing_config": json.dumps(pricing_config) if pricing_config else None,
+                "enable_thinking": enable_thinking,
+                "thinking_level": thinking_level,
                 "change_summary": change_summary,
                 "status": status,
                 "now": now,
@@ -904,6 +913,8 @@ class SubAgentRepository(AuditedRepository):
             "foundry_scopes": foundry_scopes,
             "foundry_version": foundry_version,
             "pricing_config": pricing_config,
+            "enable_thinking": enable_thinking,
+            "thinking_level": thinking_level,
             "change_summary": change_summary,
             "status": status,
         }

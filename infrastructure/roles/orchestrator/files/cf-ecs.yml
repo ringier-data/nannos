@@ -247,9 +247,11 @@ Resources:
             - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
             - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
             - { Name: "MAX_RECURSION_LIMIT", Value: '{{ max_recursion_limit }}' }
-            - { Name: "GOOGLE_CLOUD_PROJECT", Value: '{{ gcp_project_id }}' }
-            - { Name: "GOOGLE_CLOUD_LOCATION", Value: '{{ gcp_location }}' }
+            - { Name: "GCP_PROJECT_ID", Value: '{{ gcp_project_id }}' }
+            - { Name: "GCP_LOCATION", Value: '{{ gcp_location }}' }
             - { Name: "GOOGLE_GENAI_USE_VERTEXAI", Value: 'true' }
+            - { Name: "ORCHESTRATOR_ENABLE_THINKING", Value: '{{ orchestrator_enable_thinking | default("false") | string | lower }}' }
+            - { Name: "ORCHESTRATOR_THINKING_LEVEL", Value: '{{ orchestrator_thinking_level | default("low") }}' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }

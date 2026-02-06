@@ -20,6 +20,7 @@ from ..models.sub_agent import (
     SubAgentStatus,
     SubAgentType,
     SubAgentUpdate,
+    ThinkingLevel,
 )
 from ..models.user import User
 from ..repositories.sub_agent_repository import ApprovalContext
@@ -30,6 +31,48 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Models that support Extended Thinking
+MODELS_SUPPORTING_THINKING = {
+    "claude-sonnet-4.5",
+    "claude-haiku-4-5",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+}
+
+
+def _normalize_thinking_config(
+    model: str | None,
+    enable_thinking: bool | None,
+    thinking_level: ThinkingLevel | None,
+) -> tuple[bool | None, ThinkingLevel | None]:
+    """Normalize Extended Thinking configuration based on model support.
+
+    Returns (enable_thinking, thinking_level) with automatic nullification:
+    - If model doesn't support thinking: both set to None
+    - If enable_thinking is False: thinking_level set to None
+    - Otherwise: preserve the provided values
+
+    Args:
+        model: The model identifier (e.g., 'claude-sonnet-4.5')
+        enable_thinking: Whether Extended Thinking is enabled
+        thinking_level: The thinking level ('minimal', 'low', 'medium', 'high')
+
+    Returns:
+        Tuple of (normalized_enable_thinking, normalized_thinking_level)
+    """
+    if model is None:
+        return (None, None)
+    # If model doesn't support thinking, force both to None
+    if model and model not in MODELS_SUPPORTING_THINKING:
+        return (None, None)
+
+    # If thinking is explicitly disabled, set level to None
+    if enable_thinking is False:
+        return (False, None)
+
+    # Preserve the provided values
+    return (enable_thinking, thinking_level)
 
 
 class SubAgentService:
@@ -109,7 +152,10 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.enable_thinking as cv_enable_thinking,
+                   cv.thinking_level as cv_thinking_level,
+                   cv.agent_url as cv_agent_url,
                    cv.mcp_tools as cv_mcp_tools,
                    cv.foundry_hostname as cv_foundry_hostname,
                    cv.foundry_client_id as cv_foundry_client_id,
@@ -164,7 +210,10 @@ class SubAgentService:
                        cv.id as cv_id, cv.version as cv_version,
                        cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                        cv.description as cv_description,
-                       cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url,
+                       cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                       cv.enable_thinking as cv_enable_thinking,
+                       cv.thinking_level as cv_thinking_level,
+                       cv.agent_url as cv_agent_url,
                        cv.mcp_tools as cv_mcp_tools,
                        cv.foundry_hostname as cv_foundry_hostname,
                        cv.foundry_client_id as cv_foundry_client_id,
@@ -175,6 +224,8 @@ class SubAgentService:
                        cv.foundry_scopes as cv_foundry_scopes,
                        cv.foundry_version as cv_foundry_version,
                        cv.pricing_config as cv_pricing_config,
+                       cv.enable_thinking as cv_enable_thinking,
+                       cv.thinking_level as cv_thinking_level,
                        cv.change_summary as cv_change_summary, cv.status as cv_status,
                        cv.submitted_by_user_id as cv_submitted_by_user_id,
                        cv.approved_by_user_id as cv_approved_by_user_id,
@@ -224,7 +275,10 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.enable_thinking as cv_enable_thinking,
+                   cv.thinking_level as cv_thinking_level,
+                   cv.agent_url as cv_agent_url,
                    cv.mcp_tools as cv_mcp_tools,
                    cv.foundry_hostname as cv_foundry_hostname,
                    cv.foundry_client_id as cv_foundry_client_id,
@@ -272,7 +326,10 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.enable_thinking as cv_enable_thinking,
+                   cv.thinking_level as cv_thinking_level,
+                   cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
                    cv.foundry_hostname as cv_foundry_hostname,
                    cv.foundry_client_id as cv_foundry_client_id,
                    cv.foundry_client_secret_ref as cv_foundry_client_secret_ref,
@@ -319,7 +376,10 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.enable_thinking as cv_enable_thinking,
+                   cv.thinking_level as cv_thinking_level,
+                   cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
                    cv.foundry_hostname as cv_foundry_hostname,
                    cv.foundry_client_id as cv_foundry_client_id,
                    cv.foundry_client_secret_ref as cv_foundry_client_secret_ref,
@@ -364,7 +424,10 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt, cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
+                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.enable_thinking as cv_enable_thinking,
+                   cv.thinking_level as cv_thinking_level,
+                   cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
                    cv.foundry_hostname as cv_foundry_hostname,
                    cv.foundry_client_id as cv_foundry_client_id,
                    s.ssm_parameter_name as cv_foundry_client_secret_ssmkey,  -- needed for the orchestrator
@@ -412,7 +475,9 @@ class SubAgentService:
                        cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
+                       cv.pricing_config, cv.enable_thinking, cv.thinking_level,
                        cv.change_summary, cv.status, 
+                       cv.submitted_by_user_id,
                        cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
                 FROM sub_agent_config_versions cv
                 LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
@@ -426,7 +491,9 @@ class SubAgentService:
                        cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
+                       cv.pricing_config, cv.enable_thinking, cv.thinking_level,
                        cv.change_summary, cv.status, 
+                       cv.submitted_by_user_id,
                        cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
                 FROM sub_agent_config_versions cv
                 LEFT JOIN secrets s ON cv.foundry_client_secret_ref = s.id
@@ -484,6 +551,13 @@ class SubAgentService:
             returning="id",
         )
 
+        # Normalize Extended Thinking configuration based on model support
+        normalized_enable_thinking, normalized_thinking_level = _normalize_thinking_config(
+            data.model,
+            data.enable_thinking,
+            data.thinking_level,
+        )
+
         # Create initial version with all configuration data
         await self._create_config_version(
             db,
@@ -504,8 +578,9 @@ class SubAgentService:
             foundry_scopes=[s.value for s in data.foundry_scopes] if data.foundry_scopes else None,
             foundry_version=data.foundry_version,
             pricing_config=data.pricing_config,
+            enable_thinking=normalized_enable_thinking,
+            thinking_level=normalized_thinking_level,
         )
-
         await db.commit()
 
         return await self.get_sub_agent_by_id(db, sub_agent_id)  # type: ignore
@@ -567,6 +642,8 @@ class SubAgentService:
             or data.foundry_query_api_name is not None
             or data.foundry_scopes is not None
             or data.pricing_config is not None
+            or data.thinking_level is not None
+            or data.enable_thinking is not None
         )
 
         if needs_new_version:
@@ -608,6 +685,24 @@ class SubAgentService:
                     if data.system_prompt is not None
                     else (current_config.system_prompt if current_config else None)
                 )
+                version_model = (
+                    data.model if data.model is not None else (current_config.model if current_config else None)
+                )
+                version_mcp_tools = (
+                    data.mcp_tools
+                    if data.mcp_tools is not None
+                    else (current_config.mcp_tools if current_config else [])
+                )
+                version_thinking_level = (
+                    data.thinking_level
+                    if data.thinking_level is not None
+                    else (current_config.thinking_level if current_config else None)
+                )
+                version_enable_thinking = (
+                    data.enable_thinking
+                    if data.enable_thinking is not None
+                    else (current_config.enable_thinking if current_config else None)
+                )
                 version_agent_url = None
                 version_foundry_hostname = None
                 version_foundry_client_id = None
@@ -616,13 +711,20 @@ class SubAgentService:
                 version_foundry_query_api_name = None
                 version_foundry_scopes = None
                 version_foundry_version = None
+                version_pricing_config = None
             elif existing.type == SubAgentType.REMOTE:
                 version_agent_url = (
                     data.agent_url
                     if data.agent_url is not None
                     else (current_config.agent_url if current_config else None)
                 )
+
                 version_system_prompt = None
+                version_model = None
+                version_thinking_level = None
+                version_enable_thinking = None
+                version_mcp_tools = None
+
                 version_foundry_hostname = None
                 version_foundry_client_id = None
                 version_foundry_client_secret_ref = None
@@ -630,9 +732,21 @@ class SubAgentService:
                 version_foundry_query_api_name = None
                 version_foundry_scopes = None
                 version_foundry_version = None
+
+                version_pricing_config = (
+                    data.pricing_config
+                    if data.pricing_config is not None
+                    else (current_config.pricing_config if current_config else None)
+                )
+
             else:  # foundry
-                version_system_prompt = None
                 version_agent_url = None
+
+                version_system_prompt = None
+                version_model = None
+                version_thinking_level = None
+                version_enable_thinking = None
+                version_mcp_tools = None
 
                 # For Foundry agents, gather all required fields with fallback to current config
                 version_foundry_hostname = (
@@ -669,6 +783,12 @@ class SubAgentService:
                     else (current_config.foundry_version if current_config else None)
                 )
 
+                version_pricing_config = (
+                    data.pricing_config
+                    if data.pricing_config is not None
+                    else (current_config.pricing_config if current_config else None)
+                )
+
                 # Validate all required Foundry fields are present (per DB constraint)
                 missing_fields = []
                 if version_foundry_hostname is None:
@@ -695,17 +815,14 @@ class SubAgentService:
                 if data.description is not None
                 else (current_config.description if current_config else "")
             )
-            version_model = data.model if data.model is not None else (current_config.model if current_config else None)
-            version_mcp_tools = (
-                data.mcp_tools if data.mcp_tools is not None else (current_config.mcp_tools if current_config else [])
+
+            # Normalize Extended Thinking configuration based on model support
+            version_enable_thinking, version_thinking_level = _normalize_thinking_config(
+                version_model,
+                version_enable_thinking,
+                version_thinking_level,
             )
 
-            # Handle pricing_config (for remote and foundry agents)
-            version_pricing_config = (
-                data.pricing_config
-                if data.pricing_config is not None
-                else (current_config.pricing_config if current_config else None)
-            )
             # Create new version
             await self._create_config_version(
                 db,
@@ -726,6 +843,8 @@ class SubAgentService:
                 foundry_scopes=version_foundry_scopes,
                 foundry_version=version_foundry_version,
                 pricing_config=version_pricing_config,
+                enable_thinking=version_enable_thinking,
+                thinking_level=version_thinking_level,
             )
 
             # Update current_version pointer
@@ -1558,6 +1677,8 @@ class SubAgentService:
             foundry_scopes=target.config_version.foundry_scopes,
             foundry_version=target.config_version.foundry_version,
             pricing_config=target.config_version.pricing_config,
+            thinking_level=target.config_version.thinking_level,
+            enable_thinking=target.config_version.enable_thinking,
         )
 
         await self.repo.update_current_version(
@@ -1846,6 +1967,8 @@ class SubAgentService:
         foundry_scopes: list[str] | None = None,
         foundry_version: str | None = None,
         pricing_config: dict | None = None,
+        enable_thinking: bool | None = None,
+        thinking_level: ThinkingLevel | None = None,
     ) -> int:
         """Create a new configuration version entry. Returns the new version ID."""
         now = datetime.now(timezone.utc)
@@ -1873,6 +1996,8 @@ class SubAgentService:
             foundry_scopes=foundry_scopes,
             foundry_version=foundry_version,
             pricing_config=pricing_config,
+            enable_thinking=enable_thinking,
+            thinking_level=thinking_level,
         )
 
     def _row_to_sub_agent_with_version(self, row: Any) -> SubAgent:
@@ -1895,6 +2020,8 @@ class SubAgentService:
                 description=row["cv_description"],
                 model=row["cv_model"],
                 system_prompt=row.get("cv_system_prompt"),
+                enable_thinking=row.get("cv_enable_thinking"),
+                thinking_level=row.get("cv_thinking_level"),
                 agent_url=row.get("cv_agent_url"),
                 mcp_tools=row.get("cv_mcp_tools", []),
                 foundry_hostname=row.get("cv_foundry_hostname"),
@@ -1957,8 +2084,11 @@ class SubAgentService:
             foundry_scopes=row.get("foundry_scopes"),
             foundry_version=row.get("foundry_version"),
             pricing_config=row.get("pricing_config"),
+            enable_thinking=row.get("enable_thinking", False),
+            thinking_level=row.get("thinking_level", "low"),
             change_summary=row["change_summary"],
             status=row["status"],
+            submitted_by_user_id=row.get("submitted_by_user_id"),
             approved_by_user_id=row["approved_by_user_id"],
             approved_at=row["approved_at"],
             rejection_reason=row["rejection_reason"],

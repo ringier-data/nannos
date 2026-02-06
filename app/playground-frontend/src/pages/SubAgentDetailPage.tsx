@@ -67,11 +67,12 @@ import { ApprovalDialog } from '@/components/subagents/ApprovalDialog';
 import { SubAgentPermissionsDialog } from '@/components/subagents/SubAgentPermissionsDialog';
 import { VersionSidebar } from '@/components/subagents/VersionSidebar';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
+import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
-import { MODEL_OPTIONS } from '@/config/models';
+import { MODEL_OPTIONS, modelSupportsThinking } from '@/config/models';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
   getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions,
@@ -82,7 +83,7 @@ import {
   listSecretsApiV1SecretsGetOptions,
   getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgentConfigVersion } from '@/api/generated/types.gen';
+import type { SubAgentConfigVersion, OrchestratorThinkingLevel } from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
 import { Markdown } from '@/components/ui/markdown';
 import { usePlaygroundChat } from '@/hooks/usePlaygroundChat';
@@ -148,6 +149,8 @@ export function SubAgentDetailPage() {
   const [editAgentUrl, setEditAgentUrl] = useState('');
   const [editSystemPrompt, setEditSystemPrompt] = useState('');
   const [editMcpTools, setEditMcpTools] = useState<string[]>([]);
+  const [editEnableThinking, setEditEnableThinking] = useState(false);
+  const [editThinkingLevel, setEditThinkingLevel] = useState<OrchestratorThinkingLevel | null>(null);
 
   // Foundry configuration state
   const [editFoundryHostname, setEditFoundryHostname] = useState('');
@@ -475,6 +478,8 @@ export function SubAgentDetailPage() {
     } else {
       setEditSystemPrompt(String(sa.config_version?.system_prompt ?? ''));
       setEditMcpTools(Array.isArray(sa.config_version?.mcp_tools) ? sa.config_version.mcp_tools : []);
+      setEditEnableThinking(sa.config_version?.enable_thinking ?? false);
+      setEditThinkingLevel((sa.config_version?.thinking_level as OrchestratorThinkingLevel) ?? null);
     }
     
     // Initialize pricing config for remote and foundry agents
@@ -539,6 +544,8 @@ export function SubAgentDetailPage() {
       typeSpecificConfig = {
         system_prompt: editSystemPrompt,
         mcp_tools: editMcpTools.length > 0 ? editMcpTools : undefined,
+        enable_thinking: editEnableThinking,
+        thinking_level: editThinkingLevel ?? undefined, // Convert null to undefined for API
       };
     }
 
@@ -1275,6 +1282,11 @@ export function SubAgentDetailPage() {
                         value={editModel}
                         onValueChange={(value) => {
                           setEditModel(value);
+                          // Auto-reset thinking if new model doesn't support it
+                          if (!modelSupportsThinking(value)) {
+                            setEditEnableThinking(false);
+                            setEditThinkingLevel(null);
+                          }
                           handleFieldChange();
                         }}
                       >
@@ -1295,6 +1307,31 @@ export function SubAgentDetailPage() {
                       </p>
                     )}
                   </div>
+
+                  {/* Extended Thinking Configuration - Only for local agents during editing */}
+                  {isEditing && (
+                    <div className="space-y-2 flex-shrink-0">
+                      <ExtendedThinkingConfig
+                        model={editModel}
+                        enableThinking={editEnableThinking}
+                        thinkingLevel={editThinkingLevel}
+                        onEnableThinkingChange={(checked) => {
+                          setEditEnableThinking(checked);
+                          if (!checked) {
+                            setEditThinkingLevel(null);
+                          } else if (editThinkingLevel === null) {
+                            setEditThinkingLevel('low');
+                          }
+                          handleFieldChange();
+                        }}
+                        onThinkingLevelChange={(level) => {
+                          setEditThinkingLevel(level);
+                          handleFieldChange();
+                        }}
+                        showAsCard={false}
+                      />
+                    </div>
+                  )}
 
                   {/* MCP Tools */}
                   <div className="space-y-2 flex-shrink-0">
@@ -1339,7 +1376,7 @@ export function SubAgentDetailPage() {
                           )}
                         </CollapsibleContent>
                       </Collapsible>
-                    )}
+                    )}  
                   </div>
 
                   {/* System Prompt */}
