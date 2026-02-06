@@ -4,4 +4,3 @@ export { ChatInput } from './ChatInput';
 export { ConnectionStatus } from './ConnectionStatus';
 export { TaskPanel } from './TaskPanel';
 export { SettingsModal } from './SettingsModal';
-export { ProfilePopover } from './ProfilePopover';

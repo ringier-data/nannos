@@ -160,7 +160,7 @@ class UserSettings(BaseModel):
     custom_prompt: str | None = None
     mcp_tools: list[str] = Field(default_factory=list)
     preferred_model: str | None = None
-    enable_thinking: bool = False
+    enable_thinking: bool | None = None
     thinking_level: OrchestratorThinkingLevel | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

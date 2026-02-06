@@ -4,7 +4,7 @@ version = "0.3.1"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "a2a-sdk[all]>=0.3.10",
+    "a2a-sdk[all]>=0.3.20",
     "httpx[http2]>=0.28.1",
     "httpx-sse>=0.4.0",
     "jwcrypto>=1.5.6",

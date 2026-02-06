@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { useQuery } from '@tanstack/react-query';
 import type { AgentResponseData, Conversation, Message, Settings, Task, TaskHistoryEntry } from '../types';
 import { useSocket } from './SocketContext';
-import { useLocalStorage, useSessionId } from '../hooks/useLocalStorage';
+import { useSessionId } from '../hooks/useLocalStorage';
 import { extractPartTexts, generateUUID, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
 import {
   getAdminModeFromStorage,
@@ -11,6 +11,7 @@ import {
   IMPERSONATE_USER_HEADER,
 } from '../../../api/apiInstanceConfig';
 import { getCurrentUserSettingsApiV1AuthMeSettingsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
+import { config } from '@/config';
 
 interface ChatContextType {
   // State
@@ -19,6 +20,7 @@ interface ChatContextType {
   messages: Message[];
   tasks: Task[];
   settings: Settings | null;
+  userSettings: { preferred_model?: string | null; enable_thinking?: boolean | null; thinking_level?: string | null } | null;
   isLoadingConversations: boolean;
   isLoadingMessages: boolean;
   isConnected: boolean;
@@ -68,7 +70,8 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [contextIdsMap, setContextIdsMap] = useState<Map<string, string>>(new Map());
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
-  const [settings, setSettings] = useLocalStorage<Settings | null>('connection-settings', null);
+  // Settings are ephemeral and not persisted to localStorage
+  const [settings, setSettings] = useState<Settings | null>(null);
 
   const messageCounterRef = useRef(0);
   const taskCounterRef = useRef(0);
@@ -603,7 +606,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
   // Default settings for auto-initialization
   const DEFAULT_SETTINGS: Settings = {
-    agentUrl: 'https://orchestrator.d.nannos.rcplus.io',
+    agentUrl: config.orchestratorUrl,
     model: 'claude-sonnet-4.5',
   };
 
@@ -621,12 +624,12 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
     const effectiveSettings = settings || DEFAULT_SETTINGS;
     
-    // If no settings exist, save the defaults
+    // If no settings exist, set the defaults (ephemeral, not persisted)
     if (!settings) {
       setSettings(DEFAULT_SETTINGS);
     }
     
-    console.log('Auto-initializing chat with settings:', effectiveSettings);
+    console.log('Auto-initializing chat with settings (ephemeral):', effectiveSettings);
     initializeClient(effectiveSettings, sessionId).then((success) => {
       console.log('Auto-initialization result:', success);
       if (success) {
@@ -643,6 +646,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         messages,
         tasks,
         settings,
+        userSettings: userSettings || null,
         isLoadingConversations,
         isLoadingMessages,
         isConnected,

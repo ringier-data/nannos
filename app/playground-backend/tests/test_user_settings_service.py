@@ -319,6 +319,7 @@ class TestUserSettingsService:
 
         assert settings.language == "de"
         assert settings.timezone == "America/Los_Angeles"  # Preserved
+
     async def test_cascade_delete_removes_settings(
         self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession
     ):
@@ -387,8 +388,8 @@ class TestUserSettingsThinkingConfiguration:
 
         assert settings.user_id == user.id
         assert settings.preferred_model is None
-        assert settings.enable_thinking is False
-        assert settings.thinking_level == "low"
+        assert settings.enable_thinking is None
+        assert settings.thinking_level is None
 
     async def test_upsert_settings_with_thinking_enabled(
         self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession
