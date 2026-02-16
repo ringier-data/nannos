@@ -38,9 +38,28 @@ Resources:
             Status: 'Enabled'
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
-          - Id: 'DeleteAfterNinetyDays'
+          
+          # Temporary download artifacts from orchestrator docstore exports
+          # Presigned URLs expire in 24h, files cleaned up after 7 days
+          - Id: 'DeleteDocstoreExportsAfterSevenDays'
             Status: 'Enabled'
-            ExpirationInDays: 90
+            Prefix: 'docstore/exports/'
+            ExpirationInDays: 7
+          
+          # Long retention for chat conversation attachments
+          # Users expect these to persist with conversation history
+          - Id: 'DeleteUploadsAfterOneYear'
+            Status: 'Enabled'
+            Prefix: 'uploads/'
+            ExpirationInDays: 365
+          
+          # Short lifecycle for temporary processing artifacts
+          - Id: 'DeleteTempFilesAfterSevenDays'
+            Status: 'Enabled'
+            Prefix: 'temp/'
+            ExpirationInDays: 7
+          
+          # Intelligent tiering for cost optimization
           - Id: 'IntelligentTieringByDefault'
             Status: 'Enabled'
             Transitions:
