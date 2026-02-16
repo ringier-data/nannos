@@ -1,4 +1,4 @@
-import { AlertTriangle, Bot, User } from 'lucide-react';
+import { AlertTriangle, Bot, User, FileText, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -11,10 +11,20 @@ interface MessageCardProps {
   message: Message;
 }
 
+/**
+ * MessageCard renders individual chat messages with support for file attachments.
+ * 
+ * File attachments include presigned S3 URLs that are hydrated by the backend
+ * whenever messages are loaded, so they're always fresh.
+ */
+
 function MessageCard({ message }: MessageCardProps) {
   const isUser = message.type === 'user';
   const isError = message.content.startsWith('Error:');
   const formattedTime = formatTime(message.timestamp);
+
+  // Extract file parts if available
+  const fileParts = message.parts?.filter(part => part.kind === 'file' && part.file) || [];
 
   return (
     <div
@@ -56,7 +66,7 @@ function MessageCard({ message }: MessageCardProps) {
       )}>
         <div
           className={cn(
-            'rounded-lg px-4 py-2 max-w-[85%] overflow-hidden',
+            'rounded-lg px-4 py-2 max-w-[85%] overflow-hidden space-y-2',
             isError && 'bg-destructive/10 text-destructive border border-destructive/20',
             isUser && 'bg-primary text-primary-foreground',
             !isError && !isUser && 'bg-muted'
@@ -65,6 +75,58 @@ function MessageCard({ message }: MessageCardProps) {
           <Markdown inverted={isUser} className="text-sm">
             {message.content}
           </Markdown>
+          
+          {/* Render file attachments */}
+          {fileParts.length > 0 && (
+            <div className="space-y-2 mt-2">
+              {fileParts.map((part, index) => {
+                const file = part.file!;
+                const isAudio = file.mimeType?.startsWith('audio/');
+                const isImage = file.mimeType?.startsWith('image/');
+                
+                return (
+                  <div key={index} className="border border-border/50 rounded p-2 bg-background/50">
+                    {isAudio && (
+                      <div className="space-y-1">
+                        <p className="text-xs text-muted-foreground">{file.name || 'Audio recording'}</p>
+                        <audio
+                          controls
+                          src={file.uri}
+                          className="w-full max-w-md"
+                          preload="metadata"
+                        >
+                          Your browser does not support the audio element.
+                        </audio>
+                      </div>
+                    )}
+                    {isImage && (
+                      <div className="space-y-1">
+                        <p className="text-xs text-muted-foreground">{file.name || 'Image'}</p>
+                        <img
+                          src={file.uri}
+                          alt={file.name || 'Attachment'}
+                          className="max-w-md rounded"
+                        />
+                      </div>
+                    )}
+                    {!isAudio && !isImage && (
+                      <a
+                        href={file.uri}
+                        download={file.name}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 text-sm hover:underline"
+                      >
+                        <FileText className="w-4 h-4" />
+                        <span className="flex-1 truncate">{file.name || 'Download file'}</span>
+                        <Download className="w-4 h-4 shrink-0" />
+                      </a>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
         <span className="text-xs text-muted-foreground px-1">{formattedTime}</span>
       </div>

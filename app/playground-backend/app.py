@@ -17,6 +17,8 @@ import yaml
 from a2a.client import A2ACardResolver, A2AClientHTTPError
 from a2a.client.client import ClientEvent
 from a2a.types import (
+    FilePart,
+    FileWithUri,
     Message,
     Role,
     Task,
@@ -47,6 +49,7 @@ from playground_backend.routers.admin_group_router import router as admin_group_
 from playground_backend.routers.admin_user_router import router as admin_user_router
 from playground_backend.routers.auth_router import router as auth_router
 from playground_backend.routers.conversation_router import router as conversation_router
+from playground_backend.routers.file_router import router as file_router
 from playground_backend.routers.group_router import router as group_router
 from playground_backend.routers.mcp_router import router as mcp_router
 from playground_backend.routers.message_router import router as message_router
@@ -56,6 +59,7 @@ from playground_backend.routers.secrets_router import router as secrets_router
 from playground_backend.routers.sub_agent_router import router as sub_agent_router
 from playground_backend.routers.usage_router import router as usage_router
 from playground_backend.service_instances import cleanup_services, initialize_services
+from playground_backend.services.messages_service import MessagesService
 from playground_backend.utils.connection_pool import connection_pool
 from playground_backend.utils.cookie_signer import verify_cookie
 from playground_backend.utils.fastapi_mcp_patch import apply_patch
@@ -199,6 +203,7 @@ app.add_middleware(CustomSessionMiddleware)
 app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(message_router)
+app.include_router(file_router)
 app.include_router(mcp_router)
 app.include_router(secrets_router)
 app.include_router(sub_agent_router)
@@ -674,15 +679,33 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
 
     Args:
         sid: Socket.IO session ID
-        json_data: Message data
+        json_data: Message data with 'message' (string) and optional 'fileAttachments'
 
     Returns:
         Response dict sent to client's acknowledgment callback if present
     """
     message_id = json_data.get("id", str(uuid4()))
 
-    # Validate text message size (only applies to text content, not file attachments)
-    message_text = bleach.clean(json_data.get("message", ""))
+    # Get message text and validate
+    message_text = json_data.get("message", "")
+    if isinstance(message_text, str):
+        message_text = bleach.clean(message_text)
+    else:
+        message_text = ""
+
+    # Get file attachments
+    file_attachments = json_data.get("fileAttachments", [])
+    has_text = bool(message_text.strip())
+    has_files = bool(file_attachments and isinstance(file_attachments, list) and len(file_attachments) > 0)
+
+    if not has_text and not has_files:
+        error_response = create_error_response(
+            SocketError.MSG_SEND_FAILED,
+            details={"reason": "Message must contain either text content or file attachments"},
+        )
+        error_response["id"] = message_id
+        await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+        return error_response
 
     if len(message_text) > MAX_TEXT_MESSAGE_SIZE:
         error_response = create_error_response(
@@ -781,9 +804,30 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
                 sub_agent_config_hash=sub_agent_config_hash,
             )
 
-            parts = [{"kind": "text", "text": message_text}]
+            # Build parts array: text part (if non-empty) + file parts (if any)
+            parts = []
 
-            messages_service = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
+            # Add text part only if there's actual text content
+            if message_text.strip():
+                parts.append({"kind": "text", "text": message_text})
+
+            # Add file parts from attachments
+            if file_attachments and isinstance(file_attachments, list):
+                for attachment in file_attachments:
+                    if isinstance(attachment, dict) and "uri" in attachment:
+                        parts.append(
+                            {
+                                "kind": "file",
+                                "file": {
+                                    "uri": attachment["uri"],
+                                    "mime_type": attachment.get("mimeType"),
+                                    "name": attachment.get("name"),
+                                },
+                            }
+                        )
+                        logger.info(f"Added file attachment: {attachment.get('name')} ({attachment.get('mimeType')})")
+
+            messages_service: MessagesService = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
             await messages_service.insert_message(
                 conversation_id=context_id,
                 user_id=socket_session.user_id,
@@ -799,9 +843,29 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         except Exception as db_error:
             logger.error(f"Failed to save user message to DynamoDB: {db_error}", exc_info=True)
 
+        # Build A2A message with text and file parts
+        a2a_parts = []
+
+        # Add text part if there's content
+        if message_text.strip():
+            a2a_parts.append(TextPart(text=str(message_text)))  # type: ignore[arg-type]
+
+        # Add file parts
+        if file_attachments and isinstance(file_attachments, list):
+            for attachment in file_attachments:
+                if isinstance(attachment, dict) and "uri" in attachment:
+                    file_part = FilePart(
+                        file=FileWithUri(
+                            uri=attachment["uri"],
+                            mime_type=attachment.get("mimeType"),
+                            name=attachment.get("name"),
+                        )
+                    )
+                    a2a_parts.append(file_part)  # type: ignore[arg-type]
+
         message = Message(
             role=Role.user,
-            parts=[TextPart(text=str(message_text))],  # type: ignore[list-item]
+            parts=a2a_parts,
             message_id=message_id,
             context_id=context_id,
             metadata=metadata,

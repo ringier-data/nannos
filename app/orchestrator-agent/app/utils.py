@@ -384,7 +384,14 @@ def build_runtime_context(
     # Start with built-in local sub-agents (like file-analyzer)
     # These run in-process but use the same registry as remote A2A agents
     subagent_registry: dict[str, CompiledSubAgent] = {}
-    subagent_registry["file-analyzer"] = create_file_analyzer_subagent()
+    subagent_registry["file-analyzer"] = create_file_analyzer_subagent(
+        cost_logger=cost_logger,  # Share CostLogger from GraphFactory
+        sub_agent_id=None,  # file-analyzer is a system service, not user-specific
+        user_sub=user_config.user_sub,  # For cost attribution in file-analyzer
+        # NOTE: With sub_agent_id=None, costs are attributed to the orchestrator.
+        # This is intentional: file-analyzer is a built-in capability (not a user-created
+        # sub-agent), so its costs are considered part of orchestrator overhead.
+    )
 
     # Add remote A2A sub-agents from discovery
     for subagent in user_config.sub_agents or []:

@@ -51,14 +51,25 @@ def _describe_file(uri: str, mime_type: str | None, name: str | None) -> str:
 
     # File type indicator
     if mime_type:
-        if mime_type.startswith("image/"):
+        # Normalize video/webm to audio/webm if the file appears to be audio-only
+        # (mimetypes.guess_type default to video/webm for .webm)
+        display_mime = mime_type
+        if mime_type == "video/webm" and name and "recording" in name.lower():
+            # Likely an audio recording, not a video
+            display_mime = "audio/webm"
+
+        if display_mime.startswith("image/"):
             parts.append("[Image file attached]")
-        elif mime_type == "application/pdf":
+        elif display_mime == "application/pdf":
             parts.append("[PDF document attached]")
-        elif mime_type.startswith("text/"):
+        elif display_mime.startswith("text/"):
             parts.append("[Text file attached]")
+        elif display_mime.startswith("audio/"):
+            parts.append(f"[Audio file attached: {display_mime}]")
+        elif display_mime.startswith("video/"):
+            parts.append(f"[Video file attached: {display_mime}]")
         else:
-            parts.append(f"[File attached: {mime_type}]")
+            parts.append(f"[File attached: {display_mime}]")
     else:
         parts.append("[File attached]")
 

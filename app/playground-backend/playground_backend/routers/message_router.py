@@ -40,6 +40,9 @@ async def get_messages_by_conversation(
 
         messages = await messages_service.get_messages_by_conversation(conversation_id, user.id, limit=limit)
 
+        # Hydrate file parts with presigned URLs
+        messages = await messages_service.hydrate_messages_files(messages)
+
         return {
             "conversation_id": conversation_id,
             "messages": [

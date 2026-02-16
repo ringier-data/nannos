@@ -38,6 +38,14 @@ class DynamoDBConfig(BaseModel):
     )
 
 
+class FileStorageConfig(BaseModel):
+    """S3 configuration for user-uploaded files including audio recordings."""
+
+    bucket: str = Field(default_factory=lambda: os.getenv("FILES_S3_BUCKET", "dev-nannos-infrastructure-agents-files"))
+    presigned_ttl_seconds: int = Field(default_factory=lambda: int(os.getenv("FILES_PRESIGNED_TTL_SECONDS", "3600")))
+    prefix: str = Field(default_factory=lambda: os.getenv("FILES_S3_PREFIX", ""))
+
+
 class PostgresConfig(BaseModel):
     """PostgreSQL database configuration."""
 
@@ -113,6 +121,7 @@ class Config(BaseModel):
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)
     mcp_gateway: MCPGatewayConfig = Field(default_factory=MCPGatewayConfig)
+    file_storage: FileStorageConfig = Field(default_factory=FileStorageConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"
