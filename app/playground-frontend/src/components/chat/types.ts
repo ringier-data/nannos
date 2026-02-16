@@ -24,6 +24,15 @@ export interface Message {
   type: 'user' | 'agent' | 'task';
   content: string;
   timestamp: Date;
+  parts?: Array<{
+    kind: string;
+    text?: string;
+    file?: {
+      uri: string;
+      mimeType?: string;
+      name?: string;
+    };
+  }>;
 }
 
 export interface TaskHistoryEntry {
@@ -130,8 +139,13 @@ export interface SendMessagePayload {
   conversationId: string;
   message: string;
   sessionId: string;
-  metadata?: Record<string, string>;
+  metadata?: Record<string, any>;
   contextId?: string;
+  fileAttachments?: Array<{
+    url: string;
+    mimeType: string;
+    name: string;
+  }>;
 }
 
 export interface ClientInitializedData {

@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import boto3
 import httpx
-from a2a.types import Part, TaskState
+from a2a.types import FilePart, FileWithUri, Part, TaskState
 from aiodynamo.client import Client
 from aiodynamo.credentials import Credentials, Key, StaticCredentials
 from aiodynamo.expressions import F, HashAndRangeKeyCondition, HashKey
@@ -17,8 +17,14 @@ from uuid6 import uuid7
 
 from ..config import config
 from ..models.message import Message
+from .file_storage_service import FileStorageService
 
 logger = logging.getLogger(__name__)
+
+
+EXPIRY_BUFFER_SECONDS = (
+    300  # 5 minutes buffer to account for clock skew and ensure URLs are refreshed before they expire
+)
 
 
 def _serialize_part(p):
@@ -322,7 +328,7 @@ class MessagesService:
         task_id: str = "",
         state: TaskState = TaskState.unknown,
         raw_payload: str = "",
-        metadata: dict[str, str] | None = None,
+        metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
         final: bool = False,
         kind: str = "",
@@ -333,7 +339,7 @@ class MessagesService:
             conversation_id: The conversation ID (partition key)
             user_id: The user ID
             role: Message role ('user' or 'assistant')
-            parts: Array of message parts [{'kind': 'text', 'text': '...'}, {'kind': 'file', 'url': '...'}]
+            parts: Array of message parts [{'kind': 'text', 'text': '...'}, {'kind': 'file', 'uri': '...'}]
             task_id: Task ID (optional)
             state: Task processing state. This represents the message's TaskState
                 and is used to track processing lifecycle.
@@ -441,7 +447,7 @@ class MessagesService:
                 task_id=task_id,
                 state=state,
                 raw_payload=json.dumps(response_data, default=str),
-                metadata=metadata,
+                metadata=metadata or {},
                 message_id=message_id,
                 final=final,
                 kind=kind,
@@ -460,3 +466,71 @@ class MessagesService:
         except Exception:
             logger.exception("Failed to save agent response")
             return None
+
+    async def hydrate_message_files(self, message: Message) -> Message:
+        """Hydrate file parts in a message with presigned URLs.
+
+        For files stored with s3:// URIs, always regenerates fresh presigned URLs.
+        For other URIs, only regenerates if the presigned URL has expired.
+
+        Args:
+            message: Message to hydrate
+
+        Returns:
+            Message with file parts updated with fresh presigned URLs
+        """
+        if not message.parts:
+            return message
+
+        storage = FileStorageService()
+        updated_parts = []
+
+        for part in message.parts:
+            # Part is a RootModel union, get the actual part via .root
+            actual_part = part.root if hasattr(part, "root") else part
+
+            if not isinstance(actual_part, FilePart):
+                updated_parts.append(part)
+                continue
+            if not isinstance(actual_part.file, FileWithUri):
+                updated_parts.append(part)
+                continue
+
+            uri = actual_part.file.uri
+
+            # Check if URI is an S3 URL (s3://bucket/key/...)
+            if uri.startswith("s3://"):
+                # Always regenerate presigned URLs for S3 URIs
+                try:
+                    # Parse s3://bucket/key... to extract key part
+                    parts_list = uri.split("/", 3)  # Split to get at most 4 parts
+                    if len(parts_list) >= 4:
+                        # Format: s3://bucket/key/file -> reconstruct as bucket/key/file
+                        bucket = parts_list[2]
+                        key = "/".join(parts_list[3:])
+
+                        # Generate fresh presigned URL
+                        presigned_url = await storage.generate_presigned_get_url(key)
+                        actual_part.file.uri = presigned_url
+                        logger.debug(f"Regenerated presigned URL for S3 file: s3://{bucket}/{key}")
+                    else:
+                        logger.warning(f"Invalid S3 URI format: {uri}")
+                except Exception as e:
+                    logger.warning(f"Failed to regenerate presigned URL for S3 URI {uri}: {e}")
+
+            updated_parts.append(part)
+
+        # Create a new message with updated parts
+        message.parts = updated_parts
+        return message
+
+    async def hydrate_messages_files(self, messages: list[Message]) -> list[Message]:
+        """Hydrate file parts in multiple messages with presigned URLs.
+
+        Args:
+            messages: List of messages to hydrate
+
+        Returns:
+            List of messages with file parts updated with presigned URLs
+        """
+        return [await self.hydrate_message_files(msg) for msg in messages]

@@ -21,6 +21,7 @@ from .repositories.user_repository import UserRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
 from .services.audit_service import AuditService
 from .services.conversation_service import ConversationService
+from .services.file_storage_service import FileStorageService
 from .services.keycloak_admin_service import KeycloakAdminService
 from .services.messages_service import MessagesService
 from .services.notification_service import NotificationService
@@ -113,6 +114,7 @@ async def initialize_services(app: "FastAPI") -> None:
 
     # Initialize conversation and message services
     app.state.conversation_service = ConversationService()
+    app.state.file_storage_service = FileStorageService()
     app.state.messages_service = MessagesService(conversation_service=app.state.conversation_service)
 
     # Initialize OAuth service
