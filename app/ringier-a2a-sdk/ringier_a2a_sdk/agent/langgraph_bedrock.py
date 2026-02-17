@@ -8,6 +8,7 @@ to eliminate code duplication across similar agent implementations.
 import asyncio
 import logging
 import os
+import re
 from abc import abstractmethod
 from collections.abc import AsyncIterable
 
@@ -27,8 +28,9 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph_checkpoint_aws import DynamoDBSaver
 from pydantic import BaseModel, Field
 
-from ringier_a2a_sdk.agent.base import BaseAgent
-from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
+from ..agent.base import BaseAgent
+from ..middleware.credential_injector import BaseCredentialInjector
+from ..models import AgentStreamResponse, UserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,7 @@ class LangGraphBedrockAgent(BaseAgent):
     - Stream responses with structured final state
 
     Subclasses must implement:
-    - _get_mcp_connections(): Return MCP server connection configuration
+    - _get_mcp_connections(): Return async MCP server connection configuration
     - _get_system_prompt(): Return agent-specific system prompt
     - _get_checkpoint_namespace(): Return unique checkpoint namespace
     - _get_bedrock_model_id(): Return Bedrock model ID (optional, has default)
@@ -69,11 +71,12 @@ class LangGraphBedrockAgent(BaseAgent):
     - Shared DynamoDB checkpointer for conversation persistence
     - Single graph instance reused across requests
     - Cost tracking integration via BaseAgent
+    - Credential injection for both handshake and tool-call time
     """
 
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
 
-    def __init__(self):
+    def __init__(self, tool_query_regex: str | None = None):
         """Initialize the LangGraph Bedrock Agent.
 
         Sets up:
@@ -106,6 +109,66 @@ class LangGraphBedrockAgent(BaseAgent):
         # Graph and MCP client
         self._graph: CompiledStateGraph | None = None
         self._mcp_client: MultiServerMCPClient | None = None
+        self.tool_query_regex = re.compile(tool_query_regex) if tool_query_regex else None
+
+    async def get_headers(self) -> dict[str, str]:
+        """Apply credential headers from injector for MCP initial handshake.
+
+        This helper method extracts credentials from context variables (which are
+        set by BaseAgent.stream()) and applies them to MCP connection headers
+        using the same credential injector logic used for tool-call-time injection.
+
+        The method:
+        1. Gets credentials from async context variables (thread-safe)
+        2. Finds the first BaseCredentialInjector in _get_tool_interceptors()
+        3. Calls the injector's _get_authorization_header() to format credentials
+        4. Returns a headers dict containing the Authorization header
+
+        Returns:
+            Dictionary with "Authorization" header, or empty dict if no injector found
+
+        Raises:
+            ValueError: If credentials are not set in context
+            (The injector will raise this if credentials are missing)
+
+        Example:
+            ```python
+            async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+                headers = await self.get_headers()
+                return {
+                    "server": StreamableHttpConnection(
+                        transport="streamable_http",
+                        url="https://example.com/mcp",
+                        headers=headers,
+                    )
+                }
+            ```
+        """
+
+        # Find the first credential injector in the interceptors list
+        interceptors = self._get_tool_interceptors()
+        for interceptor in interceptors:
+            if isinstance(interceptor, BaseCredentialInjector):
+                logger.info(f"Found credential injector for MCP handshake: {interceptor.__class__.__name__}")
+                return await interceptor.get_headers()
+
+        # No credential injector found
+        logger.debug("No credential injector found in _get_tool_interceptors(), skipping header injection")
+        return {}
+
+    def _filter_tools(self, tools: list[BaseTool]) -> list[BaseTool]:
+        """Helper method to filter tools by query blob.
+
+        Args:
+            tools: A list of BaseTool instances
+        """
+        if not self.tool_query_regex:
+            return tools
+        filtered_tools = [tool for tool in tools if self.tool_query_regex.search(tool.name)]
+        logger.info(
+            f"Filtered tools with pattern '{self.tool_query_regex.pattern}': {[tool.name for tool in filtered_tools]}"
+        )
+        return filtered_tools
 
     def _create_bedrock_client(self) -> boto3.client:
         """Create configured Bedrock client from environment variables.
@@ -260,11 +323,11 @@ class LangGraphBedrockAgent(BaseAgent):
         try:
             logger.info("Discovering MCP tools...")
 
-            # Get MCP connections from subclass
-            connections = self._get_mcp_connections()
+            # Get MCP connections from subclass (async call with credential context available)
+            connections = await self._get_mcp_connections()
 
             # Create MCP client
-            self._mcp_client = MultiServerMCPClient(connections=connections)
+            self._mcp_client = MultiServerMCPClient(connections=connections)  # type: ignore
 
             # Get tool interceptors for credential injection
             interceptors = self._get_tool_interceptors()
@@ -279,6 +342,7 @@ class LangGraphBedrockAgent(BaseAgent):
                     tool_interceptors=interceptors,
                     server_name=server_name,
                 )
+                tools = self._filter_tools(tools)
                 all_tools.extend(tools)
                 logger.info(f"Loaded {len(tools)} tools from {server_name}")
 
@@ -511,7 +575,7 @@ class LangGraphBedrockAgent(BaseAgent):
     # Abstract methods that subclasses must implement
 
     @abstractmethod
-    def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+    async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection configuration.
 
         Subclasses should return a dictionary mapping server names to

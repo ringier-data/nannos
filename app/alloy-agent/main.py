@@ -117,8 +117,8 @@ def create_app():
         capabilities=capabilities,
         skills=[skill],
         supports_authenticated_extended_card=False,
-        security_schemes={"naonous-agent": SecurityScheme(root=oidc_scheme)},
-        security=[{"naonous-agent": ["openid"]}],
+        security_schemes={"alloy-agent": SecurityScheme(root=oidc_scheme)},
+        security=[{"alloy-agent": ["openid"]}],
     )
 
     # Create request handler

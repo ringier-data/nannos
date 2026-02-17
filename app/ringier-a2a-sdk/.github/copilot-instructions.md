@@ -46,12 +46,22 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 ## Architecture Patterns
 
-### Agent Base Class
+### Agent Base Class Hierarchy
 
-- Extend `BaseAgent` for custom agent implementations
-- Implement required methods: `process_request()`, `get_capabilities()`
-- Use proper error handling and logging
-- Support async operations
+The SDK provides a base agent class for building A2A agents:
+
+**BaseAgent** (abstract)
+- Root agent interface
+- Implements stream() template method with cost tracking setup
+- Requires `_stream_impl()` implementation
+- Sets request-scoped credentials in context variables
+
+**LangGraphBedrockAgent** (extends BaseAgent)
+- Adds AWS Bedrock + LangGraph integration with MCP tools
+- Implements MCP tool discovery and DynamoDB checkpointing
+- Lazy loads MCP tools on first request (not during init)
+- Provides default graph creation with FinalResponseSchema support
+- Requires async `_get_mcp_connections()` implementation
 
 ### Server Middleware
 
@@ -66,6 +76,40 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 - OAuth integration for token exchange
 - Support for refresh tokens
 - Proper token validation and expiration handling
+
+### Credential Injection for MCP Tools
+
+LangGraph-based agents support two credential injection strategies for MCP tool authentication:
+
+**PassThroughCredentialInjector** (for pre-exchanged tokens):
+- Used when credentials are already in the correct format for the MCP server
+- Example: orchestrator pre-exchanges user token → gatana token before passing to agent
+- Returns: `f"Bearer {access_token}"` directly
+
+**TokenExchangeCredentialInjector** (for OIDC token exchange):
+- Used when credentials need to be exchanged for a different audience/client
+- Performs RFC 8693 OIDC token exchange at request time
+- Preserves user identity through exchange
+- Example: agent-creator exchanges user token for gatana token at tool-call time
+
+Both injectors:
+- Automatically handle credential injection at tool-call time via interceptor pipeline
+- Extract credentials from thread-safe context variables set by `BaseAgent.stream()`
+- Can be applied to initial MCP handshake by accessing credentials in `_get_mcp_connections()`
+
+**Pattern for Initial Handshake Authentication**:
+```python
+async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+    # get_headers() is a helper method that extracts credentials from context variables using the credential injector
+    headers = await self.get_headers()
+    return {
+        "server": StreamableHttpConnection(
+            transport="streamable_http",
+            url="https://example.com/mcp",
+            headers=headers,  # Credentials in initial handshake
+        )
+    }
+````
 
 ## Testing
 

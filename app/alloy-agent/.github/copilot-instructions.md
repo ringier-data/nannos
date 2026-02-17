@@ -62,12 +62,21 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 ### MCP Tool Integration
 
-- MCP tools are discovered from the Naonous MCP server at `https://naonous.d.alloy.rcplus.io/mcp`
-- No authentication required (VPN-protected access)
-- Tools are discovered once at initialization and reused
+- Extends `LangGraphBedrockAgent` base class which provides async MCP connection handling
+- MCP tools are discovered from the Naonous MCP server through the Gatana MCP gateway
+- **Authentication**: Uses `PassThroughCredentialInjector` to inject pre-exchanged gatana (MCP gateway) tokens
+- User-specific authentication enables user attribution
+- Orchestrator exchanges user tokens for gatana tokens before passing to alloy-agent
+- **Credential Injection Pattern**:
+  - The `PassThroughCredentialInjector` is used for BOTH:
+    - Initial MCP handshake (by extracting credentials in `_get_mcp_connections()`)
+    - Runtime tool-call injection (via interceptor pipeline)
+  - This ensures consistent credential handling across both phases with a single injector instance
+  - Credentials are extracted from async context variables (thread-safe) set by `BaseAgent.stream()`
+- Tools are discovered once at first request and reused
 - Use `StreamableHttpConnection` for MCP server connection
 - Tools are loaded via `langchain_mcp_adapters`
-- TenantEnforcementMiddleware enforces 'riad' tenant is used for all the tool calls
+- No token exchange needed (already done by orchestrator)
 
 ### Campaign Management
 
@@ -84,7 +93,7 @@ The agent manages the complete campaign lifecycle:
 - All configuration is loaded from environment variables via direct `os.getenv()`
 - No Pydantic Settings model needed (simpler approach)
 - Support multiple environments (local, dev, stg, prod)
-- VPN-protected MCP server access (no auth tokens required)
+- Gatana (MCP gateway) tokens are passed through to Naonous MCP server for authentication
 
 ## Distributed Tracing
 

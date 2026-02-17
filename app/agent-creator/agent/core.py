@@ -6,85 +6,14 @@ specialized subagents through natural language conversation.
 
 import logging
 import os
-from collections.abc import Awaitable, Callable
 
-from langchain_core.messages import ToolMessage
-from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from langgraph.types import Command
-from mcp.types import CallToolResult
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent import LangGraphBedrockAgent
-from ringier_a2a_sdk.cost_tracking.logger import get_request_credentials
+from ringier_a2a_sdk.middleware.credential_injector import TokenExchangeCredentialInjector
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
 logger = logging.getLogger(__name__)
-
-
-class UserCredentialInjector:
-    """Interceptor that injects user credentials into MCP tool calls.
-
-    This interceptor adds the Authorization Bearer token
-    to every MCP tool call via the MCPToolCallRequest.headers field.
-
-    The MCP adapter (langchain_mcp_adapters) handles creating new connections
-    with these headers when session=None is used during tool loading.
-
-    Uses contextvars for thread-safe credential storage across concurrent requests.
-    """
-
-    async def __call__(
-        self,
-        request: MCPToolCallRequest,
-        handler: Callable[[MCPToolCallRequest], Awaitable[CallToolResult | ToolMessage | Command]],
-    ) -> CallToolResult | ToolMessage | Command:
-        """Inject user credentials into the request headers.
-
-        Args:
-            request: The MCP tool call request
-            handler: The next handler in the interceptor chain
-
-        Returns:
-            The result from the handler
-        """
-        # Get credentials from context variables (thread-safe)
-        user_sub, access_token = get_request_credentials()
-
-        if not user_sub or not access_token:
-            logger.error(
-                f"Credentials not set in context: user_sub={user_sub}, access_token={'SET' if access_token else 'NOT SET'}"
-            )
-            raise ValueError("Credentials not set in context. This should not happen.")
-
-        tool_name = request.name
-        logger.info(f"Injecting credentials for tool '{tool_name}', user={user_sub}")
-
-        # Get existing headers or create new dict
-        headers = dict(request.headers) if request.headers else {}
-
-        # Inject credentials:
-        # - Authorization: The exchanged user token (via OIDC token exchange RFC 8693)
-        #   Token exchange preserves the user's sub claim, so backend can look up user directly
-        oauth2_client = OidcOAuth2Client(
-            client_id=os.getenv("OIDC_CLIENT_ID", "agent-creator"),
-            client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
-            issuer=os.getenv("OIDC_ISSUER", ""),
-        )
-        mcp_gateway_token = await oauth2_client.exchange_token(
-            subject_token=access_token,
-            target_client_id=os.environ.get("MCP_GATEWAY_CLIENT_ID", "gatana"),
-            requested_scopes=["openid", "profile", "offline_access"],
-        )
-        headers["Authorization"] = f"Bearer {mcp_gateway_token}"
-
-        logger.info(f"Headers for '{tool_name}': {list(headers.keys())}")
-
-        # Create modified request with updated headers
-        # The MCP adapter will use these headers to create a new connection
-        modified_request = request.override(headers=headers)
-
-        # Call the handler with modified request
-        return await handler(modified_request)
 
 
 # System prompt for the agent creator
@@ -301,8 +230,19 @@ class AgentCreator(LangGraphBedrockAgent):
         self.playground_backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
         self.playground_frontend_url = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
 
-        # Create credential injection interceptor
-        self._credential_injector = UserCredentialInjector()
+        # Create OIDC client for token exchange
+        oauth2_client = OidcOAuth2Client(
+            client_id=os.getenv("OIDC_CLIENT_ID", "agent-creator"),
+            client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
+            issuer=os.getenv("OIDC_ISSUER", ""),
+        )
+
+        # Create credential injection interceptor with token exchange
+        self._credential_injector = TokenExchangeCredentialInjector(
+            oidc_client=oauth2_client,
+            target_client_id=os.environ.get("MCP_GATEWAY_CLIENT_ID", "gatana"),
+            requested_scopes=["openid", "profile", "offline_access"],
+        )
 
         super().__init__()
 
@@ -320,11 +260,11 @@ class AgentCreator(LangGraphBedrockAgent):
 
     # Abstract method implementations
 
-    def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+    async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection for playground backend.
 
         Returns connection without authentication - credentials are injected
-        at runtime via UserCredentialInjector.
+        at runtime via TokenExchangeCredentialInjector.
         """
         playground_mcp_url = f"{self.playground_backend_url}/mcp"
         return {
