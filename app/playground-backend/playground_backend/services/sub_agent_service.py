@@ -1290,6 +1290,13 @@ class SubAgentService:
                 logger.error(f"Failed to activate agent for default groups: {e}")
                 # Don't fail the approval - activation can be retried
 
+            # Also auto-activate for the owner
+            try:
+                await self._activate_for_owner(db, sub_agent_id, owner_id, actor=actor)
+            except Exception as e:
+                logger.error(f"Failed to auto-activate agent for owner: {e}")
+                # Don't fail the approval - owner can activate manually
+
         return await self.get_sub_agent_by_id(db, sub_agent_id)
 
     async def _get_group_members(self, db: AsyncSession, group_id: int) -> list[str]:
@@ -1526,6 +1533,68 @@ class SubAgentService:
             except Exception as e:
                 logger.error(f"Failed to activate agent {sub_agent_id} for group {group_id}: {e}")
                 # Continue to next group - don't fail the entire operation
+
+    async def _activate_for_owner(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        owner_id: str,
+        actor: User,
+    ) -> None:
+        """
+        Internal helper to auto-activate a newly-approved agent for its owner.
+
+        This is called after approval to automatically activate the agent for the owner,
+        just as we do for group members.
+
+        Args:
+            db: Database session
+            sub_agent_id: The sub-agent ID that was just approved
+            owner_id: The owner's user ID
+            actor: The admin user who approved (for audit trail)
+        """
+        try:
+            # Check if owner is already activated (e.g., from group membership)
+            check_query = text("""
+                SELECT 1 FROM user_sub_agent_activations
+                WHERE user_id = :user_id AND sub_agent_id = :sub_agent_id
+            """)
+            result = await db.execute(check_query, {"user_id": owner_id, "sub_agent_id": sub_agent_id})
+            if result.scalar_one_or_none():
+                logger.info(f"Agent {sub_agent_id} already activated for owner {owner_id}, skipping")
+                return
+
+            # Bulk activate the agent for the owner (using USER activation source)
+            affected_user_ids = await self.repo.bulk_activate_sub_agent(
+                db=db,
+                actor=actor,
+                user_ids=[owner_id],
+                sub_agent_id=sub_agent_id,
+                activated_by=ActivationSource.USER,  # Owner self-activates
+                group_id=None,
+            )
+
+            # Create notification for the owner if activation was successful
+            agent_names = await self.get_agent_names(db, [sub_agent_id])
+            agent_name = agent_names.get(sub_agent_id, f"Agent {sub_agent_id}")
+            if affected_user_ids and self.notification_service:
+                notification = NotificationData(
+                    user_id=owner_id,
+                    notification_type=NotificationType.AGENT_ACTIVATED,
+                    title=f"Your agent '{agent_name}' is now active",
+                    message=f"Your agent '{agent_name}' has been approved and automatically activated for you.",
+                    metadata={
+                        "sub_agent_id": sub_agent_id,
+                        "reason": "owner_auto_activation",
+                    },
+                )
+                await self.notification_service.bulk_create_notifications(db, [notification])
+
+            logger.info(f"Auto-activated agent {sub_agent_id} for owner {owner_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to auto-activate agent {sub_agent_id} for owner {owner_id}: {e}")
+            # Don't fail the approval - activation can be done manually
 
     async def submit_version_for_approval(
         self,
