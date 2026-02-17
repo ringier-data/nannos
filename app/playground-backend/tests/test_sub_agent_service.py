@@ -21,6 +21,7 @@ import pytest
 from aiomoto import mock_aws
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from playground_backend.models.notification import NotificationType
 from playground_backend.models.sub_agent import (
     FoundryScope,
     SubAgent,
@@ -1607,16 +1608,24 @@ class TestSubmittedByUserTracking:
         # Approve
         await service.approve_version(pg_session, agent.id, 1, True, actor=approver)
 
-        # Verify notifications were sent
-        notification_service.bulk_create_notifications.assert_called_once()
-        notifications = notification_service.bulk_create_notifications.call_args[0][1]
+        # Verify notifications were sent - should be called twice:
+        # 1. Approval notifications for owner and submitter
+        # 2. Owner auto-activation notification
+        assert notification_service.bulk_create_notifications.call_count == 2
 
-        # Should notify both owner and submitter (but not approver)
-        notified_users = {n.user_id for n in notifications}
-        assert owner.id in notified_users
-        assert submitter_id.id in notified_users
-        assert approver.id not in notified_users
-        assert len(notified_users) == 2
+        # First call: approval notifications
+        first_call_notifications = notification_service.bulk_create_notifications.call_args_list[0][0][1]
+        notified_users_first = {n.user_id for n in first_call_notifications}
+        assert owner.id in notified_users_first
+        assert submitter_id.id in notified_users_first
+        assert approver.id not in notified_users_first
+        assert len(notified_users_first) == 2
+
+        # Second call: owner auto-activation notification
+        second_call_notifications = notification_service.bulk_create_notifications.call_args_list[1][0][1]
+        assert len(second_call_notifications) == 1
+        assert second_call_notifications[0].user_id == owner.id
+        assert second_call_notifications[0].notification_type == NotificationType.AGENT_ACTIVATED
 
     @pytest.mark.asyncio
     async def test_rejection_notifies_both_owner_and_submitter(
@@ -1762,14 +1771,22 @@ class TestSubmittedByUserTracking:
         # Approve
         await service.approve_version(pg_session, agent.id, 1, True, actor=approver)
 
-        # Verify notifications were sent
-        notification_service.bulk_create_notifications.assert_called_once()
-        notifications = notification_service.bulk_create_notifications.call_args[0][1]
+        # Verify notifications were sent - should be called twice:
+        # 1. Approval notification for owner (single notification since owner == submitter)
+        # 2. Owner auto-activation notification
+        assert notification_service.bulk_create_notifications.call_count == 2
 
-        # Should notify owner only once (deduplicated)
-        notified_users = [n.user_id for n in notifications]
-        assert notified_users == [owner.id]
-        assert len(notifications) == 1
+        # First call: approval notification (owner only, no duplicate)
+        first_call_notifications = notification_service.bulk_create_notifications.call_args_list[0][0][1]
+        assert len(first_call_notifications) == 1
+        assert first_call_notifications[0].user_id == owner.id
+        assert first_call_notifications[0].notification_type == NotificationType.APPROVAL_COMPLETED
+
+        # Second call: owner auto-activation notification
+        second_call_notifications = notification_service.bulk_create_notifications.call_args_list[1][0][1]
+        assert len(second_call_notifications) == 1
+        assert second_call_notifications[0].user_id == owner.id
+        assert second_call_notifications[0].notification_type == NotificationType.AGENT_ACTIVATED
 
 
 @pytest.mark.asyncio
