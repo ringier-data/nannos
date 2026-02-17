@@ -697,9 +697,6 @@ if [ "$ALLOY_ENV" = "local" ]; then
     update_env_var ".env" "OIDC_ISSUER" "$OIDC_ISSUER"
     update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
     
-    # Set MCP URLs based on ALLOY_ENV (defaults to dev for local)
-    update_env_var ".env" "NAONOUS_MCP_URL" "${NAONOUS_MCP_URLS[$ALLOY_ENV]}"
-    
     # Configure cost tracking backend URL based on backend environment
     update_env_var ".env" "PLAYGROUND_BACKEND_URL" "${BACKEND_URLS[$BACKEND_ENV]}"
     update_env_var ".env" "PLAYGROUND_FRONTEND_URL" "http://localhost:5173"
@@ -715,9 +712,9 @@ if [ "$ALLOY_ENV" = "local" ]; then
     # Start alloy-agent with or without debugpy
     if [ "$DEBUG_MODE" = true ]; then
         echo -e "${YELLOW}Alloy Agent will listen for debugger on port 5681${NC}"
-        start_component "alloy" "app/alloy-agent" "uv run --env-file .env python -m debugpy --listen 0.0.0.0:5681 main.py"
+        start_component "alloy" "app/alloy-agent" "uv run --env-file .env python -m debugpy --listen 0.0.0.0:5681 main.py  --reload"
     else
-        start_component "alloy" "app/alloy-agent" "uv run --env-file .env python main.py"
+        start_component "alloy" "app/alloy-agent" "uv run --env-file .env python main.py --reload"
     fi
     
     # Wait for alloy-agent to be ready

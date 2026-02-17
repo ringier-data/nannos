@@ -221,6 +221,12 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             target_client_id = "agent-creator"
             requested_scopes = ["openid", "profile", "email"]  # Preserve playground access
             token_description = "agent-creator token (playground access)"
+        elif scheme_name == "alloy-agent":
+            # TOOD: shall we establish a convention that agents needing MCP gateway access should use a specific scheme name?
+            # For now, we assume only the alloy-agent needs it and hardcode the logic here
+            target_client_id = "gatana"  # This client is provisioned with MCP gateway access
+            requested_scopes = ["openid", "profile", "offline_access"]  # MCP gateway scopes
+            token_description = "gatana token (MCP gateway access)"
         else:
             # NOTE: we could also decide to have a shared sub-agents client with reduced scopes
             target_client_id = "orchestrator"

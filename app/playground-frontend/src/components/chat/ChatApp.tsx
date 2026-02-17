@@ -1,9 +1,12 @@
 import { useRef, useState, useEffect } from 'react';
-import { Settings, PanelRightOpen } from 'lucide-react';
+import { Settings, PanelRightOpen, ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useSocket, useChat } from './contexts';
+import { useAuth } from '@/contexts/AuthContext';
+import { config } from '@/config';
 import {
   ConversationPanel,
   MessageList,
@@ -15,7 +18,8 @@ import {
 
 export function ChatApp() {
   const { agentInfo } = useSocket();
-  const { messages } = useChat();
+  const { messages, activeConversationId } = useChat();
+  const { isAdmin } = useAuth();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(true);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -48,6 +52,30 @@ export function ChatApp() {
           <h2 className="text-sm font-semibold">{agentName}</h2>
           <div className="flex items-center gap-1">
             <ConnectionStatus />
+            {isAdmin && activeConversationId && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => {
+                        const url = `https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${activeConversationId}`;
+                        window.open(url, '_blank', 'noopener,noreferrer');
+                      }}
+                      data-testid="button-langchain-trace"
+                      aria-label="View trace in LangChain"
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>View trace in LangChain</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
             <Button
               variant="ghost"
               size="icon"

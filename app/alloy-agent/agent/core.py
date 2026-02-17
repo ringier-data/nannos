@@ -6,68 +6,12 @@ lifecycle of BYOK (Bring Your Own KPI) campaigns through natural language conver
 
 import logging
 import os
-from collections.abc import Awaitable, Callable
-from typing import Any
 
-from langchain.agents.middleware.types import AgentMiddleware
-from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from ringier_a2a_sdk.agent import LangGraphBedrockAgent
+from ringier_a2a_sdk.agent.langgraph_bedrock import LangGraphBedrockAgent
+from ringier_a2a_sdk.middleware.credential_injector import PassThroughCredentialInjector
 
 logger = logging.getLogger(__name__)
-
-
-# Default tenant for all MCP tool calls
-DEFAULT_TENANT = "riad"
-
-
-class TenantEnforcementMiddleware(AgentMiddleware):
-    """AgentMiddleware that enforces tenant parameter in all tool calls.
-
-    This middleware intercepts tool calls at execution time and automatically
-    overrides the 'tenant' parameter to DEFAULT_TENANT for any tool that has
-    a tenant parameter in its arguments.
-
-    The enforcement happens at the tool call level (awrap_tool_call) by
-    modifying the tool call arguments before the tool is executed.
-    """
-
-    tools: list[BaseTool] = []  # No tools registered with middleware itself
-
-    async def awrap_tool_call(
-        self,
-        request: Any,
-        handler: Callable[[Any], Awaitable[Any]],
-    ) -> Any:
-        """Intercept tool call and enforce tenant parameter.
-
-        This async wrap-style hook:
-        1. Checks if the tool call has a 'tenant' argument
-        2. If present, overrides it with DEFAULT_TENANT
-        3. Executes the tool via handler with modified arguments
-        4. Returns the tool result
-
-        Args:
-            request: Tool call request with tool name and arguments
-            handler: Async callback to execute the tool
-
-        Returns:
-            ToolMessage or Command from tool execution
-        """
-        tool_call = request.tool_call
-        tool_name = tool_call.get("name", "")
-        args = tool_call.get("args", {})
-
-        # Check if this tool call has a tenant parameter
-        if isinstance(args, dict) and "tenant" in args:
-            original_tenant = args.get("tenant")
-            args["tenant"] = DEFAULT_TENANT
-            logger.debug(f"Enforcing tenant={DEFAULT_TENANT} for tool '{tool_name}' (original: {original_tenant})")
-
-        # Execute the tool with modified arguments
-        result = await handler(request)
-        return result
-
 
 NAONOUS_AGENT_SYSTEM_PROMPT = """You are an expert Campaign Manager for Alloy's BYOK (Bring Your Own KPI) platform. Your role is to manage the complete lifecycle of advertising campaigns through natural language conversation.
 
@@ -279,23 +223,35 @@ class NaonousAgent(LangGraphBedrockAgent):
     - MCP tools discovered once at initialization (no authentication required)
     - Shared DynamoDB checkpointer for conversation persistence
     - VPN-protected MCP server access
-    - TenantEnforcementMiddleware ensures tenant=riad for all tool calls
     """
 
     def __init__(self):
         """Initialize the Naonous Agent."""
         # Store configuration before calling super().__init__()
-        self.naonous_mcp_url = os.getenv("NAONOUS_MCP_URL", "https://naonous.d.alloy.rcplus.io/mcp")
+        self.mcp_gateway_url = os.environ["MCP_GATEWAY_URL"]
+
+        # Create credential injection interceptor for user-specific authentication
+        self._credential_injector = PassThroughCredentialInjector()
+
         super().__init__()
 
     # Abstract method implementations
 
-    def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
-        """Return MCP server connection for Naonous server (VPN-protected, no auth)."""
+    async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+        """Return MCP server connection for Naonous server.
+
+        Authentication is handled via PassThroughCredentialInjector which injects
+        gatana (MCP gateway) tokens dynamically for both the initial handshake
+        (via this method) and at tool-call time (via the interceptor pipeline).
+        """
+        # Apply credentials from request context to headers via the credential injector
+        headers = await self.get_headers()
+
         return {
-            "naonous": StreamableHttpConnection(
+            "gatana": StreamableHttpConnection(
                 transport="streamable_http",
-                url=self.naonous_mcp_url,
+                url=f"{self.mcp_gateway_url}?includeOnlyServerSlugs=naonous-riad,naonous-smg",
+                headers=headers,
             )
         }
 
@@ -311,6 +267,6 @@ class NaonousAgent(LangGraphBedrockAgent):
         """Return Bedrock model ID for Naonous agent."""
         return os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
-    def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return middleware list with tenant enforcement."""
-        return [TenantEnforcementMiddleware()]
+    def _get_tool_interceptors(self) -> list:
+        """Return credential injector for MCP tool calls."""
+        return [self._credential_injector]
