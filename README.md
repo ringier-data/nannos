@@ -1,6 +1,6 @@
 # rcplus-nannos-infrastructure-agents
 
-Current version: **v0.3.2**
+Current version: **v0.4.0**
 
 ## Description
 
