@@ -626,12 +626,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       const contextId = contextIdsMap.get(conversationId);
 
       // Build file attachments array
-      let fileAttachments: Array<{ uri: string; mimeType: string; name: string }> | undefined;
+      let fileAttachments: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }> | undefined;
       if (hasFiles) {
         fileAttachments = files!.map(f => ({
           uri: f.uri,
           mimeType: f.mimeType,
           name: f.name,
+          s3Url: f.s3Url, // Include s3Url for backend processing
         }));
       }
 
