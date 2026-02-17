@@ -220,6 +220,9 @@ Resources:
             - { Name: "MCP_GATEWAY_CLIENT_ID", Value: '{{ mcp_gateway_client_id }}' }
             - { Name: "KEYCLOAK_ADMIN_CLIENT_ID", Value: '{{ keycloak_admin_client_id }}' }
             - { Name: "KEYCLOAK_GROUP_NAME_PREFIX", Value: '{{ keycloak_group_name_prefix }}' }
+            - { Name: 'FILES_S3_BUCKET', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-files' }
+            - { Name: "FILES_PRESIGNED_TTL_SECONDS", Value: "3600" }
+            - { Name: "FILES_S3_PREFIX", Value: "" }
           Secrets:
             - { Name: "OIDC_CLIENT_SECRET", ValueFrom: '{{ ssmkey_agent_console_oidc_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }

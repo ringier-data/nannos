@@ -1325,7 +1325,7 @@ wheels = [
 
 [[package]]
 name = "playground-backend"
-version = "0.3.2"
+version = "0.4.0"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["all"] },
@@ -1344,6 +1344,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyjwt" },
     { name = "python-keycloak" },
+    { name = "python-multipart" },
     { name = "python-socketio" },
     { name = "pyyaml" },
     { name = "rcplus-alloy-common" },
@@ -1394,6 +1395,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10.6" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "python-keycloak", specifier = ">=7.0.2" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "python-socketio" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rcplus-alloy-common", specifier = ">=8.6.1" },
@@ -1977,7 +1979,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "0.3.2"
+version = "0.4.0"
 source = { editable = "../ringier-a2a-sdk" }
 dependencies = [
     { name = "a2a-sdk" },

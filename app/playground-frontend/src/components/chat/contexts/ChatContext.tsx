@@ -11,6 +11,7 @@ import {
   IMPERSONATE_USER_HEADER,
 } from '../../../api/apiInstanceConfig';
 import { getCurrentUserSettingsApiV1AuthMeSettingsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
+import type { UploadedFileInfo } from '@/api/generated';
 import { config } from '@/config';
 
 interface ChatContextType {
@@ -28,7 +29,10 @@ interface ChatContextType {
   // Actions
   createConversation: () => void;
   selectConversation: (id: string) => void;
-  sendMessage: (content: string) => void;
+  sendMessage: (
+    content: string, 
+    files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>
+  ) => void;
   updateSettings: (settings: Settings) => Promise<boolean>;
   loadConversations: () => Promise<void>;
 }
@@ -428,7 +432,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
       const mapped: Message[] = raw
         .map((m: Record<string, unknown>) => {
-          const partArray = m.parts as Array<{ text?: string }> | undefined;
+          const partArray = m.parts as Array<{ kind?: string; text?: string; file?: { uri: string; mimeType?: string; name?: string } }> | undefined;
           if (partArray && !shouldDisplayMessageParts(partArray) && typeof m.content !== 'string') {
             return null;
           }
@@ -450,6 +454,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             type: role === 'user' ? 'user' : 'agent',
             content,
             timestamp,
+            parts: partArray, // Include parts array for file attachments
           } as Message;
         })
         .filter(Boolean) as Message[];
@@ -500,8 +505,15 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
   // Send a message
   const sendMessageAction = useCallback(
-    (content: string) => {
-      if (!content.trim() || !isConnected) return;
+    (
+      content: string, 
+      files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>
+    ) => {
+      // Allow messages with either text content or file attachments
+      const hasContent = content.trim().length > 0;
+      const hasFiles = files && files.length > 0;
+      
+      if (!isConnected || (!hasContent && !hasFiles)) return;
 
       let conversationId = activeConversationId;
       const isFirstMessage = conversationId ? (messagesMap.get(conversationId)?.length || 0) === 0 : true;
@@ -509,12 +521,18 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       // Create new conversation if needed
       if (!conversationId) {
         conversationId = generateUUID();
-        const title = content.slice(0, 40) + (content.length > 40 ? '...' : '');
+        // Use content for title if available, otherwise use file attachment info
+        const displayText = hasContent 
+          ? content 
+          : hasFiles 
+          ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}`
+          : 'New conversation';
+        const title = displayText.slice(0, 40) + (displayText.length > 40 ? '...' : '');
         const timestamp = new Date();
         const newConv: Conversation = {
           id: conversationId,
           title,
-          lastMessage: content.slice(0, 50),
+          lastMessage: displayText.slice(0, 50),
           timestamp,
           lastUpdatedRaw: timestamp.toISOString(),
           status: 'active',
@@ -527,28 +545,69 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       // Add user message
       const messageId = generateUUID();
       messageCounterRef.current++;
+      
+      // Build parts array for message (text + files)
+      const parts: Array<{ kind: string; text?: string; file?: { uri: string; mimeType?: string; name?: string } }> = [];
+      
+      // Add text part only if there's content
+      if (hasContent) {
+        parts.push({ kind: 'text', text: content });
+      }
+      
+      if (hasFiles) {
+        files!.forEach((file) => {
+          parts.push({
+            kind: 'file',
+            file: {
+              uri: file.uri,
+              mimeType: file.mimeType,
+              name: file.name,
+            },
+          });
+        });
+      }
+      
+      // Use content for display if available, otherwise describe the attachments
+      const displayContent = hasContent 
+        ? content
+        : hasFiles
+        ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}: ${files!.map(f => f.name).join(', ')}`
+        : '';
+      
       const userMsg: Message = {
         id: messageId,
         conversationId,
         type: 'user',
-        content,
+        content: displayContent,
         timestamp: new Date(),
+        parts,
       };
       addMessage(conversationId, userMsg);
 
-      // Update conversation
+      // Update conversation with appropriate last message text
+      const lastMessageText = hasContent 
+        ? content.slice(0, 50)
+        : hasFiles
+        ? `📎 ${files!.length} file${files!.length > 1 ? 's' : ''}`
+        : 'New message';
+      
       updateConversation(conversationId, {
-        lastMessage: content.slice(0, 50),
+        lastMessage: lastMessageText,
         timestamp: new Date(),
       });
 
       if (isFirstMessage) {
-        const title = content.slice(0, 40) + (content.length > 40 ? '...' : '');
+        const displayText = hasContent 
+          ? content 
+          : hasFiles 
+          ? `Sent ${files!.length} file${files!.length > 1 ? 's' : ''}`
+          : 'New conversation';
+        const title = displayText.slice(0, 40) + (displayText.length > 40 ? '...' : '');
         updateConversation(conversationId, { title });
       }
 
       // Build metadata - prefer local settings, fallback to user preferences from database
-      const metadata: Record<string, string> = {};
+      const metadata: Record<string, any> = {};
       const effectiveModel = settings?.model || userSettings?.preferred_model;
       const effectiveEnableThinking = settings?.enableThinking ?? userSettings?.enable_thinking;
       const effectiveThinkingLevel = settings?.thinkingLevel || userSettings?.thinking_level;
@@ -566,15 +625,33 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       // Get context ID if available
       const contextId = contextIdsMap.get(conversationId);
 
-      // Send via socket
-      socketSendMessage({
+      // Build file attachments array
+      let fileAttachments: Array<{ uri: string; mimeType: string; name: string; s3Url?: string }> | undefined;
+      if (hasFiles) {
+        fileAttachments = files!.map(f => ({
+          uri: f.uri,
+          mimeType: f.mimeType,
+          name: f.name,
+          s3Url: f.s3Url, // Include s3Url for backend processing
+        }));
+      }
+
+      // Send simple payload - backend converts to A2A format
+      const payload: any = {
         id: messageId,
         conversationId,
         message: content,
         sessionId,
         metadata,
         ...(contextId && { contextId }),
-      });
+      };
+
+      if (fileAttachments && fileAttachments.length > 0) {
+        payload.fileAttachments = fileAttachments;
+      }
+
+      // Send via socket
+      socketSendMessage(payload);
     },
     [
       activeConversationId,

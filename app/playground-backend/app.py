@@ -15,8 +15,10 @@ import httpx
 import socketio
 import yaml
 from a2a.client import A2ACardResolver, A2AClientHTTPError
-from a2a.client.client import ClientEvent
+from a2a.client.client import Client, ClientEvent
 from a2a.types import (
+    FilePart,
+    FileWithUri,
     Message,
     Role,
     Task,
@@ -41,12 +43,14 @@ from playground_backend.dependencies import require_auth
 from playground_backend.exceptions import ConversationOwnershipError
 from playground_backend.middleware import OrchestratorAuth, ProxyHeadersMiddleware
 from playground_backend.middleware import SessionMiddleware as CustomSessionMiddleware
+from playground_backend.models.socket_session import SocketSession
 from playground_backend.models.user import User
 from playground_backend.routers.admin_audit_router import router as admin_audit_router
 from playground_backend.routers.admin_group_router import router as admin_group_router
 from playground_backend.routers.admin_user_router import router as admin_user_router
 from playground_backend.routers.auth_router import router as auth_router
 from playground_backend.routers.conversation_router import router as conversation_router
+from playground_backend.routers.file_router import router as file_router
 from playground_backend.routers.group_router import router as group_router
 from playground_backend.routers.mcp_router import router as mcp_router
 from playground_backend.routers.message_router import router as message_router
@@ -56,6 +60,8 @@ from playground_backend.routers.secrets_router import router as secrets_router
 from playground_backend.routers.sub_agent_router import router as sub_agent_router
 from playground_backend.routers.usage_router import router as usage_router
 from playground_backend.service_instances import cleanup_services, initialize_services
+from playground_backend.services.conversation_service import ConversationService
+from playground_backend.services.messages_service import MessagesService
 from playground_backend.utils.connection_pool import connection_pool
 from playground_backend.utils.cookie_signer import verify_cookie
 from playground_backend.utils.fastapi_mcp_patch import apply_patch
@@ -199,6 +205,7 @@ app.add_middleware(CustomSessionMiddleware)
 app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(message_router)
+app.include_router(file_router)
 app.include_router(mcp_router)
 app.include_router(secrets_router)
 app.include_router(sub_agent_router)
@@ -665,6 +672,150 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
         return error_response
 
 
+async def _save_user_message_to_db(
+    conversation_service: ConversationService,
+    messages_service: MessagesService,
+    context_id: str,
+    socket_session: SocketSession | None,
+    message_text: str,
+    file_attachments: list[dict[str, Any]],
+    json_data: dict[str, Any],
+    metadata: dict[str, Any],
+    message_id: str,
+) -> None:
+    """Save user message to DynamoDB with conversation tracking.
+
+    Args:
+        conversation_service: ConversationService instance
+        messages_service: MessagesService instance
+        context_id: Conversation context ID
+        socket_session: Socket session with user_id (guaranteed non-None after validation)
+        message_text: Message text content
+        file_attachments: File attachments list
+        json_data: Original message data for raw_payload
+        metadata: Message metadata
+        message_id: Message ID
+    """
+    try:
+        if not socket_session or not socket_session.user_id:
+            raise ValueError("Socket session or user ID is missing")
+
+        sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
+        logger.info(
+            f"Creating/getting conversation {context_id} with sub_agent_config_hash={sub_agent_config_hash}, metadata={metadata}"
+        )
+
+        await conversation_service.get_or_create_conversation(
+            conversation_id=context_id,
+            user_id=socket_session.user_id,
+            agent_url=socket_session.agent_url or "",
+            message=message_text,
+            sub_agent_config_hash=sub_agent_config_hash,
+        )
+
+        # Build parts array: text part (if non-empty) + file parts (if any)
+        parts = []
+
+        if message_text.strip():
+            parts.append({"kind": "text", "text": message_text})
+
+        if file_attachments and isinstance(file_attachments, list):
+            for attachment in file_attachments:
+                if isinstance(attachment, dict) and "s3Url" in attachment:
+                    parts.append(
+                        {
+                            "kind": "file",
+                            "file": {
+                                "uri": attachment["s3Url"],
+                                "mime_type": attachment.get("mimeType"),
+                                "name": attachment.get("name"),
+                            },
+                        }
+                    )
+                    logger.info(f"Added file attachment: {attachment.get('name')} ({attachment.get('mimeType')})")
+
+        await messages_service.insert_message(
+            conversation_id=context_id,
+            user_id=socket_session.user_id,
+            role="user",
+            parts=parts,
+            task_id="",
+            state=TaskState.working,
+            raw_payload=json.dumps(json_data, default=str),
+            metadata=metadata,
+            message_id=message_id,
+        )
+        logger.info(f"Saved user message {message_id} to conversation {context_id}")
+    except Exception as db_error:
+        logger.error(f"Failed to save user message to DynamoDB: {db_error}", exc_info=True)
+
+
+def _build_a2a_message_parts(message_text: str, file_attachments: list[dict[str, Any]]) -> list[Any]:
+    """Build A2A message parts from text and file attachments.
+
+    Args:
+        message_text: Message text content
+        file_attachments: File attachments list
+
+    Returns:
+        List of A2A message parts (TextPart and/or FilePart)
+    """
+    a2a_parts: list[Any] = []
+
+    if message_text.strip():
+        a2a_parts.append(TextPart(text=str(message_text)))  # type: ignore[arg-type]
+
+    if file_attachments and isinstance(file_attachments, list):
+        for attachment in file_attachments:
+            if isinstance(attachment, dict) and "uri" in attachment:
+                file_part = FilePart(
+                    file=FileWithUri(
+                        uri=attachment["uri"],
+                        mime_type=attachment.get("mimeType"),
+                        name=attachment.get("name"),
+                    )
+                )
+                a2a_parts.append(file_part)  # type: ignore[arg-type]
+
+    return a2a_parts
+
+
+async def _send_message_to_agent(
+    a2a_client: Client | None,
+    message: Message,
+    sid: str,
+    message_id: str,
+    sio: socketio.AsyncServer,
+) -> dict[str, Any] | None:
+    """Send message to agent via A2A client and process stream response.
+
+    Args:
+        a2a_client: A2A client instance (guaranteed non-None after validation)
+        message: Message to send
+        sid: Socket.IO session ID
+        message_id: Message ID
+
+    Returns:
+        Success response or error response if HTTP error occurs
+    """
+    try:
+        assert a2a_client is not None, "a2a_client must not be None"
+
+        response_stream = a2a_client.send_message(message)
+        async for stream_result in response_stream:
+            await _process_a2a_response(stream_result, sid, message_id, message.context_id)
+        return create_success_response({"id": message_id})
+    except A2AClientHTTPError as http_err:
+        logger.error(f"Runtime error during message send: {http_err}", exc_info=True)
+        error_response = create_error_response(
+            SocketError.MSG_SEND_FAILED,
+            details={"reason": f"HTTP error during message send: {http_err}"},
+        )
+        error_response["id"] = message_id
+        await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+        return error_response
+
+
 @sio.on(SocketEvents.SEND_MESSAGE)  # type: ignore
 @require_socket_auth(sio)
 async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
@@ -674,43 +825,77 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
 
     Args:
         sid: Socket.IO session ID
-        json_data: Message data
+        json_data: Message data with 'message' (string) and optional 'fileAttachments'
 
     Returns:
         Response dict sent to client's acknowledgment callback if present
     """
     message_id = json_data.get("id", str(uuid4()))
 
-    # Validate text message size (only applies to text content, not file attachments)
-    message_text = bleach.clean(json_data.get("message", ""))
-
-    if len(message_text) > MAX_TEXT_MESSAGE_SIZE:
-        error_response = create_error_response(
-            SocketError.MSG_SIZE_EXCEEDED,
-            details={"max_size": MAX_TEXT_MESSAGE_SIZE, "actual_size": len(message_text)},
-        )
-        error_response["id"] = message_id
-        await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
-        return error_response
-
-    context_id = json_data.get("conversationId")
-
-    # Require context_id for all messages
-    if not context_id:
-        error_response = create_error_response(
-            SocketError.MSG_SEND_FAILED,
-            details={"reason": "conversationId is required"},
-        )
-        error_response["id"] = message_id
-        await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
-        return error_response
-
-    metadata = json_data.get("metadata", {})
-
     try:
-        # Get agent URL from session
-        socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
-        if not socket_session or not socket_session.agent_url:
+        socket_session: SocketSession = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
+        if not socket_session:
+            error_response = create_error_response(
+                SocketError.SESSION_NOT_FOUND,
+                details={"reason": "Client session not found. Please refresh and try again."},
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
+
+        # Validate and clean message input (text and attachments)
+        message_text = bleach.clean(json_data.get("message", "") if isinstance(json_data.get("message"), str) else "")
+        file_attachments = json_data.get("fileAttachments", [])
+        has_text = bool(message_text.strip())
+        has_files = bool(file_attachments and isinstance(file_attachments, list) and len(file_attachments) > 0)
+
+        if not has_text and not has_files:
+            error_response = create_error_response(
+                SocketError.MSG_SEND_FAILED,
+                details={"reason": "Message must contain either text content or file attachments"},
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
+
+        if len(message_text) > MAX_TEXT_MESSAGE_SIZE:
+            error_response = create_error_response(
+                SocketError.MSG_SIZE_EXCEEDED,
+                details={"max_size": MAX_TEXT_MESSAGE_SIZE, "actual_size": len(message_text)},
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
+
+        context_id = json_data.get("conversationId")
+
+        # Require context_id for all messages
+        if not context_id:
+            error_response = create_error_response(
+                SocketError.MSG_SEND_FAILED,
+                details={"reason": "conversationId is required"},
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
+
+        metadata = json_data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        if socket_session.user_id:
+            metadata["user_id"] = socket_session.user_id
+        else:
+            error_response = create_error_response(
+                SocketError.SESSION_NOT_FOUND,
+                details={"reason": "User ID not found in session. Please refresh and try again."},
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
+
+        # Get A2A client from connection pool (handles creation and recovery automatically)
+        if not socket_session.agent_url:
             error_response = create_error_response(
                 SocketError.INIT_NOT_INITIALIZED,
                 details={"reason": "Client not initialized or agent URL missing"},
@@ -718,8 +903,6 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             error_response["id"] = message_id
             await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
             return error_response
-
-        # Get A2A client from connection pool (handles creation and recovery automatically)
         a2a_client = await connection_pool.get_or_create_a2a_client(sid, socket_session.agent_url)
         if not a2a_client:
             error_response = create_error_response(
@@ -730,97 +913,43 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
             return error_response
 
-        try:
-            logger.info(
-                "Outgoing message payload: %s",
-                json.dumps(
-                    {
-                        "sid": sid,
-                        "id": message_id,
-                        "contextId": context_id,
-                        "metadata": metadata,
-                        "message_preview": message_text[:200],
-                    },
-                    default=str,
-                ),
-            )
-        except Exception:
-            logger.info("Outgoing message for sid=%s id=%s", sid, message_id)
+        # Get services
+        conversation_service: ConversationService = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
+        messages_service: MessagesService = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
 
-        try:
-            if not isinstance(metadata, dict):
-                metadata = {}
+        # Save message to database
+        await _save_user_message_to_db(
+            conversation_service,
+            messages_service,
+            context_id,
+            socket_session,
+            message_text,
+            file_attachments,
+            json_data,
+            metadata,
+            message_id,
+        )
 
-            if socket_session and socket_session.user_id:
-                metadata["user_id"] = socket_session.user_id
-
-            # Attach authoritative metadata back to original json_data so raw_payload is consistent
-            try:
-                if isinstance(json_data, dict):
-                    json_data["metadata"] = metadata
-            except Exception:
-                logger.debug("Failed to attach authoritative metadata back to json_data for sid %s", sid)
-        except Exception as val_err:
-            logger.exception("Error enforcing authoritative metadata.user_id for sid %s: %s", sid, val_err)
-
-        try:
-            # Ensure conversation exists (creates if doesn't exist, validates ownership if exists)
-            conversation_service = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
-
-            # Extract sub_agent_config_hash from metadata for playground mode
-            sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
-            logger.info(
-                f"Creating/getting conversation {context_id} with sub_agent_config_hash={sub_agent_config_hash}, metadata={metadata}"
-            )
-
-            await conversation_service.get_or_create_conversation(
-                conversation_id=context_id,
-                user_id=socket_session.user_id,
-                agent_url=socket_session.agent_url or "",
-                message=message_text,
-                sub_agent_config_hash=sub_agent_config_hash,
-            )
-
-            parts = [{"kind": "text", "text": message_text}]
-
-            messages_service = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
-            await messages_service.insert_message(
-                conversation_id=context_id,
-                user_id=socket_session.user_id,
-                role="user",
-                parts=parts,
-                task_id="",
-                state=TaskState.working,
-                raw_payload=json.dumps(json_data, default=str),
-                metadata=metadata,
-                message_id=message_id,
-            )
-            logger.info(f"Saved user message {message_id} to conversation {context_id}")
-        except Exception as db_error:
-            logger.error(f"Failed to save user message to DynamoDB: {db_error}", exc_info=True)
-
+        # Build and send A2A message
         message = Message(
             role=Role.user,
-            parts=[TextPart(text=str(message_text))],  # type: ignore[list-item]
+            parts=_build_a2a_message_parts(message_text, file_attachments),
             message_id=message_id,
             context_id=context_id,
             metadata=metadata,
         )
 
-        response_stream = a2a_client.send_message(message)
-        try:
-            async for stream_result in response_stream:
-                await _process_a2a_response(stream_result, sid, message_id, message.context_id)
-        except A2AClientHTTPError as http_err:
-            logger.error(f"Runtime error during message send: {http_err}", exc_info=True)
-            error_response = create_error_response(
-                SocketError.MSG_SEND_FAILED,
-                details={"reason": f"HTTP error during message send: {http_err}"},
-            )
-            error_response["id"] = message_id
-            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
-            return error_response
-        return create_success_response({"id": message_id})
+        return await _send_message_to_agent(a2a_client, message, sid, message_id, sio)
+
+    except ValueError as e:
+        # Validation errors - send specific error details
+        error_response = create_error_response(
+            SocketError.MSG_SEND_FAILED,
+            details={"reason": str(e)},
+        )
+        error_response["id"] = message_id
+        await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+        return error_response
 
     except ConversationOwnershipError as e:
         logger.warning(f"Conversation ownership violation: sid={sid}, message_id={message_id}, error={e!s}")

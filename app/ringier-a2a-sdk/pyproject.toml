@@ -1,6 +1,6 @@
 [project]
 name = "ringier-a2a-sdk"
-version = "0.3.2"
+version = "0.4.0"
 description = "Ringier A2A SDK for building authenticated agent-to-agent communication systems"
 readme = "README.md"
 requires-python = ">=3.12"

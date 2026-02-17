@@ -369,7 +369,7 @@ async def _export_file_impl(
     # Upload to S3
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     file_name = file_path.split("/")[-1]  # Get basename
-    s3_key = f"documents/exports/{user_id}/{timestamp}_{file_name}"
+    s3_key = f"docstore/exports/{user_id}/{timestamp}_{file_name}"
     s3_uri = f"s3://{s3_bucket}/{s3_key}"
 
     await s3_service.upload_content(

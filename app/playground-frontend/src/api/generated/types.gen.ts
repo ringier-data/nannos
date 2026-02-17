@@ -139,6 +139,20 @@ export type BillingUnitDetail = {
 };
 
 /**
+ * Body_upload_files_api_v1_files_upload_post
+ */
+export type BodyUploadFilesApiV1FilesUploadPost = {
+    /**
+     * Conversation Id
+     */
+    conversation_id: string;
+    /**
+     * Files
+     */
+    files: Array<Blob | File>;
+};
+
+/**
  * BulkDeleteResult
  *
  * Result of a single group deletion.
@@ -644,6 +658,48 @@ export type RateCardPricingEntry = {
 };
 
 /**
+ * RegenerateUrlRequest
+ *
+ * Request to regenerate presigned URLs for file attachments.
+ */
+export type RegenerateUrlRequest = {
+    /**
+     * Files
+     */
+    files: Array<{
+        [key: string]: string;
+    }>;
+};
+
+/**
+ * RegeneratedFileInfo
+ */
+export type RegeneratedFileInfo = {
+    /**
+     * Key
+     */
+    key: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Url
+     */
+    url: string;
+};
+
+/**
+ * RegeneratedFileResponse
+ */
+export type RegeneratedFileResponse = {
+    /**
+     * Files
+     */
+    files: Array<RegeneratedFileInfo>;
+};
+
+/**
  * Secret
  *
  * Secret model for SSM Parameter Store reference.
@@ -956,7 +1012,7 @@ export type SubAgentConfigVersion = {
     /**
      * Enable Thinking
      */
-    enable_thinking?: boolean;
+    enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
     /**
      * Change Summary
@@ -1334,6 +1390,60 @@ export type UnreadCountResponse = {
      * Count
      */
     count: number;
+};
+
+/**
+ * UploadedFileInfo
+ *
+ * Response model for uploaded file metadata.
+ */
+export type UploadedFileInfo = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Bucket
+     */
+    bucket: string;
+    /**
+     * Key
+     */
+    key: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Mimetype
+     */
+    mimeType: string;
+    /**
+     * Size
+     */
+    size: number;
+    /**
+     * Uri
+     */
+    uri: string;
+    /**
+     * Downloaduri
+     */
+    downloadUri: string;
+    /**
+     * S3Url
+     */
+    s3Url: string;
+};
+
+/**
+ * UploadedFileResponse
+ */
+export type UploadedFileResponse = {
+    /**
+     * Files
+     */
+    files: Array<UploadedFileInfo>;
 };
 
 /**
@@ -1850,7 +1960,7 @@ export type UserSettings = {
     /**
      * Enable Thinking
      */
-    enable_thinking?: boolean;
+    enable_thinking?: boolean | null;
     thinking_level?: OrchestratorThinkingLevel | null;
     /**
      * Created At
@@ -2305,6 +2415,56 @@ export type GetMessagesByConversationApiV1MessagesConversationIdGetResponses = {
 };
 
 export type GetMessagesByConversationApiV1MessagesConversationIdGetResponse = GetMessagesByConversationApiV1MessagesConversationIdGetResponses[keyof GetMessagesByConversationApiV1MessagesConversationIdGetResponses];
+
+export type UploadFilesApiV1FilesUploadPostData = {
+    body: BodyUploadFilesApiV1FilesUploadPost;
+    path?: never;
+    query?: never;
+    url: '/api/v1/files/upload';
+};
+
+export type UploadFilesApiV1FilesUploadPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UploadFilesApiV1FilesUploadPostError = UploadFilesApiV1FilesUploadPostErrors[keyof UploadFilesApiV1FilesUploadPostErrors];
+
+export type UploadFilesApiV1FilesUploadPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: UploadedFileResponse;
+};
+
+export type UploadFilesApiV1FilesUploadPostResponse = UploadFilesApiV1FilesUploadPostResponses[keyof UploadFilesApiV1FilesUploadPostResponses];
+
+export type RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostData = {
+    body: RegenerateUrlRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/files/regenerate-urls';
+};
+
+export type RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostError = RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostErrors[keyof RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostErrors];
+
+export type RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: RegeneratedFileResponse;
+};
+
+export type RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponse = RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponses[keyof RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponses];
 
 export type PlaygroundListMcpToolsData = {
     body?: never;

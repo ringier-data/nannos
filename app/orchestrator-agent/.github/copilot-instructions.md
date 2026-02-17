@@ -127,7 +127,7 @@ LangSmith trace headers MUST be injected dynamically per-request using httpx eve
 Why thread_id is required:
 - checkpoint_ns alone is insufficient
 - Without unique thread_id, sub-agents could load orchestrator's checkpoint history, causing "missing tool_result" errors
-- **CRITICAL**: All agents share the SAME DynamoDB table (`dev-alloy-infrastructure-agents-langgraph-checkpoints`)
+- **CRITICAL**: All agents share the SAME DynamoDB table (`{env}-nannos-infrastructure-agents-langgraph-checkpoints`)
 
 Thread ID patterns:
 - **Dynamic sub-agents**: `{context_id}::dynamic-{agent_name}` (app/agents/dynamic_agent.py)
