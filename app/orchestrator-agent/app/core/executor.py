@@ -132,11 +132,15 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             streaming_middleware=self.agent._graph_factory.a2a_middleware,
         )
 
+        # Discover ALL tools (without whitelist)
+        # The whitelist will be applied later in build_runtime_context for orchestrator binding
+        # Server info is stored in tool.metadata["server_name"] by MultiServerMCPClient
         tools = await self.agent.tool_discovery_service.discover_tools(
             user_config.access_token.get_secret_value(),
-            white_list=user_config.tool_names if user_config.tool_names else None,
+            white_list=None,  # Don't filter here - GP agent needs access to all tools
         )
         logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
+        logger.debug(f"Discovered {len(tools)} total tools (unfiltered)")
 
         # Update user_config with discovered data
         user_config.tools = tools

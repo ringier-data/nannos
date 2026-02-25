@@ -8,9 +8,9 @@ from langchain_core.tools import Tool
 
 from app.a2a_utils.base import SubAgentInput
 from app.a2a_utils.models import LocalLangGraphSubAgentConfig
+from app.a2a_utils.structured_response import SubAgentResponseSchema
 from app.agents.dynamic_agent import (
     DynamicLocalAgentRunnable,
-    SubAgentResponseSchema,
     create_dynamic_local_subagent,
 )
 

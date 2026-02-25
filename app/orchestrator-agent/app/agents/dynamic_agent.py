@@ -25,29 +25,30 @@ tool whitelists, enabling specialized assistants without deploying separate A2A 
 """
 
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from deepagents import CompiledSubAgent
-from deepagents.backends.composite import StateBackend
-from deepagents.middleware.filesystem import FilesystemMiddleware
+from deepagents.backends.state import StateBackend
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolRetryMiddleware
-from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphInterrupt
 from langgraph.store.postgres.aio import AsyncPostgresStore
-from pydantic import BaseModel, Field
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
 from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
 from ..a2a_utils.models import LocalLangGraphSubAgentConfig
-from ..middleware import RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware
+from ..a2a_utils.structured_response import (
+    A2A_PROTOCOL_ADDENDUM,
+    StructuredResponseMixin,
+    get_response_format,
+)
+from ..core.graph_utils import build_common_middleware_stack
 from ..models.config import AgentSettings
 from ..utils import get_language_display_name
 
@@ -102,48 +103,7 @@ def _validate_tool_schema(tool: BaseTool) -> BaseTool:
     return tool
 
 
-class SubAgentResponseSchema(BaseModel):
-    """Structured output schema for sub-agent responses.
-
-    Sub-agents MUST use this schema to explicitly indicate their task state.
-    This eliminates guessing based on message content patterns.
-    """
-
-    task_state: Literal["completed", "input_required", "failed"] = Field(
-        description=(
-            "The task state for this response:\n"
-            "- completed: Task finished successfully, provide summary of what was done\n"
-            "- input_required: Need more information from user to proceed, ask a clear question\n"
-            "- failed: Encountered an error that prevents completion, explain what went wrong"
-        )
-    )
-
-    message: str = Field(
-        description=(
-            "The response message to send back:\n"
-            "- For 'completed': Summary of what was accomplished\n"
-            "- For 'input_required': Clear question asking for the specific information needed\n"
-            "- For 'failed': Explanation of the error and any possible remediation"
-        )
-    )
-
-
-# System prompt addendum that instructs the agent to use structured output
-A2A_PROTOCOL_ADDENDUM = """
-**Response Protocol:**
-You are a sub-agent communicating with an orchestrator. You MUST determine the appropriate task state:
-
-1. **completed** - Use when you have successfully completed the requested task. Provide a clear summary of what was accomplished.
-
-2. **input_required** - Use when you need additional information from the user to proceed. Ask a specific, clear question about what information you need.
-
-3. **failed** - Use when you encounter an error that prevents you from completing the task. Explain what went wrong and any potential remediation steps.
-
-IMPORTANT: You must explicitly choose one of these states for every response. Do not leave the task state ambiguous.
-"""
-
-
-class DynamicLocalAgentRunnable(LocalA2ARunnable):
+class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
     """A dynamically configured local sub-agent with full LangGraph capabilities.
 
     This runnable wraps a LangGraph agent that is lazily created on first invocation.
@@ -434,44 +394,20 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
             backend = lambda rt: StateBackend(rt)  # noqa: E731
             logger.debug(f"Using simple StateBackend for {self.name} (no persistence)")
 
-        # Create middleware list with FilesystemMiddleware
+        # Create middleware list using the common stack (FilesystemMiddleware,
+        # SummarizationMiddleware, AnthropicPromptCachingMiddleware,
+        # PatchToolCallsMiddleware, ToolRetryMiddleware,
+        # RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware).
         middleware_list = [
-            FilesystemMiddleware(backend=backend),
-            ToolRetryMiddleware(
-                max_retries=5,
-                backoff_factor=2.0,
-            ),
-            RepeatedToolCallMiddleware(max_repeats=5, window_size=10),
-            # Add tool schema cleaning middleware for Gemini compatibility
-            # This cleans tool schemas at model-binding time, not at creation time
-            ToolSchemaCleaningMiddleware(),
+            *build_common_middleware_stack(self.model, backend),
         ]
 
-        # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
-        # Use AutoStrategy for Bedrock models (more efficient)
-        # For bedrock models when thinking is enabled AutoStrategy doesn't work
-        if self.model.__class__.__name__ == "AzureChatOpenAI":
-            response_format = ToolStrategy(schema=SubAgentResponseSchema)
-        elif self.model.__class__.__name__ == "ChatBedrockConverse":
-            if self.config.thinking_level:
-                # AWS Bedrock doesn't allow to force tool usage via 'tool_choice = "any"' when thinking is enabled,
-                # therefore we softly enforce it by adding the response tool directly to the tools list while setting
-                # response_format to None
-                response_format = None
-                tools.append(
-                    StructuredTool.from_function(
-                        func=lambda **kwargs: SubAgentResponseSchema(**kwargs),
-                        name="SubAgentResponseSchema",
-                        description="ALWAYS use this tool to format your final response to the user.",
-                        args_schema=SubAgentResponseSchema,
-                        return_direct=True,
-                    )
-                )
-            else:
-                response_format = AutoStrategy(schema=SubAgentResponseSchema)
-        else:
-            # Gemini and others
-            response_format = AutoStrategy(schema=SubAgentResponseSchema)
+        # Get model-specific response_format strategy (may mutate tools list for Bedrock+thinking)
+        response_format = get_response_format(
+            model=self.model,
+            tools=tools,
+            thinking_enabled=bool(self.config.thinking_level),
+        )
 
         self._agent = create_agent(
             self.model,
@@ -586,92 +522,7 @@ class DynamicLocalAgentRunnable(LocalA2ARunnable):
                 task_id=task_id,
             )
 
-    def _translate_agent_result(
-        self,
-        result: Dict[str, Any],
-        context_id: Optional[str],
-        task_id: Optional[str],
-    ) -> Dict[str, Any]:
-        """Translate LangGraph agent result to A2A protocol format.
-
-        The agent uses SubAgentResponseSchema for structured output, so we
-        extract the task_state and message from the structured response.
-
-        This eliminates guessing based on message patterns - the LLM explicitly
-        declares its task state just like the orchestrator does.
-
-        Args:
-            result: The LangGraph agent's result dict
-            context_id: Optional context ID for conversation continuity
-            task_id: Optional task ID for this invocation
-
-        Returns:
-            Dict with 'messages' and A2A metadata
-        """
-        # Check for structured_response (AutoStrategy for OpenAI)
-        structured_response = result.get("structured_response")
-        if structured_response and isinstance(structured_response, SubAgentResponseSchema):
-            return self._build_response_from_schema(structured_response, context_id, task_id)
-
-        # Check messages for tool call with SubAgentResponseSchema (Bedrock)
-        logger.info(f"Translating agent result for '{self.name}'")
-        messages = result.get("messages", [])
-        for msg in reversed(messages):
-            # Check if this is a tool message with SubAgentResponseSchema result
-            if hasattr(msg, "name") and msg.name == "SubAgentResponseSchema":
-                try:
-                    # The tool returns a SubAgentResponseSchema instance
-                    if isinstance(msg.content, SubAgentResponseSchema):
-                        return self._build_response_from_schema(msg.content, context_id, task_id)
-                except Exception as e:
-                    logger.warning(f"Failed to parse SubAgentResponseSchema from tool message: {e}")
-
-            # Check for tool_calls that invoked SubAgentResponseSchema
-            if hasattr(msg, "tool_calls"):
-                for tool_call in msg.tool_calls:
-                    if tool_call.get("name") == "SubAgentResponseSchema":
-                        try:
-                            schema = SubAgentResponseSchema(**tool_call.get("args", {}))
-                            return self._build_response_from_schema(schema, context_id, task_id)
-                        except Exception as e:
-                            logger.warning(f"Failed to parse SubAgentResponseSchema from tool_call: {e}")
-
-        # Fallback: If no structured response found, extract last message and treat as completed
-        # This shouldn't happen if the agent follows the protocol correctly
-        if messages:
-            last_message = messages[-1]
-            content = last_message.content if hasattr(last_message, "content") else str(last_message)
-            logger.warning(f"No structured response found for '{self.name}', falling back to completed state")
-            return self._build_success_response(content, context_id=context_id, task_id=task_id)
-
-        return self._build_error_response(
-            "Agent returned no response",
-            context_id=context_id,
-            task_id=task_id,
-        )
-
-    def _build_response_from_schema(
-        self,
-        schema: SubAgentResponseSchema,
-        context_id: Optional[str],
-        task_id: Optional[str],
-    ) -> Dict[str, Any]:
-        """Build A2A response from SubAgentResponseSchema.
-
-        Args:
-            schema: The structured response from the agent
-            context_id: Optional context ID for conversation continuity
-            task_id: Optional task ID for this invocation
-
-        Returns:
-            Dict with 'messages' and A2A metadata
-        """
-        if schema.task_state == "completed":
-            return self._build_success_response(schema.message, context_id=context_id, task_id=task_id)
-        elif schema.task_state == "input_required":
-            return self._build_input_required_response(schema.message, context_id=context_id, task_id=task_id)
-        else:  # failed
-            return self._build_error_response(schema.message, context_id=context_id, task_id=task_id)
+    # _translate_agent_result and _build_response_from_schema are provided by StructuredResponseMixin
 
 
 def create_dynamic_local_subagent(

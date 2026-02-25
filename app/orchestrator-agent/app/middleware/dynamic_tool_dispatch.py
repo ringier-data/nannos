@@ -13,7 +13,7 @@ MCP tool configurations and A2A subagent registrations:
    - Tools registered with ToolNode → pass to handler (standard execution)
    - Dynamic MCP tools not in ToolNode → execute from GraphRuntimeContext.tool_registry
    - "task" tool for A2A agents → dispatch from GraphRuntimeContext.subagent_registry
-   - "task" tool for general-purpose → fall through to SubAgentMiddleware's handler
+   - "task" tool for built-in deepagents sub-agents → fall through to SubAgentMiddleware's handler
 
 Architecture:
 - Graph is created with standard tools (write_todos, task, etc.)
@@ -66,7 +66,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
        - ToolNode-registered tools → standard handler execution
        - Dynamic MCP tools → execute from GraphRuntimeContext.tool_registry
        - "task" tool for A2A agents → dispatch from GraphRuntimeContext.subagent_registry
-       - "task" tool for general-purpose → fall through to SubAgentMiddleware's handler
+       - "task" tool for built-in deepagents sub-agents → fall through to SubAgentMiddleware's handler
 
     Example:
         ```python
@@ -93,14 +93,24 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
     state_schema = AgentState
     tools: list[BaseTool] = []  # No tools registered with middleware itself
 
-    def __init__(self, static_tools: list[BaseTool] | None = None):
+    def __init__(
+        self,
+        static_tools: list[BaseTool] | None = None,
+        skip_tool_injection: bool = False,
+    ):
         """Initialize the middleware.
 
         Args:
             static_tools: Optional list of static tools that are always available
                 regardless of user context (e.g., FinalResponseSchema for Bedrock).
+            skip_tool_injection: If True, awrap_model_call only converts existing
+                request.tools to dicts (schema cleaning) but does NOT inject tools
+                from tool_registry. Set to True by the custom GP graph where
+                ToolsetSelectorMiddleware handles tool injection and filtering.
+                Tool execution (awrap_tool_call) still dispatches from tool_registry.
         """
         self.static_tools = {t.name: t for t in (static_tools or [])}
+        self.skip_tool_injection = skip_tool_injection
 
     def _enhance_task_tool_schema(
         self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
@@ -179,6 +189,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         user_context: GraphRuntimeContext,
         original_tools: list[Any] | None = None,
         level: CleanupLevel = CleanupLevel.MINIMAL,
+        inject_from_registry: bool = True,
     ) -> list[dict[str, Any]]:
         """Get all tools available to the user as OpenAI-format dicts.
 
@@ -187,6 +198,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
            - The "task" tool is enhanced with A2A agent descriptions from subagent_registry
         2. Static tools from middleware initialization (e.g., FinalResponseSchema)
         3. User's dynamic tools from tool_registry (can override earlier tools)
+           Only performed when ``inject_from_registry=True``.  Set to ``False`` when
+           ``skip_tool_injection=True`` (GP graph path) so that
+           ``ToolsetSelectorMiddleware`` retains sole responsibility for tool injection.
 
         Tools are converted to dict format to bypass LangGraph's tool validation.
 
@@ -194,6 +208,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             user_context: User context containing tool_registry and subagent_registry
             original_tools: Original tools from the request (from create_agent/create_deep_agent)
             level: Cleanup level to apply to schemas
+            inject_from_registry: Whether to add tools from tool_registry (step 3).
+                Set to False on the skip_tool_injection path.
 
         Returns:
             List of tools in OpenAI function calling dict format
@@ -237,9 +253,19 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 seen_names.add(tool.name)
 
         # 3. Add user's dynamic tools (may override previous tools by name)
+        # Skipped when inject_from_registry=False (GP / skip_tool_injection path where
+        # ToolsetSelectorMiddleware handles injection).
         # CRITICAL: Do NOT modify the original tools in the registry
         # They need to remain intact for tool execution in wrap_tool_call
+        # NOTE: Only include tools from the whitelist for orchestrator (GP agent gets separate filtering)
+        if not inject_from_registry:
+            return tool_dicts
+
         for name, tool in user_context.tool_registry.items():
+            # Skip tools not in orchestrator's whitelist
+            if name not in user_context.whitelisted_tool_names:
+                continue
+
             if name in seen_names:
                 # User tool overrides existing tool - remove old and add user's
                 tool_dicts = [t for t in tool_dicts if t.get("function", {}).get("name") != name]
@@ -395,12 +421,18 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             logger.warning("DynamicToolDispatchMiddleware: No GraphRuntimeContext, passing through")
             return handler(request)
 
-        # Get merged tools: original request tools + static tools + user tools + task tool
-        # Pass original request.tools to preserve tools from create_deep_agent (e.g., write_todos)
-        tool_dicts = self._get_tools_as_dicts(user_context, original_tools=request.tools)
+        # Get merged tools: original request tools + static tools + (optionally) registry tools.
+        # When skip_tool_injection=True, step 3 (registry injection) is skipped because
+        # ToolsetSelectorMiddleware handles that on the GP graph path.
+        tool_dicts = self._get_tools_as_dicts(
+            user_context,
+            original_tools=request.tools,
+            inject_from_registry=not self.skip_tool_injection,
+        )
 
         logger.debug(
-            f"DynamicToolDispatchMiddleware.wrap_model_call: "
+            f"DynamicToolDispatchMiddleware.wrap_model_call"
+            f"{'(skip_injection)' if self.skip_tool_injection else ''}: "
             f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_sub}: "
             f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
         )
@@ -421,17 +453,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         - MODERATE: + Remove ALL enums
         - AGGRESSIVE: + Remove format/min/max/array constraints
 
+        When skip_tool_injection=True, registry injection (step 3) is skipped so that
+        ToolsetSelectorMiddleware retains sole responsibility for tool injection.
+
         Args:
             request: Model request with tools
-            handler: Async callback to execute the model
-
-        Returns:
-            Model response
-        """
-        """Async version of wrap_model_call with progressive retry.
-
-        Args:
-            request: Model request (tools may be empty or placeholder)
             handler: Async callback to execute the model
 
         Returns:
@@ -445,7 +471,12 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Try progressive cleanup levels on INVALID_ARGUMENT errors
         # MODERATE removes all enums (solves global state space limit with 80+ tools)
         for level in [CleanupLevel.MINIMAL, CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE]:
-            tool_dicts = self._get_tools_as_dicts(user_context, original_tools=request.tools, level=level)
+            tool_dicts = self._get_tools_as_dicts(
+                user_context,
+                original_tools=request.tools,
+                level=level,
+                inject_from_registry=not self.skip_tool_injection,
+            )
             try:
                 logger.debug(
                     f"DynamicToolDispatchMiddleware.awrap_model_call: "
@@ -603,7 +634,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         subagent = user_context.subagent_registry.get(subagent_type)
         if subagent is None:
             # Subagent not in dynamic registry - return None to signal fallback
-            # This allows SubAgentMiddleware to handle general-purpose and other built-in agents
+            # This allows SubAgentMiddleware to handle built-in agents
+            # If we wouldn't provide a custom `general-purpose` sub-agent in the dynamic registry,
+            # then returning None here would allow the deepagents built-in `general-purpose` to handle the query.
             logger.debug(
                 f"DynamicToolDispatchMiddleware: Subagent '{subagent_type}' not in "
                 f"dynamic registry, falling back to handler (SubAgentMiddleware)"

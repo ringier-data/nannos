@@ -104,6 +104,23 @@ class GraphRuntimeContext:
     are stored in this unified registry for dispatch by DynamicToolDispatchMiddleware.
     """
 
+    whitelisted_tool_names: set[str] = field(default_factory=set)
+    """Set of tool names that are whitelisted for orchestrator use.
+    
+    The orchestrator only has access to these tools, while the general-purpose
+    agent has access to all tools in tool_registry. This enables different
+    tool scopes for orchestrator vs GP agent.
+    """
+
+    _cached_selected_tools: Optional[list[Any]] = field(default=None, repr=False)
+    """Cached tool selection results (internal).
+    
+    Set by ToolsetSelectorMiddleware after Phase 1 (server selection) and
+    Phase 2 (tool selection) to avoid re-running the LLM selections on every
+    model call within the same GP invocation. Reset to None between GP
+    invocations by GPAgentRunnable._process().
+    """
+
     @property
     def tools(self) -> list["BaseTool"]:
         """Get list of all tools available to this user."""
@@ -210,6 +227,16 @@ class AgentSettings:
     # Recursion limit configuration (overrides deepagents default of 1000)
     MAX_RECURSION_LIMIT = int(os.getenv("MAX_RECURSION_LIMIT", "50"))
 
+    # Toolset selection configuration (used by ToolsetSelectorMiddleware in custom GP graph)
+    TOOLSET_SELECTION_THRESHOLD = int(os.getenv("TOOLSET_SELECTION_THRESHOLD", "50"))
+    """Trigger server-level selection (Phase 1) in ToolsetSelectorMiddleware when total MCP tool count exceeds this."""
+
+    TOOL_SELECTION_THRESHOLD = int(os.getenv("TOOL_SELECTION_THRESHOLD", "20"))
+    """Trigger tool-level LLM selection (Phase 2) in ToolsetSelectorMiddleware when remaining tools exceed this."""
+
+    TOOLSET_SELECTION_MODEL: ModelType = os.getenv("TOOLSET_SELECTION_MODEL", "gpt-4o-mini")  # type: ignore
+    """Model to use for server and tool selection (fast, cheap model preferred)."""
+
     # Cache configuration
     AGENT_DISCOVERY_CACHE_TTL = 30  # seconds
 
@@ -246,6 +273,14 @@ class AgentSettings:
         "You can use the todo list tool to keep a todo list of tasks to accomplish the user's goals, and delegate these tasks to appropriate sub-agents. "
         "You must decide which sub-agents to invoke, in what order, and how to handle their outputs. "
         "\n\n"
+        "**CRITICAL - ALWAYS DELEGATE TO SUB-AGENTS:**\n"
+        "You are an orchestrator, NOT an executor. Your primary job is to PLAN and DELEGATE tasks to sub-agents.\n"
+        "- ALWAYS use the 'task' tool to delegate work to sub-agents\n"
+        "- The general-purpose sub-agent has access to ALL available tools through smart toolset selection\n"
+        "- When in doubt, delegate to general-purpose - it can handle a wide variety of tasks\n"
+        "- Specialized sub-agents (file-analyzer, data-analyst, etc.) should be used for their specific domains\n"
+        "- Do NOT attempt to solve tasks directly using your own reasoning - you lack the tools to execute\n"
+        "\n"
         "**IMPORTANT - Todo List Management:**\n"
         '- ALWAYS update the todo list when starting work on a task (set status to "in_progress")\n'
         '- ALWAYS update the todo list when completing a task successfully (set status to "completed")\n'
@@ -375,22 +410,29 @@ class AgentSettings:
         "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
         "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
         "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
-        "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
-        "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
-        "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
-        "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
-        "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
-        "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
-        "You MUST only plan tasks that can be executed using your available tools and sub-agents. "
+        "\n"
+        "**HOW TO APPROACH EVERY USER REQUEST:**\n"
+        "1. Analyze what the user is asking for\n"
+        "2. Identify which sub-agent(s) can handle the task\n"
+        "3. Delegate to the appropriate sub-agent using the 'task' tool\n"
+        "4. Do NOT provide answers from your own knowledge\n"
+        "5. Do NOT try to execute tasks yourself\n"
+        "\n"
+        "**THE GENERAL-PURPOSE SUB-AGENT IS YOUR WORKHORSE:**\n"
+        "- It has access to ALL available tools through smart toolset selection\n"
+        "- It can automatically select the right MCP server toolsets for each task\n"
+        "- Use it for: coding, data analysis, web searches, file operations, API calls, etc.\n"
+        "- When unsure which sub-agent to use, default to general-purpose\n"
+        "\n"
         "Before creating any task plan:\n"
-        "1. Review your available tools and sub-agents carefully\n"
-        "2. Verify each planned task can be accomplished with these capabilities\n"
-        "3. If a task cannot be solved with available tools, you MUST adapt your approach:\n"
-        "   - Break the task into smaller parts that ARE solvable with available tools\n"
-        "   - Find alternative approaches using different available tools\n"
-        "   - Inform the user about limitations and propose feasible alternatives\n"
-        "4. NEVER plan tasks that require capabilities you do not have\n"
-        "5. When in doubt, explicitly check what tools are available before planning\n"
+        "1. Review your available sub-agents carefully (check the 'task' tool description)\n"
+        "2. Verify each planned task can be accomplished by a sub-agent\n"
+        "3. If a task cannot be solved with available sub-agents, you MUST:\n"
+        "   - Try general-purpose first (it has broad capabilities)\n"
+        "   - If that fails, inform the user about limitations\n"
+        "   - Propose feasible alternatives using available sub-agents\n"
+        "4. NEVER plan tasks that require capabilities no sub-agent has\n"
+        "5. When in doubt, delegate to general-purpose - let it determine if it can help\n"
         "\n"
         "If the user sends you an error message about a system issue, plan how to resolve it using your sub-agents. "
         "For example:\n"
@@ -401,7 +443,7 @@ class AgentSettings:
         "5. Assign appropriate coding agents to fix the bug\n"
         "6. Poll the ticket to find the PR link\n"
         "\n"
-        "Remember: Every task in your plan must be achievable with your current toolset."
+        "Remember: Every task in your plan must be delegated to a sub-agent. You are the conductor, not the performer."
     )
 
     @classmethod
