@@ -515,8 +515,7 @@ def build_runtime_context(
         )
 
     # Calculate whitelisted tool names (tools the orchestrator can use)
-    # If user_config.tool_names is specified, use it; otherwise all tools are whitelisted
-    whitelisted_tool_names = set(user_config.tool_names) if user_config.tool_names else set(tool_registry.keys())
+    whitelisted_tool_names = set(user_config.tool_names or [])
 
     logger.debug(f"Tool registry contains {len(tool_registry)} total tools")
     logger.debug(f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools")

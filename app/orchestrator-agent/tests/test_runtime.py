@@ -75,6 +75,91 @@ class TestBuildRuntimeContext:
         assert "dict_tool" in context.tool_registry
         assert context.tool_registry["dict_tool"] == dict_tool
 
+    def test_whitelisted_tool_names_only_from_user_config(self):
+        """Test that whitelisted_tool_names contains only tools from user_config.tool_names.
+
+        This verifies that the whitelist is built exclusively from the DB (user_config.tool_names),
+        not from all tools in the registry. The registry may contain additional tools like
+        docstore tools, but only user-configured tools should be whitelisted for the orchestrator.
+        """
+        # Create 3 mock tools that will go into the registry
+        mock_tool_a = Mock()
+        mock_tool_a.name = "tool_a"
+
+        mock_tool_b = Mock()
+        mock_tool_b.name = "tool_b"
+
+        mock_tool_c = Mock()
+        mock_tool_c.name = "tool_c"
+
+        # User has 3 tools discovered, but only 2 are whitelisted in DB
+        user_config = UserConfig(
+            user_id="user-123",
+            user_sub="sub-123",
+            name="Test User",
+            email="test@example.com",
+            access_token=SecretStr("test-token"),
+            tools=[mock_tool_a, mock_tool_b, mock_tool_c],  # All 3 tools in registry
+            tool_names=["tool_a", "tool_b"],  # Only 2 whitelisted from DB
+        )
+
+        context = build_runtime_context(user_config)
+
+        # Verify the whitelist contains exactly what's in tool_names (from DB)
+        assert context.whitelisted_tool_names == {"tool_a", "tool_b"}
+
+        # Verify the registry has all 3 tools (superset of whitelist)
+        assert len(context.tool_registry) == 3
+        assert "tool_a" in context.tool_registry
+        assert "tool_b" in context.tool_registry
+        assert "tool_c" in context.tool_registry
+
+        # Verify tool_c is in registry but NOT in whitelist
+        assert "tool_c" not in context.whitelisted_tool_names
+
+    def test_whitelisted_tool_names_excludes_docstore_tools(self):
+        """Test that docstore tools are not automatically added to whitelisted_tool_names.
+
+        Document store tools are added to tool_registry at runtime, but should never
+        be added to whitelisted_tool_names (which comes exclusively from DB settings).
+        """
+        mock_user_tool = Mock()
+        mock_user_tool.name = "user_tool"
+
+        user_config = UserConfig(
+            user_id="user-123",
+            user_sub="sub-123",
+            name="Test User",
+            email="test@example.com",
+            access_token=SecretStr("test-token"),
+            tools=[mock_user_tool],
+            tool_names=["user_tool"],  # Only user_tool in whitelist from DB
+        )
+
+        # Mock document store dependencies to trigger docstore tool addition
+        mock_store = Mock()
+        mock_s3_service = Mock()
+        bucket_name = "test-bucket"
+
+        context = build_runtime_context(
+            user_config,
+            document_store=mock_store,
+            s3_service=mock_s3_service,
+            document_store_bucket=bucket_name,
+        )
+
+        # Docstore tools should be in registry (added at runtime)
+        assert len(context.tool_registry) > 1  # user_tool + docstore tools
+
+        # But whitelist should ONLY contain user_tool from DB
+        assert context.whitelisted_tool_names == {"user_tool"}
+
+        # Verify docstore tools are NOT in whitelist
+        for tool_name in context.tool_registry.keys():
+            if tool_name != "user_tool":
+                # This is a docstore tool - should NOT be whitelisted
+                assert tool_name not in context.whitelisted_tool_names
+
     def test_user_config_with_sub_agents(self):
         """Test building context with remote A2A sub-agents (dict format)."""
         # Remote sub-agents are passed as dicts in runtime.py line 106-108
@@ -341,3 +426,37 @@ class TestRuntimeContextValidation:
         # Only built-in file-analyzer should be present
         assert len(context.subagent_registry) == 1
         assert "file-analyzer" in context.subagent_registry
+
+    def test_whitelisted_tool_names_none(self):
+        """Test that whitelisted_tool_names is empty set when tool_names is None."""
+        user_config = UserConfig(
+            user_id="user-123",
+            user_sub="sub-123",
+            name="Test User",
+            email="test@example.com",
+            access_token=SecretStr("test-token"),
+            tool_names=None,  # No whitelist from DB
+        )
+
+        context = build_runtime_context(user_config)
+
+        # Whitelist should be empty set
+        assert context.whitelisted_tool_names == set()
+        assert isinstance(context.whitelisted_tool_names, set)
+
+    def test_whitelisted_tool_names_empty_list(self):
+        """Test that whitelisted_tool_names is empty set when tool_names is empty list."""
+        user_config = UserConfig(
+            user_id="user-123",
+            user_sub="sub-123",
+            name="Test User",
+            email="test@example.com",
+            access_token=SecretStr("test-token"),
+            tool_names=[],  # Empty whitelist from DB
+        )
+
+        context = build_runtime_context(user_config)
+
+        # Whitelist should be empty set
+        assert context.whitelisted_tool_names == set()
+        assert isinstance(context.whitelisted_tool_names, set)
