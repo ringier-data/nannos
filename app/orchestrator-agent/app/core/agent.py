@@ -163,6 +163,7 @@ class OrchestratorDeepAgent:
             backend_factory=self._graph_factory.backend_factory,
             cost_logger=self._graph_factory.cost_logger,
             backend_url=backend_url,
+            gp_graph_provider=self._graph_factory.get_gp_graph,
         )
 
     async def get_or_create_graph(

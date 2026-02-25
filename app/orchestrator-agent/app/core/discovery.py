@@ -4,8 +4,9 @@ This module handles the discovery of available sub-agents and tools,
 including caching and error handling.
 """
 
+import asyncio
 import logging
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from a2a.types import AgentCard
@@ -197,12 +198,50 @@ class ToolDiscoveryService:
         self.config = config
         self.oauth2_client = oauth2_client
 
+    async def fetch_available_servers(self, token: str) -> List[Dict[str, str]]:
+        """Fetch list of available MCP servers from the gateway.
+
+        Args:
+            token: User's access token for authentication
+
+        Returns:
+            List of server metadata dicts with 'slug' and 'description' keys
+
+        Raises:
+            httpx.HTTPError: If API request fails
+        """
+        logger.debug("Fetching available MCP servers from gateway")
+        try:
+            # Call the MCP gateway API to get server list
+            # Extract base URL from MCP_GATEWAY_URL (remove /mcp path)
+            base_url = self.config.MCP_GATEWAY_URL.rstrip("/mcp").rstrip("/")
+            servers_url = f"{base_url}/api/v1/mcp-servers"
+
+            logger.debug(f"Fetching servers from: {servers_url}")
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    servers_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                servers = data.get("servers", [])
+                logger.debug(f"Discovered {len(servers)} MCP servers")
+                return servers
+
+        except Exception as e:
+            logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
+            return []
+
     async def discover_tools(
         self,
         token: str,
         white_list: Optional[List[str]] = None,
+        include_server_slugs: Optional[List[str]] = None,
     ) -> List[BaseTool]:
-        """Discover available MCP tools with token exchange for gatana.
+        """Discover available MCP tools with optional server filtering.
 
         Performs token exchange to obtain a token for the gatana client
         in the same Keycloak realm, then uses that token to authenticate with
@@ -210,9 +249,11 @@ class ToolDiscoveryService:
 
         Args:
             token: User's access token from the orchestrator
+            white_list: Optional list of tool names to filter to (post-discovery filtering)
+            include_server_slugs: Optional list of server slugs to include tools from
 
         Returns:
-            List of discovered tools
+            List of discovered tools with server_name in metadata
         """
         logger.debug("Discovering tools for orchestrator deep agent")
         try:
@@ -225,22 +266,62 @@ class ToolDiscoveryService:
             )
             logger.info("Successfully exchanged token for gatana")
 
-            # Use the exchanged token for MCP connection
-            # logger.debug(f"Gatana MCP gateway token: {mcp_gateway_token}")
-            client = MultiServerMCPClient(
-                connections={
-                    self.config.MCP_GATEWAY_CLIENT_ID: StreamableHttpConnection(
-                        transport="streamable_http",
-                        url=self.config.MCP_GATEWAY_URL,
-                        headers={"Authorization": f"Bearer {mcp_gateway_token}"},
-                    )
-                }
-            )
+            # Fetch available servers to create per-server connections
+            servers = await self.fetch_available_servers(mcp_gateway_token)
 
-            tools = await client.get_tools()
-            logger.debug(f"Discovered {len(tools)} MCP tools")
-            tools = [tool for tool in tools if tool.name in (white_list or [])]
-            logger.debug(f"Filtered tools based on white list: {len(tools)} tools remain")
+            if not servers:
+                logger.warning("No MCP servers discovered, returning empty tool list")
+                return []
+
+            # Filter servers if include_server_slugs is provided
+            if include_server_slugs:
+                servers = [s for s in servers if s.get("slug") in include_server_slugs]
+                logger.debug(f"Filtered to {len(servers)} servers: {[s.get('slug') for s in servers]}")
+
+            # Create one connection per MCP server
+            # This allows MultiServerMCPClient to naturally track which tools come from which server
+            connections = {}
+            for server in servers:
+                server_slug = server.get("slug")
+                if not server_slug:
+                    continue
+
+                # Each connection uses the gateway URL but filtered to one server
+                connections[server_slug] = StreamableHttpConnection(
+                    transport="streamable_http",
+                    url=f"{self.config.MCP_GATEWAY_URL}?includeOnlyServerSlugs={server_slug}",
+                    headers={"Authorization": f"Bearer {mcp_gateway_token}"},
+                )
+
+            if not connections:
+                logger.warning("No valid server connections created, returning empty tool list")
+                return []
+
+            logger.debug(f"Created {len(connections)} MCP server connections: {list(connections.keys())}")
+
+            # Create client with per-server connections
+            # Discover tools per-server in parallel and tag each tool's metadata
+            # with server_name (langchain_mcp_adapters does NOT store server_name
+            # in tool.metadata automatically — it only captures it in call_tool closures)
+            client = MultiServerMCPClient(connections=connections)
+
+            async def _get_tagged_tools(slug: str) -> list:
+                server_tools = await client.get_tools(server_name=slug)
+                for tool in server_tools:
+                    if tool.metadata is None:
+                        tool.metadata = {}
+                    tool.metadata["server_name"] = slug
+                return server_tools
+
+            results = await asyncio.gather(*[_get_tagged_tools(slug) for slug in connections])
+            tools = [tool for server_tools in results for tool in server_tools]
+            logger.debug(f"Discovered {len(tools)} MCP tools from {len(connections)} servers")
+
+            # Apply whitelist filtering if provided
+            if white_list:
+                tools = [tool for tool in tools if tool.name in white_list]
+                logger.debug(f"Filtered tools based on white list: {len(tools)} tools remain")
+
             return tools
 
         except Exception as e:

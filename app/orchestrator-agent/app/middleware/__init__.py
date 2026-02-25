@@ -29,6 +29,7 @@ from .dynamic_tool_dispatch import DynamicToolDispatchMiddleware
 from .loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware
 from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
 from .tool_schema_cleaning import ToolSchemaCleaningMiddleware
+from .toolset_selector import ToolsetSelectorMiddleware
 from .user_preferences_middleware import UserPreferencesMiddleware
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "TodoStatusMiddleware",
     "TodoStatusState",
     "ToolSchemaCleaningMiddleware",
+    "ToolsetSelectorMiddleware",
     "UserPreferencesMiddleware",
     "RepeatedToolCallMiddleware",
     "LoopDetectionState",

@@ -60,7 +60,8 @@ class CostTrackingMixin:
 
     def enable_cost_tracking(
         self,
-        backend_url: str,
+        backend_url: Optional[str] = None,
+        cost_logger: Optional[CostLogger] = None,
         batch_size: int = 10,
         flush_interval: float = 5.0,
         sub_agent_id: Optional[int] = None,
@@ -68,10 +69,17 @@ class CostTrackingMixin:
         """
         Enable cost tracking for this agent.
 
+        Accepts either a pre-built CostLogger instance (when the caller owns the logger
+        lifecycle, e.g. a factory that shares one logger across agents) or a backend_url
+        to construct a new one. Exactly one of the two must be provided.
+
         Args:
-            backend_url: Backend API URL (e.g., "https://chat.nannos.rcplus.io/")
-            batch_size: Number of records to batch before sending
-            flush_interval: Seconds to wait before auto-flushing partial batches
+            backend_url: Backend API URL (e.g., "https://chat.nannos.rcplus.io/").
+                Used to create a new CostLogger. Mutually exclusive with cost_logger.
+            cost_logger: Existing CostLogger instance to use directly.
+                Mutually exclusive with backend_url.
+            batch_size: Number of records to batch before sending (ignored when cost_logger provided)
+            flush_interval: Seconds to wait before auto-flushing partial batches (ignored when cost_logger provided)
             sub_agent_id: Optional sub-agent ID for cost attribution (passed by orchestrator)
 
         Note:
@@ -80,13 +88,24 @@ class CostTrackingMixin:
             - The sub_agent_id should be passed by the orchestrator in UserConfig.sub_agent_id
               for automatic cost attribution to the correct sub-agent.
         """
-        # Initialize cost logger (always available, no langchain dependency)
-        self._cost_logger = CostLogger(
-            backend_url=backend_url,
-            batch_size=batch_size,
-            flush_interval=flush_interval,
-            sub_agent_id=sub_agent_id,  # Pass through for cost attribution
-        )
+        if backend_url is None and cost_logger is None:
+            raise ValueError("Either backend_url or cost_logger must be provided")
+        if backend_url is not None and cost_logger is not None:
+            raise ValueError("Only one of backend_url or cost_logger may be provided")
+
+        if cost_logger is not None:
+            # Use the pre-built logger directly (caller owns lifecycle)
+            self._cost_logger = cost_logger
+            log_context = "existing CostLogger"
+        else:
+            # Construct a new logger from backend_url
+            self._cost_logger = CostLogger(
+                backend_url=backend_url,  # type: ignore[arg-type]
+                batch_size=batch_size,
+                flush_interval=flush_interval,
+                sub_agent_id=sub_agent_id,
+            )
+            log_context = f"backend={backend_url}"
 
         # Note: Worker will be started lazily on first request (when event loop is running)
 
@@ -97,7 +116,7 @@ class CostTrackingMixin:
 
             self._langchain_callbacks = [CostTrackingCallback(self._cost_logger, sub_agent_id=sub_agent_id)]
             logger.info(
-                f"Cost tracking enabled with LangChain auto-instrumentation (backend={backend_url}, sub_agent_id={sub_agent_id})"
+                f"Cost tracking enabled with LangChain auto-instrumentation ({log_context}, sub_agent_id={sub_agent_id})"
             )
         except ImportError as e:
             logger.info(f"Cost tracking enabled with manual instrumentation only (langchain_core not available: {e})")

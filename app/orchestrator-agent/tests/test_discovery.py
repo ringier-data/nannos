@@ -229,6 +229,7 @@ class TestToolDiscoveryService:
         config.get_oidc_client_secret.return_value = Mock()
         config.get_oidc_client_secret.return_value.get_secret_value.return_value = "test_secret"
         config.get_oidc_issuer.return_value = "https://test.oidc.com"
+        config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")
@@ -238,16 +239,21 @@ class TestToolDiscoveryService:
         mock_tool1 = Mock()
         mock_tool1.name = "allowed_tool"
         mock_tool1.description = "This tool is allowed"
+        mock_tool1.metadata = None
 
         mock_tool2 = Mock()
         mock_tool2.name = "blocked_tool"
         mock_tool2.description = "This tool is blocked"
+        mock_tool2.metadata = None
 
         with patch("app.core.discovery.MultiServerMCPClient") as mock_client:
-            # Mock MCP client
             mock_client_instance = Mock()
+            # Called as: await client.get_tools(server_name=slug)
             mock_client_instance.get_tools = AsyncMock(return_value=[mock_tool1, mock_tool2])
             mock_client.return_value = mock_client_instance
+
+            # Mock fetch_available_servers so no real HTTP call is made
+            service.fetch_available_servers = AsyncMock(return_value=[{"slug": "mock-server"}])
 
             token = "test_token"
             white_list = ["allowed_tool"]

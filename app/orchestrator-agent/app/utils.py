@@ -312,6 +312,7 @@ def build_runtime_context(
     backend_factory: Any = None,
     cost_logger: Any = None,
     backend_url: str | None = None,
+    gp_graph_provider: Any = None,
 ) -> Any:  # GraphRuntimeContext
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
@@ -320,6 +321,7 @@ def build_runtime_context(
     - Built-in local sub-agents (like file-analyzer)
     - Remote A2A agents from discovery
     - Dynamic local sub-agents from user configuration
+    - General-purpose (GP) agent (if gp_graph_provider is provided)
     - Document store tools (if dependencies provided)
 
     Dynamic local sub-agents are instantiated with:
@@ -343,6 +345,7 @@ def build_runtime_context(
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
+        gp_graph_provider: Callable(model_type, thinking_level) -> CompiledStateGraph for GP agent.
 
     Returns:
         GraphRuntimeContext for graph invocation
@@ -355,6 +358,7 @@ def build_runtime_context(
     from .agents.dynamic_agent import create_dynamic_local_subagent
     from .agents.file_analyzer import create_file_analyzer_subagent
     from .agents.foundry_agent import create_foundry_local_subagent
+    from .agents.gp_agent import create_gp_local_subagent
     from .core.document_store_tools import create_document_store_tools
     from .core.model_factory import create_model, get_default_model, is_valid_model
     from .models.config import GraphRuntimeContext
@@ -510,7 +514,14 @@ def build_runtime_context(
             f"Skipping {len(user_config.local_subagents)} dynamic sub-agents."
         )
 
-    return GraphRuntimeContext(
+    # Calculate whitelisted tool names (tools the orchestrator can use)
+    # If user_config.tool_names is specified, use it; otherwise all tools are whitelisted
+    whitelisted_tool_names = set(user_config.tool_names) if user_config.tool_names else set(tool_registry.keys())
+
+    logger.debug(f"Tool registry contains {len(tool_registry)} total tools")
+    logger.debug(f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools")
+
+    context = GraphRuntimeContext(
         user_id=user_config.user_id,  # Database ID (stable)
         user_sub=user_config.user_sub,  # OIDC sub (current)
         name=user_config.name,
@@ -522,4 +533,25 @@ def build_runtime_context(
         custom_prompt=user_config.custom_prompt,
         tool_registry=tool_registry,
         subagent_registry=subagent_registry,
+        whitelisted_tool_names=whitelisted_tool_names,
     )
+
+    # Register general-purpose (GP) agent as a local sub-agent.
+    # This is done after GraphRuntimeContext creation because the GP agent needs
+    # the context reference for runtime tool injection (context_schema=GraphRuntimeContext).
+    # Since subagent_registry is a mutable dict, updating it here also updates the
+    # reference inside context.
+    if gp_graph_provider:
+        model_type = user_config.model or get_default_model()
+        thinking_level = user_config.thinking_level
+        subagent_registry["general-purpose"] = create_gp_local_subagent(
+            gp_graph_provider=gp_graph_provider,
+            user_context=context,
+            model_type=model_type,
+            user_sub=user_config.user_sub,
+            thinking_level=thinking_level,
+            cost_logger=cost_logger,
+        )
+        logger.info(f"Registered GP local sub-agent (model: {model_type}, thinking: {thinking_level})")
+
+    return context
