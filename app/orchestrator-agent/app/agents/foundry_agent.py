@@ -138,6 +138,12 @@ class FoundryLocalAgentRunnable(CostTrackingMixin, LocalA2ARunnable):
         return self.config.name
 
     @property
+    def input_modes(self) -> list[str]:
+        """Return the list of input modalities supported by this agent."""
+        # Foundry agents are code execution agents, not multimodal
+        return ["text"]
+
+    @property
     def description(self) -> str:
         """Return the agent description."""
         return self.config.description

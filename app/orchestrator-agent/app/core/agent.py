@@ -283,11 +283,19 @@ class OrchestratorDeepAgent:
             if runtime_context.slack_user_handle:
                 user_prefix = f"{runtime_context.name} {runtime_context.slack_user_handle}"
 
-            text_content = build_text_content(
+            text_content, pending_file_blocks = await build_text_content(
                 parts=message_parts,
                 user_prefix=user_prefix,
             )
 
+            # Store file content blocks on runtime context for deterministic
+            # forwarding to sub-agents (bypasses the LLM entirely)
+            runtime_context.pending_file_blocks = pending_file_blocks
+
+            # NOTE: we intentionally do NOT include file content in the input to the orchestrator's graph.
+            # It will be a sub-agent responsibility to read the file content if needed, using the tools available to it.
+            # This keeps the orchestrator's graph focused on orchestration and delegation.
+            # The file-analyzer sub-agent can always be used in case the sub-agent input modalities are insufficient
             input_data = {"messages": [HumanMessage(content=text_content)]}
         try:
             # Use streaming with memory for multi-turn conversation support

@@ -697,6 +697,9 @@ if [ "$ALLOY_ENV" = "local" ]; then
     update_env_var ".env" "OIDC_ISSUER" "$OIDC_ISSUER"
     update_env_var ".env" "ORCHESTRATOR_CLIENT_ID" "orchestrator"
     
+    # MCP Gateway Configuration
+    update_env_var ".env" "MCP_GATEWAY_URL" "$MCP_GATEWAY_URL"
+    
     # Configure cost tracking backend URL based on backend environment
     update_env_var ".env" "PLAYGROUND_BACKEND_URL" "${BACKEND_URLS[$BACKEND_ENV]}"
     update_env_var ".env" "PLAYGROUND_FRONTEND_URL" "http://localhost:5173"

@@ -1,3 +1,11 @@
 ---
 
 max_recursion_limit: 200
+
+# A2A Client Timeout Configuration (in seconds)
+# Timeouts for Agent-to-Agent communication with sub-agents
+# Increase a2a_timeout_read for heavy operations (e.g., campaign_proposal)
+a2a_timeout_connect: 10.0
+a2a_timeout_read: 600.0  # 10 minutes for heavy operations
+a2a_timeout_write: 10.0
+a2a_timeout_pool: 5.0

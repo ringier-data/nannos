@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from deepagents import CompiledSubAgent
+from langchain_core.messages import ContentBlock
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from ..a2a_utils.models import LocalSubAgentConfig
@@ -110,6 +111,18 @@ class GraphRuntimeContext:
     The orchestrator only has access to these tools, while the general-purpose
     agent has access to all tools in tool_registry. This enables different
     tool scopes for orchestrator vs GP agent.
+    """
+
+    pending_file_blocks: list[ContentBlock] = field(default_factory=list)
+    """File content blocks extracted from the current A2A message's FileParts.
+
+    Ephemeral per-request data (never checkpointed). When the user attaches files,
+    their URIs and MIME types are captured here as typed LangChain ContentBlocks
+    (ImageContentBlock, FileContentBlock, etc.) and injected deterministically
+    into every sub-agent dispatch via HumanMessage.content_blocks.
+
+    This avoids the orchestrator LLM seeing (and hallucinating) raw pre-signed URLs.
+    Sub-agents receive the exact original URIs without any LLM round-trip.
     """
 
     _cached_selected_tools: Optional[list[Any]] = field(default=None, repr=False)
@@ -391,11 +404,12 @@ class AgentSettings:
         "- The tool uses the user's configured timezone automatically\n"
         "\n"
         "**FILE HANDLING:**\n"
-        "When the user's message contains URLs or file references, use file-analyzer to understand their content:\n"
-        "- **HTTPS URLs (https://...)**: Pass DIRECTLY to file-analyzer - these work as-is, no conversion needed!\n"
+        "When the user's message mentions attached files or file references, use file-analyzer to analyze them:\n"
+        "- **Attached files** S3 URIs (s3://...): use the generate_presigned_url tool to get pre-signed URLs, then pass those URLs to file-analyzer or relevant sub-agents for processing.\n"
+        "- **Attached files** HTTPS URLs: are automatically forwarded to sub-agents through metadata — you do NOT need to include file URLs in your task description. Just describe what analysis is needed.\n"
+        "- **HTTPS URLs in user text (https://...)**: Include the URL in your task description for file-analyzer.\n"
         "- **S3 URIs (s3://...)**: First use generate_presigned_url, then pass the result to file-analyzer.\n"
-        "- **DO NOT ask the user for a presigned URL if they already provided an HTTPS URL!**\n"
-        "- **DO NOT use generate_presigned_url on HTTPS URLs - only on S3 URIs (s3://...)!**\n"
+        "- **DO NOT fabricate, modify, or reproduce file URLs** — attached file URLs are forwarded automatically and must not be altered.\n"
         "\n"
         "**AUDIO MESSAGE HANDLING:**\n"
         "When the user sends an audio file (audio/webm, audio/wav, etc.) WITHOUT any accompanying text:\n"
