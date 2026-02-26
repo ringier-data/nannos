@@ -168,6 +168,7 @@ Resources:
             - { Name: "BEDROCK_MAX_RETRY_ATTEMPTS", Value: '{{ bedrock_max_retry_attempts }}' }
             - { Name: "BEDROCK_RETRY_MODE", Value: '{{ bedrock_retry_mode }}' }
             - { Name: "MCP_GATEWAY_URL", Value: '{{ mcp_gateway_url }}' }
+            - { Name: "MCP_TIMEOUT_SECONDS", Value: '{{ mcp_timeout_seconds }}' }
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
             - { Name: 'COST_TRACKING_BATCH_SIZE', Value: '{{ cost_tracking_batch_size }}' }
             - { Name: 'COST_TRACKING_FLUSH_INTERVAL', Value: '{{ cost_tracking_flush_interval }}' }

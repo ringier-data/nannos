@@ -1,5 +1,6 @@
 """Unit tests for content builder module."""
 
+import pytest
 from a2a.types import FilePart, FileWithUri, Part, TextPart
 
 from app.core.content_builder import (
@@ -52,102 +53,193 @@ class TestGuessMimeType:
 
 
 class TestDescribeFile:
-    """Test file description generation."""
+    """Test file description generation (no raw URIs)."""
 
     def test_describe_image_file(self):
-        """Test describing an image file."""
+        """Test describing an image file — URI must NOT appear."""
         result = _describe_file(uri="s3://bucket/photo.jpg", mime_type="image/jpeg", name="vacation.jpg")
 
-        assert "[Image file attached]" in result
-        assert "Name: vacation.jpg" in result
-        assert "URI: s3://bucket/photo.jpg" in result
+        assert "[Image file attached] vacation.jpg" in result
+        # URIs must NOT be in the text description
+        assert "s3://bucket/photo.jpg" not in result
 
     def test_describe_pdf_file(self):
-        """Test describing a PDF document."""
+        """Test describing a PDF document — URI must NOT appear."""
         result = _describe_file(uri="s3://bucket/report.pdf", mime_type="application/pdf", name="report.pdf")
 
-        assert "[PDF document attached]" in result
-        assert "Name: report.pdf" in result
-        assert "URI: s3://bucket/report.pdf" in result
+        assert "[PDF document attached] report.pdf" in result
+        assert "s3://bucket/report.pdf" not in result
 
     def test_describe_text_file(self):
         """Test describing a text file."""
         result = _describe_file(uri="s3://bucket/notes.txt", mime_type="text/plain", name="notes.txt")
 
-        assert "[Text file attached]" in result
-        assert "Name: notes.txt" in result
+        assert "[Text file attached] notes.txt" in result
+        assert "s3://bucket/notes.txt" not in result
+
+    def test_describe_audio_file(self):
+        """Test describing an audio file."""
+        result = _describe_file(uri="s3://bucket/music.mp3", mime_type="audio/mpeg", name="music.mp3")
+
+        assert "[Audio file attached] music.mp3 (audio/mpeg)" in result
+        assert "s3://bucket/music.mp3" not in result
+
+    def test_describe_video_file(self):
+        """Test describing a video file."""
+        result = _describe_file(uri="s3://bucket/clip.mp4", mime_type="video/mp4", name="clip.mp4")
+
+        assert "[Video file attached] clip.mp4 (video/mp4)" in result
+        assert "s3://bucket/clip.mp4" not in result
 
     def test_describe_file_without_name(self):
-        """Test describing a file without a name."""
+        """Test describing a file without a name — URI must NOT appear."""
         result = _describe_file(uri="s3://bucket/file", mime_type="application/pdf", name=None)
 
-        assert "[PDF document attached]" in result
-        assert "Name:" not in result
-        assert "URI: s3://bucket/file" in result
+        assert "[PDF document attached] file" in result
+        assert "s3://bucket/file" not in result
 
     def test_describe_file_unknown_mime_type(self):
         """Test describing a file with unknown MIME type."""
         result = _describe_file(uri="s3://bucket/data.bin", mime_type="application/octet-stream", name="data.bin")
 
-        assert "[File attached: application/octet-stream]" in result
+        assert "[File attached] data.bin (application/octet-stream)" in result
+        assert "s3://bucket/data.bin" not in result
 
     def test_describe_file_no_mime_type(self):
         """Test describing a file without MIME type."""
         result = _describe_file(uri="s3://bucket/file", mime_type=None, name="file")
 
-        assert "[File attached]" in result
-        assert "Name: file" in result
+        assert "[File attached] file" in result
+        assert "s3://bucket/file" not in result
 
 
 class TestProcessFilePart:
-    """Test processing of A2A FilePart."""
+    """Test processing of A2A FilePart — now returns (description, ContentBlock)."""
 
-    def test_process_file_with_uri(self):
-        """Test processing FilePart with URI."""
+    @pytest.mark.asyncio
+    async def test_process_file_with_uri_returns_tuple(self):
+        """Test processing FilePart with URI returns (description, ContentBlock)."""
         file_data = FileWithUri(uri="s3://bucket/photo.jpg", mimeType="image/jpeg", name="photo.jpg")
         part = Part(root=FilePart(file=file_data))
 
-        result = _process_file_part(part)
+        result = await _process_file_part(part)
 
         assert result is not None
-        assert "[Image file attached]" in result
-        assert "photo.jpg" in result
-        assert "s3://bucket/photo.jpg" in result
+        description, content_block = result
+        # Text description
+        assert "[Image file attached]" in description
+        assert "photo.jpg" in description
+        # URI must NOT be in text
+        assert "s3://bucket/photo.jpg" not in description
+        # ContentBlock carries the presigned URL (not raw S3 URI)
+        assert content_block["type"] == "image"
+        assert content_block["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in content_block["url"]  # Verify it's a presigned URL
+        assert content_block["mime_type"] == "image/jpeg"
 
-    def test_process_file_without_mime_type(self):
+    @pytest.mark.asyncio
+    async def test_process_audio_file(self):
+        """Test processing audio FilePart returns AudioContentBlock."""
+        file_data = FileWithUri(uri="s3://bucket/audio.mp3", mimeType="audio/mpeg", name="audio.mp3")
+        part = Part(root=FilePart(file=file_data))
+
+        result = await _process_file_part(part)
+
+        assert result is not None
+        description, content_block = result
+        assert content_block["type"] == "audio"
+        assert content_block["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in content_block["url"]  # Verify it's a presigned URL
+        assert content_block["mime_type"] == "audio/mpeg"
+
+    @pytest.mark.asyncio
+    async def test_process_video_file(self):
+        """Test processing video FilePart returns VideoContentBlock."""
+        file_data = FileWithUri(uri="s3://bucket/clip.mp4", mimeType="video/mp4", name="clip.mp4")
+        part = Part(root=FilePart(file=file_data))
+
+        result = await _process_file_part(part)
+
+        assert result is not None
+        description, content_block = result
+        assert content_block["type"] == "video"
+        assert content_block["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in content_block["url"]  # Verify it's a presigned URL
+        assert content_block["mime_type"] == "video/mp4"
+
+    @pytest.mark.asyncio
+    async def test_process_pdf_file_uses_file_block(self):
+        """Test processing PDF FilePart returns FileContentBlock."""
+        file_data = FileWithUri(uri="s3://bucket/doc.pdf", mimeType="application/pdf", name="doc.pdf")
+        part = Part(root=FilePart(file=file_data))
+
+        result = await _process_file_part(part)
+
+        assert result is not None
+        description, content_block = result
+        assert content_block["type"] == "file"
+        assert content_block["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in content_block["url"]  # Verify it's a presigned URL
+        assert content_block["mime_type"] == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_process_file_without_mime_type(self):
         """Test processing FilePart without MIME type (guessed from name)."""
         file_data = FileWithUri(uri="s3://bucket/document.pdf", name="document.pdf")
         part = Part(root=FilePart(file=file_data))
 
-        result = _process_file_part(part)
+        result = await _process_file_part(part)
 
         assert result is not None
-        assert "[PDF document attached]" in result
+        description, content_block = result
+        assert "[PDF document attached]" in description
+        assert content_block["type"] == "file"
+        assert content_block["mime_type"] == "application/pdf"
 
-    def test_process_non_file_part(self):
+    @pytest.mark.asyncio
+    async def test_process_non_file_part(self):
         """Test processing non-FilePart returns None."""
         text_part = Part(root=TextPart(text="Hello"))
 
-        result = _process_file_part(text_part)
+        result = await _process_file_part(text_part)
 
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_process_file_with_https_uri_unchanged(self):
+        """Test that non-S3 URIs (https://) are left unchanged."""
+        https_url = "https://example.com/myfile.pdf"
+        file_data = FileWithUri(uri=https_url, mimeType="application/pdf", name="myfile.pdf")
+        part = Part(root=FilePart(file=file_data))
+
+        result = await _process_file_part(part)
+
+        assert result is not None
+        description, content_block = result
+        # Non-S3 URIs should remain unchanged
+        assert content_block["type"] == "file"
+        assert content_block["url"] == https_url
+        assert "X-Amz-Algorithm" not in content_block["url"]  # Not a presigned URL
+
 
 class TestBuildTextContent:
-    """Test building text content from A2A message parts."""
+    """Test building text content from A2A message parts — returns tuple."""
 
-    def test_build_from_text_parts_only(self):
-        """Test building content from text parts only."""
+    @pytest.mark.asyncio
+    async def test_build_from_text_parts_only(self):
+        """Test building content from text parts only — no file blocks."""
         parts = [
             Part(root=TextPart(text="Hello, world!")),
             Part(root=TextPart(text="How are you?")),
         ]
 
-        result = build_text_content(parts)
+        text, file_blocks = await build_text_content(parts)
 
-        assert result == "Hello, world!\nHow are you?"
+        assert text == "Hello, world!\nHow are you?"
+        assert file_blocks == []
 
-    def test_build_from_mixed_parts(self):
+    @pytest.mark.asyncio
+    async def test_build_from_mixed_parts(self):
         """Test building content from mixed text and file parts."""
         file_data = FileWithUri(uri="s3://bucket/doc.pdf", mimeType="application/pdf", name="doc.pdf")
 
@@ -157,31 +249,45 @@ class TestBuildTextContent:
             Part(root=TextPart(text="Let me know your thoughts.")),
         ]
 
-        result = build_text_content(parts)
+        text, file_blocks = await build_text_content(parts)
 
-        assert "Please review this document:" in result
-        assert "[PDF document attached]" in result
-        assert "doc.pdf" in result
-        assert "Let me know your thoughts." in result
+        # Text should have descriptions but NO URIs
+        assert "Please review this document:" in text
+        assert "[PDF document attached]" in text
+        assert "doc.pdf" in text
+        assert "Let me know your thoughts." in text
+        assert "s3://bucket/doc.pdf" not in text
 
-    def test_build_with_user_prefix(self):
+        # File blocks should carry the presigned URL
+        assert len(file_blocks) == 1
+        assert file_blocks[0]["type"] == "file"
+        assert file_blocks[0]["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in file_blocks[0]["url"]  # Verify it's a presigned URL
+        assert file_blocks[0]["mime_type"] == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_build_with_user_prefix(self):
         """Test building content with user prefix for multi-user attribution."""
         parts = [
             Part(root=TextPart(text="Hello from Slack!")),
         ]
 
-        result = build_text_content(parts, user_prefix="John Doe <@johndoe>")
+        text, file_blocks = await build_text_content(parts, user_prefix="John Doe <@johndoe>")
 
-        assert result.startswith("[John Doe <@johndoe>]:")
-        assert "Hello from Slack!" in result
+        assert text.startswith("[John Doe <@johndoe>]:")
+        assert "Hello from Slack!" in text
+        assert file_blocks == []
 
-    def test_build_from_empty_parts(self):
+    @pytest.mark.asyncio
+    async def test_build_from_empty_parts(self):
         """Test building content from empty parts list."""
-        result = build_text_content([])
+        text, file_blocks = await build_text_content([])
 
-        assert result == ""
+        assert text == ""
+        assert file_blocks == []
 
-    def test_build_with_only_files(self):
+    @pytest.mark.asyncio
+    async def test_build_with_only_files(self):
         """Test building content with only file parts."""
         file1 = FileWithUri(uri="s3://bucket/a.jpg", mimeType="image/jpeg", name="a.jpg")
         file2 = FileWithUri(uri="s3://bucket/b.pdf", mimeType="application/pdf", name="b.pdf")
@@ -191,35 +297,50 @@ class TestBuildTextContent:
             Part(root=FilePart(file=file2)),
         ]
 
-        result = build_text_content(parts)
+        text, file_blocks = await build_text_content(parts)
 
-        assert "[Image file attached]" in result
-        assert "[PDF document attached]" in result
-        assert "a.jpg" in result
-        assert "b.pdf" in result
+        assert "[Image file attached]" in text
+        assert "[PDF document attached]" in text
+        assert "a.jpg" in text
+        assert "b.pdf" in text
+        # URIs must NOT be in text
+        assert "s3://bucket/a.jpg" not in text
+        assert "s3://bucket/b.pdf" not in text
 
-    def test_build_with_user_prefix_and_no_content(self):
+        # File blocks should carry presigned URLs
+        assert len(file_blocks) == 2
+        assert file_blocks[0]["type"] == "image"
+        assert file_blocks[0]["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in file_blocks[0]["url"]  # Verify it's a presigned URL
+        assert file_blocks[1]["type"] == "file"
+        assert file_blocks[1]["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in file_blocks[1]["url"]  # Verify it's a presigned URL
+
+    @pytest.mark.asyncio
+    async def test_build_with_user_prefix_and_no_content(self):
         """Test building content with user prefix but no actual content."""
-        result = build_text_content([], user_prefix="Test User <@test>")
+        text, file_blocks = await build_text_content([], user_prefix="Test User <@test>")
 
-        assert result == "[Test User <@test>]:"
+        assert text == "[Test User <@test>]:"
+        assert file_blocks == []
 
-    def test_build_skips_unsupported_parts(self, caplog):
+    @pytest.mark.asyncio
+    async def test_build_skips_unsupported_parts(self, caplog):
         """Test that unsupported part types are skipped with debug log."""
         parts = [
             Part(root=TextPart(text="Valid text")),
-            # Would need a different part type here, but for now just verify text works
         ]
 
-        result = build_text_content(parts)
+        text, file_blocks = await build_text_content(parts)
 
-        assert "Valid text" in result
+        assert "Valid text" in text
 
 
 class TestContentBuilderIntegration:
     """Integration tests for content builder functionality."""
 
-    def test_realistic_slack_message_with_attachments(self):
+    @pytest.mark.asyncio
+    async def test_realistic_slack_message_with_attachments(self):
         """Test realistic scenario: Slack message with file attachments."""
         file_data = FileWithUri(uri="s3://documents/report-2024.pdf", mimeType="application/pdf", name="Q4 Report.pdf")
 
@@ -229,20 +350,27 @@ class TestContentBuilderIntegration:
             Part(root=TextPart(text="Let's discuss in tomorrow's meeting.")),
         ]
 
-        result = build_text_content(parts, user_prefix="Alice Smith <@alice>")
+        text, file_blocks = await build_text_content(parts, user_prefix="Alice Smith <@alice>")
 
         # Should have user attribution
-        assert result.startswith("[Alice Smith <@alice>]:")
+        assert text.startswith("[Alice Smith <@alice>]:")
         # Should have text content
-        assert "please review the quarterly report" in result
+        assert "please review the quarterly report" in text
         # Should describe the file
-        assert "[PDF document attached]" in result
-        assert "Q4 Report.pdf" in result
-        assert "s3://documents/report-2024.pdf" in result
-        # Should have follow-up text
-        assert "tomorrow's meeting" in result
+        assert "[PDF document attached]" in text
+        assert "Q4 Report.pdf" in text
+        # URI must NOT be in text
+        assert "s3://documents/report-2024.pdf" not in text
 
-    def test_multiple_images_from_design_review(self):
+        # Should have follow-up text
+        assert "tomorrow's meeting" in text
+        # File blocks carry the presigned URL
+        assert len(file_blocks) == 1
+        assert file_blocks[0]["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in file_blocks[0]["url"]  # Verify it's a presigned URL
+
+    @pytest.mark.asyncio
+    async def test_multiple_images_from_design_review(self):
         """Test realistic scenario: Design review with multiple images."""
         img1 = FileWithUri(uri="s3://designs/mockup-v1.png", mimeType="image/png", name="mockup-v1.png")
         img2 = FileWithUri(uri="s3://designs/mockup-v2.png", mimeType="image/png", name="mockup-v2.png")
@@ -254,10 +382,44 @@ class TestContentBuilderIntegration:
             Part(root=TextPart(text="Which one looks better?")),
         ]
 
-        result = build_text_content(parts)
+        text, file_blocks = await build_text_content(parts)
 
-        assert "two design options" in result
-        assert result.count("[Image file attached]") == 2
-        assert "mockup-v1.png" in result
-        assert "mockup-v2.png" in result
-        assert "Which one looks better?" in result
+        assert "two design options" in text
+        assert text.count("[Image file attached]") == 2
+        assert "mockup-v1.png" in text
+        assert "mockup-v2.png" in text
+        assert "Which one looks better?" in text
+        # URIs must NOT be in text
+        assert "s3://designs/mockup-v1.png" not in text
+        assert "s3://designs/mockup-v2.png" not in text
+        # File blocks carry presigned URLs with correct types
+        assert len(file_blocks) == 2
+        assert all(b["type"] == "image" for b in file_blocks)
+        assert file_blocks[0]["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in file_blocks[0]["url"]  # Verify it's a presigned URL
+        assert file_blocks[1]["url"].startswith("https://")
+        assert "X-Amz-Algorithm" in file_blocks[1]["url"]  # Verify it's a presigned URL
+
+    @pytest.mark.asyncio
+    async def test_mixed_media_types(self):
+        """Test scenario with image, audio, video, and document."""
+        img = FileWithUri(uri="s3://files/photo.jpg", mimeType="image/jpeg", name="photo.jpg")
+        audio = FileWithUri(uri="s3://files/song.mp3", mimeType="audio/mpeg", name="song.mp3")
+        video = FileWithUri(uri="s3://files/clip.mp4", mimeType="video/mp4", name="clip.mp4")
+        doc = FileWithUri(uri="s3://files/readme.txt", mimeType="text/plain", name="readme.txt")
+
+        parts = [
+            Part(root=TextPart(text="Multimedia upload")),
+            Part(root=FilePart(file=img)),
+            Part(root=FilePart(file=audio)),
+            Part(root=FilePart(file=video)),
+            Part(root=FilePart(file=doc)),
+        ]
+
+        text, file_blocks = await build_text_content(parts)
+
+        assert len(file_blocks) == 4
+        assert file_blocks[0]["type"] == "image"
+        assert file_blocks[1]["type"] == "audio"
+        assert file_blocks[2]["type"] == "video"
+        assert file_blocks[3]["type"] == "file"  # text/plain → FileContentBlock

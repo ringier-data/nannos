@@ -192,6 +192,10 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         """Return the agent description from configuration."""
         return self.config.description
 
+    @property
+    def input_modes(self) -> List[str]:
+        return self.config.input_modes or ["text"]
+
     def _build_preferences_addendum(self) -> str:
         """Build the user preferences addendum for the system prompt.
 

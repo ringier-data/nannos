@@ -241,7 +241,7 @@ class TestProcessErrorHandling:
             orchestrator_conversation_id=None,
         )
 
-        with pytest.raises(ValueError, match="Missing context_id or task_id"):
+        with pytest.raises(ValueError, match="Missing context_id"):
             await runnable._process(bad_input)
 
 

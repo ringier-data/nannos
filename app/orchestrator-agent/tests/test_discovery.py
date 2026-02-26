@@ -51,6 +51,7 @@ class TestAgentDiscoveryService:
             mock_agent_card.name = "Test Agent"
             mock_agent_card.description = "Test description"
             mock_agent_card.url = "http://test-agent:8000"
+            mock_agent_card.default_input_modes = ["text"]  # Add for multimodal check
             mock_agent_card_cls.return_value = mock_agent_card
 
             # Mock HTTP response for agent card
@@ -157,6 +158,7 @@ class TestAgentDiscoveryService:
             mock_agent_card.name = "Test Agent"
             mock_agent_card.description = "Test description"
             mock_agent_card.url = "http://test-agent:8000"
+            mock_agent_card.default_input_modes = ["text", "image"]  # Add for multimodal check
             mock_agent_card_cls.return_value = mock_agent_card
 
             # Mock HTTP response for agent card

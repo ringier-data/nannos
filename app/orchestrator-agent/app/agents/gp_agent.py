@@ -87,6 +87,11 @@ class GPAgentRunnable(CostTrackingMixin, StructuredResponseMixin, LocalA2ARunnab
         return "general-purpose"
 
     @property
+    def input_modes(self) -> list[str]:
+        # TODO: for the time being let's support just text
+        return ["text"]
+
+    @property
     def description(self) -> str:
         return GP_DESCRIPTION
 
@@ -108,8 +113,8 @@ class GPAgentRunnable(CostTrackingMixin, StructuredResponseMixin, LocalA2ARunnab
         """
         content = self._extract_message_content(input_data)
         context_id, task_id = self._extract_tracking_ids(input_data)
-        if context_id is None or task_id is None:
-            raise ValueError("Missing context_id or task_id in input data")
+        if context_id is None:
+            raise ValueError("Missing context_id in input data")
 
         try:
             # Clear any cached tool selection from a previous invocation

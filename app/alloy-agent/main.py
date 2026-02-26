@@ -103,7 +103,7 @@ def create_app():
 
     # Agent card - OIDC authentication required
     agent_card = AgentCard(
-        name="Naonous Agent",
+        name="alloy-manager",
         description=(
             "Expert campaign manager for BYOK (Bring Your Own KPI) campaigns on the Alloy platform. "
             "Specializes in the complete campaign lifecycle: proposal creation, slide generation, "

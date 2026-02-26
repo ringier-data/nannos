@@ -1,6 +1,6 @@
 [project]
 name = "naonous-agent"
-version = "0.5.0"
+version = "0.6.0"
 description = "A2A agent for managing BYOK campaign lifecycle on Alloy"
 requires-python = ">=3.12"
 dependencies = [
