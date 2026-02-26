@@ -222,6 +222,10 @@ Resources:
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
             - { Name: 'MCP_GATEWAY_URL', Value: '{{ mcp_gateway_url }}' }
             - { Name: 'MCP_GATEWAY_CLIENT_ID', Value: '{{ mcp_gateway_client_id }}' }
+            - { Name: 'A2A_TIMEOUT_CONNECT', Value: '{{ a2a_timeout_connect }}' }
+            - { Name: 'A2A_TIMEOUT_READ', Value: '{{ a2a_timeout_read }}' }
+            - { Name: 'A2A_TIMEOUT_WRITE', Value: '{{ a2a_timeout_write }}' }
+            - { Name: 'A2A_TIMEOUT_POOL', Value: '{{ a2a_timeout_pool }}' }
             - {
                 Name: POSTGRES_HOST,
                 Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",
