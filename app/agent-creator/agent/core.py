@@ -108,18 +108,48 @@ Output format:
   - Require: foundry_hostname, client credentials, ontology configuration
   - Best for: Foundry data operations and queries
 
-### 7. Tool Selection Strategy
-When configuring MCP tools:
-- Only select tools the agent actually needs for its tasks
-- Fewer tools = clearer focus and better performance
-- If unsure, start without specific tools (inherits orchestrator tools)
-- Common tool categories:
-  - Data access: database queries, file operations
-  - Communication: email, messaging, notifications
-  - External APIs: JIRA, GitHub, Slack integrations
-  - Analysis: data processing, code analysis
+### 7. Built-in Tools (Available to ALL Local Agents)
 
-### 8. Access Control
+Every local subagent automatically receives the following built-in tools — you do NOT need to configure these, and they CANNOT be removed. Factor them into every agent design so the system prompt can reference these capabilities directly.
+
+#### Filesystem & Sandbox Tools
+These tools give every agent a persistent sandboxed workspace for reading, writing, and executing code:
+- **ls** — List files in a directory (use before reading/editing)
+- **read_file** — Read file contents with pagination support (offset/limit for large files)
+- **write_file** — Create new files in the workspace
+- **edit_file** — Perform exact string replacements in existing files
+- **glob** — Find files matching glob patterns (e.g., `**/*.py`, `*.txt`)
+- **grep** — Search for literal text patterns across files
+- **execute** — Execute shell commands in an isolated sandbox environment
+
+#### Document Store & Memory Tools
+These tools give every agent access to long-term persistent memory and document management:
+- **docstore_search** — Semantic similarity search over indexed files in long-term storage
+- **docstore_export** — Export persisted files from `/memories/` to S3 with presigned download URLs
+- **read_personal_file** — Read files from a user's personal workspace (Slack channel context, requires permission)
+
+#### Utility Tools
+- **get_current_time** — Get current time or calculate relative dates with timezone awareness
+- **generate_presigned_url** — Convert S3 URIs (s3://...) to presigned HTTPS download URLs
+
+#### Implications for Agent Design
+- **Do NOT add MCP tools that duplicate built-in capabilities** (e.g., no need for a file-reading MCP tool)
+- **Reference built-in tools in system prompts** — e.g., "Use the `execute` tool to run Python scripts", "Use `docstore_search` to find relevant documents"
+- **Agents with NO MCP tools configured still have full workspace capabilities** via these built-in tools — they can read/write files, execute code, search documents, and manage time
+- When a user needs an agent that "just" analyzes files, writes reports, or runs scripts, built-in tools alone may be sufficient — no MCP tools required
+
+### 8. MCP Tool Selection Strategy
+When configuring MCP tools (on top of the built-in tools above):
+- Only select MCP tools the agent needs for capabilities BEYOND the built-in tools
+- Fewer tools = clearer focus and better performance
+- If unsure, start without MCP tools (the agent still gets all built-in tools)
+- Common MCP tool categories:
+  - External APIs: JIRA, GitHub, Slack, Confluence integrations
+  - Communication: email, messaging, notifications
+  - Domain-specific: data pipelines, CRM operations, campaign management
+  - Data access: database queries, specialized data sources
+
+### 9. Access Control
 - Set `is_public: false` by default (requires group permissions)
 - Set `is_public: true` only for genuinely universal agents
 - Consider who should have access when designing the agent
