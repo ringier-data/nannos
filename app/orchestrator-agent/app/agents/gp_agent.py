@@ -87,6 +87,11 @@ class GPAgentRunnable(CostTrackingMixin, StructuredResponseMixin, LocalA2ARunnab
         return "general-purpose"
 
     @property
+    def input_modes(self) -> list[str]:
+        # TODO: for the time being let's support just text
+        return ["text"]
+
+    @property
     def description(self) -> str:
         return GP_DESCRIPTION
 

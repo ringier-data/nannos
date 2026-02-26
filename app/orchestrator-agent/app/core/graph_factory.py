@@ -348,7 +348,11 @@ class GraphFactory:
         # DynamicToolDispatchMiddleware must be first to intercept model calls
         # Add Static tools directly to the graph (not via middleware) in case you want
         # FinalResponseSchema's return_direct=True to be respected by the model
-        dynamic_tool_middleware = DynamicToolDispatchMiddleware(static_tools=[])
+        dynamic_tool_middleware = DynamicToolDispatchMiddleware(
+            static_tools=[],
+            agent_settings=self.config,
+            cost_logger=self.cost_logger,
+        )
 
         # UserPreferencesMiddleware injects user preferences (language, etc.) into system prompt
         user_preferences_middleware = UserPreferencesMiddleware()
@@ -555,6 +559,8 @@ class GraphFactory:
         gp_dynamic_dispatch = DynamicToolDispatchMiddleware(
             static_tools=[],
             skip_tool_injection=True,
+            agent_settings=self.config,
+            cost_logger=self.cost_logger,
         )
 
         middleware = [

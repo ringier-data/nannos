@@ -26,10 +26,12 @@ Key Insight: Dict tools bypass factory.py validation (line 907: `if isinstance(t
 which allows runtime tool injection without graph recreation.
 """
 
+import asyncio
 import json
 import logging
+import textwrap
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -39,14 +41,16 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import ContentBlock, HumanMessage, TextContentBlock, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from langsmith import traceable
+from ringier_a2a_sdk.cost_tracking.callback import CostTrackingCallback
 
+from ..core.model_factory import create_model
 from ..models.config import GraphRuntimeContext
 from ..utils import CleanupLevel, validate_and_clean_tool_dict
 
@@ -97,6 +101,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         self,
         static_tools: list[BaseTool] | None = None,
         skip_tool_injection: bool = False,
+        agent_settings: Optional[Any] = None,
+        cost_logger: Optional[Any] = None,
     ):
         """Initialize the middleware.
 
@@ -108,9 +114,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 from tool_registry. Set to True by the custom GP graph where
                 ToolsetSelectorMiddleware handles tool injection and filtering.
                 Tool execution (awrap_tool_call) still dispatches from tool_registry.
+            agent_settings: AgentSettings for model configuration (needed for create_model)
+            cost_logger: CostLogger for tracking LLM costs (needed for file filtering)
         """
         self.static_tools = {t.name: t for t in (static_tools or [])}
         self.skip_tool_injection = skip_tool_injection
+        self.agent_settings = agent_settings
+        self.cost_logger = cost_logger
 
     def _enhance_task_tool_schema(
         self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
@@ -396,6 +406,172 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         )
 
     # =========================================================================
+    # Sub-Agent Input Construction
+    # =========================================================================
+
+    @traceable(name="DynamicToolDispatchMiddleware._filter_files_with_llm", run_type="retriever")
+    async def _filter_files_with_llm(
+        self,
+        description: str,
+        file_blocks: list[ContentBlock],
+    ) -> list[ContentBlock]:
+        """Use LLM to intelligently filter files based on task description.
+
+        Uses gemini-3-flash-preview for fast filtering with minimal latency and cost tracking.
+        On error, falls back to returning all files.
+
+        Args:
+            description: Task description from the LLM's tool call
+            file_blocks: List of ContentBlocks (ImageContentBlock, AudioContentBlock, etc.)
+
+        Returns:
+            Filtered list of ContentBlocks relevant to the task
+        """
+        if not file_blocks:
+            return []
+
+        try:
+            # Build file summary for the LLM
+            file_summaries = []
+            for idx, block in enumerate(file_blocks):
+                block_type = block.get("type", "unknown")
+                mime_type = block.get("mime_type", "unknown")
+                # Try to extract filename from URL if available
+                url = block.get("url", "")
+                filename = url.split("/")[-1].split("?")[0] if url else f"file_{idx}"
+                file_summaries.append(
+                    {
+                        "index": idx,
+                        "type": block_type,
+                        "mime_type": mime_type,
+                        "filename": filename,
+                    }
+                )
+
+            # Build prompt for file filtering
+            prompt = textwrap.dedent(
+                f"""\
+                You are a smart file filtering assistant. Given a task description and a list of files, 
+                determine which files are relevant to completing the task.
+
+                Task: {description}
+
+                Files:
+                {json.dumps(file_summaries, indent=2)}
+
+                Respond with JSON containing an array of file indices that are relevant to the task.
+                Include a file if it might be useful, even if you're not 100% sure.
+                If all files seem relevant, include all indices.
+                If no files seem relevant, return an empty array.
+
+                Response format:
+                {{"relevant_indices": [0, 2, 3]}}
+
+                Your response (JSON only):"""
+            )
+
+            # Use fast Gemini model for filtering (low latency) with cost tracking
+            if self.agent_settings and self.cost_logger:
+                callbacks = [CostTrackingCallback(self.cost_logger)]
+                model = create_model(
+                    "gemini-3-flash-preview",
+                    self.agent_settings,
+                    thinking_level=None,
+                    callbacks=callbacks,
+                )
+                model.with_structured_output(
+                    {"relevant_indices": list[int]},
+                )  # Ensure structured output for easier parsing
+            else:
+                raise ValueError("Missing agent_settings or cost_logger for LLM-based file filtering")
+
+            response = await model.ainvoke(prompt)
+            relevant_indices = response.get("relevant_indices", [])
+            if not isinstance(relevant_indices, list) or not all(isinstance(i, int) for i in relevant_indices):
+                raise ValueError(f"Invalid response format for relevant_indices: {response}")
+
+            # Filter file blocks by relevant indices
+            filtered_blocks = [block for idx, block in enumerate(file_blocks) if idx in relevant_indices]
+
+            logger.info(f"File filtering: {len(filtered_blocks)}/{len(file_blocks)} files selected as relevant to task")
+
+            return filtered_blocks if filtered_blocks else file_blocks  # Fallback to all if none selected
+
+        except Exception as e:
+            logger.warning(
+                f"File filtering failed ({type(e).__name__}: {e}), "
+                f"falling back to forwarding all {len(file_blocks)} files"
+            )
+            return file_blocks  # Fallback to all files on error
+
+    async def _build_subagent_human_message(
+        self,
+        description: str,
+        user_context: GraphRuntimeContext,
+        subagent: Any,
+    ) -> HumanMessage:
+        """Build a HumanMessage for sub-agent dispatch with intelligent file filtering.
+
+        Uses LLM-based filtering to determine which files are relevant to the task,
+        avoiding wasteful forwarding of all files to all sub-agents. Optimizes by
+        skipping filtering entirely for non-multimodal agents.
+
+        Args:
+            description: Task description from the LLM's tool call
+            user_context: Runtime context with pending_file_blocks
+            subagent: CompiledSubAgent dict with is_multimodal metadata
+
+        Returns:
+            HumanMessage with filtered content_blocks if relevant files exist,
+            or plain content otherwise
+        """
+        input_modes = subagent.get("runnable").input_modes
+        if input_modes == ["text"]:
+            # Agent doesn't support files, send text only (optimization: skip filtering)
+            logger.debug(f"Subagent '{subagent.get('name', 'unknown')}' is not multimodal, sending text-only message")
+            return HumanMessage(content=description)
+
+        # Subagent is multimodal - check if we have files to forward
+        if not user_context.pending_file_blocks:
+            return HumanMessage(content=description)
+
+        filtered_files = await self._filter_files_with_llm(
+            description,
+            list(user_context.pending_file_blocks),
+        )
+
+        # if the modes of the filtered_files don't match the subagent's input modes, we should convert them to text
+        # descriptions and adding them to the text message.
+        for block in filtered_files:
+            block_type = block.get("type", "unknown")
+            mime_type = block.get("mime_type", "unknown")
+            url = block.get("url", "")
+            filename = url.split("/")[-1].split("?")[0] if url else "unknown_file"
+            if block_type not in input_modes:
+                logger.debug(
+                    f"Converting file '{filename}' of type '{block_type}' to text description for subagent "
+                    f"because it doesn't support '{block_type}' input"
+                )
+                description_block = {
+                    "type": "text",
+                    "text": f"Url: {url}, File: {filename}, Type: {block_type}, MIME: {mime_type}",
+                }
+                description += f"\n\n{description_block['text']}"
+
+        if filtered_files:
+            text_block: TextContentBlock = {"type": "text", "text": description}
+            all_blocks: list[ContentBlock] = [text_block] + filtered_files
+            logger.debug(
+                f"Building sub-agent HumanMessage with {len(filtered_files)} "
+                f"filtered file content blocks (from {len(user_context.pending_file_blocks)} total)"
+            )
+            return HumanMessage(content_blocks=all_blocks)
+        else:
+            # No relevant files after filtering, send text only
+            logger.debug("No relevant files after filtering, sending text-only message")
+            return HumanMessage(content=description)
+
+    # =========================================================================
     # Model Call Interception - Dynamic Tool Binding
     # =========================================================================
 
@@ -566,7 +742,12 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # NOTE: subagent_state is a dict but it will be validated to SubAgentInput in the runnable astream method
         excluded_keys = ("messages", "todos")
         subagent_state = {k: v for k, v in state.items() if k not in excluded_keys}
-        subagent_state["messages"] = [HumanMessage(content=description)]
+
+        # Build sub-agent HumanMessage with intelligent file filtering.
+        # Uses LLM to determine which files are relevant to the task.
+        # Optimizes by skipping filtering for non-multimodal agents.
+        message = asyncio.run(self._build_subagent_human_message(description, user_context, subagent))
+        subagent_state["messages"] = [message]
 
         # Extract orchestrator's conversation_id from config.configurable.thread_id
         # This is the orchestrator's task.context_id set by the executor
@@ -658,7 +839,12 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Prepare state for subagent (exclude messages, todos)
         excluded_keys = ("messages", "todos")
         subagent_state = {k: v for k, v in state.items() if k not in excluded_keys}
-        subagent_state["messages"] = [HumanMessage(content=description)]
+
+        # Build sub-agent HumanMessage with intelligent file filtering.
+        # Uses LLM to determine which files are relevant to the task.
+        # Optimizes by skipping filtering for non-multimodal agents.
+        message = await self._build_subagent_human_message(description, user_context, subagent)
+        subagent_state["messages"] = [message]
 
         # Extract orchestrator's conversation_id from config.configurable.thread_id
         # This is the orchestrator's task.context_id set by the executor

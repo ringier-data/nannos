@@ -18,12 +18,14 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterable, Sequence
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from a2a.client import Client, ClientConfig, ClientFactory
 from a2a.types import (
     AgentCard,
+    FilePart,
+    FileWithUri,
     Message,
     Task,
     TaskState,
@@ -36,7 +38,7 @@ from a2a.types import (
 from a2a.types import (
     Role as A2ARole,
 )
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ContentBlock
 from langsmith.run_helpers import get_current_run_tree
 
 from ..a2a_utils.authentication import (
@@ -89,6 +91,10 @@ class A2AClientRunnable(BaseA2ARunnable):
     def name(self) -> str:
         """Return the agent name (used for tracking)."""
         return self.agent_card.name
+
+    @property
+    def input_modes(self) -> List[str]:
+        return self.agent_card.default_input_modes or []
 
     @property
     def description(self) -> str:
@@ -513,13 +519,82 @@ class A2AClientRunnable(BaseA2ARunnable):
         """
         raise NotImplementedError("Synchronous streaming not supported for A2A. Use astream() instead.")
 
-    def _create_a2a_message(self, content: str, context_id: Optional[str], task_id: Optional[str]) -> Message:
+    @staticmethod
+    def _extract_content_and_file_blocks(
+        input_data: SubAgentInput,
+    ) -> tuple[str, list[ContentBlock]]:
+        """Extract text content and file ContentBlocks from the last message.
+
+        When the dispatch middleware builds a HumanMessage with content_blocks
+        (for file passthrough), `message.content` is a list of typed dicts.
+        This method splits them into a text string and file blocks.
+
+        Args:
+            input_data: Validated sub-agent input
+
+        Returns:
+            Tuple of (text_content, file_blocks)
+        """
+        if not input_data.messages:
+            raise ValueError("No messages provided")
+
+        raw_content = input_data.messages[-1].content
+        if not raw_content:
+            raise ValueError("No input content provided")
+
+        if isinstance(raw_content, str):
+            return raw_content, []
+
+        # content_blocks present — content is a list of dicts
+        text_parts: list[str] = []
+        file_blocks: list[ContentBlock] = []
+        for block in raw_content:
+            if isinstance(block, dict):
+                block_type = block.get("type", "")
+                if block_type == "text":
+                    text_parts.append(block.get("text", ""))
+                elif block_type in ("image", "audio", "video", "file"):
+                    file_blocks.append(block)  # type: ignore[arg-type]
+
+        text = "\n".join(text_parts) if text_parts else ""
+        return text, file_blocks
+
+    @staticmethod
+    def _content_block_to_file_part(block: ContentBlock) -> A2APart | None:
+        """Convert a LangChain ContentBlock to an A2A FilePart.
+
+        Maps ImageContentBlock, AudioContentBlock, VideoContentBlock, and
+        FileContentBlock back to A2A FilePart(file=FileWithUri(...)).
+
+        Args:
+            block: Typed ContentBlock dict with 'url' and optionally 'mime_type'
+
+        Returns:
+            A2APart wrapping a FilePart, or None if no URL is present
+        """
+        if not isinstance(block, dict):
+            return None
+        url = block.get("url")
+        if not url:
+            return None
+        mime_type = block.get("mime_type")
+        file_with_uri = FileWithUri(uri=url, mime_type=mime_type)
+        return A2APart(root=FilePart(file=file_with_uri))
+
+    def _create_a2a_message(
+        self,
+        content: str,
+        context_id: Optional[str],
+        task_id: Optional[str],
+        file_blocks: Optional[list[ContentBlock]] = None,
+    ) -> Message:
         """Create an A2A message with proper metadata.
 
         Args:
-            content: Message content
+            content: Text message content
             context_id: Optional context ID for multi-turn conversations
             task_id: Optional task ID for continuing existing tasks
+            file_blocks: Optional ContentBlocks to forward as A2A FileParts
 
         Returns:
             Constructed A2A Message
@@ -529,7 +604,15 @@ class A2AClientRunnable(BaseA2ARunnable):
             "timestamp": asyncio.get_event_loop().time(),
         }
 
-        parts = [A2APart(root=TextPart(text=content, metadata=message_metadata))]
+        parts: list[A2APart] = [A2APart(root=TextPart(text=content, metadata=message_metadata))]
+
+        # Convert ContentBlocks to A2A FileParts for deterministic file forwarding
+        if file_blocks:
+            for block in file_blocks:
+                file_part = self._content_block_to_file_part(block)
+                if file_part:
+                    parts.append(file_part)
+            logger.debug(f"A2A message includes {len(parts) - 1} FilePart(s) for file passthrough")
 
         return Message(
             role=A2ARole.user,
@@ -563,9 +646,9 @@ class A2AClientRunnable(BaseA2ARunnable):
             # Get client and prepare message
             client = await self._get_client()
             input_data_validated = SubAgentInput.model_validate(input_data)
-            content = self._extract_message_content(input_data_validated)
+            content, file_blocks = self._extract_content_and_file_blocks(input_data_validated)
             context_id, task_id = self._extract_tracking_ids(input_data_validated)
-            a2a_message = self._create_a2a_message(content, context_id, task_id)
+            a2a_message = self._create_a2a_message(content, context_id, task_id, file_blocks=file_blocks)
 
             logger.info(f"Streaming A2A message: {a2a_message.message_id}")
 

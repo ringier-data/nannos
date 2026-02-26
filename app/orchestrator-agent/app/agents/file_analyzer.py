@@ -54,10 +54,10 @@ logger = logging.getLogger(__name__)
 # Sub-agent configuration
 FILE_ANALYZER_NAME = "file-analyzer"
 FILE_ANALYZER_DESCRIPTION = (
-    "Analyzes the content of files provided via HTTPS URL and answers questions about them. "
+    "Analyzes the content of attached files or files at HTTPS URLs and answers questions about them. "
     "Automatically detects and handles: images, PDFs, text files, audio files, and videos. "
-    "IMPORTANT: Include the full URL in your request! "
-    "Example: 'What is in https://example.com/file.webm?' or 'Analyze https://example.com/document.pdf' "
+    "Attached files from the user's message are forwarded automatically — just describe what analysis you need. "
+    "For HTTPS URLs in text, include the full URL. "
     "Do NOT assume the file type - let the analyzer determine it. "
     "Works with any HTTPS URL - no presigning needed. Only S3 URIs (s3://...) need presigning first."
 )
@@ -282,6 +282,11 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
         return FILE_ANALYZER_NAME
 
     @property
+    def input_modes(self) -> List[str]:
+        """Return the list of input modalities supported by this agent."""
+        return ["text", "image", "file", "audio", "video"]
+
+    @property
     def description(self) -> str:
         """Return the agent description."""
         return FILE_ANALYZER_DESCRIPTION
@@ -493,18 +498,173 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
 
         return analysis_text
 
+    def _extract_file_blocks_from_message(
+        self,
+        input_data: SubAgentInput,
+    ) -> list[ContentBlock]:
+        """Extract typed file ContentBlocks from the incoming HumanMessage.
+
+        When the dispatch middleware injects files via content_blocks on the
+        HumanMessage, they appear as typed dicts (ImageContentBlock,
+        AudioContentBlock, VideoContentBlock, FileContentBlock). This method
+        extracts non-text blocks for direct use, bypassing regex URL extraction.
+
+        Args:
+            input_data: Validated sub-agent input
+
+        Returns:
+            List of file-type ContentBlocks (may be empty)
+        """
+        if not input_data.messages:
+            return []
+
+        last_msg = input_data.messages[-1]
+
+        # content_blocks is the canonical field; when set, content becomes a list
+        blocks = last_msg.content_blocks
+        if not blocks:
+            # Check if content itself is a list of blocks (content_blocks sugar)
+            raw = last_msg.content
+            if isinstance(raw, list):
+                blocks = raw
+            else:
+                return []
+
+        file_blocks: list[ContentBlock] = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") in self.input_modes and block.get("type") != "text":
+                file_blocks.append(block)  # type: ignore[arg-type]
+        return file_blocks
+
+    @staticmethod
+    def _extract_text_from_message(input_data: SubAgentInput) -> str:
+        """Extract only the text portion of the incoming HumanMessage.
+
+        When the message was built with content_blocks, we pull just the text
+        block(s). Otherwise falls back to the raw string content.
+
+        Args:
+            input_data: Validated sub-agent input
+
+        Returns:
+            Text content as a string
+        """
+        if not input_data.messages:
+            return ""
+
+        last_msg = input_data.messages[-1]
+        raw = last_msg.content
+
+        # Simple string content (no content_blocks)
+        if isinstance(raw, str):
+            return raw
+
+        # content is a list of blocks — extract text blocks
+        if isinstance(raw, list):
+            text_parts = []
+            for block in raw:
+                if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
+                    text_parts.append(block["text"])
+            return "\n".join(text_parts) if text_parts else ""
+
+        return str(raw)
+
     async def _process(
         self,
         input_data: SubAgentInput,
     ) -> Dict[str, Any]:
-        """Analyze file(s) from URLs in the content."""
-        # Check for S3 URIs first
-        # Extract content and IDs from input_data
-        content = self._extract_message_content(input_data)
-        context_id, task_id = self._extract_tracking_ids(input_data)
+        """Analyze file(s) from URLs or typed content blocks.
 
-        # Extract user context for cost tracking
+        Two paths for receiving files:
+        1. **Deterministic** (preferred): Typed ContentBlocks injected by the dispatch
+           middleware via HumanMessage.content_blocks. These carry the exact original
+           pre-signed URLs without any LLM round-trip.
+        2. **Regex fallback**: URLs extracted from the text content of the message.
+           Used when the user types a URL directly (not from A2A FileParts).
+        """
+        context_id, task_id = self._extract_tracking_ids(input_data)
         conversation_id = input_data.orchestrator_conversation_id or context_id
+
+        # --- Path 1: Deterministic file content blocks ---
+        injected_blocks = self._extract_file_blocks_from_message(input_data)
+        if injected_blocks:
+            text_content = self._extract_text_from_message(input_data)
+            logger.info(
+                f"Using {len(injected_blocks)} deterministic file content block(s) (bypassing regex URL extraction)"
+            )
+
+            # Check for S3 URIs in injected blocks
+            s3_blocks = [b for b in injected_blocks if isinstance(b, dict) and b.get("url", "").startswith("s3://")]
+            if s3_blocks:
+                return self._build_input_required_response(
+                    f"I cannot directly access S3 URIs. Please provide a presigned URL for: {s3_blocks[0].get('url')}",
+                    context_id=context_id,
+                    task_id=task_id,
+                )
+
+            try:
+                # Injected blocks are already typed ContentBlocks ready for the model.
+                # Images can be passed by URL directly. Everything else (text, audio,
+                # video, documents) is routed through _fetch_files which does proper
+                # file-type detection, MIME correction, and content fetching.
+                #
+                # This is critical for audio recordings: browsers send video/webm for
+                # WebM containers, but Gemini rejects video/webm as inline data.
+                # _fetch_files → _detect_file_type correctly reclassifies these as
+                # audio/webm which Gemini accepts.
+                file_blocks_for_model: List[ContentBlock] = []
+                urls_needing_fetch: List[str] = []
+
+                for block in injected_blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    url = block.get("url", "")
+                    block_type = block.get("type", "")
+
+                    if block_type == "image" and url:
+                        # ImageContentBlock is natively supported by multimodal models
+                        file_blocks_for_model.append(block)
+                    elif url:
+                        # Everything else (audio, video, text, documents) goes through
+                        # _fetch_files for proper file-type detection and MIME handling
+                        urls_needing_fetch.append(url)
+
+                # Fetch and detect file types via _fetch_files
+                if urls_needing_fetch:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        fetched = await self._fetch_files(urls_needing_fetch, client)
+                        file_blocks_for_model.extend(fetched)
+
+                if not file_blocks_for_model:
+                    return self._build_input_required_response(
+                        "No processable files found in the attached content blocks.",
+                        context_id=context_id,
+                        task_id=task_id,
+                    )
+
+                analysis_result = await self._synthesize_analysis(
+                    text_content or "Analyze the attached file(s).",
+                    file_blocks_for_model,
+                    conversation_id=conversation_id,
+                )
+                return self._build_success_response(analysis_result, context_id=context_id, task_id=task_id)
+
+            except httpx.HTTPStatusError as e:
+                return self._handle_http_error(e, context_id, task_id)
+            except httpx.TimeoutException:
+                return self._build_input_required_response(
+                    "Request timed out. The file may be too large or the URL may be slow.",
+                    context_id=context_id,
+                    task_id=task_id,
+                )
+            except Exception as e:
+                logger.error(f"Failed to analyze file from content blocks: {e}")
+                return self._build_error_response(
+                    f"Error analyzing file: {str(e)}", context_id=context_id, task_id=task_id
+                )
+
+        # --- Path 2: Regex fallback for user-typed URLs ---
+        content = self._extract_message_content(input_data)
 
         s3_uris = S3_URI_PATTERN.findall(content)
         if s3_uris:
@@ -514,7 +674,6 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 task_id=task_id,
             )
 
-        # Extract HTTPS URLs
         urls = URL_PATTERN.findall(content)
         if not urls:
             return self._build_input_required_response(
@@ -524,7 +683,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 task_id=task_id,
             )
 
-        logger.info(f"Analyzing {len(urls)} file(s) from URLs...: {urls}")
+        logger.info(f"Analyzing {len(urls)} file(s) from URLs (regex fallback)...: {urls}")
 
         try:
             # Fetch files and prepare content blocks
@@ -540,26 +699,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
             return self._build_success_response(analysis_result, context_id=context_id, task_id=task_id)
 
         except httpx.HTTPStatusError as e:
-            if e.response.status_code in (401, 403):
-                return self._build_input_required_response(
-                    f"Access denied (HTTP {e.response.status_code}). "
-                    "The URL may have expired or be invalid. Please provide a valid presigned URL.",
-                    context_id=context_id,
-                    task_id=task_id,
-                )
-            elif e.response.status_code == 404:
-                return self._build_input_required_response(
-                    "File not found (HTTP 404). Please check the URL and try again.",
-                    context_id=context_id,
-                    task_id=task_id,
-                )
-            else:
-                logger.error(f"HTTP error fetching file: {e}")
-                return self._build_error_response(
-                    f"HTTP error {e.response.status_code} accessing the file.",
-                    context_id=context_id,
-                    task_id=task_id,
-                )
+            return self._handle_http_error(e, context_id, task_id)
 
         except httpx.TimeoutException:
             return self._build_input_required_response(
@@ -579,6 +719,34 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                     task_id=task_id,
                 )
             return self._build_error_response(f"Error analyzing file: {str(e)}", context_id=context_id, task_id=task_id)
+
+    def _handle_http_error(
+        self,
+        e: httpx.HTTPStatusError,
+        context_id: Optional[str],
+        task_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build appropriate response for HTTP errors."""
+        if e.response.status_code in (401, 403):
+            return self._build_input_required_response(
+                f"Access denied (HTTP {e.response.status_code}). "
+                "The URL may have expired or be invalid. Please provide a valid presigned URL.",
+                context_id=context_id,
+                task_id=task_id,
+            )
+        elif e.response.status_code == 404:
+            return self._build_input_required_response(
+                "File not found (HTTP 404). Please check the URL and try again.",
+                context_id=context_id,
+                task_id=task_id,
+            )
+        else:
+            logger.error(f"HTTP error fetching file: {e}")
+            return self._build_error_response(
+                f"HTTP error {e.response.status_code} accessing the file.",
+                context_id=context_id,
+                task_id=task_id,
+            )
 
 
 def create_file_analyzer_subagent(

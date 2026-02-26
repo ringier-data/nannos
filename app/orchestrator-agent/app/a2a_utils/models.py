@@ -32,6 +32,11 @@ class BaseLocalSubAgentConfig(BaseModel):
         description="Human-readable description shown in task tool description",
         min_length=1,
     )
+    # TODO: the agent-console doesn't support to specify input modalities per sub-agent yet, but we add this in the config for future support
+    input_modes: list[str] = Field(
+        default_factory=lambda: ["text"],
+        description="Optional list of input modalities supported by this agent (e.g., ['text', 'image']). If None, inherits from orchestrator agent.",
+    )
 
 
 class LocalFoundrySubAgentConfig(BaseLocalSubAgentConfig):

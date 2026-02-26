@@ -262,7 +262,8 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         except Exception as e:
             logger.error(
                 f"Token exchange failed for {agent_card.name} (target={target_client_id}): {e}. "
-                "Request will be sent without authentication and will likely fail."
+                "Request will be sent without authentication and will likely fail.",
+                exc_info=True,
             )
 
         return request_payload, http_kwargs

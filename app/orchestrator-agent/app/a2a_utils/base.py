@@ -29,7 +29,6 @@ class SubAgentInput(BaseModel):
 
     a2a_tracking: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     messages: List[HumanMessage]
-    files: Optional[Any] = None  # TODO: Define proper type for files
     orchestrator_conversation_id: Optional[str] = Field(
         default=None,
         description="Orchestrator's conversation ID for unified tracking across all sub-agents",
@@ -69,6 +68,12 @@ class BaseA2ARunnable(ABC):
     @abstractmethod
     def name(self) -> str:
         """Return the agent name"""
+        ...
+
+    @property
+    @abstractmethod
+    def input_modes(self) -> List[str]:
+        """Return the list of input modalities supported by this agent (e.g. ['text', 'image', 'file'])"""
         ...
 
     @property
