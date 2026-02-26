@@ -6,6 +6,7 @@ lifecycle of BYOK (Bring Your Own KPI) campaigns through natural language conver
 
 import logging
 import os
+from datetime import timedelta
 
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.agent.langgraph_bedrock import LangGraphBedrockAgent
@@ -26,7 +27,7 @@ You have access to comprehensive campaign management tools via the Naonous MCP s
 4. **campaign_proposal_slides_status** - Check status of slide generation jobs
 
 ### Campaign Management
-5. **list_campaigns** - List all campaigns with basic information (id, gam_id, name, start_date, end_date) for a tenant
+5. **list_campaigns** - List all campaigns with basic information (id, gam_id, name, start_date, end_date)
 6. **get_campaign** - Get a specific campaign with full configuration including themes, creatives, and targeting
 7. **configure_campaign** - Configure or update campaign settings
 
@@ -65,7 +66,7 @@ You have access to comprehensive campaign management tools via the Naonous MCP s
 2. **Verify Sync**: Check the sync response for counts of upserted and orphaned resources
 
 ### Phase 4: Campaign Monitoring & Analysis
-1. **List Campaigns**: Use `list_campaigns` to see all available campaigns for a tenant
+1. **List Campaigns**: Use `list_campaigns` to see all available campaigns
 2. **Inspect Campaign**: Use `get_campaign` to retrieve full configuration and status
 3. **Track Performance**: Monitor campaign KPIs and delivery metrics with `get_report`
 4. **Generate Visualizations**: Use `plot_kpi` to create visual performance reports
@@ -95,10 +96,16 @@ You have access to comprehensive campaign management tools via the Naonous MCP s
 - Use descriptive briefings that capture all campaign requirements
 
 ### Campaign Configuration
-- Ensure all required fields are provided (tenant, briefing, etc.)
+- Ensure all required fields are provided (briefing, etc.)
 - Validate budget allocations across line items
 - Confirm creative formats match targeting requirements
 - Review regional settings for proper localization
+
+### Creative Assets & Pre-signed URLs
+- It is perfectly fine to use pre-signed URLs when creating advertising creative assets
+- Cockpit will automatically store these assets into permanent locations during the creation process
+- Pre-signed URLs are temporary, but the system handles persistence automatically
+- No need to worry about URL expiration - the assets are copied to permanent storage
 
 ### Syncing to Cockpit
 - The sync operation is idempotent - safe to call multiple times
@@ -109,7 +116,7 @@ You have access to comprehensive campaign management tools via the Naonous MCP s
 - Use sync for both initial deployment and updates
 
 ### Campaign Discovery & Inspection
-- Use `list_campaigns` to help users find campaigns by tenant
+- Use `list_campaigns` to help users find campaigns
 - Use `get_campaign` to retrieve complete campaign details before making changes
 - Always provide campaign_id when referencing specific campaigns
 - Explain the full configuration when showing campaign details
@@ -247,11 +254,24 @@ class NaonousAgent(LangGraphBedrockAgent):
         # Apply credentials from request context to headers via the credential injector
         headers = await self.get_headers()
 
+        # Configure timeouts for heavy MCP operations (e.g., campaign_proposal)
+        # There are TWO timeout parameters:
+        # 1. timeout - for HTTP operations (handshake, non-SSE requests)
+        # 2. sse_read_timeout - for SSE event streaming
+        # Both must be set to handle long-running operations that involve:
+        # - Multiple LLM calls (complete_campaign_config_handler)
+        # - Creative validation (validate_creatives_pre_forecast)
+        # - GAM forecasting (get_availability)
+        # - Budget allocation (line_item_budget_allocation_handler)
+        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "600"))  # Default: 10 minutes
+
         return {
             "gatana": StreamableHttpConnection(
                 transport="streamable_http",
                 url=f"{self.mcp_gateway_url}?includeOnlyServerSlugs=naonous-riad,naonous-smg",
                 headers=headers,
+                timeout=timedelta(seconds=mcp_timeout_seconds),  # HTTP timeout (handshake, etc.)
+                sse_read_timeout=timedelta(seconds=mcp_timeout_seconds),  # SSE event timeout
             )
         }
 
