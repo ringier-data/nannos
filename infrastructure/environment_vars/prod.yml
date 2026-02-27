@@ -6,7 +6,11 @@ langsmith_project: prod-nannos-agent-framework
 langsmith_project_id: e59f2bb1-d566-4c59-b04e-8ab96cc073a9
 budget_monthly_token_limit: 100000000
 rds_backup_retention_in_days: 7
-rds_instance_class: "db.t4g.micro"
+rds_instance_class: "db.t4g.medium"
+orchestrator_agent_task_cpu: 1024
+orchestrator_agent_task_memory: 2048
+alloy_agent_task_cpu: 1024
+alloy_agent_task_memory: 2048
 
 # Keycloak settings for user/group sync
 keycloak_group_name_prefix: 'prod-'
