@@ -4,11 +4,14 @@ import sys
 from contextlib import asynccontextmanager
 
 import click
+import httpx
 import uvicorn
 import yaml
 from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import (
+    BasePushNotificationSender,
+    InMemoryPushNotificationConfigStore,
     InMemoryTaskStore,
 )
 from a2a.types import (
@@ -97,7 +100,7 @@ def create_app():
         if not os.getenv("GOOGLE_API_KEY"):
             raise MissingAPIKeyError("GOOGLE_API_KEY environment variable not set.")
 
-    capabilities = AgentCapabilities(streaming=True)
+    capabilities = AgentCapabilities(streaming=True, push_notifications=True)
     skill = AgentSkill(
         id="orchestrate_tasks",
         name="Task Orchestration",
@@ -140,17 +143,16 @@ def create_app():
     cost_logger = CostLogger(backend_url=backend_url, access_token_provider=get_request_access_token)
     logger.info(f"Cost logger initialized with backend: {backend_url}")
 
-    # TODO: do we need a task store?
-    # TODO: do we need push notifications?
-    # httpx_client = httpx.AsyncClient()
-    # push_config_store = InMemoryPushNotificationConfigStore()
-    # push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
+    # TODO: do we need a persistent task store?
+    httpx_client = httpx.AsyncClient()
+    push_config_store = InMemoryPushNotificationConfigStore()
+    push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
     agent_executor = OrchestratorDeepAgentExecutor(cost_logger=cost_logger)
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
         task_store=InMemoryTaskStore(),
-        # push_config_store=push_config_store,
-        # push_sender=push_sender,
+        push_config_store=push_config_store,
+        push_sender=push_sender,
         request_context_builder=AuthRequestContextBuilder(),
     )
     server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
