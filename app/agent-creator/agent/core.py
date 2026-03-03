@@ -34,7 +34,7 @@ Before creating an agent, thoroughly understand:
 - What specific tasks or domain the agent should handle
 - What tools or capabilities it needs
 - How specialized vs. general-purpose it should be
-- What model (GPT-4o, GPT-4o-mini, Claude Sonnet 4.5, or Claude Haiku 4.5) is most appropriate
+- What model (GPT-4o, GPT-4o-mini, Claude Sonnet 4.5, Claude Sonnet 4.6, or Claude Haiku 4.5) is most appropriate
 
 ### 2. Naming Conventions
 - Use **lowercase letters, numbers, and hyphens only** (pattern: /^[a-z0-9-]+$/)
@@ -92,6 +92,7 @@ Output format:
 - **GPT-4o**: Best for general-purpose tasks, faster responses, strong coding capabilities
 - **GPT-4o-mini**: Cost-effective option for simpler tasks, faster responses, good for routine operations
 - **Claude Sonnet 4.5**: Best for detailed analysis, longer context understanding, nuanced communication, supports thinking mode
+- **Claude Sonnet 4.6**: Improved reasoning and creativity over 4.5, ideal for complex problem-solving and creative tasks, supports thinking mode
 - **Claude Haiku 4.5**: Ultra-fast and cost-efficient for high-volume, low-latency tasks
 
 ### 6. Configuring Agent Type
