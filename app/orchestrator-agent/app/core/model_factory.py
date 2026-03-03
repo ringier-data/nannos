@@ -36,6 +36,9 @@ MODEL_CONFIG = {
     "claude-sonnet-4.5": {
         "bedrock_model_id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
     },
+    "claude-sonnet-4.6": {
+        "bedrock_model_id": "global.anthropic.claude-sonnet-4-6",
+    },
     "claude-haiku-4-5": {
         "bedrock_model_id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     },
@@ -175,7 +178,7 @@ def create_model(
             include_thoughts=include_thoughts,
             callbacks=callbacks,
         )
-    elif model_type in ("claude-sonnet-4.5", "claude-haiku-4-5"):
+    elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
         # Both Claude Sonnet and Haiku support Extended Thinking
         if thinking_level:
             budget_tokens = get_thinking_budget(thinking_level)

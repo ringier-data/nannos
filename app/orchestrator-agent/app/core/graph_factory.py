@@ -308,7 +308,7 @@ class GraphFactory:
         """Create a model instance for the given model type.
 
         Args:
-            model_type: The type of model to create ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
+            model_type: The type of model to create ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The created model instance
@@ -327,7 +327,7 @@ class GraphFactory:
         use with_config on the same model instance, but those parameters are not configurable that way yet.
 
         Args:
-            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The model instance (cached or newly created)
@@ -451,7 +451,7 @@ class GraphFactory:
         requires_response_tool = False
         if model_type in ("gpt4o", "gpt-4o-mini"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
-        elif model_type in ("claude-sonnet-4.5", "claude-haiku-4-5"):
+        elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
             # if thinking is enabled we need to set response_format to None since the bedrock api can't handle
             # forcing structured output when enabling thinking
             if thinking_level:

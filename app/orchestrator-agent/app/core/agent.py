@@ -121,7 +121,7 @@ class OrchestratorDeepAgent:
         middleware setup, and graph creation.
 
         Args:
-            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
@@ -176,7 +176,7 @@ class OrchestratorDeepAgent:
         - User tools/subagents come from GraphRuntimeContext at runtime via DynamicToolDispatchMiddleware
 
         Args:
-            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', or 'claude-haiku-4-5')
+            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The compiled LangGraph for this model type

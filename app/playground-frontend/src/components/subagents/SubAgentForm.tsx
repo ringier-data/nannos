@@ -850,7 +850,9 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                       <p className="font-medium mb-1">Model Selection</p>
                       <p className="text-muted-foreground text-xs">
                         GPT-4o: balanced performance. GPT-4o Mini: cost-effective for simpler tasks. 
-                        Claude Sonnet 4.5: best for complex reasoning. Claude Haiku 4.5: ultra-fast and efficient.
+                        Claude Sonnet 4.5: best for complex reasoning. 
+                        Claude Sonnet 4.6: improved reasoning over 4.5.
+                        Claude Haiku 4.5: ultra-fast and efficient.
                       </p>
                     </div>
                   </>

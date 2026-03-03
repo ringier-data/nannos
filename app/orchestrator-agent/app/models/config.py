@@ -171,7 +171,7 @@ class UserConfig(BaseModel):
     language: str = Field(default="en", description="User's preferred language")
     timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
     model: Optional[ModelType] = Field(
-        default=None, description="LLM model to use (gpt4o, gpt-4o-mini, claude-sonnet-4.5, or claude-haiku-4-5)"
+        default=None, description="LLM model to use (gpt4o, gpt-4o-mini, claude-sonnet-4.5, claude-sonnet-4.6 or claude-haiku-4-5)"
     )
     message_formatting: Literal["markdown", "slack", "plain"] = Field(
         default="markdown",
