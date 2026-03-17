@@ -3,10 +3,10 @@
 import json
 
 import httpx
+from agent_common.models.exceptions import A2AClientError
 from langchain_core.tools import ToolException
 
 from app.handlers.utils import handle_auth_error, parse_tool_exception, should_retry
-from app.models.exceptions import A2AClientError
 
 
 class TestErrorHandlerParseToolException:

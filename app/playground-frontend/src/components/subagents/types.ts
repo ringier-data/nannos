@@ -56,7 +56,7 @@ export interface SubAgentFormData {
   name: string;
   description: string;
   model?: string;  // LLM model to use (e.g., 'gpt-4', 'claude-3-opus')
-  type: 'remote' | 'local' | 'foundry';
+  type: 'remote' | 'local' | 'foundry' | 'automated';
   is_public?: boolean;  // If true, accessible to all users without group permissions
   configuration: SubAgentConfiguration;
   mcp_tools?: string[];  // MCP tool names for local agents

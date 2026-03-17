@@ -22,10 +22,6 @@ from app.middleware.toolset_selector import (
 )
 from app.models.config import AgentSettings, GraphRuntimeContext
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_tool(name: str, server: str | None = None) -> BaseTool:
     """Return a minimal mock BaseTool with an optional server_name metadata."""
@@ -63,11 +59,6 @@ def _make_request(
     return request
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture
 def middleware() -> ToolsetSelectorMiddleware:
     return ToolsetSelectorMiddleware()
@@ -83,11 +74,6 @@ def mock_handler() -> AsyncMock:
     """Async callable that acts as the 'next' middleware handler."""
     handler = AsyncMock(return_value=AIMessage(content="model response"))
     return handler
-
-
-# ---------------------------------------------------------------------------
-# awrap_model_call — happy-path (no filtering needed)
-# ---------------------------------------------------------------------------
 
 
 class TestAwrapModelCallNoFiltering:
@@ -164,11 +150,6 @@ class TestAwrapModelCallNoFiltering:
         assert "request_tool" in tool_names
 
 
-# ---------------------------------------------------------------------------
-# awrap_model_call — caching
-# ---------------------------------------------------------------------------
-
-
 class TestCaching:
     @pytest.mark.asyncio
     async def test_cached_tools_used_on_second_call(
@@ -199,11 +180,6 @@ class TestCaching:
             await middleware.awrap_model_call(request, mock_handler)
 
         assert ctx._cached_selected_tools == selected
-
-
-# ---------------------------------------------------------------------------
-# awrap_model_call — always_include
-# ---------------------------------------------------------------------------
 
 
 class TestAlwaysInclude:
@@ -260,11 +236,6 @@ class TestAlwaysInclude:
         assert essential_count == 1
 
 
-# ---------------------------------------------------------------------------
-# awrap_model_call — provider tool dicts are preserved
-# ---------------------------------------------------------------------------
-
-
 class TestProviderToolDicts:
     @pytest.mark.asyncio
     async def test_dict_tools_are_passed_through_unchanged(
@@ -292,11 +263,6 @@ class TestProviderToolDicts:
         assert provider_dict in captured_tools
 
 
-# ---------------------------------------------------------------------------
-# _get_last_user_message
-# ---------------------------------------------------------------------------
-
-
 class TestGetLastUserMessage:
     def test_returns_last_human_message(self, middleware: ToolsetSelectorMiddleware):
         first = HumanMessage(content="first")
@@ -312,11 +278,6 @@ class TestGetLastUserMessage:
     def test_returns_none_for_empty_list(self, middleware: ToolsetSelectorMiddleware):
         result = middleware._get_last_user_message([])
         assert result is None
-
-
-# ---------------------------------------------------------------------------
-# _select_tools — phase thresholds
-# ---------------------------------------------------------------------------
 
 
 class TestSelectToolsPhases:
@@ -385,11 +346,6 @@ class TestSelectToolsPhases:
         p2.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# _llm_select_servers
-# ---------------------------------------------------------------------------
-
-
 class TestLlmSelectServers:
     @pytest.mark.asyncio
     async def test_single_server_skips_llm(self, middleware: ToolsetSelectorMiddleware):
@@ -455,11 +411,6 @@ class TestLlmSelectServers:
         result = await middleware._llm_select_servers(tools, [AIMessage(content="only ai messages")])
 
         assert result == tools
-
-
-# ---------------------------------------------------------------------------
-# _llm_select_tools
-# ---------------------------------------------------------------------------
 
 
 class TestLlmSelectTools:

@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 # Private implementation detail - use public functions below
 _current_access_token: ContextVar[Optional[str]] = ContextVar("_current_access_token", default=None)
 _current_user_sub: ContextVar[Optional[str]] = ContextVar("_current_user_sub", default=None)
+_current_conversation_id: ContextVar[Optional[str]] = ContextVar("_current_conversation_id", default=None)
+
+# Cost accumulator for batching multiple embedding calls into a single log entry
+# Structure: {"tokens": int, "call_count": int, "provider": str, "model": str}
+_cost_accumulator: ContextVar[Optional[Dict[str, Any]]] = ContextVar("_cost_accumulator", default=None)
 
 
 def set_request_access_token(token: Optional[str]) -> None:
@@ -55,6 +60,18 @@ def set_request_user_sub(user_sub: Optional[str]) -> None:
     _current_user_sub.set(user_sub)
 
 
+def set_request_conversation_id(conversation_id: Optional[str]) -> None:
+    """
+    Set the conversation ID for the current async context (request).
+
+    This conversation ID is used for cost attribution to specific conversations.
+
+    Args:
+        conversation_id: Conversation identifier or None to clear
+    """
+    _current_conversation_id.set(conversation_id)
+
+
 def get_request_access_token() -> Optional[str]:
     """
     Get the access token for the current async context (request).
@@ -73,6 +90,142 @@ def get_request_user_sub() -> Optional[str]:
         The user ID set via set_request_user_sub(), or None
     """
     return _current_user_sub.get()
+
+
+def get_request_conversation_id() -> Optional[str]:
+    """
+    Get the conversation ID for the current async context (request).
+
+    Returns:
+        The conversation ID set via set_request_conversation_id(), or None
+    """
+    return _current_conversation_id.get()
+
+
+def start_cost_batching() -> None:
+    """
+    Start accumulating costs in the current context instead of logging immediately.
+
+    Use this before operations that make many small cost-generating calls
+    (e.g., document indexing with semantic chunking). Call flush_cost_batch()
+    when the operation completes to log the accumulated total.
+
+    Example:
+        ```python
+        start_cost_batching()
+        try:
+            # Many embedding calls happen here
+            await index_document(content)
+        finally:
+            await flush_cost_batch(cost_logger)
+        ```
+    """
+    _cost_accumulator.set(
+        {
+            "tokens": 0,
+            "call_count": 0,
+            "provider": None,
+            "model": None,
+        }
+    )
+    logger.debug("[COST BATCHING] Started cost accumulation")
+
+
+def is_cost_batching_active() -> bool:
+    """
+    Check if cost batching is currently active in this context.
+
+    Returns:
+        True if costs should be accumulated, False if they should be logged immediately
+    """
+    return _cost_accumulator.get() is not None
+
+
+def add_to_cost_batch(
+    token_count: int,
+    provider: str,
+    model_name: str,
+) -> None:
+    """
+    Add costs to the current batch accumulator.
+
+    Only effective if start_cost_batching() was called first.
+    If batching is not active, this is a no-op (caller should log directly).
+
+    Args:
+        token_count: Number of tokens to add
+        provider: Provider name (e.g., 'bedrock_embeddings')
+        model_name: Model identifier
+    """
+    accumulator = _cost_accumulator.get()
+    if accumulator is None:
+        logger.warning("[COST BATCHING] add_to_cost_batch called but batching not active")
+        return
+
+    # Accumulate tokens
+    accumulator["tokens"] += token_count
+    accumulator["call_count"] += 1
+
+    # Store provider/model from first call
+    if accumulator["provider"] is None:
+        accumulator["provider"] = provider
+        accumulator["model"] = model_name
+
+    logger.debug(
+        f"[COST BATCHING] Added {token_count} tokens to batch "
+        f"(total: {accumulator['tokens']} tokens, {accumulator['call_count']} calls)"
+    )
+
+
+async def flush_cost_batch(cost_logger: Optional["CostLogger"] = None) -> None:
+    """
+    Flush accumulated costs as a single log entry and reset the accumulator.
+
+    Args:
+        cost_logger: CostLogger instance to log to. If None, costs are discarded.
+    """
+    accumulator = _cost_accumulator.get()
+    if accumulator is None:
+        logger.debug("[COST BATCHING] flush_cost_batch called but no accumulator active")
+        return
+
+    # Clear the accumulator first to prevent re-entrancy issues
+    _cost_accumulator.set(None)
+
+    tokens = accumulator["tokens"]
+    call_count = accumulator["call_count"]
+    provider = accumulator["provider"]
+    model = accumulator["model"]
+
+    if tokens == 0 or call_count == 0:
+        logger.debug("[COST BATCHING] No costs to flush")
+        return
+
+    if cost_logger is None:
+        logger.warning(f"[COST BATCHING] Discarding {tokens} tokens from {call_count} calls (no CostLogger provided)")
+        return
+
+    # Get context for attribution
+    user_sub = get_request_user_sub()
+    conversation_id = get_request_conversation_id()
+
+    if not user_sub:
+        logger.warning(f"[COST BATCHING] Discarding {tokens} tokens from {call_count} calls (no user_sub in context)")
+        return
+
+    # Log the accumulated total as a single entry
+    cost_logger.log_cost_async(
+        user_sub=user_sub,
+        billing_unit_breakdown={"input_tokens": tokens},
+        provider=provider,
+        model_name=model,
+        conversation_id=conversation_id,
+    )
+
+    logger.info(
+        f"[COST BATCHING] Flushed batch: {tokens} tokens from {call_count} calls "
+        f"(model={model}, conversation={conversation_id})"
+    )
 
 
 def get_request_credentials() -> tuple[Optional[str], Optional[str]]:
@@ -101,6 +254,7 @@ class CostLogger:
         batch_size: int = 10,
         flush_interval: float = 5.0,
         sub_agent_id: Optional[int] = None,
+        scheduled_job_id: Optional[int] = None,
     ):
         """
         Initialize the cost logger.
@@ -112,6 +266,7 @@ class CostLogger:
             batch_size: Number of records to batch before sending (default: 10)
             flush_interval: Time in seconds to wait before auto-flushing partial batches (default: 5.0)
             sub_agent_id: Optional sub-agent ID for cost attribution (can be updated dynamically)
+            scheduled_job_id: Optional scheduler ID for cost attribution (can be updated dynamically)
         """
         self.backend_url = backend_url.rstrip("/")
         self.access_token = access_token
@@ -119,7 +274,7 @@ class CostLogger:
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         self.sub_agent_id = sub_agent_id
-
+        self.scheduled_job_id = scheduled_job_id
         self._queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
         self._shutdown = False
@@ -239,6 +394,7 @@ class CostLogger:
         langsmith_trace_id: Optional[str] = None,
         invoked_at: Optional[datetime] = None,
         _sub_agent_id_from_tag: Optional[int] = None,
+        _scheduled_job_id_from_tag: Optional[int] = None,
     ):
         """
         Queue a cost record for async batch sending.
@@ -256,7 +412,8 @@ class CostLogger:
             invoked_at: Timestamp of invocation (defaults to now)
             _sub_agent_id_from_tag: INTERNAL ONLY - sub_agent_id extracted from LangGraph tags.
                 Do not set manually. Automatically instrumented by cost tracking callback.
-
+            _scheduled_job_id_from_tag: INTERNAL ONLY - scheduled_job_id extracted from LangGraph tags.
+                Do not set manually. Automatically instrumented by cost tracking callback.
         Note:
             sub_agent_id is automatically extracted from LangGraph tags by CostTrackingCallback.
             Falls back to instance attribute if not provided (for backward compatibility).
@@ -264,7 +421,9 @@ class CostLogger:
         # Use tag-extracted sub_agent_id if available, otherwise fall back to instance attribute
         # Tags are the source of truth for unified tracking across local and remote agents
         sub_agent_id = _sub_agent_id_from_tag if _sub_agent_id_from_tag is not None else self.sub_agent_id
-
+        _scheduled_job_id_from_tag = (
+            _scheduled_job_id_from_tag if _scheduled_job_id_from_tag is not None else self.scheduled_job_id
+        )
         record = {
             "user_sub": user_sub,
             "provider": provider,
@@ -272,6 +431,7 @@ class CostLogger:
             "billing_unit_breakdown": billing_unit_breakdown,
             "conversation_id": conversation_id,
             "sub_agent_id": sub_agent_id,  # From tag (preferred) or instance attribute (fallback)
+            "scheduled_job_id": _scheduled_job_id_from_tag,  # From tag (preferred) or instance attribute (fallback)
             "langsmith_run_id": langsmith_run_id,
             "langsmith_trace_id": langsmith_trace_id,
             "invoked_at": (invoked_at or datetime.now(timezone.utc)).isoformat(),

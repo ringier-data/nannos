@@ -1,0 +1,12 @@
+---
+agent_runner_client_id: 'orchestrator' #  'agent-runner'
+agent_runner_public_api_port: 8080
+agent_runner_task_cpu: 256
+agent_runner_task_memory: 512
+agent_runner_ecr_repository_name: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner'
+
+# Scheduler service client ID (playground-backend) — validates azp claim on incoming JWTs
+scheduler_service_client_id: 'playground-backend'
+
+# MCP timeout for watch condition evaluation
+mcp_timeout_seconds: 300

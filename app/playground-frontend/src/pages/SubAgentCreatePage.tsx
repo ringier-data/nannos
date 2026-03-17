@@ -34,7 +34,7 @@ export function SubAgentCreatePage() {
       body: {
         name: data.name,
         description: data.description,
-        model: data.model,
+        model: data.model as any, // Cast to ModelEnum - validated by form
         type: data.type,
         is_public: data.is_public,
         system_prompt: 'system_prompt' in config ? config.system_prompt : undefined,

@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.messages import SystemMessage
 
 from app.middleware.user_preferences_middleware import (
     UserPreferencesMiddleware,
@@ -152,33 +153,39 @@ class TestUserPreferencesMiddleware:
 
         mock_request = MagicMock()
         mock_request.runtime.context = user_context_de
-        mock_request.system_prompt = original_prompt
+        mock_request.system_message = SystemMessage(content=original_prompt)
 
         mock_handler = MagicMock(return_value="response")
 
         middleware.wrap_model_call(mock_request, mock_handler)
 
-        # Verify the system prompt was modified
-        assert original_prompt in mock_request.system_prompt
-        assert "German" in mock_request.system_prompt
-        assert "**User Preferences:**" in mock_request.system_prompt
+        # Verify override was called with a system_message containing preferences
+        mock_request.override.assert_called_once()
+        new_system_message = mock_request.override.call_args.kwargs["system_message"]
+        content_str = str(new_system_message.content)
+        assert original_prompt in content_str
+        assert "German" in content_str
+        assert "**User Preferences:**" in content_str
 
-        # Verify handler was called
-        mock_handler.assert_called_once_with(mock_request)
+        # Verify handler was called with the modified request
+        mock_handler.assert_called_once_with(mock_request.override.return_value)
 
     def test_wrap_model_call_creates_prompt_when_none(self, middleware, user_context_de):
         """Should create system prompt when none exists."""
         mock_request = MagicMock()
         mock_request.runtime.context = user_context_de
-        mock_request.system_prompt = None
+        mock_request.system_message = None
 
         mock_handler = MagicMock(return_value="response")
 
         middleware.wrap_model_call(mock_request, mock_handler)
 
-        # Verify system prompt was set
-        assert mock_request.system_prompt is not None
-        assert "German" in mock_request.system_prompt
+        # Verify override was called with a non-None system_message containing preferences
+        mock_request.override.assert_called_once()
+        new_system_message = mock_request.override.call_args.kwargs["system_message"]
+        assert new_system_message is not None
+        content_str = str(new_system_message.content)
+        assert "German" in content_str
 
     def test_wrap_model_call_passes_through_without_context(self, middleware):
         """Should pass through when no GraphRuntimeContext."""
@@ -201,18 +208,21 @@ class TestUserPreferencesMiddleware:
 
         mock_request = MagicMock()
         mock_request.runtime.context = user_context_de
-        mock_request.system_prompt = original_prompt
+        mock_request.system_message = SystemMessage(content=original_prompt)
 
         mock_handler = AsyncMock(return_value="response")
 
         await middleware.awrap_model_call(mock_request, mock_handler)
 
-        # Verify the system prompt was modified
-        assert original_prompt in mock_request.system_prompt
-        assert "German" in mock_request.system_prompt
+        # Verify override was called with a system_message containing preferences
+        mock_request.override.assert_called_once()
+        new_system_message = mock_request.override.call_args.kwargs["system_message"]
+        content_str = str(new_system_message.content)
+        assert original_prompt in content_str
+        assert "German" in content_str
 
-        # Verify handler was called
-        mock_handler.assert_called_once_with(mock_request)
+        # Verify handler was called with the modified request
+        mock_handler.assert_called_once_with(mock_request.override.return_value)
 
     @pytest.mark.asyncio
     async def test_awrap_model_call_passes_through_without_context(self, middleware):

@@ -50,18 +50,21 @@ from playground_backend.routers.admin_group_router import router as admin_group_
 from playground_backend.routers.admin_user_router import router as admin_user_router
 from playground_backend.routers.auth_router import router as auth_router
 from playground_backend.routers.conversation_router import router as conversation_router
+from playground_backend.routers.delivery_channel_router import router as delivery_channel_router
 from playground_backend.routers.file_router import router as file_router
 from playground_backend.routers.group_router import router as group_router
 from playground_backend.routers.mcp_router import router as mcp_router
 from playground_backend.routers.message_router import router as message_router
 from playground_backend.routers.notification_router import router as notification_router
 from playground_backend.routers.rate_card_router import router as rate_card_router
+from playground_backend.routers.scheduler_router import router as scheduler_router
 from playground_backend.routers.secrets_router import router as secrets_router
 from playground_backend.routers.sub_agent_router import router as sub_agent_router
 from playground_backend.routers.usage_router import router as usage_router
 from playground_backend.service_instances import cleanup_services, initialize_services
 from playground_backend.services.conversation_service import ConversationService
 from playground_backend.services.messages_service import MessagesService
+from playground_backend.services.socket_notification_manager import SocketNotificationManager
 from playground_backend.utils.connection_pool import connection_pool
 from playground_backend.utils.cookie_signer import verify_cookie
 from playground_backend.utils.fastapi_mcp_patch import apply_patch
@@ -143,6 +146,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await initialize_services(app)
     logger.info("Services initialized")
 
+    # Start scheduler engine
+    await app.state.scheduler_engine.start()
+
     # Start connection pool cleanup task
     connection_pool.start_cleanup_task()
     logger.info("Connection pool cleanup task started")
@@ -153,6 +159,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Shutdown - called automatically when Uvicorn receives SIGTERM/SIGINT
     logger.info("Application shutting down...")
+    if hasattr(app.state, "scheduler_engine"):
+        await app.state.scheduler_engine.stop()
+        logger.info("Scheduler engine stopped")
     await shutdown_handler()
     await cleanup_services(app)
     await close_db()
@@ -216,6 +225,9 @@ app.include_router(group_router)
 app.include_router(usage_router)
 app.include_router(rate_card_router)
 app.include_router(notification_router)
+# Scheduler router MUST be registered before FastApiMCP instantiation below
+app.include_router(scheduler_router)
+app.include_router(delivery_channel_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.
@@ -256,6 +268,11 @@ sio = socketio.AsyncServer(
 # This allows Socket.IO event handlers to access services, even though is an unconventional pattern
 # this should be safe in our setup.
 sio.app_instance = app  # type: ignore[attr-defined]
+
+# Initialize Socket notification manager for real-time scheduler notifications
+socket_notification_manager = SocketNotificationManager(sio)
+# Store in app.state for access by services
+app.state.socket_notification_manager = socket_notification_manager
 
 
 # ==============================================================================
@@ -518,6 +535,10 @@ async def handle_connect(sid: str, environ: dict[str, Any]) -> bool:
         user_id=user.id,
         http_session_id=session_id,
     )
+
+    # Register connection for scheduler notifications
+    socket_notification_manager.register_connection(user.id, sid)
+
     logger.debug(f"Socket.IO connection authenticated for {sid}: {user.email}")
     return True  # Accept the connection
 
@@ -526,6 +547,11 @@ async def handle_connect(sid: str, environ: dict[str, Any]) -> bool:
 async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     """Handle the 'disconnect' socket.io event with reconnection guidance."""
     logger.debug(f"Client disconnected: {sid} (reason: {reason})")
+
+    # Get socket session to  unregister from notification manager
+    socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
+    if socket_session:
+        socket_notification_manager.unregister_connection(socket_session.user_id, sid)
 
     # Clean up socket session from DynamoDB
     await sio.app_instance.state.socket_session_service.destroy_session(sid)  # type: ignore[attr-defined]

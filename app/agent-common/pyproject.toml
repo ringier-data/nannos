@@ -1,0 +1,84 @@
+[project]
+name = "agent-common"
+version = "0.7.0"
+description = "Shared library for sub-agent creation, model factory, middleware stack, and A2A protocol utilities"
+requires-python = ">=3.12"
+dependencies = [
+    # A2A protocol
+    "a2a-sdk[http-server]>=0.3.9",
+    # LangChain core
+    "langchain>=1.0.0",
+    "langchain-core>=0.3.0",
+    "langchain-aws>=1.1.0",
+    # LangGraph
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-aws>=1.0.1",
+    # DeepAgents
+    "deepagents>=0.4.5,<0.5.0",
+    # MCP adapters
+    "langchain-mcp-adapters>=0.1.11",
+    # HTTP client
+    "httpx>=0.28.1",
+    # Data models
+    "pydantic>=2.10.6",
+    # Shared SDKs
+    "ringier-a2a-sdk>=0.1.0",
+    # Tracing
+    "langsmith>=0.4.37",
+    # AWS SDK (for boto3 in model factory)
+    "boto3>=1.35.0",
+    "nltk>=3.9.3",
+]
+
+[project.optional-dependencies]
+openai = [
+    "langchain-openai>=0.1.0",
+]
+google = [
+    "langchain-google-genai>=2.0.10",
+    "google-auth>=2.36.0",
+]
+anthropic = [
+    "langchain-anthropic>=0.1.0",
+]
+foundry = [
+    "foundry-platform-sdk==1.63.0",
+    "aiobotocore>=2.26.0",
+]
+docstore = [
+    "aiobotocore>=2.26.0",
+    "langgraph-checkpoint-postgres>=2.0.11",
+    "psycopg>=3.2.0",
+    "psycopg-binary>=3.2.0",
+    "psycopg-pool>=3.2.0",
+    # Semantic chunking (used by IndexingStoreBackend)
+    "nltk>=3.9.0",
+]
+all = [
+    "agent-common[openai,google,anthropic,foundry,docstore]",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "langgraph-checkpoint-postgres>=2.0.11",
+    "psycopg>=3.2.0",
+    "psycopg-binary>=3.2.0",
+    "aiobotocore>=2.26.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+
+[tool.uv.sources]
+ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }

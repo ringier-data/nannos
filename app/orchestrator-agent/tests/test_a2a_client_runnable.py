@@ -22,11 +22,10 @@ from a2a.types import (
     TextPart,
 )
 from a2a.types import Role as A2ARole
+from agent_common.a2a.base import SubAgentInput
+from agent_common.a2a.client_runnable import A2AClientRunnable
+from agent_common.a2a.config import A2AClientConfig
 from langchain_core.messages import AIMessage, HumanMessage
-
-from app.a2a_utils.base import SubAgentInput
-from app.a2a_utils.client_runnable import A2AClientRunnable
-from app.a2a_utils.config import A2AClientConfig
 
 
 @pytest.fixture
@@ -733,7 +732,7 @@ class TestA2AClientRunnableTraceHeaders:
             "baggage": "key=value",
         }
 
-        with patch("app.a2a_utils.client_runnable.get_current_run_tree", return_value=mock_run_tree):
+        with patch("agent_common.a2a.client_runnable.get_current_run_tree", return_value=mock_run_tree):
             await a2a_client_runnable._inject_trace_headers(mock_request)
 
         assert mock_request.headers["langsmith-trace"] == "trace-123"
@@ -745,7 +744,7 @@ class TestA2AClientRunnableTraceHeaders:
         mock_request = Mock(spec=httpx.Request)
         mock_request.headers = {}
 
-        with patch("app.a2a_utils.client_runnable.get_current_run_tree", return_value=None):
+        with patch("agent_common.a2a.client_runnable.get_current_run_tree", return_value=None):
             await a2a_client_runnable._inject_trace_headers(mock_request)
 
         # Headers should remain empty
@@ -754,7 +753,7 @@ class TestA2AClientRunnableTraceHeaders:
     @pytest.mark.asyncio
     async def test_get_client_registers_trace_hook(self, a2a_client_runnable):
         """Test that HTTP client is created with trace injection hook."""
-        with patch("app.a2a_utils.client_runnable.ClientFactory") as mock_factory:
+        with patch("agent_common.a2a.client_runnable.ClientFactory") as mock_factory:
             mock_factory_instance = Mock()
             mock_factory.return_value = mock_factory_instance
             mock_factory_instance.create.return_value = Mock()

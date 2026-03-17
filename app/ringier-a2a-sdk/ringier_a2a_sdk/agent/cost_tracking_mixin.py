@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from ..cost_tracking import CostLogger
+from ..utils import create_runnable_config as _create_runnable_config
 
 # Import ContextVar for sub_agent_id (used by remote agents)
 try:
@@ -41,13 +42,13 @@ class CostTrackingMixin:
                 await self.report_llm_usage(
                     user_sub=user_config.user_sub,
                     provider="openai",
-                    model_name="gpt-4",
+                    model_name="gpt-4o",
                     billing_unit_breakdown={"input_tokens": 100, "output_tokens": 50},
                     conversation_id=task.context_id
                 )
 
                 # Or use LangChain auto-instrumentation
-                model = ChatOpenAI(model="gpt-4", callbacks=self.get_langchain_callbacks())
+                model = ChatOpenAI(model="gpt-4o", callbacks=self.get_langchain_callbacks())
         ```
     """
 
@@ -135,6 +136,7 @@ class CostTrackingMixin:
         langsmith_run_id: Optional[str] = None,
         langsmith_trace_id: Optional[str] = None,
         invoked_at: Optional[datetime] = None,
+        scheduled_job_id: Optional[int] = None,
     ) -> None:
         """
         Manually report usage (framework-agnostic).
@@ -193,6 +195,7 @@ class CostTrackingMixin:
             langsmith_trace_id=langsmith_trace_id,
             invoked_at=invoked_at,
             _sub_agent_id_from_tag=sub_agent_id_from_contextvar,  # Pass through as if from tag
+            _scheduled_job_id_from_tag=scheduled_job_id,
         )
 
         logger.debug(
@@ -210,7 +213,7 @@ class CostTrackingMixin:
             ```python
             # Add to LangChain model for automatic cost tracking
             model = ChatOpenAI(
-                model="gpt-4",
+                model="gpt-4o",
                 callbacks=self.get_langchain_callbacks()
             )
             ```
@@ -226,25 +229,33 @@ class CostTrackingMixin:
         thread_id: Optional[str] = None,
         checkpoint_ns: Optional[str] = None,
         checkpointer=None,
+        scheduled_job_id: Optional[int] = None,
+        sub_agent_id: Optional[int] = None,
+        user_id: Optional[str] = None,
+        assistant_id: Optional[str] = None,
         **extra_configurable,
     ) -> Dict[str, Any]:
         """
-        Create a RunnableConfig with cost tracking tags and callbacks.
+        Create a RunnableConfig with cost tracking tags, callbacks, and metadata.
 
-        This helper method constructs a properly configured RunnableConfig object
-        with consistent cost tracking tags and callbacks, eliminating code duplication
-        across agents.
+        This is a convenience wrapper around the SDK's create_runnable_config utility
+        that automatically provides the cost_logger for callback generation.
 
         Args:
             user_sub: User sub for cost attribution
-            conversation_id: Conversation ID for cost attribution
+            conversation_id: Conversation ID for cost attribution and tool result scoping
             thread_id: Thread ID for checkpointing (defaults to conversation_id)
             checkpoint_ns: Checkpoint namespace for isolation (e.g., "agent-creator")
             checkpointer: Checkpointer instance (for __pregel_checkpointer)
+            scheduled_job_id: Optional scheduled job ID — adds "scheduled_job:{id}" tag for cost attribution
+            sub_agent_id: Optional sub-agent ID for cost attribution (explicit override;
+                if not provided, falls back to ContextVar from SubAgentIdMiddleware)
+            user_id: Optional user database ID for IndexingStoreBackend (defaults to user_sub)
+            assistant_id: Optional assistant ID for channel-scoped files (defaults to user_sub)
             **extra_configurable: Additional configurable parameters
 
         Returns:
-            RunnableConfig (or dict) with tags and callbacks configured for cost tracking
+            RunnableConfig (or dict) with tags, callbacks, and metadata configured
 
         Usage:
             ```python
@@ -254,42 +265,58 @@ class CostTrackingMixin:
                 thread_id=task.context_id,
                 checkpoint_ns="agent-creator",
                 checkpointer=self._checkpointer,
+                user_id=user.id,  # For user-scoped files
             )
             await graph.astream(messages, config)
             ```
 
         Note:
-            - Automatically adds user_sub:{user_sub} and conversation:{conversation_id} tags
-            - Automatically adds sub_agent:{sub_agent_id} tag if available from ContextVar
-            - Includes callbacks from get_langchain_callbacks() for automatic cost tracking
+            - Delegates to ringier_a2a_sdk.utils.create_runnable_config
+            - Automatically provides cost_logger for callback generation
+            - See utility function for full documentation
         """
-        # Construct cost tracking tags
+        return _create_runnable_config(
+            user_sub=user_sub,
+            conversation_id=conversation_id,
+            user_id=user_id or user_sub,
+            assistant_id=assistant_id or user_sub,
+            thread_id=thread_id,
+            checkpoint_ns=checkpoint_ns,
+            checkpointer=checkpointer,
+            scheduled_job_id=scheduled_job_id,
+            sub_agent_id=sub_agent_id,
+            cost_logger=self._cost_logger if self._cost_tracking_enabled else None,
+            **extra_configurable,
+        )
 
-        tags = [
-            f"user_sub:{user_sub}",
-            f"conversation:{conversation_id}",
-        ]
+    def add_cost_tracking_tags(
+        self,
+        config: Dict[str, Any],
+        sub_agent_identifier: str,
+    ) -> Dict[str, Any]:
+        """Extend config with cost attribution tags.
 
-        # Add sub_agent tag if available from ContextVar (set by SubAgentIdMiddleware)
-        if _has_sub_agent_id_contextvar and current_sub_agent_id:
-            sub_agent_id = current_sub_agent_id.get()
-            if sub_agent_id:
-                tags.append(f"sub_agent:{sub_agent_id}")
+        Observability layer: Adds sub-agent identifier to tags for proper cost attribution.
+        This ensures costs are tracked under the correct sub-agent, not the orchestrator.
 
-        # Build configurable dict
-        configurable = extra_configurable.copy()
-        if thread_id is not None:
-            configurable["thread_id"] = thread_id
-        if checkpoint_ns is not None:
-            configurable["checkpoint_ns"] = checkpoint_ns
-        if checkpointer is not None:
-            configurable["__pregel_checkpointer"] = checkpointer
+        Args:
+            config: Config dict (typically from extend_config_for_checkpoint_isolation)
+            sub_agent_identifier: Sub-agent identifier for cost tracking
+                Examples: "task-scheduler", "general-purpose", "{sub_agent_id}", "dynamic-{name}"
 
-        return {
-            "configurable": configurable,
-            "tags": tags,
-            "callbacks": self.get_langchain_callbacks(),
-        }
+        Returns:
+            New config dict with extended tags for cost attribution
+
+        Example:
+            # After checkpoint isolation
+            config = self.extend_config_for_checkpoint_isolation(...)
+            # Add cost tracking
+            config = self.add_cost_tracking_tags(
+                config=config,
+                sub_agent_identifier="task-scheduler"
+            )
+        """
+        return {**config, "tags": config.get("tags", []) + [f"sub_agent:{sub_agent_identifier}"]}
 
     async def flush_cost_tracking(self) -> None:
         """

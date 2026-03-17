@@ -120,6 +120,8 @@ class UsageLog(BaseModel):
     sub_agent_id: int | None = None
     sub_agent_name: str | None = None
     sub_agent_config_version_id: int | None = None
+    scheduled_job_id: int | None = None
+    scheduled_job_name: str | None = None
     provider: str | None = None
     model_name: str | None = None
     total_cost_usd: Decimal
@@ -138,6 +140,7 @@ class UsageLogCreate(BaseModel):
     conversation_id: str | None = None
     sub_agent_id: int | None = None
     sub_agent_config_version_id: int | None = None
+    scheduled_job_id: int | None = None
     provider: str | None = None
     model_name: str | None = None
     billing_unit_breakdown: dict[str, int] = Field(

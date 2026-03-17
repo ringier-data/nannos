@@ -159,7 +159,7 @@ class TestSubAgentRepositoryAudit:
             change_summary="Version 2",
             status="pending_approval",
             description="Test",
-            model="gpt-4",
+            model="gpt-4o",
             system_prompt="Test prompt",
             mcp_tools=[],
         )
@@ -224,7 +224,7 @@ class TestSubAgentRepositoryAudit:
             change_summary="Version 2",
             status="pending_approval",
             description="Test",
-            model="gpt-4",
+            model="gpt-4o",
             system_prompt="Test prompt",
             mcp_tools=[],
         )
@@ -451,7 +451,7 @@ class TestSubAgentRepositoryAudit:
             change_summary="Initial version",
             status="draft",
             description="Test config",
-            model="gpt-4",
+            model="gpt-4o",
             system_prompt="You are a helpful assistant",
             mcp_tools=["tool1", "tool2"],
         )
@@ -484,7 +484,7 @@ class TestSubAgentRepositoryAudit:
         assert after["version_hash"] == "abc123"
         assert after["change_summary"] == "Initial version"
         assert after["description"] == "Test config"
-        assert after["model"] == "gpt-4"
+        assert after["model"] == "gpt-4o"
         assert after["system_prompt"] == "You are a helpful assistant"
         assert after["mcp_tools"] == ["tool1", "tool2"]
         assert after["status"] == "draft"

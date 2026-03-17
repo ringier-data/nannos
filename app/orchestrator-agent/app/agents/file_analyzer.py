@@ -32,6 +32,9 @@ import re
 from typing import Any, Dict, List, Optional, cast
 
 import httpx
+from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+from agent_common.core.model_factory import create_model, is_valid_model
+from agent_common.models.base import ModelType
 from deepagents import CompiledSubAgent
 from langchain_core.messages import (
     ContentBlock,
@@ -43,11 +46,6 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 from ringier_a2a_sdk.cost_tracking import CostLogger
-
-from app.core.model_factory import create_model, is_valid_model
-from app.models.base import ModelType
-
-from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +234,7 @@ def _create_file_analyzer_model(callbacks: Optional[List] = None):
             model_name = DEFAULT_FILE_ANALYZER_MODEL
 
     logger.info(f"Creating file analyzer model: {model_name} with callbacks={callbacks}")
-    return create_model(model_name, config=None, callbacks=callbacks)  # type: ignore
+    return create_model(model_name, callbacks=callbacks)  # type: ignore
 
 
 class FileAnalyzerRunnable(LocalA2ARunnable):
@@ -290,6 +288,31 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
     def description(self) -> str:
         """Return the agent description."""
         return FILE_ANALYZER_DESCRIPTION
+
+    def get_checkpoint_ns(self, input_data: SubAgentInput) -> str:
+        """Return checkpoint namespace for this agent.
+
+        Args:
+            input_data: Validated input data
+
+        Returns:
+            Checkpoint namespace (e.g., "file-analyzer")
+        """
+        return "file-analyzer"
+
+    def get_sub_agent_identifier(self, input_data: SubAgentInput) -> str:
+        """Return identifier for cost tracking.
+
+        Args:
+            input_data: Validated input data
+
+        Returns:
+            Sub-agent identifier (\"file-analyzer\" since it's a built-in system capability)
+        """
+        # File-analyzer costs are attributed to the orchestrator (built-in system capability)
+        if self.sub_agent_id is not None:
+            return str(self.sub_agent_id)
+        return "file-analyzer"
 
     @traceable(name="fetch_files")
     async def _fetch_files(
@@ -572,6 +595,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
     async def _process(
         self,
         input_data: SubAgentInput,
+        config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Analyze file(s) from URLs or typed content blocks.
 
@@ -581,6 +605,10 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
            pre-signed URLs without any LLM round-trip.
         2. **Regex fallback**: URLs extracted from the text content of the message.
            Used when the user types a URL directly (not from A2A FileParts).
+
+        Args:
+            input_data: Validated input with messages and tracking IDs
+            config: Optional parent config from orchestrator (not currently used by file-analyzer)
         """
         context_id, task_id = self._extract_tracking_ids(input_data)
         conversation_id = input_data.orchestrator_conversation_id or context_id

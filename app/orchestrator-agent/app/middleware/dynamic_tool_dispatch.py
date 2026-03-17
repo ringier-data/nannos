@@ -33,6 +33,7 @@ import textwrap
 from collections.abc import Awaitable, Callable
 from typing import Any, Optional, cast
 
+from agent_common.core.model_factory import create_model
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -49,8 +50,8 @@ from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from langsmith import traceable
 from ringier_a2a_sdk.cost_tracking.callback import CostTrackingCallback
+from ringier_a2a_sdk.utils import create_runnable_config
 
-from ..core.model_factory import create_model
 from ..models.config import GraphRuntimeContext
 from ..utils import CleanupLevel, validate_and_clean_tool_dict
 
@@ -194,6 +195,79 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         }
         return enhanced_tool
 
+    def _enhance_scheduler_create_job_schema(
+        self, scheduler_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
+    ) -> dict[str, Any]:
+        """Enhance scheduler_create_job tool's parameters with available options.
+
+        This prevents the agent from hallucinating values by providing:
+        - check_tool: guidance on discovering valid MCP tools hierarchically
+        - sub_agent_id: description listing available sub-agents
+        - delivery_channel_id: reminder to check available channels
+
+        Args:
+            scheduler_tool_dict: The scheduler_create_job tool in OpenAI dict format
+            user_context: User context with tool_registry and subagent_registry
+
+        Returns:
+            Enhanced tool dict with improved parameter schemas
+        """
+        function_dict = scheduler_tool_dict.get("function", {})
+        parameters = function_dict.get("parameters", {})
+        properties = parameters.get("properties", {})
+
+        enhanced_properties = dict(properties)  # Copy to avoid modifying original
+
+        # 2. Enhance sub_agent_id description with available sub-agents
+        if user_context.subagent_registry:
+            # Filter to show only sub-agents that might be automated (exclude system agents)
+            automated_agents = {
+                name: agent
+                for name, agent in user_context.subagent_registry.items()
+                if name not in ["file-analyzer", "task-scheduler"]  # Exclude system agents
+            }
+
+            if automated_agents:
+                sub_agent_id_prop = properties.get("sub_agent_id", {})
+                agent_list = "\n".join(
+                    [f"  - {name}: {agent.get('description', 'N/A')}" for name, agent in automated_agents.items()]
+                )
+                enhanced_properties["sub_agent_id"] = {
+                    **sub_agent_id_prop,
+                    "description": (
+                        sub_agent_id_prop.get("description", "ID of an existing sub-agent to execute")
+                        + f"\n\nAvailable sub-agents (use playground_list_sub_agents to get IDs):\n{agent_list}"
+                    ),
+                }
+
+        # 3. Enhance delivery_channel_id description with note about available channels
+        delivery_channel_id_prop = properties.get("delivery_channel_id", {})
+        if delivery_channel_id_prop:
+            enhanced_properties["delivery_channel_id"] = {
+                **delivery_channel_id_prop,
+                "description": (
+                    delivery_channel_id_prop.get("description", "ID of a registered delivery channel")
+                    + "\n\nNote: User must have configured delivery channels in Settings. "
+                    "If not available, omit this field - users will receive in-app notifications."
+                ),
+            }
+
+        # Build enhanced tool
+        enhanced_parameters = {
+            **parameters,
+            "properties": enhanced_properties,
+        }
+
+        enhanced_function = {
+            **function_dict,
+            "parameters": enhanced_parameters,
+        }
+
+        return {
+            **scheduler_tool_dict,
+            "function": enhanced_function,
+        }
+
     def _get_tools_as_dicts(
         self,
         user_context: GraphRuntimeContext,
@@ -283,10 +357,16 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 # Convert to dict for model binding (creates a copy, doesn't modify original)
                 tool_dict = convert_to_openai_tool(tool)
                 tool_dict = validate_and_clean_tool_dict(tool_dict, level)
+                # Enhance scheduler_create_job tool with MCP tools enum
+                if name == "scheduler_create_job":
+                    tool_dict = self._enhance_scheduler_create_job_schema(tool_dict, user_context)
                 tool_dicts.append(tool_dict)
             elif isinstance(tool, dict):
                 # Already in dict format, but still validate and clean
                 tool_dict = validate_and_clean_tool_dict(tool, level)
+                # Enhance scheduler_create_job tool with MCP tools enum
+                if name == "scheduler_create_job":
+                    tool_dict = self._enhance_scheduler_create_job_schema(tool_dict, user_context)
                 tool_dicts.append(tool_dict)
             seen_names.add(name)
 
@@ -475,7 +555,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 callbacks = [CostTrackingCallback(self.cost_logger)]
                 model = create_model(
                     "gemini-3-flash-preview",
-                    self.agent_settings,
+                    self.agent_settings.get_bedrock_region(),
                     thinking_level=None,
                     callbacks=callbacks,
                 )
@@ -856,15 +936,32 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         subagent_state["orchestrator_conversation_id"] = orchestrator_conversation_id
 
+        # Prepare complete config for sub-agent with correct user_id/assistant_id for namespace consistency
+        # Extract values from user context and parent config
+        user_id = user_context.user_id
+        user_sub = user_context.user_sub
+        assistant_id = config.get("metadata", {}).get("assistant_id") if isinstance(config, dict) else None
+
+        # Create complete RunnableConfig for sub-agent using SDK utility
+        # This ensures FilesystemMiddleware uses consistent (user_id, "filesystem") namespace
+        subagent_config = create_runnable_config(
+            user_sub=user_sub,
+            conversation_id=orchestrator_conversation_id or "unknown",  # Fallback to "unknown" if not available
+            user_id=user_id,
+            assistant_id=assistant_id or user_id,  # Fallback to user_id if not in parent config
+            thread_id=f"{orchestrator_conversation_id or 'unknown'}::{subagent_type}",  # Unique thread_id for checkpoint isolation
+            checkpoint_ns=subagent_type,  # Namespace for checkpointer
+        )
+
         # Use a traced function for proper LangSmith visibility
         @traceable(name=f"task:{subagent_type}", run_type="tool")
-        async def ainvoke_a2a_agent(agent_state: dict) -> dict:
+        async def ainvoke_a2a_agent(agent_state: dict, agent_config: dict) -> dict:
             """Invoke A2A agent asynchronously with tracing for LangSmith visibility."""
-            return await runnable.ainvoke(agent_state)
+            return await runnable.ainvoke(agent_state, agent_config)
 
         try:
-            # Invoke the subagent runnable asynchronously with tracing
-            result = await ainvoke_a2a_agent(subagent_state)
+            # Invoke the subagent runnable asynchronously with tracing and prepared config
+            result = await ainvoke_a2a_agent(subagent_state, subagent_config)
 
             # Extract content and A2A metadata, then build Command
             content, a2a_metadata = self._extract_subagent_response(result, subagent_type)
@@ -951,7 +1048,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             )
             return handler(request)
 
-        # Tool is NOT in ToolNode - look up from user's dynamic registry
+        # Tool is NOT in ToolNode — resolve it from the user's dynamic registry and
+        # inject it into the request via override(tool=...) so the full inner middleware
+        # chain executes.  This ensures FilesystemMiddleware eviction, retry,
+        # InjectedToolArg injection, and ToolNode error handling all fire for dynamic
+        # (MCP) tools exactly as they do for statically registered tools.
         tool = self._lookup_tool(tool_name, user_context)
 
         if tool is None:
@@ -971,33 +1072,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_sub}"
         )
 
-        # Invoke the dynamic tool directly
-        try:
-            # Prepare tool call args in the format tools expect
-            call_args = {**tool_call, "type": "tool_call"}
-            result = tool.invoke(call_args, request.runtime.config)
-
-            # Handle different return types
-            if isinstance(result, Command):
-                return result
-            if isinstance(result, ToolMessage):
-                return result
-
-            # Wrap raw result in ToolMessage
-            return ToolMessage(
-                content=str(result),
-                name=tool_name,
-                tool_call_id=tool_call_id,
-            )
-
-        except Exception as e:
-            logger.exception(f"DynamicToolDispatchMiddleware: Tool '{tool_name}' failed: {e}")
-            return ToolMessage(
-                content=f"Error executing tool '{tool_name}': {e}",
-                name=tool_name,
-                tool_call_id=tool_call_id,
-                status="error",
-            )
+        return handler(request.override(tool=tool))
 
     async def awrap_tool_call(
         self,
@@ -1058,7 +1133,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             )
             return await handler(request)
 
-        # Tool is NOT in ToolNode - look up from user's dynamic registry
+        # Tool is NOT in ToolNode — resolve it from the user's dynamic registry and
+        # inject it into the request via override(tool=...) so the full inner middleware
+        # chain executes.  This ensures FilesystemMiddleware eviction, retry,
+        # InjectedToolArg injection, and ToolNode error handling all fire for dynamic
+        # (MCP) tools exactly as they do for statically registered tools.
         tool = self._lookup_tool(tool_name, user_context)
 
         if tool is None:
@@ -1078,30 +1157,4 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             f"Dispatching dynamic tool '{tool_name}' for user {user_context.user_sub}"
         )
 
-        # Invoke the dynamic tool asynchronously
-        try:
-            # Prepare tool call args in the format tools expect
-            call_args = {**tool_call, "type": "tool_call"}
-            result = await tool.ainvoke(call_args, request.runtime.config)
-
-            # Handle different return types
-            if isinstance(result, Command):
-                return result
-            if isinstance(result, ToolMessage):
-                return result
-
-            # Wrap raw result in ToolMessage
-            return ToolMessage(
-                content=str(result),
-                name=tool_name,
-                tool_call_id=tool_call_id,
-            )
-
-        except Exception as e:
-            logger.exception(f"DynamicToolDispatchMiddleware: Tool '{tool_name}' failed: {e}")
-            return ToolMessage(
-                content=f"Error executing tool '{tool_name}': {e}",
-                name=tool_name,
-                tool_call_id=tool_call_id,
-                status="error",
-            )
+        return await handler(request.override(tool=tool))

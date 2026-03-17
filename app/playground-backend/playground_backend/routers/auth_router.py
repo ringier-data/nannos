@@ -53,7 +53,12 @@ def get_user_group_service(request: Request) -> UserGroupService:
 def get_auth_controller(request: Request) -> AuthController:
     session_service = get_session_service(request)
     user_service = get_user_service(request)
-    auth_controller = AuthController(session_service=session_service, user_service=user_service)
+    scheduler_token_service = getattr(request.app.state, "scheduler_token_service", None)
+    auth_controller = AuthController(
+        session_service=session_service,
+        user_service=user_service,
+        scheduler_token_service=scheduler_token_service,
+    )
     return auth_controller
 
 
@@ -124,7 +129,7 @@ async def logout_callback(request: Request) -> RedirectResponse:
 async def get_current_user(
     request: Request,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> dict:
     """Get the current authenticated user's information.
 

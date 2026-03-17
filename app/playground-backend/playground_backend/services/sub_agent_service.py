@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..authorization import SYSTEM_ROLE_CAPABILITIES, check_action_allowed
+from ..config import config
 from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import (
     ActivationSource,
@@ -39,6 +40,40 @@ MODELS_SUPPORTING_THINKING = {
     "gemini-3-pro-preview",
     "gemini-3-flash-preview",
 }
+
+
+def _validate_automated_constraints(
+    system_prompt: str | None, mcp_tools: list[str] | None, is_public: bool | None
+) -> None:
+    """Validate that an automated sub-agent meets the required constraints.
+
+    Raises ValueError if any constraint is violated.
+    """
+    max_prompt = config.auto_approve.max_system_prompt_length
+    max_tools = config.auto_approve.max_mcp_tools_count
+    system_prompt_len = len(system_prompt or "")
+    mcp_tools_count = len(mcp_tools or [])
+    if system_prompt_len > max_prompt:
+        raise ValueError(
+            f"Automated sub-agent system_prompt must be ≤ {max_prompt} characters (got {system_prompt_len})."
+        )
+    if mcp_tools_count > max_tools:
+        raise ValueError(f"Automated sub-agent may reference at most {max_tools} MCP tools (got {mcp_tools_count}).")
+    if is_public:
+        raise ValueError("Automated sub-agents must be private (is_public=False).")
+
+
+def _meets_auto_approve_constraints(
+    sub_agent_type: SubAgentType, system_prompt: str | None, mcp_tools: list[str] | None, is_public: bool | None
+) -> bool:
+    """Check if a sub-agent meets the constraints for auto-approval."""
+    if sub_agent_type not in {SubAgentType.AUTOMATED, SubAgentType.LOCAL}:
+        return False
+    return (
+        len(system_prompt or "") <= config.auto_approve.max_system_prompt_length
+        and len(mcp_tools or []) <= config.auto_approve.max_mcp_tools_count
+        and not (is_public if is_public is not None else False)
+    )
 
 
 def _normalize_thinking_config(
@@ -513,6 +548,10 @@ class SubAgentService:
         """Create a new sub-agent with initial version."""
         now = datetime.now(timezone.utc)
 
+        # For AUTOMATED agents, validate constraints and enforce private visibility
+        if data.type == SubAgentType.AUTOMATED:
+            _validate_automated_constraints(data.system_prompt, data.mcp_tools, data.is_public)
+
         # For Foundry agents, validate that all required fields are provided
         if data.type == SubAgentType.FOUNDRY:
             missing_fields = []
@@ -582,6 +621,26 @@ class SubAgentService:
             thinking_level=normalized_thinking_level,
         )
         await db.commit()
+
+        # Auto-approve logic:
+        # - AUTOMATED agents: always auto-approved (constraints already validated above)
+        # - All other types: auto-approve if constraints happen to be met
+        #   (system_prompt <= max chars, <= max MCP tools, private)
+        should_auto_approve = data.type == SubAgentType.AUTOMATED or _meets_auto_approve_constraints(
+            data.type,
+            data.system_prompt,
+            data.mcp_tools,
+            data.is_public,
+        )
+        if should_auto_approve:
+            approval_ctx = ApprovalContext(
+                sub_agent_id=sub_agent_id,
+                version=1,
+                action="approve",
+                release_number=1,
+            )
+            await self.repo.approve_version(db, actor, approval_ctx)
+            await db.commit()
 
         return await self.get_sub_agent_by_id(db, sub_agent_id)  # type: ignore
 
@@ -677,9 +736,9 @@ class SubAgentService:
             # Get current version values to use as defaults
             current_config = existing.config_version
 
-            # For local agents, only use system_prompt. For remote agents, only use agent_url. For Foundry agents, use foundry_* fields.
+            # For local/automated agents, only use system_prompt. For remote agents, only use agent_url. For Foundry agents, use foundry_* fields.
             # This ensures we don't violate the CHECK constraint.
-            if existing.type == SubAgentType.LOCAL:
+            if existing.type in (SubAgentType.LOCAL, SubAgentType.AUTOMATED):
                 version_system_prompt = (
                     data.system_prompt
                     if data.system_prompt is not None
@@ -810,6 +869,11 @@ class SubAgentService:
                         "All Foundry configuration fields must be provided."
                     )
 
+            # For AUTOMATED agents, validate constraints
+            if existing.type == SubAgentType.AUTOMATED:
+                is_public = data.is_public if data.is_public is not None else existing.is_public
+                _validate_automated_constraints(version_system_prompt, version_mcp_tools, is_public)
+
             version_description = (
                 data.description
                 if data.description is not None
@@ -854,6 +918,32 @@ class SubAgentService:
                 sub_agent_id=sub_agent_id,
                 version=new_version,
             )
+
+            # Auto-approve AUTOMATED agents or LOCAL agents that meet the constraints (auto-approve config)
+            if existing.type == SubAgentType.AUTOMATED or _meets_auto_approve_constraints(
+                existing.type,
+                version_system_prompt,
+                version_mcp_tools,
+                data.is_public if data.is_public is not None else existing.is_public,
+            ):
+                # Get the release number for this version
+                result = await db.execute(
+                    text("""
+                        SELECT COALESCE(MAX(release_number), 0) + 1
+                        FROM sub_agent_config_versions
+                        WHERE sub_agent_id = :sub_agent_id AND status = 'approved'
+                    """),
+                    {"sub_agent_id": sub_agent_id},
+                )
+                next_release_number = result.scalar_one()
+
+                approval_ctx = ApprovalContext(
+                    sub_agent_id=sub_agent_id,
+                    version=new_version,
+                    action="approve",
+                    release_number=next_release_number,
+                )
+                await self.repo.approve_version(db, actor, approval_ctx)
 
         await db.commit()
         return await self.get_sub_agent_by_id(db, sub_agent_id)
@@ -983,6 +1073,10 @@ class SubAgentService:
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
+
+        # Automated sub-agents are auto-approved on creation; manual submission is not allowed
+        if existing.type == SubAgentType.AUTOMATED:
+            raise ValueError("Automated sub-agents cannot be submitted for approval manually.")
 
         # Check if user has write permission (owner or group write access)
         has_write_permission = await self.check_user_permission(db, sub_agent_id, actor.id, "write", sub_agent=existing)

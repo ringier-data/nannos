@@ -18,6 +18,8 @@ class AuditEntityType(str, Enum):
     SESSION = "session"  # For session-related events like admin mode activation
     SECRET = "secret"  # For secrets management operations
     RATE_CARD = "rate_card"  # For LLM pricing rate cards
+    SCHEDULED_JOB = "scheduled_job"  # For scheduler job CRUD operations
+    DELIVERY_CHANNEL = "delivery_channel"  # For delivery channel registration/management
 
 
 class AuditAction(str, Enum):

@@ -21,15 +21,14 @@ avoiding the need for special dispatch code in DynamicToolDispatchMiddleware.
 import logging
 from typing import Any, Callable, Dict, Optional
 
+from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+from agent_common.a2a.structured_response import StructuredResponseMixin
+from agent_common.models.base import ModelType, ThinkingLevel
 from deepagents import CompiledSubAgent
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphInterrupt
-from ringier_a2a_sdk.agent.cost_tracking_mixin import CostTrackingMixin
 from ringier_a2a_sdk.cost_tracking import CostLogger
 
-from ..a2a_utils.base import LocalA2ARunnable, SubAgentInput
-from ..a2a_utils.structured_response import StructuredResponseMixin
-from ..models.base import ModelType, ThinkingLevel
 from ..models.config import GraphRuntimeContext
 
 logger = logging.getLogger(__name__)
@@ -42,13 +41,13 @@ GP_DESCRIPTION = (
 )
 
 
-class GPAgentRunnable(CostTrackingMixin, StructuredResponseMixin, LocalA2ARunnable):
+class GPAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
     """Local A2A runnable for the general-purpose agent.
 
     Wraps a custom GP graph (created by GraphFactory._create_gp_graph) and handles:
-    - Checkpoint isolation via unique thread_id
+    - Automatic checkpoint isolation via LocalA2ARunnable
+    - Automatic cost tracking tag injection via LocalA2ARunnable
     - Context injection via graph's context_schema=GraphRuntimeContext
-    - Cost tracking via CostTrackingCallback
     - Structured output via SubAgentResponseSchema (from StructuredResponseMixin)
 
     Tool selection (server-level and tool-level) is handled entirely by
@@ -95,7 +94,15 @@ class GPAgentRunnable(CostTrackingMixin, StructuredResponseMixin, LocalA2ARunnab
     def description(self) -> str:
         return GP_DESCRIPTION
 
-    async def _process(self, input_data: SubAgentInput) -> Dict[str, Any]:
+    def get_checkpoint_ns(self, input_data: SubAgentInput) -> str:
+        """Return checkpoint namespace for GP agent."""
+        return "general-purpose"
+
+    def get_sub_agent_identifier(self, input_data: SubAgentInput) -> str:
+        """Return identifier for cost tracking."""
+        return "general-purpose"
+
+    async def _process(self, input_data: SubAgentInput, config: Dict[str, Any]) -> Dict[str, Any]:
         """Process a general-purpose task.
 
         Flow:
@@ -107,6 +114,7 @@ class GPAgentRunnable(CostTrackingMixin, StructuredResponseMixin, LocalA2ARunnab
 
         Args:
             input_data: Validated input with messages and tracking IDs
+            config: Extended config from ainvoke (checkpoint isolation + cost tracking already applied)
 
         Returns:
             Dict with 'messages' and A2A metadata
@@ -123,21 +131,19 @@ class GPAgentRunnable(CostTrackingMixin, StructuredResponseMixin, LocalA2ARunnab
             # Get GP graph matching current model type
             gp_graph = self._gp_graph_provider(self._model_type, self._thinking_level)
 
-            # Build config for GP graph with checkpoint isolation and cost tracking
-            # Full config with cost tracking tags, callbacks, and checkpoint isolation
-            config = self.create_runnable_config(
-                user_sub=self._user_sub,
-                conversation_id=context_id,
-                thread_id=f"{context_id}::general-purpose",
-                checkpoint_ns="general-purpose",
+            # Config is already extended by ainvoke with checkpoint isolation and cost tracking
+            logger.info(
+                f"[COST TRACKING] GP agent invoking with tags: {config.get('tags', [])} (inherited from parent config)"
             )
-            logger.info(f"[COST TRACKING] GP agent invoking with tags: {config.get('tags', [])}")
 
-            # Invoke GP graph with context for runtime tool injection
+            # Invoke GP graph with BOTH config and context - they serve different purposes:
+            # - config: Controls HOW the graph runs (checkpointing, cost tracking, metadata)
+            # - context: Controls WHAT the graph accesses (tools, user preferences, file attachments)
+            # Both are required and complementary, not redundant.
             result = await gp_graph.ainvoke(
                 {"messages": [HumanMessage(content=content)]},
-                config=config,
-                context=self._user_context,
+                config=config,  # Infrastructure: checkpoint isolation, cost tracking, metadata
+                context=self._user_context,  # Runtime data: tools, user info, preferences
             )
 
             # Translate structured response to A2A protocol format

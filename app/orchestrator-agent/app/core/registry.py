@@ -6,10 +6,9 @@ from datetime import datetime
 from typing import Any
 
 import httpx
+from agent_common.a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
+from agent_common.models.base import ThinkingLevel
 from pydantic import BaseModel, Field
-
-from ..a2a_utils.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig, LocalSubAgentConfig
-from ..core.model_factory import ThinkingLevel
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +329,11 @@ class RegistryService:
         for sa in sub_agents:
             logger.debug(f"Processing sub-agent '{sa.name}' of type '{sa.type}' for user sub {user_sub}")
             if not sa.config_version:
+                continue
+
+            # Automated sub-agents are for system scheduling only — never exposed to users
+            if sa.type == "automated":
+                logger.debug(f"Skipping automated sub-agent '{sa.name}' (not for interactive use)")
                 continue
 
             cv = sa.config_version

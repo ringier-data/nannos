@@ -86,6 +86,8 @@ class CostTrackingCallback(BaseCallbackHandler):
 
                     logger.debug(f"[COST TRACKING] Processing LLM callback with tags: {tags}")
 
+                    scheduled_job_id = None
+
                     for tag in tags:
                         if tag.startswith("user_sub:"):
                             user_sub = tag.split(":", 1)[1]
@@ -96,6 +98,11 @@ class CostTrackingCallback(BaseCallbackHandler):
                                 sub_agent_id = int(tag.split(":", 1)[1])
                             except (ValueError, IndexError) as e:
                                 logger.warning(f"Failed to parse sub_agent_id from tag '{tag}': {e}")
+                        elif tag.startswith("scheduled_job:"):
+                            try:
+                                scheduled_job_id = int(tag.split(":", 1)[1])
+                            except (ValueError, IndexError) as e:
+                                logger.warning(f"Failed to parse scheduled_job_id from tag '{tag}': {e}")
 
                     if not user_sub:
                         logger.warning("No user_sub found in callback tags, skipping cost tracking")
@@ -113,6 +120,7 @@ class CostTrackingCallback(BaseCallbackHandler):
                         langsmith_trace_id=langsmith_trace_id,
                         invoked_at=datetime.now(tz=timezone.utc),
                         _sub_agent_id_from_tag=sub_agent_id,  # Internal: extracted from tag, not user-settable
+                        _scheduled_job_id_from_tag=scheduled_job_id,  # Internal: extracted from tag
                     )
 
                     logger.info(

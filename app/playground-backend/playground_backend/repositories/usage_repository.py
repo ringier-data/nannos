@@ -25,6 +25,7 @@ class UsageRepository:
         invoked_at: datetime,
         conversation_id: str | None = None,
         sub_agent_id: int | None = None,
+        scheduled_job_id: int | None = None,
         sub_agent_config_version_id: int | None = None,
         langsmith_run_id: str | None = None,
         langsmith_trace_id: str | None = None,
@@ -42,6 +43,7 @@ class UsageRepository:
             invoked_at: When the service was invoked
             conversation_id: Optional conversation ID
             sub_agent_id: Optional sub-agent ID
+            scheduled_job_id: Optional scheduler ID
             sub_agent_config_version_id: Optional sub-agent config version ID
             langsmith_run_id: Optional LangSmith run ID
             langsmith_trace_id: Optional LangSmith trace ID
@@ -52,12 +54,12 @@ class UsageRepository:
         # Insert usage log
         log_query = text("""
             INSERT INTO usage_logs (
-                user_id, conversation_id, sub_agent_id, sub_agent_config_version_id,
+                user_id, conversation_id, sub_agent_id, scheduled_job_id, sub_agent_config_version_id,
                 provider, model_name, total_cost_usd,
                 langsmith_run_id, langsmith_trace_id, invoked_at
             )
             VALUES (
-                :user_id, :conversation_id, :sub_agent_id, :sub_agent_config_version_id,
+                :user_id, :conversation_id, :sub_agent_id, :scheduled_job_id, :sub_agent_config_version_id,
                 :provider, :model_name, :total_cost_usd,
                 :langsmith_run_id, :langsmith_trace_id, :invoked_at
             )
@@ -70,6 +72,7 @@ class UsageRepository:
                 "user_id": user_id,
                 "conversation_id": conversation_id,
                 "sub_agent_id": sub_agent_id,
+                "scheduled_job_id": scheduled_job_id,
                 "sub_agent_config_version_id": sub_agent_config_version_id,
                 "provider": provider,
                 "model_name": model_name,
@@ -422,23 +425,23 @@ class UsageRepository:
         params: dict[str, Any] = {"limit": limit, "offset": (page - 1) * limit}
 
         if user_id:
-            where_conditions.append("user_id = :user_id")
+            where_conditions.append("u.user_id = :user_id")
             params["user_id"] = user_id
 
         if conversation_id:
-            where_conditions.append("conversation_id = :conversation_id")
+            where_conditions.append("u.conversation_id = :conversation_id")
             params["conversation_id"] = conversation_id
 
         if sub_agent_id:
-            where_conditions.append("sub_agent_id = :sub_agent_id")
+            where_conditions.append("u.sub_agent_id = :sub_agent_id")
             params["sub_agent_id"] = sub_agent_id
 
         if start_date:
-            where_conditions.append("invoked_at >= :start_date")
+            where_conditions.append("u.invoked_at >= :start_date")
             params["start_date"] = start_date
 
         if end_date:
-            where_conditions.append("invoked_at < :end_date")
+            where_conditions.append("u.invoked_at < :end_date")
             params["end_date"] = end_date
 
         where_clause = ""
@@ -448,7 +451,7 @@ class UsageRepository:
         # Get total count
         count_query = text(f"""
             SELECT COUNT(*) as total
-            FROM usage_logs
+            FROM usage_logs u
             {where_clause}
         """)
         count_result = await db.execute(count_query, params)
@@ -459,6 +462,7 @@ class UsageRepository:
             SELECT
                 u.*,
                 sa.name as sub_agent_name,
+                sj.name as scheduled_job_name,
                 COALESCE(
                     json_agg(
                         json_build_object('billing_unit', t.billing_unit, 'unit_count', t.unit_count)
@@ -469,8 +473,9 @@ class UsageRepository:
             FROM usage_logs u
             LEFT JOIN usage_billing_units t ON u.id = t.usage_log_id
             LEFT JOIN sub_agents sa ON u.sub_agent_id = sa.id AND sa.deleted_at IS NULL
+            LEFT JOIN scheduled_jobs sj ON u.scheduled_job_id = sj.id
             {where_clause}
-            GROUP BY u.id, sa.name
+            GROUP BY u.id, sa.name, sj.name
             ORDER BY u.invoked_at DESC
             LIMIT :limit OFFSET :offset
         """)

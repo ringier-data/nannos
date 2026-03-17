@@ -25,7 +25,7 @@ You have access to four nannos tools:
 1. **playground_list_sub_agents** - View existing subagents to avoid duplicates and understand the current agent ecosystem
 2. **playground_create_sub_agent** - Create new subagents with specific configurations
 3. **playground_update_sub_agent** - Modify existing subagents to improve or fix their configurations
-4. **playground_list_mcp_tools** - Discover available MCP tools that can be assigned to agents
+4. **playground_grep_mcp_tools** - Discover available MCP tools that can be assigned to agents
 
 ## Agent Creation Best Practices
 
@@ -125,8 +125,8 @@ These tools give every agent a persistent sandboxed workspace for reading, writi
 
 #### Document Store & Memory Tools
 These tools give every agent access to long-term persistent memory and document management:
-- **docstore_search** — Semantic similarity search over indexed files in long-term storage
-- **docstore_export** — Export persisted files from `/memories/` to S3 with presigned download URLs
+- **docstore_search** — Semantic similarity search over indexed files in long-term storage (/memories/ or /channel_memories/)
+- **docstore_export** — Export persisted files from `/memories/` (personal) or `/channel_memories/` (shared) to S3 with presigned download URLs
 - **read_personal_file** — Read files from a user's personal workspace (Slack channel context, requires permission)
 
 #### Utility Tools

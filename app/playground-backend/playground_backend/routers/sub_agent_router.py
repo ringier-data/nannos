@@ -197,7 +197,7 @@ async def get_sub_agent(
     request: Request,
     sub_agent_id: int,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
     version: int | None = Query(None, description="Specific version to fetch (defaults to current)"),
 ) -> SubAgent:
     """Get a sub-agent by ID.

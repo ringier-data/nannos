@@ -21,6 +21,7 @@ class SubAgentType(str, Enum):
     REMOTE = "remote"
     LOCAL = "local"
     FOUNDRY = "foundry"
+    AUTOMATED = "automated"  # Scheduler-owned: auto-approved, constrained, not interactive
 
 
 class SubAgentStatus(str, Enum):
@@ -107,7 +108,9 @@ class SubAgentConfigVersion(BaseModel):
     description: str  # Agent skill set description - crucial for orchestrator routing
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: str | None = None  # LLM model: 'gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', 'claude-haiku-4-5'
+    model: str | None = (
+        None  # LLM model: 'gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', 'claude-haiku-4-5'
+    )
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] = Field(default_factory=list)  # MCP tool names enabled for this version
@@ -181,6 +184,9 @@ class SubAgent(BaseModel):
         from_attributes = True
 
 
+ModelName = Literal["gpt-4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"]
+
+
 class SubAgentCreate(BaseModel):
     """Request model for creating a sub-agent."""
 
@@ -190,7 +196,9 @@ class SubAgentCreate(BaseModel):
     is_public: bool = False  # If true, accessible to all users without group permissions
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: str | None = None  # LLM model: 'gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', 'claude-haiku-4-5'
+    model: ModelName | None = (
+        None  # LLM model: 'gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', 'claude-haiku-4-5'
+    )
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] | None = None  # MCP tool names enabled for this version
@@ -227,7 +235,7 @@ class SubAgentUpdate(BaseModel):
     is_public: bool | None = None  # If true, accessible to all users without group permissions
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: str | None = None  # LLM model to use
+    model: ModelName | None = None  # LLM model to use
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] | None = None  # MCP tool names enabled for this version

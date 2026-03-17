@@ -102,6 +102,17 @@ class BaseAgentExecutor(AgentExecutor, ABC):
 
         logger.info(f"[ZERO-TRUST] Executing with verified user_sub: {user_sub}, sub_agent_id: {sub_agent_id}")
 
+        # Extract optional scheduler overrides from message metadata (set by agent-runner)
+        scheduled_job_id_from_meta: int | None = None
+        try:
+            if context.message and isinstance(context.message.metadata, dict) and context.message.metadata:
+                raw_job_id = context.message.metadata.get("scheduled_job_id")
+                scheduled_job_id_from_meta = int(raw_job_id) if raw_job_id is not None else None
+                if scheduled_job_id_from_meta:
+                    logger.info(f"[SCHEDULER] scheduled_job_id={scheduled_job_id_from_meta}")
+        except Exception as meta_err:
+            logger.warning(f"Failed to read message metadata: {meta_err}")
+
         try:
             # Create config for agent execution
             # Note: access_token is None for orchestrator JWT auth (agent uses orchestrator's JWT)
@@ -111,6 +122,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 name=user_name,
                 email=user_email,
                 sub_agent_id=sub_agent_id,  # For cost tracking attribution
+                scheduled_job_id=scheduled_job_id_from_meta,  # For scheduled-job cost attribution
             )
             async for item in self.agent.stream(query, user_config, task):
                 await self._handle_stream_item(item, updater, task)

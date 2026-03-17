@@ -37,6 +37,8 @@ ssmkey_chat_ui_secret_key: '/{{ project_id }}/{{ software_component }}/chat-ui-s
 base_domain: '{{ domain_prefix }}nannos.rcplus.io'
 orchestrator_agent_fqdn: 'orchestrator.{{ base_domain }}'
 chat_ui_fqdn: 'chat.{{ base_domain }}'
+agent_runner_fqdn: 'agent-runner.{{ base_domain }}'
+
 orchestrator_agent_task_cpu: 512
 orchestrator_agent_task_memory: 1024
 chat_ui_task_cpu: 256

@@ -90,6 +90,10 @@ class FileStorageService:
     def is_allowed_file(self, mime_type: str, filename: str | None = None) -> bool:
         """Validate that the provided file mime-type is supported."""
 
+        # Allow text/plain (e.g. txt or csv files, tsv) - these are common for user uploads and generally safe
+        if mime_type in ("text/plain", "text/csv", "text/tab-separated-values") or mime_type.startswith("text/"):
+            return True
+
         # Allow all image types
         if mime_type.startswith("image/"):
             return True

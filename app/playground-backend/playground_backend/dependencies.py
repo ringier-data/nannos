@@ -149,6 +149,28 @@ async def require_auth_or_bearer_token(request: Request, db: DbSession) -> User:
     )
 
 
+async def get_client_id_from_request(request: Request) -> str | None:
+    """Extract the Keycloak client_id from a client-credentials Bearer JWT.
+
+    Reads the ``azp`` (authorised party) claim from the validated Bearer token,
+    which Keycloak sets to the client ID on client-credential tokens.
+    Falls back to ``client_id`` claim if ``azp`` is absent.
+
+    Returns None if no Bearer token is present or the token has no azp/client_id claim.
+    Does not raise on missing token — use ``require_auth_or_bearer_token`` for that.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.split(" ", 1)[1]
+    try:
+        validator = JWTValidator(issuer=config.oidc.issuer)
+        payload = await validator.validate(token)
+        return payload.get("azp") or payload.get("client_id") or None
+    except JWTValidationError:
+        return None
+
+
 def require_active_user(request: Request) -> User:
     """Dependency to require an active (non-suspended, non-deleted) user.
 

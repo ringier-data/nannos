@@ -75,6 +75,66 @@ uv run pytest tests/ --cov=app --cov-report=html
 - Validate configuration at startup
 - Support multiple environments (local, dev, stg, prod)
 
+### Runtime Parameters: config vs context
+
+**CRITICAL**: LangGraph invocations use TWO distinct parameters with different purposes:
+
+#### `config` (RunnableConfig) - Controls HOW the graph runs
+Standard LangGraph/LangChain parameter containing infrastructure and observability settings:
+
+- **Checkpoint isolation** (`configurable.thread_id`, `configurable.checkpoint_ns`)
+  - Thread ID isolates conversation state: `{context_id}::agent-name`
+  - Checkpoint namespace for additional isolation layer
+  - `__pregel_checkpointer` for custom checkpoint backends
+
+- **Cost tracking** (`tags: ["sub_agent:name"]`)
+  - LangSmith tags for cost attribution
+  - Inherited from parent and extended by sub-agents
+
+- **Metadata** (`metadata: {user_id, assistant_id}`)
+  - User/assistant attribution for LangSmith
+  - Inherited from orchestrator's config
+
+- **Callbacks** (LangChain callback handlers)
+  - Logging, tracing, and monitoring hooks
+  - Automatically propagated through call chain
+
+#### `context` (GraphRuntimeContext) - Controls WHAT the graph accesses
+Custom parameter enabled by `context_schema=GraphRuntimeContext` containing user-specific runtime data:
+
+- **Tool registry** (`tool_registry: dict[str, BaseTool]`)
+  - User's MCP tools discovered at request time
+  - Middleware binds these to the model dynamically
+
+- **SubAgent registry** (`subagent_registry: dict[str, CompiledSubAgent]`)
+  - Available sub-agents for task delegation
+  - Both local and remote A2A agents
+
+- **User preferences** (`name`, `language`, `timezone`, `custom_prompt`)
+  - Personalization data injected into system prompts
+  - Message formatting preferences (markdown/slack/plain)
+
+- **File attachments** (`pending_file_blocks: list[ContentBlock]`)
+  - Ephemeral file content from current request
+  - Injected into sub-agent dispatches
+
+- **Whitelisted tools** (`whitelisted_tool_names: set[str]`)
+  - Tool scope filtering (orchestrator vs GP agent)
+
+**Why both are required:**
+```python
+result = await graph.ainvoke(
+    {"messages": [...]},
+    config=config,        # ← LangGraph infrastructure (checkpointing, tracking)
+    context=context,      # ← Custom runtime data (tools, user info)
+)
+```
+
+- Without `config`: No checkpoint isolation, no cost attribution, no metadata propagation
+- Without `context`: No tools, no user preferences, middleware cannot function
+
+`config` is a LangGraph standard for execution control; `context` is our custom extension for runtime data injection. They are complementary, not redundant.
+
 ## Distributed Tracing
 
 ### A2A Sub-Agent Tracing

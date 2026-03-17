@@ -3,16 +3,15 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import HumanMessage
-from langchain_core.tools import Tool
-
-from app.a2a_utils.base import SubAgentInput
-from app.a2a_utils.models import LocalLangGraphSubAgentConfig
-from app.a2a_utils.structured_response import SubAgentResponseSchema
-from app.agents.dynamic_agent import (
+from agent_common.a2a.base import SubAgentInput
+from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.a2a.structured_response import SubAgentResponseSchema
+from agent_common.agents.dynamic_agent import (
     DynamicLocalAgentRunnable,
     create_dynamic_local_subagent,
 )
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import Tool
 
 
 class TestDynamicLocalAgentRunnable:
@@ -96,7 +95,7 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
             await runnable._ensure_agent()
 
         # Agent should now exist
@@ -119,9 +118,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
             result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Please complete the task.")])
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Please complete the task.")]),
+                config={},
             )
 
         # Check A2A response format
@@ -148,9 +148,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
             result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Create a ticket")])
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Create a ticket")]),
+                config={},
             )
 
         # Check A2A response format indicates input required
@@ -165,9 +166,10 @@ class TestDynamicLocalAgentRunnable:
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
 
         # Mock create_agent to raise an exception
-        with patch("app.agents.dynamic_agent.create_agent", side_effect=Exception("Model error")):
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", side_effect=Exception("Model error")):
             result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")])
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
+                config={},
             )
 
         # Check A2A response format indicates failure
@@ -211,9 +213,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
             result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")])
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
+                config={},
             )
 
         # Check A2A response format indicates failure
@@ -233,9 +236,10 @@ class TestDynamicLocalAgentRunnable:
             }
         )
 
-        with patch("app.agents.dynamic_agent.create_agent", return_value=mock_graph):
+        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
             result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")])
+                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
+                config={},
             )
 
         # Should fall back to completed state with warning

@@ -13,10 +13,9 @@ the unified read_file tool.
 import logging
 from typing import Literal
 
+from agent_common.core.s3_service import get_s3_service
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
-
-from .s3_service import get_s3_service
 
 logger = logging.getLogger(__name__)
 

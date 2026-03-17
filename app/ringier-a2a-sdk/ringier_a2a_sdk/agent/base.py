@@ -70,12 +70,17 @@ class BaseAgent(CostTrackingMixin, ABC):
             task: The task context for the current interaction
         """
         if self._cost_tracking_enabled:
+            # Use task.context_id as the conversation_id for cost tracking.
+            # For scheduled jobs, the scheduler sets orchestrator_conversation_id to the job run ID,
+            # which becomes the natural context_id and is stored in the job run table.
+            conversation_id = task.context_id
             await self.report_llm_usage(
                 user_sub=user_config.user_sub,
                 billing_unit_breakdown={
                     "requests": 1,
                 },
-                conversation_id=task.context_id,
+                conversation_id=conversation_id,
+                scheduled_job_id=user_config.scheduled_job_id,
             )
 
     async def stream(self, query: str, user_config: UserConfig, task: Task) -> AsyncIterable[AgentStreamResponse]:

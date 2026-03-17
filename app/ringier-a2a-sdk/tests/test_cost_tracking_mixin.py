@@ -137,7 +137,7 @@ class TestCostTrackingMixin:
         await agent.report_llm_usage(
             user_sub="sub-123",
             provider="openai",
-            model_name="gpt-4",
+            model_name="gpt-4o",
             billing_unit_breakdown={"input_tokens": 100, "output_tokens": 50},
         )
 
@@ -297,23 +297,28 @@ class TestCostTrackingMixin:
     def test_create_runnable_config_with_callbacks(self):
         """Test create_runnable_config includes callbacks."""
         agent = TestAgent()
-        agent._cost_tracking_enabled = True
 
-        mock_callback = MagicMock()
-        agent._langchain_callbacks = [mock_callback]
+        # Enable cost tracking with a mock cost logger
+        mock_cost_logger = MagicMock()
+        agent.enable_cost_tracking(cost_logger=mock_cost_logger)
 
         config = agent.create_runnable_config(
             user_sub="sub-123",
             conversation_id="conv-456",
         )
 
-        # Should include the callback
+        # Should include the CostTrackingCallback
         if isinstance(config, dict):
             assert len(config["callbacks"]) == 1
-            assert config["callbacks"][0] == mock_callback
+            # The callback should be a CostTrackingCallback instance
+            from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
+
+            assert isinstance(config["callbacks"][0], CostTrackingCallback)
         else:
             assert len(config.callbacks) == 1
-            assert config.callbacks[0] == mock_callback
+            from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
+
+            assert isinstance(config.callbacks[0], CostTrackingCallback)
 
     def test_create_runnable_config_with_sub_agent_id(self):
         """Test create_runnable_config adds sub_agent tag from ContextVar."""
@@ -321,12 +326,12 @@ class TestCostTrackingMixin:
         agent._cost_tracking_enabled = True
         agent._langchain_callbacks = []
 
-        # Mock the ContextVar
-        with patch("ringier_a2a_sdk.agent.cost_tracking_mixin._has_sub_agent_id_contextvar", True):
+        # Mock the ContextVar in the utility module (where create_runnable_config is defined)
+        with patch("ringier_a2a_sdk.utils.config._has_sub_agent_id_contextvar", True):
             mock_contextvar = MagicMock()
             mock_contextvar.get.return_value = 42
 
-            with patch("ringier_a2a_sdk.agent.cost_tracking_mixin.current_sub_agent_id", mock_contextvar):
+            with patch("ringier_a2a_sdk.utils.config.current_sub_agent_id", mock_contextvar):
                 config = agent.create_runnable_config(
                     user_sub="sub-123",
                     conversation_id="conv-456",
@@ -411,7 +416,7 @@ class TestCostTrackingMixin:
             logger.log_cost_async(
                 user_sub="subA",
                 provider="openai",
-                model_name="gpt-4",
+                model_name="gpt-4o",
                 billing_unit_breakdown={"input_tokens": 10, "output_tokens": 5},
                 conversation_id="convA",
             )
@@ -419,7 +424,7 @@ class TestCostTrackingMixin:
             logger.log_cost_async(
                 user_sub="subB",
                 provider="openai",
-                model_name="gpt-4",
+                model_name="gpt-4o",
                 billing_unit_breakdown={"input_tokens": 20, "output_tokens": 10},
                 conversation_id="convB",
             )

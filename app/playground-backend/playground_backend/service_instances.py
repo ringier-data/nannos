@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING
 from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 
 from .config import config
+from .db.connection import get_async_session_factory
+from .repositories.delivery_channel_repository import DeliveryChannelRepository
 from .repositories.rate_card_repository import RateCardRepository
+from .repositories.scheduled_job_repository import ScheduledJobRepository
 from .repositories.secrets_repository import SecretsRepository
 from .repositories.sub_agent_repository import SubAgentRepository
 from .repositories.usage_repository import UsageRepository
@@ -26,6 +29,9 @@ from .services.keycloak_admin_service import KeycloakAdminService
 from .services.messages_service import MessagesService
 from .services.notification_service import NotificationService
 from .services.rate_card_service import RateCardService
+from .services.scheduler_engine import SchedulerEngine
+from .services.scheduler_service import SchedulerService
+from .services.scheduler_token_service import SchedulerTokenService
 from .services.sub_agent_service import SubAgentService
 from .services.usage_service import UsageService
 from .services.user_group_service import UserGroupService
@@ -123,6 +129,35 @@ async def initialize_services(app: "FastAPI") -> None:
         client_id=oidc_config.client_id,
         client_secret=oidc_config.client_secret.get_secret_value(),
         issuer=oidc_config.issuer,
+    )
+
+    # Initialize delivery channel repository
+    app.state.delivery_channel_repository = DeliveryChannelRepository()
+    app.state.delivery_channel_repository.set_audit_service(app.state.audit_service)
+
+    # Initialize scheduler services
+    app.state.scheduled_job_repository = ScheduledJobRepository()
+    app.state.scheduled_job_repository.set_audit_service(app.state.audit_service)
+
+    app.state.scheduler_token_service = SchedulerTokenService(
+        oidc_issuer=config.oidc.issuer,
+        oidc_client_id=config.oidc.client_id,
+        oidc_client_secret=config.oidc.client_secret.get_secret_value(),
+    )
+
+    app.state.scheduler_service = SchedulerService()
+    app.state.scheduler_service.set_repository(app.state.scheduled_job_repository)
+    app.state.scheduler_service.set_sub_agent_service(app.state.sub_agent_service)
+
+    app.state.scheduler_engine = SchedulerEngine(
+        repo=app.state.scheduled_job_repository,
+        delivery_channel_repo=app.state.delivery_channel_repository,
+        token_service=app.state.scheduler_token_service,
+        agent_runner_url=config.scheduler.agent_runner_url,
+        db_session_factory=get_async_session_factory(),
+        socket_notification_manager=app.state.socket_notification_manager,
+        tick_interval_seconds=config.scheduler.tick_interval_seconds,
+        claim_limit=config.scheduler.claim_limit,
     )
 
     # Initialize orchestrator cookie cache

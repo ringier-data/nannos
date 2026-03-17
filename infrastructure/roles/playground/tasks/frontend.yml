@@ -53,6 +53,8 @@
     VITE_LANGSMITH_PROJECT_ID: "{{ langsmith_project_id }}"
     VITE_KEYCLOAK_BASE_URL: "{{ oidc_domain }}"
     VITE_KEYCLOAK_REALM: "{{ keycloak_realm_name }}"
+    VITE_AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH: "{{ auto_approve_max_system_prompt_length }}"
+    VITE_AUTO_APPROVE_MAX_MCP_TOOLS_COUNT: "{{ auto_approve_max_mcp_tools_count }}"
   command: npm run build
 
 - name: 'sync playground-frontend build to S3'

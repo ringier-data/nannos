@@ -3,8 +3,7 @@
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-
-from app.a2a_utils.authentication import SmartTokenInterceptor
+from agent_common.a2a.authentication import SmartTokenInterceptor
 
 
 class MockSecurityScheme:

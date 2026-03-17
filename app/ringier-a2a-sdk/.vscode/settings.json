@@ -8,4 +8,12 @@
             "source.fixAll.ruff": "explicit"
         }
     },
+    "ruff.importStrategy": "fromEnvironment",
+    "python-envs.pythonProjects": [
+        {
+            "path": ".",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
 }

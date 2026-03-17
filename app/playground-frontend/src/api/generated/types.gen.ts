@@ -51,7 +51,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel';
 
 /**
  * AuditLog
@@ -96,6 +96,42 @@ export type AuditLogListResponse = {
      */
     data: Array<AuditLog>;
     meta: PaginationMeta;
+};
+
+/**
+ * AutomatedSubAgentConfig
+ *
+ * Configuration for an automated sub-agent to execute as part of a scheduled job.
+ */
+export type AutomatedSubAgentConfig = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * Short description of the sub-agent's skill, max 200 chars.
+     */
+    description: string;
+    model: ModelEnum;
+    /**
+     * System Prompt
+     *
+     * System prompt describing the task for the agent.
+     */
+    system_prompt: string;
+    /**
+     * Mcp Tools
+     *
+     * List of MCP tool names that the agent is allowed to call. Leave empty if the task requires no tools. Call the playground_grep_mcp_tools API to get available tools and their input schemas.
+     */
+    mcp_tools?: Array<string> | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: ThinkingLevel | null;
 };
 
 /**
@@ -258,6 +294,134 @@ export type BulkUserOperationResponse = {
 };
 
 /**
+ * DeliveryChannelCreate
+ *
+ * Request body for registering a new delivery channel (A2A client → backend).
+ */
+export type DeliveryChannelCreate = {
+    /**
+     * Name
+     *
+     * Human-readable channel name.
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * Optional description for the LLM to understand when this channel should be used (e.g. 'Sends push notifications to the Alloy mobile app for critical alerts').
+     */
+    description?: string | null;
+    /**
+     * Webhook Url
+     *
+     * HTTPS URL the scheduler will POST notifications to.
+     */
+    webhook_url: string;
+    /**
+     * Secret
+     *
+     * Shared secret sent verbatim as the X-A2A-Notification-Token header on every push.
+     */
+    secret: string;
+    /**
+     * Group Ids
+     *
+     * IDs of user groups whose members can see and use this channel.
+     */
+    group_ids: Array<number>;
+};
+
+/**
+ * DeliveryChannelListResponse
+ *
+ * Wrapper around a list of delivery channels.
+ */
+export type DeliveryChannelListResponse = {
+    /**
+     * Channels
+     */
+    channels: Array<DeliveryChannelResponse>;
+};
+
+/**
+ * DeliveryChannelResponse
+ *
+ * Delivery channel as returned by the API.  The secret is never included.
+ */
+export type DeliveryChannelResponse = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Webhook Url
+     */
+    webhook_url: string;
+    /**
+     * Client Id
+     *
+     * Keycloak client ID of the A2A service that registered this channel.
+     */
+    client_id: string;
+    /**
+     * Registered By
+     *
+     * OIDC subject (sub) of the token used to register this channel.
+     */
+    registered_by: string;
+    /**
+     * Group Ids
+     *
+     * IDs of groups that can use this channel.
+     */
+    group_ids: Array<number>;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * DeliveryChannelUpdate
+ *
+ * Request body for updating an existing delivery channel.  All fields optional.
+ */
+export type DeliveryChannelUpdate = {
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Webhook Url
+     */
+    webhook_url?: string | null;
+    /**
+     * Secret
+     */
+    secret?: string | null;
+    /**
+     * Group Ids
+     */
+    group_ids?: Array<number> | null;
+};
+
+/**
  * DetailedUsageReport
  *
  * Detailed usage report with billing unit breakdowns.
@@ -284,6 +448,62 @@ export type DetailedUsageReport = {
  * Foundry API scopes for OAuth2 authentication.
  */
 export type FoundryScope = 'api:use-ontologies-read' | 'api:use-ontologies-write' | 'api:use-aip-agents-read' | 'api:use-aip-agents-write' | 'api:use-mediasets-read' | 'api:use-mediasets-write';
+
+/**
+ * GenerateWatchParamsRequest
+ *
+ * Request body for AI-assisted watch parameter generation.
+ */
+export type GenerateWatchParamsRequest = {
+    /**
+     * Tools
+     *
+     * List of available MCP tool objects (name, description, input_schema.)
+     */
+    tools: Array<{
+        [key: string]: unknown;
+    }>;
+    /**
+     * Query
+     *
+     * Natural-language description of the condition to watch for.
+     */
+    query: string;
+};
+
+/**
+ * GenerateWatchParamsResponse
+ *
+ * AI-generated tool selection, arguments, condition expression and notification text for a watch job.
+ */
+export type GenerateWatchParamsResponse = {
+    /**
+     * Check Tool
+     */
+    check_tool?: string | null;
+    /**
+     * Check Args
+     */
+    check_args?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Condition Expr
+     */
+    condition_expr?: string | null;
+    /**
+     * Expected Value
+     */
+    expected_value?: string | null;
+    /**
+     * Llm Condition
+     */
+    llm_condition?: string | null;
+    /**
+     * Notification Message
+     */
+    notification_message?: string | null;
+};
 
 /**
  * GroupMemberAdd
@@ -371,6 +591,48 @@ export type ImpersonateStartRequest = {
 };
 
 /**
+ * JobRunStatus
+ *
+ * Terminal status of a single job execution attempt.
+ */
+export type JobRunStatus = 'running' | 'success' | 'failed' | 'condition_not_met';
+
+/**
+ * JobType
+ *
+ * Job type: one-shot task (LLM execution) or conditional watch (poll until condition met).
+ */
+export type JobType = 'task' | 'watch';
+
+/**
+ * MCPServer
+ *
+ * MCP server information.
+ */
+export type McpServer = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+};
+
+/**
+ * MCPServersResponse
+ *
+ * Response model for MCP servers list.
+ */
+export type McpServersResponse = {
+    /**
+     * Servers
+     */
+    servers: Array<McpServer>;
+};
+
+/**
  * MCPTool
  *
  * MCP tool information.
@@ -388,6 +650,12 @@ export type McpTool = {
      * Input Schema
      */
     input_schema?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Output Schema
+     */
+    output_schema?: {
         [key: string]: unknown;
     } | null;
     /**
@@ -697,6 +965,369 @@ export type RegeneratedFileResponse = {
      * Files
      */
     files: Array<RegeneratedFileInfo>;
+};
+
+/**
+ * RunNowResponse
+ *
+ * Response for an immediate job trigger (202 Accepted).
+ */
+export type RunNowResponse = {
+    /**
+     * Job Id
+     */
+    job_id: number;
+    /**
+     * Run Id
+     */
+    run_id: number;
+    /**
+     * Status
+     */
+    status?: string;
+};
+
+/**
+ * ScheduleKind
+ *
+ * How the job is scheduled.
+ */
+export type ScheduleKind = 'cron' | 'once' | 'interval';
+
+/**
+ * ScheduledJob
+ *
+ * Full scheduled job representation returned by the API.
+ */
+export type ScheduledJob = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * User Id
+     */
+    user_id: string;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Name
+     */
+    name: string;
+    job_type: JobType;
+    schedule_kind: ScheduleKind;
+    /**
+     * Cron Expr
+     */
+    cron_expr?: string | null;
+    /**
+     * Interval Seconds
+     */
+    interval_seconds?: number | null;
+    /**
+     * Run At
+     */
+    run_at?: string | null;
+    /**
+     * Next Run At
+     */
+    next_run_at: string;
+    /**
+     * Last Run At
+     */
+    last_run_at?: string | null;
+    /**
+     * Prompt
+     */
+    prompt?: string | null;
+    /**
+     * Notification Message
+     */
+    notification_message?: string | null;
+    /**
+     * Check Tool
+     */
+    check_tool?: string | null;
+    /**
+     * Check Args
+     */
+    check_args?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Condition Expr
+     */
+    condition_expr?: string | null;
+    /**
+     * Expected Value
+     */
+    expected_value?: string | null;
+    /**
+     * Llm Condition
+     */
+    llm_condition?: string | null;
+    /**
+     * Destroy After Trigger
+     */
+    destroy_after_trigger?: boolean;
+    /**
+     * Last Check Result
+     */
+    last_check_result?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Delivery Channel Id
+     */
+    delivery_channel_id?: number | null;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Max Failures
+     */
+    max_failures: number;
+    /**
+     * Consecutive Failures
+     */
+    consecutive_failures: number;
+    /**
+     * Paused Reason
+     */
+    paused_reason?: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+};
+
+/**
+ * ScheduledJobCreate
+ *
+ * Request body for creating a new scheduled job.
+ */
+export type ScheduledJobCreate = {
+    /**
+     * Sub Agent Id
+     *
+     * ID of an existing sub-agent to execute. Alternatively a custom automated sub-agent can be provided through sub_agent_parameters. Required for job_type='task'; optional for 'watch'.
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Optional custom automated sub-agent configuration to execute for a task job. If provided, this will be used instead of the referenced sub-agent template. Ignored for watch jobs.
+     */
+    sub_agent_parameters?: AutomatedSubAgentConfig | null;
+    /**
+     * Name
+     */
+    name: string;
+    job_type: JobType;
+    schedule_kind: ScheduleKind;
+    /**
+     * Cron Expr
+     *
+     * Required when schedule_kind='cron'
+     */
+    cron_expr?: string | null;
+    /**
+     * Interval Seconds
+     *
+     * Required when schedule_kind='interval'. Min 60s.
+     */
+    interval_seconds?: number | null;
+    /**
+     * Run At
+     *
+     * Required when schedule_kind='once'
+     */
+    run_at?: string | null;
+    /**
+     * Prompt
+     *
+     * Instruction/prompt for the agent to execute (task jobs only). Example: 'Analyze the sales data and create a summary'.
+     */
+    prompt?: string;
+    /**
+     * Notification Message
+     *
+     * Notification text delivered when watch condition triggers (watch jobs only). If empty, an LLM will generate a message based on the check result.
+     */
+    notification_message?: string;
+    /**
+     * Check Tool
+     *
+     * MCP tool name to evaluate the watch condition
+     */
+    check_tool?: string | null;
+    /**
+     * Check Args
+     *
+     * Arguments for the check tool
+     */
+    check_args?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Condition Expr
+     *
+     * JSONPath expression to extract a value from the tool response.
+     */
+    condition_expr?: string | null;
+    /**
+     * Expected Value
+     *
+     * Expected value to compare against the JSONPath result. If null, checks that result is not null. Otherwise performs exact string comparison.
+     */
+    expected_value?: string | null;
+    /**
+     * Llm Condition
+     *
+     * Natural language condition for LLM-based evaluation. Use when exact matching is not suitable. Example: 'The status indicates success or completion'.
+     */
+    llm_condition?: string | null;
+    /**
+     * Destroy After Trigger
+     *
+     * If True (default), the watch job will be disabled after the condition is met once. If False, the watch continues indefinitely.
+     */
+    destroy_after_trigger?: boolean;
+    /**
+     * Delivery Channel Id
+     *
+     * ID of a registered delivery channel.  The channel must be visible to the user.
+     */
+    delivery_channel_id?: number | null;
+    /**
+     * Max Failures
+     */
+    max_failures?: number;
+};
+
+/**
+ * ScheduledJobRun
+ *
+ * A single execution record for a scheduled job.
+ */
+export type ScheduledJobRun = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Job Id
+     */
+    job_id: number;
+    /**
+     * Started At
+     */
+    started_at: string;
+    /**
+     * Completed At
+     */
+    completed_at?: string | null;
+    status: JobRunStatus;
+    /**
+     * Result Summary
+     */
+    result_summary?: string | null;
+    /**
+     * Error Message
+     */
+    error_message?: string | null;
+    /**
+     * Conversation Id
+     */
+    conversation_id?: string | null;
+    /**
+     * Delivered
+     */
+    delivered: boolean;
+};
+
+/**
+ * ScheduledJobUpdate
+ *
+ * Request body for updating an existing scheduled job. All fields optional.
+ */
+export type ScheduledJobUpdate = {
+    /**
+     * Name
+     */
+    name?: string | null;
+    schedule_kind?: ScheduleKind | null;
+    /**
+     * Cron Expr
+     */
+    cron_expr?: string | null;
+    /**
+     * Interval Seconds
+     */
+    interval_seconds?: number | null;
+    /**
+     * Run At
+     */
+    run_at?: string | null;
+    /**
+     * Prompt
+     */
+    prompt?: string | null;
+    /**
+     * Notification Message
+     */
+    notification_message?: string | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Check Tool
+     */
+    check_tool?: string | null;
+    /**
+     * Check Args
+     */
+    check_args?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Condition Expr
+     */
+    condition_expr?: string | null;
+    /**
+     * Expected Value
+     */
+    expected_value?: string | null;
+    /**
+     * Llm Condition
+     */
+    llm_condition?: string | null;
+    /**
+     * Destroy After Trigger
+     */
+    destroy_after_trigger?: boolean | null;
+    /**
+     * Delivery Channel Id
+     */
+    delivery_channel_id?: number | null;
+    /**
+     * Enabled
+     */
+    enabled?: boolean | null;
+    /**
+     * Max Failures
+     */
+    max_failures?: number | null;
 };
 
 /**
@@ -1067,7 +1698,7 @@ export type SubAgentCreate = {
     /**
      * Model
      */
-    model?: string | null;
+    model?: ModelEnum | null;
     /**
      * System Prompt
      */
@@ -1274,7 +1905,7 @@ export type SubAgentSubmitRequest = {
  *
  * Sub-agent type enum matching database enum.
  */
-export type SubAgentType = 'remote' | 'local' | 'foundry';
+export type SubAgentType = 'remote' | 'local' | 'foundry' | 'automated';
 
 /**
  * SubAgentUpdate
@@ -1297,7 +1928,7 @@ export type SubAgentUpdate = {
     /**
      * Model
      */
-    model?: string | null;
+    model?: ModelEnum | null;
     /**
      * System Prompt
      */
@@ -1537,6 +2168,14 @@ export type UsageLog = {
      */
     sub_agent_config_version_id?: number | null;
     /**
+     * Scheduled Job Id
+     */
+    scheduled_job_id?: number | null;
+    /**
+     * Scheduled Job Name
+     */
+    scheduled_job_name?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;
@@ -1602,6 +2241,10 @@ export type UsageLogCreate = {
      * Sub Agent Config Version Id
      */
     sub_agent_config_version_id?: number | null;
+    /**
+     * Scheduled Job Id
+     */
+    scheduled_job_id?: number | null;
     /**
      * Provider
      */
@@ -2107,6 +2750,11 @@ export type ValidationError = {
 };
 
 /**
+ * Model
+ */
+export type ModelEnum = 'gpt-4o' | 'gpt-4o-mini' | 'claude-sonnet-4.5' | 'claude-sonnet-4.6' | 'claude-haiku-4-5';
+
+/**
  * Action
  */
 export type ActionEnum = 'suspend' | 'activate' | 'delete';
@@ -2466,12 +3114,64 @@ export type RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponses = {
 
 export type RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponse = RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponses[keyof RegeneratePresignedUrlsApiV1FilesRegenerateUrlsPostResponses];
 
+export type PlaygroundGrepMcpToolsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Query
+         */
+        query: string;
+        /**
+         * Server Slug
+         */
+        server_slug?: string | null;
+        /**
+         * Top K
+         */
+        top_k?: number;
+    };
+    url: '/api/v1/mcp/tools/search';
+};
+
+export type PlaygroundGrepMcpToolsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PlaygroundGrepMcpToolsError = PlaygroundGrepMcpToolsErrors[keyof PlaygroundGrepMcpToolsErrors];
+
+export type PlaygroundGrepMcpToolsResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpToolsResponse;
+};
+
+export type PlaygroundGrepMcpToolsResponse = PlaygroundGrepMcpToolsResponses[keyof PlaygroundGrepMcpToolsResponses];
+
 export type PlaygroundListMcpToolsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Server Slug
+         */
+        server_slug?: string | null;
+    };
     url: '/api/v1/mcp/tools';
 };
+
+export type PlaygroundListMcpToolsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PlaygroundListMcpToolsError = PlaygroundListMcpToolsErrors[keyof PlaygroundListMcpToolsErrors];
 
 export type PlaygroundListMcpToolsResponses = {
     /**
@@ -2481,6 +3181,22 @@ export type PlaygroundListMcpToolsResponses = {
 };
 
 export type PlaygroundListMcpToolsResponse = PlaygroundListMcpToolsResponses[keyof PlaygroundListMcpToolsResponses];
+
+export type PlaygroundListMcpServersData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/mcp/servers';
+};
+
+export type PlaygroundListMcpServersResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpServersResponse;
+};
+
+export type PlaygroundListMcpServersResponse = PlaygroundListMcpServersResponses[keyof PlaygroundListMcpServersResponses];
 
 export type ListSecretsApiV1SecretsGetData = {
     body?: never;
@@ -4759,6 +5475,387 @@ export type MarkAllNotificationsAsReadApiV1NotificationsMarkAllReadPutResponses 
      */
     200: unknown;
 };
+
+export type GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostData = {
+    body: GenerateWatchParamsRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/scheduler/generate-watch-params';
+};
+
+export type GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostError = GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostErrors[keyof GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostErrors];
+
+export type GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: GenerateWatchParamsResponse;
+};
+
+export type GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostResponse = GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostResponses[keyof GenerateWatchParamsApiV1SchedulerGenerateWatchParamsPostResponses];
+
+export type SchedulerListJobsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/scheduler/jobs';
+};
+
+export type SchedulerListJobsResponses = {
+    /**
+     * Response Scheduler List Jobs
+     *
+     * Successful Response
+     */
+    200: Array<ScheduledJob>;
+};
+
+export type SchedulerListJobsResponse = SchedulerListJobsResponses[keyof SchedulerListJobsResponses];
+
+export type SchedulerCreateJobData = {
+    body: ScheduledJobCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/scheduler/jobs';
+};
+
+export type SchedulerCreateJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerCreateJobError = SchedulerCreateJobErrors[keyof SchedulerCreateJobErrors];
+
+export type SchedulerCreateJobResponses = {
+    /**
+     * Successful Response
+     */
+    201: ScheduledJob;
+};
+
+export type SchedulerCreateJobResponse = SchedulerCreateJobResponses[keyof SchedulerCreateJobResponses];
+
+export type SchedulerDeleteJobData = {
+    body?: never;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}';
+};
+
+export type SchedulerDeleteJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerDeleteJobError = SchedulerDeleteJobErrors[keyof SchedulerDeleteJobErrors];
+
+export type SchedulerDeleteJobResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type SchedulerDeleteJobResponse = SchedulerDeleteJobResponses[keyof SchedulerDeleteJobResponses];
+
+export type SchedulerGetJobData = {
+    body?: never;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}';
+};
+
+export type SchedulerGetJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerGetJobError = SchedulerGetJobErrors[keyof SchedulerGetJobErrors];
+
+export type SchedulerGetJobResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScheduledJob;
+};
+
+export type SchedulerGetJobResponse = SchedulerGetJobResponses[keyof SchedulerGetJobResponses];
+
+export type SchedulerUpdateJobData = {
+    body: ScheduledJobUpdate;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}';
+};
+
+export type SchedulerUpdateJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerUpdateJobError = SchedulerUpdateJobErrors[keyof SchedulerUpdateJobErrors];
+
+export type SchedulerUpdateJobResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScheduledJob;
+};
+
+export type SchedulerUpdateJobResponse = SchedulerUpdateJobResponses[keyof SchedulerUpdateJobResponses];
+
+export type RunJobNowApiV1SchedulerJobsJobIdRunNowPostData = {
+    body?: never;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}/run-now';
+};
+
+export type RunJobNowApiV1SchedulerJobsJobIdRunNowPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RunJobNowApiV1SchedulerJobsJobIdRunNowPostError = RunJobNowApiV1SchedulerJobsJobIdRunNowPostErrors[keyof RunJobNowApiV1SchedulerJobsJobIdRunNowPostErrors];
+
+export type RunJobNowApiV1SchedulerJobsJobIdRunNowPostResponses = {
+    /**
+     * Successful Response
+     */
+    202: RunNowResponse;
+};
+
+export type RunJobNowApiV1SchedulerJobsJobIdRunNowPostResponse = RunJobNowApiV1SchedulerJobsJobIdRunNowPostResponses[keyof RunJobNowApiV1SchedulerJobsJobIdRunNowPostResponses];
+
+export type SchedulerPauseJobData = {
+    body?: never;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}/pause';
+};
+
+export type SchedulerPauseJobErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SchedulerPauseJobError = SchedulerPauseJobErrors[keyof SchedulerPauseJobErrors];
+
+export type SchedulerPauseJobResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScheduledJob;
+};
+
+export type SchedulerPauseJobResponse = SchedulerPauseJobResponses[keyof SchedulerPauseJobResponses];
+
+export type ResumeJobApiV1SchedulerJobsJobIdResumePostData = {
+    body?: never;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}/resume';
+};
+
+export type ResumeJobApiV1SchedulerJobsJobIdResumePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ResumeJobApiV1SchedulerJobsJobIdResumePostError = ResumeJobApiV1SchedulerJobsJobIdResumePostErrors[keyof ResumeJobApiV1SchedulerJobsJobIdResumePostErrors];
+
+export type ResumeJobApiV1SchedulerJobsJobIdResumePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScheduledJob;
+};
+
+export type ResumeJobApiV1SchedulerJobsJobIdResumePostResponse = ResumeJobApiV1SchedulerJobsJobIdResumePostResponses[keyof ResumeJobApiV1SchedulerJobsJobIdResumePostResponses];
+
+export type ListRunsApiV1SchedulerJobsJobIdRunsGetData = {
+    body?: never;
+    path: {
+        /**
+         * Job Id
+         */
+        job_id: number;
+    };
+    query?: never;
+    url: '/api/v1/scheduler/jobs/{job_id}/runs';
+};
+
+export type ListRunsApiV1SchedulerJobsJobIdRunsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListRunsApiV1SchedulerJobsJobIdRunsGetError = ListRunsApiV1SchedulerJobsJobIdRunsGetErrors[keyof ListRunsApiV1SchedulerJobsJobIdRunsGetErrors];
+
+export type ListRunsApiV1SchedulerJobsJobIdRunsGetResponses = {
+    /**
+     * Response List Runs Api V1 Scheduler Jobs  Job Id  Runs Get
+     *
+     * Successful Response
+     */
+    200: Array<ScheduledJobRun>;
+};
+
+export type ListRunsApiV1SchedulerJobsJobIdRunsGetResponse = ListRunsApiV1SchedulerJobsJobIdRunsGetResponses[keyof ListRunsApiV1SchedulerJobsJobIdRunsGetResponses];
+
+export type ListChannelsApiV1DeliveryChannelsGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/delivery-channels';
+};
+
+export type ListChannelsApiV1DeliveryChannelsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: DeliveryChannelListResponse;
+};
+
+export type ListChannelsApiV1DeliveryChannelsGetResponse = ListChannelsApiV1DeliveryChannelsGetResponses[keyof ListChannelsApiV1DeliveryChannelsGetResponses];
+
+export type RegisterChannelApiV1DeliveryChannelsPostData = {
+    body: DeliveryChannelCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/delivery-channels';
+};
+
+export type RegisterChannelApiV1DeliveryChannelsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RegisterChannelApiV1DeliveryChannelsPostError = RegisterChannelApiV1DeliveryChannelsPostErrors[keyof RegisterChannelApiV1DeliveryChannelsPostErrors];
+
+export type RegisterChannelApiV1DeliveryChannelsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: DeliveryChannelResponse;
+};
+
+export type RegisterChannelApiV1DeliveryChannelsPostResponse = RegisterChannelApiV1DeliveryChannelsPostResponses[keyof RegisterChannelApiV1DeliveryChannelsPostResponses];
+
+export type DeleteChannelApiV1DeliveryChannelsChannelIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Channel Id
+         */
+        channel_id: number;
+    };
+    query?: never;
+    url: '/api/v1/delivery-channels/{channel_id}';
+};
+
+export type DeleteChannelApiV1DeliveryChannelsChannelIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteChannelApiV1DeliveryChannelsChannelIdDeleteError = DeleteChannelApiV1DeliveryChannelsChannelIdDeleteErrors[keyof DeleteChannelApiV1DeliveryChannelsChannelIdDeleteErrors];
+
+export type DeleteChannelApiV1DeliveryChannelsChannelIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteChannelApiV1DeliveryChannelsChannelIdDeleteResponse = DeleteChannelApiV1DeliveryChannelsChannelIdDeleteResponses[keyof DeleteChannelApiV1DeliveryChannelsChannelIdDeleteResponses];
+
+export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchData = {
+    body: DeliveryChannelUpdate;
+    path: {
+        /**
+         * Channel Id
+         */
+        channel_id: number;
+    };
+    query?: never;
+    url: '/api/v1/delivery-channels/{channel_id}';
+};
+
+export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchError = UpdateChannelApiV1DeliveryChannelsChannelIdPatchErrors[keyof UpdateChannelApiV1DeliveryChannelsChannelIdPatchErrors];
+
+export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: DeliveryChannelResponse;
+};
+
+export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponse = UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses[keyof UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses];
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;

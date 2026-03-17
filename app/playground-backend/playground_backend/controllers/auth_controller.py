@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import URL
 
 from ..config import config
+from ..services.scheduler_token_service import SchedulerTokenService
 from ..services.session_service import SessionService
 from ..services.user_service import UserService
 from ..utils.cookie_signer import sign_cookie
@@ -52,10 +53,12 @@ class AuthController:
         self,
         session_service: SessionService,
         user_service: UserService,
+        scheduler_token_service: SchedulerTokenService | None = None,
     ) -> None:
         """Initialize the auth controller."""
         self.session_service = session_service
         self.user_service = user_service
+        self.scheduler_token_service = scheduler_token_service
         self.oidc_config = config.oidc
         self.base_domain = config.base_domain
         self.is_dev = config.is_local() or config.is_dev()
@@ -204,6 +207,24 @@ class AuthController:
         # Get tokens for session
         access_token = token.get("access_token", "")
         refresh_token = token.get("refresh_token", "")
+
+        # Auto-store the refresh token as scheduler offline token.
+        # The scope already includes offline_access so this token survives user logout.
+        # Failures are non-fatal — scheduler consent is a best-effort convenience.
+        if refresh_token and self.scheduler_token_service:
+            try:
+                await self.scheduler_token_service.store_offline_token(
+                    db=db,
+                    user_id=user.id,
+                    refresh_token=refresh_token,
+                )
+                logger.info("Auto-stored scheduler offline token for user %s", user.id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to auto-store scheduler offline token for user %s: %s",
+                    user.id,
+                    exc,
+                )
         id_token = token.get("id_token", "")
         logger.debug(f"Expires in: {token.get('expires_in')}")
         expires_in = token.get("expires_in", 3600)  # Default to 1 hour if not provided

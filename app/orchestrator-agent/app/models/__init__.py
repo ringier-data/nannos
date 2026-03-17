@@ -10,7 +10,8 @@ Key Components:
 - Custom exceptions (A2AClientError, AgentFrameworkAuthError)
 """
 
-from .exceptions import A2AClientError, AgentFrameworkAuthError
+from agent_common.models.exceptions import A2AClientError, AgentFrameworkAuthError
+
 from .responses import AgentStreamResponse
 from .schemas import FinalResponseSchema
 

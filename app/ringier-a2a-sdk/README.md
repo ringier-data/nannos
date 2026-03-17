@@ -302,7 +302,7 @@ class MyAgent(BaseAgent):
         await self.report_llm_usage(
             user_id=user_config.user_id,
             provider="openai",
-            model_name="gpt-4",
+            model_name="gpt-4o",
             billing_unit_breakdown={
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens

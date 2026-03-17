@@ -1,4 +1,4 @@
-import { MessagesSquare, Settings, Bot, Users, UsersRound, FileText, DollarSign, CreditCard } from 'lucide-react';
+import { MessagesSquare, Settings, Bot, Users, UsersRound, FileText, DollarSign, CreditCard, Calendar, Webhook } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -27,6 +27,16 @@ export const mainNavItems: NavItem[] = [
     title: 'Usage & Costs',
     url: '/app/usage',
     icon: DollarSign,
+  },
+  {
+    title: 'Scheduler',
+    url: '/app/scheduler',
+    icon: Calendar,
+  },
+  {
+    title: 'Delivery Channels',
+    url: '/app/delivery-channels',
+    icon: Webhook,
   },
 ];
 

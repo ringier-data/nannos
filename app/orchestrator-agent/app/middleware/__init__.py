@@ -23,12 +23,13 @@ Usage:
     )
 """
 
+from agent_common.middleware.loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware
+from agent_common.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
+
 from .a2a_tracking import A2ATaskTrackingMiddleware, A2ATrackingState
 from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState
 from .dynamic_tool_dispatch import DynamicToolDispatchMiddleware
-from .loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware
 from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
-from .tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from .toolset_selector import ToolsetSelectorMiddleware
 from .user_preferences_middleware import UserPreferencesMiddleware
 

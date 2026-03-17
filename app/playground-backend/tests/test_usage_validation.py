@@ -15,7 +15,7 @@ class TestBillingUnitValidation:
         """Test that standard LLM token types are accepted."""
         log = UsageLogCreate(
             provider="openai",
-            model_name="gpt-4",
+            model_name="gpt-4o",
             billing_unit_breakdown={
                 "input_tokens": 1234,
                 "output_tokens": 567,

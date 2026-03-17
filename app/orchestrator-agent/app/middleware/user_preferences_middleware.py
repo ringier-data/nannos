@@ -16,6 +16,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from agent_common.middleware.utils import append_to_system_message
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -163,7 +164,8 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
 
         addendum = self._build_preferences_addendum(user_context)
         if addendum:
-            request.system_prompt = request.system_prompt + addendum if request.system_prompt else addendum
+            new_system_message = append_to_system_message(request.system_message, addendum)
+            request = request.override(system_message=new_system_message)
 
         return handler(request)
 
@@ -188,6 +190,7 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
 
         addendum = self._build_preferences_addendum(user_context)
         if addendum:
-            request.system_prompt = request.system_prompt + addendum if request.system_prompt else addendum
+            new_system_message = append_to_system_message(request.system_message, addendum)
+            request = request.override(system_message=new_system_message)
 
         return await handler(request)

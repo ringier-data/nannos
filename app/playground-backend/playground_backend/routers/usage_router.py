@@ -210,6 +210,7 @@ async def get_my_usage_logs(
                     sub_agent_id=log.get("sub_agent_id"),
                     sub_agent_config_version_id=log.get("sub_agent_config_version_id"),
                     sub_agent_name=log.get("sub_agent_name"),
+                    scheduled_job_id=log.get("scheduled_job_id"),
                     provider=log["provider"],
                     model_name=log["model_name"],
                     total_cost_usd=log["total_cost_usd"],

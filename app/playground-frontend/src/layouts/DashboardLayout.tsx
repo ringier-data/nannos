@@ -20,6 +20,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { mainNavItems, groupManagerNavItems, adminNavItems } from '@/config/navigation';
 import { NotificationInbox } from '@/components/notifications/NotificationInbox';
 import { ImpersonationBanner } from '@/components/ImpersonationBanner';
+import { SchedulerNotifications } from '@/components/SchedulerNotifications';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -30,6 +31,7 @@ export function DashboardLayout() {
 
   return (
     <SidebarProvider>
+      <SchedulerNotifications />
       <Sidebar>
         <SidebarHeader>
           <div className="flex items-center gap-2 px-2 py-2">

@@ -18,12 +18,12 @@ from a2a.utils import (
     new_task,
 )
 from a2a.utils.errors import ServerError
+from agent_common.models.base import ModelType
 from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
 
 from app.models.responses import AgentStreamResponse
 
-from ..models.base import ModelType
 from ..models.config import UserConfig
 
 # from google.adk.sessions import InMemorySessionService
@@ -128,8 +128,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         sub_agents = await self.agent.agent_discovery_service.register_agents(
             agent_metadata=user_config.agent_metadata or {},
             token=user_config.access_token.get_secret_value(),
-            user_config=user_config,
-            streaming_middleware=self.agent._graph_factory.a2a_middleware,
         )
 
         # Discover ALL tools (without whitelist)
@@ -322,8 +320,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             config = {
                 "configurable": {"thread_id": task.context_id},
                 "metadata": {
-                    "assistant_id": slack_channel_id if slack_channel_id else user_sub,
+                    "assistant_id": slack_channel_id
+                    if slack_channel_id
+                    else user.id,  # Use database ID (not OIDC sub) to match docstore tools
                     "user_id": user.id,  # Stable database ID (not OIDC sub)
+                    "conversation_id": task.context_id,  # For conversation-scoped tool result storage
                     "user_name": user_name,
                     "slack_thread_ts": request_metadata.get("slackThreadTs"),
                     "scope": "personal" if not slack_channel_id else "channel",

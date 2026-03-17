@@ -13,6 +13,7 @@ Graph creation with actual models should be tested in integration tests.
 from unittest.mock import Mock, patch
 
 import pytest
+from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from langchain.agents.middleware import ToolRetryMiddleware
 
 from app.core.graph_factory import GraphFactory
@@ -109,14 +110,15 @@ class TestMiddlewareStack:
         stack = factory._create_middleware_stack()
 
         # Verify correct order (DynamicTool must be first)
-        assert len(stack) == 7
+        assert len(stack) == 8
         assert isinstance(stack[0], DynamicToolDispatchMiddleware)
         assert isinstance(stack[1], UserPreferencesMiddleware)
-        assert isinstance(stack[2], RepeatedToolCallMiddleware)
-        assert isinstance(stack[3], AuthErrorDetectionMiddleware)
-        assert isinstance(stack[4], ToolRetryMiddleware)
-        assert isinstance(stack[5], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[6], TodoStatusMiddleware)
+        assert isinstance(stack[2], StoragePathsInstructionMiddleware)
+        assert isinstance(stack[3], RepeatedToolCallMiddleware)
+        assert isinstance(stack[4], AuthErrorDetectionMiddleware)
+        assert isinstance(stack[5], ToolRetryMiddleware)
+        assert isinstance(stack[6], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[7], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_middleware_stack_dynamic_tool_dispatch_config(self, mock_dynamodb, mock_config):
@@ -134,8 +136,9 @@ class TestMiddlewareStack:
 class TestStaticTools:
     """Test static tools caching and retrieval."""
 
+    @patch("app.core.graph_factory.AsyncPostgresStore")
     @patch("app.core.graph_factory.DynamoDBSaver")
-    def test_get_static_tools_returns_cached_tools(self, mock_dynamodb, mock_config):
+    def test_get_static_tools_returns_cached_tools(self, mock_dynamodb, mock_pg_store, mock_config):
         """Test that get_static_tools returns the same cached list on repeated calls."""
         factory = GraphFactory(config=mock_config)
 
@@ -147,8 +150,9 @@ class TestStaticTools:
         # Verify it's a list
         assert isinstance(tools1, list)
 
+    @patch("app.core.graph_factory.AsyncPostgresStore")
     @patch("app.core.graph_factory.DynamoDBSaver")
-    def test_static_tools_include_time_and_file(self, mock_dynamodb, mock_config):
+    def test_static_tools_include_time_and_file(self, mock_dynamodb, mock_pg_store, mock_config):
         """Test that static tools list includes expected tools."""
         factory = GraphFactory(config=mock_config)
 
@@ -156,7 +160,7 @@ class TestStaticTools:
 
         # Verify it's a list of tools
         assert isinstance(tools, list)
-        assert len(tools) == 2  # FinalResponseSchema only added when with_response_tool=True
+        assert len(tools) == 3  # FinalResponseSchema only added when with_response_tool=True
 
         # Get tool names
         tool_names = [tool.name for tool in tools]
@@ -164,3 +168,4 @@ class TestStaticTools:
         # Verify expected tools present
         assert "generate_presigned_url" in tool_names
         assert "get_current_time" in tool_names
+        assert "copy_file" in tool_names

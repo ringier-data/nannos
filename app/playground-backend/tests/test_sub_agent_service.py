@@ -41,14 +41,14 @@ async def _create_sub_agent(
     user: User,
     name: str,
     subagent_service: SubAgentService,
-    system_prompt: str = "Default prompt",
+    system_prompt: str = "Default prompt" * 100,  # Long prompt to ensure auto-approval is not triggered
 ) -> SubAgent:
     """Create a test sub-agent and return it."""
     data = SubAgentCreate(
         name=name,
         type=SubAgentType.LOCAL,
         description="Test agent",
-        model="gpt-4",
+        model="gpt-4o",
         system_prompt=system_prompt,
         mcp_tools=[],
     )
@@ -73,7 +73,7 @@ class TestSubAgentVersionCreation:
             name="Test Agent",
             type=SubAgentType.LOCAL,
             description="Test description",
-            model="gpt-4",
+            model="gpt-4o",
             system_prompt="You are a helpful assistant",
             mcp_tools=["tool1", "tool2"],
         )
@@ -83,10 +83,10 @@ class TestSubAgentVersionCreation:
         assert agent is not None
         assert agent.name == "Test Agent"
         assert agent.current_version == 1
-        assert agent.default_version is None  # Not approved yet
+        assert agent.default_version == 1  # Auto-approved since < 500 chars and < 4 tools
         assert agent.config_version is not None
         assert agent.config_version.version == 1
-        assert agent.config_version.status == SubAgentStatus.DRAFT
+        assert agent.config_version.status == SubAgentStatus.APPROVED
         assert agent.config_version.change_summary == "Initial version"
         assert agent.config_version.version_hash is not None
         assert len(agent.config_version.version_hash) == 12  # 12-char hash
@@ -102,7 +102,7 @@ class TestSubAgentVersionCreation:
         # Update configuration
         data = SubAgentUpdate(
             description="Updated description",
-            system_prompt="New system prompt",
+            system_prompt="New system prompt" * 100,  # Long enough to prevent auto-approval
             change_summary="Updated system prompt",
         )
 
@@ -112,7 +112,7 @@ class TestSubAgentVersionCreation:
         assert updated.current_version == 2
         assert updated.config_version is not None
         assert updated.config_version.version == 2
-        assert updated.config_version.system_prompt == "New system prompt"
+        assert updated.config_version.system_prompt == "New system prompt" * 100  # Matches the updated value
         assert updated.config_version.change_summary == "Updated system prompt"
         assert updated.config_version.status == SubAgentStatus.DRAFT
 
@@ -229,7 +229,7 @@ class TestSubAgentVersionCreation:
             description="Local agent description",
             type=SubAgentType.LOCAL,
             system_prompt="Local prompt",
-            model="gpt-4",
+            model="gpt-4o",
         )
 
         agent = await service.create_sub_agent(pg_session, data, test_user_db)
@@ -513,7 +513,7 @@ class TestSubAgentVersionCreation:
             name="Agent",
             type=SubAgentType.LOCAL,
             description="Desc",
-            model="gpt-4",
+            model="gpt-4o",
             system_prompt="Prompt A",
             mcp_tools=["tool1"],
         )
@@ -529,7 +529,7 @@ class TestSubAgentVersionCreation:
         hash2 = agent2.config_version.version_hash
 
         # Modify model
-        update = SubAgentUpdate(description="Desc", model="gpt-4-turbo", change_summary="Changed model")
+        update = SubAgentUpdate(description="Desc", model="gpt-4o-mini", change_summary="Changed model")
         agent3 = await service.update_sub_agent(pg_session, agent2.id, update, actor=user)
         assert agent3 is not None
         assert agent3.config_version is not None
@@ -561,7 +561,7 @@ class TestSubAgentVersionCreation:
             name="Agent",
             type=SubAgentType.LOCAL,
             description="Agent with default tools",
-            model="gpt-4",
+            model="gpt-4o",
             system_prompt="Prompt",
             mcp_tools=None,  # Use orchestrator defaults
         )
@@ -839,7 +839,7 @@ class TestVersionApprovalWorkflow:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2", description="Version 2"),
+            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
             actor=user,
         )
         await service.submit_for_approval(pg_session, agent.id, "V2", actor=user)
@@ -949,7 +949,7 @@ class TestVersionReversion:
             name="Agent",
             type=SubAgentType.LOCAL,
             description="V1 description",
-            model="gpt-4",
+            model="gpt-4o",
             system_prompt="V1 prompt",
             mcp_tools=["tool1", "tool2"],
         )
@@ -975,7 +975,7 @@ class TestVersionReversion:
         assert result.config_version.description == "V1 description"
         assert result.config_version.system_prompt == "V1 prompt"
         assert result.config_version.mcp_tools == ["tool1", "tool2"]
-        assert result.config_version.model == "gpt-4"
+        assert result.config_version.model == "gpt-4o"
 
     @pytest.mark.asyncio
     async def test_non_owner_cannot_revert_version(
@@ -1027,7 +1027,7 @@ class TestDefaultVersionManagement:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2", description="Version 2"),
+            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
             actor=user,
         )
         await service.submit_for_approval(pg_session, agent.id, "V2", actor=user)
@@ -1128,7 +1128,7 @@ class TestVersionDeletion:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2", description="Version 2"),
+            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
             actor=user,
         )
 
@@ -1189,7 +1189,7 @@ class TestVersionDeletion:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2", description="Version 2"),
+            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
             actor=user,
         )
 
@@ -1250,7 +1250,7 @@ class TestVersionDeletion:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(description="", system_prompt="V2"),
+            SubAgentUpdate(description="", system_prompt="V2 prompt" * 100),  # Long enough to prevent auto-approval
             actor=user,
         )
         await service.submit_version_for_approval(pg_session, agent.id, 2, "Submit V2", actor=user)
@@ -1292,7 +1292,7 @@ class TestPermissionValidation:
         service = sub_agent_service
         owner = test_user_db
         admin = test_admin_user_db
-        agent = await _create_sub_agent(pg_session, owner, "Agent", service, "V1")
+        agent = await _create_sub_agent(pg_session, owner, "Agent", service)
 
         # Owner can submit
         await service.submit_for_approval(pg_session, agent.id, "Submit", actor=owner)
@@ -1333,7 +1333,7 @@ class TestPermissionValidation:
         service = sub_agent_service
         owner = test_user_db
         approver = test_approver_user_db
-        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service, "V1")
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
 
         # Create a group and add approver to it
         group_result = await pg_session.execute(
@@ -1387,7 +1387,7 @@ class TestPermissionValidation:
         service = sub_agent_service
         owner = test_user_db
         approver = test_approver_user_db
-        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service, "V1")
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, "Ready for review", actor=owner)
@@ -1402,7 +1402,7 @@ class TestPermissionValidation:
     ):
         """Test that approvers who own a sub-agent can approve it without group membership."""
         service = sub_agent_service
-        agent = await _create_sub_agent(pg_session, test_approver_user_db, "Agent", sub_agent_service, "V1")
+        agent = await _create_sub_agent(pg_session, test_approver_user_db, "Agent", sub_agent_service)
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, "Ready for review", actor=test_approver_user_db)
@@ -1422,7 +1422,7 @@ class TestPermissionValidation:
         service = sub_agent_service
         owner = test_user_db
         admin_role_user = test_admin_user_db
-        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service, "V1")
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, "Ready for review", actor=owner)
@@ -1447,7 +1447,7 @@ class TestPermissionValidation:
         service = sub_agent_service
         owner = test_user_db
         other = test_approver_user_db
-        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service, "V1")
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
 
         # Submit for approval
         await service.submit_for_approval(pg_session, agent.id, "Ready for review", actor=owner)

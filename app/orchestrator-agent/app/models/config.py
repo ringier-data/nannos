@@ -9,12 +9,11 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
+from agent_common.a2a.models import LocalSubAgentConfig
+from agent_common.models.base import ModelType, ThinkingLevel
 from deepagents import CompiledSubAgent
 from langchain_core.messages import ContentBlock
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
-
-from ..a2a_utils.models import LocalSubAgentConfig
-from ..models.base import ModelType, ThinkingLevel
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +170,8 @@ class UserConfig(BaseModel):
     language: str = Field(default="en", description="User's preferred language")
     timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
     model: Optional[ModelType] = Field(
-        default=None, description="LLM model to use (gpt4o, gpt-4o-mini, claude-sonnet-4.5, claude-sonnet-4.6 or claude-haiku-4-5)"
+        default=None,
+        description="LLM model to use (gpt-4o, gpt-4o-mini, claude-sonnet-4.5, claude-sonnet-4.6 or claude-haiku-4-5)",
     )
     message_formatting: Literal["markdown", "slack", "plain"] = Field(
         default="markdown",
@@ -271,6 +271,9 @@ class AgentSettings:
     # MCP gateway configuration
     MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
+
+    # Playground backend URL — used to subscribe to playground's MCP endpoint
+    PLAYGROUND_BACKEND_URL: str | None = os.getenv("PLAYGROUND_BACKEND_URL", None)
 
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -456,6 +459,45 @@ class AgentSettings:
         "4. Use github tools to create an issue for the bug\n"
         "5. Assign appropriate coding agents to fix the bug\n"
         "6. Poll the ticket to find the PR link\n"
+        "\n"
+        "**SCHEDULING AUTOMATED TASKS:**\n"
+        "For ANY scheduling-related request, IMMEDIATELY delegate to the 'task-scheduler' sub-agent. Do NOT ask the user for details like:\n"
+        "- Channel IDs, channel names, or delivery methods\n"
+        "- Cron expressions or specific times\n"
+        "- Job configurations or parameters\n"
+        "\n"
+        "The task-scheduler will handle ALL information gathering and configuration itself.\n"
+        "\n"
+        "Correct approach:\n"
+        "User: 'Schedule a daily verse at 9am'\n"
+        "You: [Immediately call task tool with subagent_type='task-scheduler', description='Schedule a daily verse at 9am']\n"
+        "\n"
+        "Wrong approach:\n"
+        "User: 'Schedule a daily verse at 9am'\n"
+        "You: [Asking 'What channel should I send it to?' or 'What time zone?']\n"
+        "\n"
+        "The task-scheduler specializes in:\n"
+        "- Creating scheduled jobs (one-time, recurring, or watch-based)\n"
+        "- Managing existing schedules (list, update, pause, resume)\n"
+        "- Creating automated sub-agents for task execution\n"
+        "- Validating watch conditions and gathering required information\n"
+        "- Setting up monitoring and notifications (watch jobs)\n"
+        "\n"
+        "Examples that should be delegated immediately:\n"
+        "- 'Schedule a daily joke at 9am' → task-scheduler\n"
+        "- 'Create a watch to monitor Jira tickets' → task-scheduler\n"
+        "- 'Send me La Divina Commedia verses every morning' → task-scheduler\n"
+        "- 'Show me all my scheduled jobs' → task-scheduler\n"
+        "- 'Pause the daily report job' → task-scheduler\n"
+        "- 'Let me know when PR #123 is merged' → task-scheduler\n"
+        "- 'Notify me when the deployment completes' → task-scheduler\n"
+        "- 'Alert me if the build fails' → task-scheduler\n"
+        "- 'Tell me when issue XYZ is closed' → task-scheduler\n"
+        "\n"
+        "Key patterns that indicate task-scheduler routing:\n"
+        "- Time-based: 'every day', 'at 9am', 'daily', 'weekly', 'schedule'\n"
+        "- Watch/Monitor: 'when X happens', 'notify me when', 'let me know when', 'alert me if/when'\n"
+        "- Job management: 'list my jobs', 'pause', 'resume', 'show scheduled tasks'\n"
         "\n"
         "Remember: Every task in your plan must be delegated to a sub-agent. You are the conductor, not the performer."
     )

@@ -106,6 +106,26 @@ class MCPGatewayConfig(BaseModel):
     client_id: str = Field(default_factory=lambda: os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana"))
 
 
+class SchedulerConfig(BaseModel):
+    """Scheduler engine configuration."""
+
+    tick_interval_seconds: int = Field(default_factory=lambda: int(os.getenv("SCHEDULER_TICK_INTERVAL_SECONDS", "30")))
+    claim_limit: int = Field(default_factory=lambda: int(os.getenv("SCHEDULER_CLAIM_LIMIT", "10")))
+    agent_runner_url: str = Field(default_factory=lambda: os.getenv("AGENT_RUNNER_URL", "http://localhost:5005"))
+    ai_model_id: str = Field(
+        default_factory=lambda: os.getenv("SCHEDULER_AI_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
+    )  # NOTE: supports just bedrock models for now, but can be extended in the future
+
+
+class AutoApproveConfig(BaseModel):
+    """Auto-approve constraints for sub-agents."""
+
+    max_system_prompt_length: int = Field(
+        default_factory=lambda: int(os.getenv("AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH", "500"))
+    )
+    max_mcp_tools_count: int = Field(default_factory=lambda: int(os.getenv("AUTO_APPROVE_MAX_MCP_TOOLS_COUNT", "3")))
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -122,6 +142,8 @@ class Config(BaseModel):
     keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)
     mcp_gateway: MCPGatewayConfig = Field(default_factory=MCPGatewayConfig)
     file_storage: FileStorageConfig = Field(default_factory=FileStorageConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"

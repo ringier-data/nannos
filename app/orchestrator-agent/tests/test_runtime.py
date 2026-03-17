@@ -3,9 +3,9 @@
 import logging
 from unittest.mock import Mock
 
+from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from pydantic import SecretStr
 
-from app.a2a_utils.models import LocalLangGraphSubAgentConfig
 from app.models.config import GraphRuntimeContext, UserConfig
 from app.utils import build_runtime_context
 
@@ -327,7 +327,8 @@ class TestBuildRuntimeContext:
             # Patch the create_dynamic_local_subagent to raise an error
             # It's imported inside build_runtime_context, so patch where it's used
             with patch(
-                "app.agents.dynamic_agent.create_dynamic_local_subagent", side_effect=Exception("Agent creation failed")
+                "agent_common.agents.dynamic_agent.create_dynamic_local_subagent",
+                side_effect=Exception("Agent creation failed"),
             ):
                 context = build_runtime_context(
                     user_config,

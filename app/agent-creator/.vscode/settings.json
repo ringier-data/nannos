@@ -11,7 +11,7 @@
   "ruff.importStrategy": "fromEnvironment",
   "python-envs.pythonProjects": [
     {
-      "path": "",
+      "path": ".",
       "envManager": "ms-python.python:venv",
       "packageManager": "ms-python.python:pip"
     }

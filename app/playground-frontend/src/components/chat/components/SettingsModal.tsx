@@ -27,7 +27,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   // User has settings if preferred_model is explicitly set (not null)
   const hasUserSettings = userSettings?.preferred_model !== null && userSettings?.preferred_model !== undefined;
 
-  const [model, setModel] = useState(settings?.model || 'gpt4o');
+  const [model, setModel] = useState(settings?.model || 'gpt-4o');
   const [enableThinking, setEnableThinking] = useState(settings?.enableThinking || false);
   const [thinkingLevel, setThinkingLevel] = useState(settings?.thinkingLevel || 'low');
   const [isSaving, setIsSaving] = useState(false);
@@ -35,7 +35,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   // Reset form when modal opens
   useEffect(() => {
     if (isOpen && settings) {
-      setModel(settings.model || 'gpt4o');
+      setModel(settings.model || 'gpt-4o');
       setEnableThinking(settings.enableThinking || false);
       setThinkingLevel(settings.thinkingLevel || 'low');
     }

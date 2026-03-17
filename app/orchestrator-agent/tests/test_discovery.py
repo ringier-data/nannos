@@ -126,64 +126,6 @@ class TestAgentDiscoveryService:
 
         assert result == []
 
-    @pytest.mark.asyncio
-    async def test_register_agents_with_middleware(self):
-        """Test agent registration with streaming middleware."""
-        config = Mock(spec=AgentSettings)
-        config.get_oidc_client_id.return_value = "test_client_id"
-        config.get_oidc_client_secret.return_value = Mock()
-        config.get_oidc_client_secret.return_value.get_secret_value.return_value = "test_secret"
-        config.get_oidc_issuer.return_value = "https://test.oidc.com"
-
-        oauth2_client = Mock()
-        service = AgentDiscoveryService(config, oauth2_client)
-        agent_metadata = {
-            "http://test-agent:8000": {
-                "sub_agent_id": "test-id",
-                "name": "Test Agent",
-                "description": "Test description",
-            }
-        }
-        token = "valid_token"
-        middleware = Mock()
-        middleware.register_streaming_runnable = Mock()
-
-        with (
-            patch("app.core.discovery.make_a2a_async_runnable") as mock_runnable,
-            patch("app.core.discovery.AgentCard") as mock_agent_card_cls,
-            patch("httpx.AsyncClient") as mock_client,
-        ):
-            # Mock AgentCard instance
-            mock_agent_card = Mock()
-            mock_agent_card.name = "Test Agent"
-            mock_agent_card.description = "Test description"
-            mock_agent_card.url = "http://test-agent:8000"
-            mock_agent_card.default_input_modes = ["text", "image"]  # Add for multimodal check
-            mock_agent_card_cls.return_value = mock_agent_card
-
-            # Mock HTTP response for agent card
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "name": "Test Agent",
-                "description": "Test description",
-                "url": "http://test-agent:8000",
-            }
-            mock_response.raise_for_status.return_value = None
-
-            mock_http_client = AsyncMock()
-            mock_http_client.get = AsyncMock(return_value=mock_response)
-            mock_client.return_value.__aenter__.return_value = mock_http_client
-
-            # Mock A2A runnable with streaming
-            mock_runnable_instance = Mock()
-            mock_runnable_instance._streaming_runnable = Mock()
-            mock_runnable.return_value = mock_runnable_instance
-
-            result = await service.register_agents(agent_metadata, token, streaming_middleware=middleware)
-
-            assert len(result) == 1
-            middleware.register_streaming_runnable.assert_called_once()
-
 
 class TestToolDiscoveryService:
     """Test ToolDiscoveryService functionality."""
@@ -232,6 +174,7 @@ class TestToolDiscoveryService:
         config.get_oidc_client_secret.return_value.get_secret_value.return_value = "test_secret"
         config.get_oidc_issuer.return_value = "https://test.oidc.com"
         config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
+        config.PLAYGROUND_BACKEND_URL = None
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")

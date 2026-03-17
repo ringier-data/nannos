@@ -2,6 +2,16 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { io, type Socket } from 'socket.io-client';
 import type { AgentInfo, AgentResponseData, ClientInitializedData, SendMessagePayload, Settings } from '../types';
 
+interface SchedulerNotification {
+  job_id: number;
+  job_name: string;
+  run_id: number;
+  status: string;
+  result_summary?: string;
+  error_message?: string;
+  timestamp: string;
+}
+
 interface SocketContextType {
   socket: Socket | null;
   isConnected: boolean;
@@ -10,6 +20,7 @@ interface SocketContextType {
   initializeClient: (settings: Settings, sessionId: string) => Promise<boolean>;
   sendMessage: (payload: SendMessagePayload) => void;
   onAgentResponse: (callback: (data: AgentResponseData) => void) => () => void;
+  onSchedulerNotification: (callback: (data: SchedulerNotification) => void) => () => void;
 }
 
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
@@ -26,6 +37,7 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
   const [isSocketReady, setIsSocketReady] = useState(false);
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const responseCallbacksRef = useRef<Set<(data: AgentResponseData) => void>>(new Set());
+  const schedulerCallbacksRef = useRef<Set<(data: SchedulerNotification) => void>>(new Set());
   const initResolveRef = useRef<((value: boolean) => void) | null>(null);
   const customHeadersRef = useRef(customHeaders);
 
@@ -61,6 +73,11 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
 
     newSocket.on('agent_response', (data: AgentResponseData) => {
       responseCallbacksRef.current.forEach((callback) => callback(data));
+    });
+
+    newSocket.on('scheduler_notification', (data: SchedulerNotification) => {
+      console.log('Scheduler notification:', data);
+      schedulerCallbacksRef.current.forEach((callback) => callback(data));
     });
 
     newSocket.on('debug_log', (data: unknown) => {
@@ -123,6 +140,13 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
     };
   }, []);
 
+  const onSchedulerNotification = useCallback((callback: (data: SchedulerNotification) => void) => {
+    schedulerCallbacksRef.current.add(callback);
+    return () => {
+      schedulerCallbacksRef.current.delete(callback);
+    };
+  }, []);
+
   return (
     <SocketContext.Provider
       value={{
@@ -133,6 +157,7 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
         initializeClient,
         sendMessage,
         onAgentResponse,
+        onSchedulerNotification,
       }}
     >
       {children}

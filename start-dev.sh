@@ -17,6 +17,7 @@ BACKEND_ENV="local"
 ORCHESTRATOR_ENV="local"
 AGENT_CREATOR_ENV="local"
 ALLOY_ENV="local"
+AGENT_RUNNER_ENV="local"
 LOG_DIR="./logs"
 HELP=false
 DEBUG_MODE=false
@@ -53,6 +54,14 @@ ALLOY_URLS=(
     dev "https://alloy-agent.d.nannos.rcplus.io"
     stg "https://alloy-agent.s.nannos.rcplus.io"
     prod "https://alloy-agent.nannos.rcplus.io"
+)
+
+typeset -A AGENT_RUNNER_URLS
+AGENT_RUNNER_URLS=(
+    local "http://localhost:5005"
+    dev "https://agent-runner.d.nannos.rcplus.io"
+    stg "https://agent-runner.s.nannos.rcplus.io"
+    prod "https://agent-runner.nannos.rcplus.io"
 )
 
 
@@ -92,6 +101,10 @@ while [[ $# -gt 0 ]]; do
             ALLOY_ENV="$2"
             shift 2
             ;;
+        --agent-runner)
+            AGENT_RUNNER_ENV="$2"
+            shift 2
+            ;;
         --log-dir)
             LOG_DIR="$2"
             shift 2
@@ -124,6 +137,7 @@ Options:
   --orchestrator ENV      Orchestrator environment (local|dev|stg|prod) [default: local]
   --agent-creator ENV     Agent Creator environment (local|dev|stg|prod) [default: local]
   --alloy ENV            Alloy Agent environment (local|dev|stg|prod) [default: local]
+  --agent-runner ENV     Agent Runner environment (local|dev|stg|prod) [default: local]
   --log-dir DIR          Directory for log files [default: ./logs]
   --debug                Enable debug mode (starts Python services with debugpy)
   -h, --help             Show this help message
@@ -163,7 +177,7 @@ EOF
 fi
 
 # Validate environments
-for env in "$BACKEND_ENV" "$ORCHESTRATOR_ENV" "$AGENT_CREATOR_ENV" "$ALLOY_ENV"; do
+for env in "$BACKEND_ENV" "$ORCHESTRATOR_ENV" "$AGENT_CREATOR_ENV" "$ALLOY_ENV" "$AGENT_RUNNER_ENV"; do
     if [[ ! "$env" =~ ^(local|dev|stg|prod)$ ]]; then
         echo -e "${RED}Error: Invalid environment '$env'. Must be one of: local, dev, stg, prod${NC}"
         exit 1
@@ -305,6 +319,11 @@ ensure_ports_available() {
             check_port 5681 "Alloy Debug"
         fi
     fi
+
+    # Check agent-runner port if running locally
+    if [ "$AGENT_RUNNER_ENV" = "local" ]; then
+        check_port 5005 "Agent Runner"
+    fi
     
     # Always check frontend port (always runs locally)
     check_port 5173 "Frontend"
@@ -346,6 +365,7 @@ echo -e "Debug Mode:      ${GREEN}${DEBUG_MODE}${NC}"
 echo -e "Orchestrator:    ${GREEN}${ORCHESTRATOR_ENV}${NC} (${ORCHESTRATOR_DOMAINS[$ORCHESTRATOR_ENV]})"
 echo -e "Agent Creator:   ${GREEN}${AGENT_CREATOR_ENV}${NC} (${AGENT_CREATOR_URLS[$AGENT_CREATOR_ENV]})"
 echo -e "Alloy Agent:    ${GREEN}${ALLOY_ENV}${NC} (${ALLOY_URLS[$ALLOY_ENV]})"
+echo -e "Agent Runner:    ${GREEN}${AGENT_RUNNER_ENV}${NC} (${AGENT_RUNNER_URLS[$AGENT_RUNNER_ENV]})"
 echo -e "Logs:            ${GREEN}${LOG_DIR}/${NC}"
 echo -e "${BLUE}================================${NC}\n"
 
@@ -438,7 +458,11 @@ if [ "$BACKEND_ENV" = "local" ]; then
     # MCP Gateway Configuration
     update_env_var ".env" "MCP_GATEWAY_URL" "$MCP_GATEWAY_URL"
     update_env_var ".env" "MCP_GATEWAY_CLIENT_ID" "$MCP_GATEWAY_CLIENT_ID"
-    
+
+    # Scheduler Configuration
+    update_env_var ".env" "SCHEDULER_TICK_INTERVAL_SECONDS" "30"
+    update_env_var ".env" "AGENT_RUNNER_URL" "${AGENT_RUNNER_URLS[$AGENT_RUNNER_ENV]}"
+
     # Fetch secrets from AWS SSM
     echo -e "${YELLOW}Fetching secrets from AWS SSM...${NC}"
     
@@ -735,6 +759,109 @@ if [ "$ALLOY_ENV" = "local" ]; then
     done
 fi
 
+# 4.5. AGENT RUNNER
+if [ "$AGENT_RUNNER_ENV" = "local" ]; then
+    echo -e "${YELLOW}Configuring Agent Runner (local)...${NC}"
+    # Determine environment prefix for SSM paths and resource names
+    case "$BACKEND_ENV" in
+        dev) ENV_PREFIX="dev" ;;
+        stg) ENV_PREFIX="stg" ;;
+        prod) ENV_PREFIX="prod" ;;
+        *) ENV_PREFIX="dev" ;;
+    esac
+
+    pushd app/agent-runner > /dev/null
+
+    # Generate .env from template
+    cp .env.template .env
+
+    # OIDC Authentication - use shared OIDC_ISSUER
+    update_env_var ".env" "OIDC_ISSUER" "$OIDC_ISSUER"
+    update_env_var ".env" "AGENT_BASE_URL" "http://localhost:5005"
+
+    # Override environment-specific AWS resources (always use dev for local)
+    update_env_var ".env" "CHECKPOINT_DYNAMODB_TABLE_NAME" "dev-nannos-infrastructure-agents-langgraph-checkpoints"
+    update_env_var ".env" "CHECKPOINT_S3_BUCKET_NAME" "dev-nannos-infrastructure-agents-orchestrator-checkpoints"
+
+    # Configure playground-backend URL
+    update_env_var ".env" "PLAYGROUND_BACKEND_URL" "${BACKEND_URLS[$BACKEND_ENV]}"
+
+    # Configure PostgreSQL document store
+    if [ "$BACKEND_ENV" = "local" ]; then
+        update_env_var ".env" "POSTGRES_HOST" "localhost"
+        update_env_var ".env" "POSTGRES_PORT" "5432"
+        update_env_var ".env" "POSTGRES_USER" "postgres"
+        update_env_var ".env" "POSTGRES_PASSWORD" "password"
+    else
+        echo -e "${YELLOW}Fetching remote database configuration for agent-runner...${NC}"
+        RDS_STACK_NAME="${ENV_PREFIX}-nannos-infrastructure-agents-rds"
+        PG_HOST=$(aws cloudformation describe-stacks --stack-name "$RDS_STACK_NAME" --query 'Stacks[0].Outputs[?OutputKey==`RdsInstanceEndpointAddress`].OutputValue' --output text 2>/dev/null || echo "")
+        if [ -n "$PG_HOST" ]; then
+            update_env_var ".env" "POSTGRES_HOST" "${PG_HOST}"
+            update_env_var ".env" "POSTGRES_PORT" "5432"
+            PG_USER=$(aws ssm get-parameter --name /nannos/infrastructure-agents/rds-docstore-username --output json --with-decryption | jq -r .Parameter.Value)
+            PG_PASS=$(aws ssm get-parameter --name /nannos/infrastructure-agents/rds-docstore-password --output json --with-decryption | jq -r .Parameter.Value)
+            update_env_var ".env" "POSTGRES_USER" "${PG_USER}"
+            update_env_var ".env" "POSTGRES_PASSWORD" "${PG_PASS}"
+        fi
+    fi
+
+    update_env_var ".env" "DOCUMENT_STORE_S3_BUCKET" "${ENV_PREFIX}-nannos-infrastructure-agents-files"
+
+    # MCP Gateway Configuration
+    update_env_var ".env" "MCP_GATEWAY_URL" "$MCP_GATEWAY_URL"
+
+    if ! LANGSMITH_API_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/langsmith-api-key --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch LANGSMITH_API_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "LANGSMITH_API_KEY" "$LANGSMITH_API_KEY"
+    update_env_var ".env" "LANGSMITH_PROJECT" "${ENV_PREFIX}-nannos-agent-framework"
+
+    # OIDC credentials: agent-runner reuses the orchestrator Keycloak client
+    # for both inbound JWT validation and outbound token exchange
+    # (SmartTokenInterceptor) when calling remote A2A agents.
+    if ! OIDC_CLIENT_SECRET=$(aws ssm get-parameter --name /nannos/keycloak/orchestrator-secret --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch OIDC_CLIENT_SECRET from AWS SSM${NC}"
+        exit 1
+    fi
+    if ! GCP_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/gcp-key --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch GCP_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "GCP_KEY" "'$GCP_KEY'"
+
+    update_env_var ".env" "OIDC_CLIENT_SECRET" "$OIDC_CLIENT_SECRET"
+    if ! AZURE_OPENAI_API_KEY=$(aws ssm get-parameter --name /nannos/openai-api-key-chatgpt-4o --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch AZURE_OPENAI_API_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "AZURE_OPENAI_API_KEY" "$AZURE_OPENAI_API_KEY"
+
+    popd > /dev/null
+
+    # Start agent-runner with or without debugpy
+    if [ "$DEBUG_MODE" = true ]; then
+        start_component "agent-runner" "app/agent-runner" "uv run --env-file .env python -m debugpy --listen 0.0.0.0:5682 main.py --reload"
+    else
+        start_component "agent-runner" "app/agent-runner" "uv run --env-file .env python main.py --reload"
+    fi
+
+    # Wait for agent-runner to be ready
+    echo -e "${YELLOW}Waiting for agent-runner to be ready...${NC}"
+    for i in {1..20}; do
+        if curl -s http://localhost:5005/health > /dev/null 2>&1; then
+            echo -e "${GREEN}Agent Runner is ready!${NC}\n"
+            break
+        fi
+        if [ $i -eq 20 ]; then
+            echo -e "${RED}Agent Runner failed to start. Check ${LOG_DIR}/agent-runner.log${NC}"
+            exit 1
+        fi
+        sleep 1
+    done
+fi
+
 # 5. FRONTEND (always local)
 echo -e "${YELLOW}Configuring Frontend (local)...${NC}"
 pushd app/playground-frontend > /dev/null
@@ -756,6 +883,8 @@ VITE_LANGSMITH_ORGANIZATION_ID=eacaca37-6472-40d5-80b4-9206d058caef
 VITE_LANGSMITH_PROJECT_ID=052ac0c2-787f-44e2-810a-34d8b7845a09
 VITE_KEYCLOAK_BASE_URL=${OIDC_BASE_URL}
 VITE_KEYCLOAK_REALM=${KEYCLOAK_REALM_NAME}
+VITE_AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH=${AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH:-500}
+VITE_AUTO_APPROVE_MAX_MCP_TOOLS_COUNT=${AUTO_APPROVE_MAX_MCP_TOOLS_COUNT:-3}
 EOF
 
 # If backend is remote, fetch its PostgreSQL configuration for SDK generation
@@ -825,6 +954,11 @@ if [ "$ALLOY_ENV" = "local" ]; then
 else
     echo -e "Alloy Agent:    ${GREEN}${ALLOY_URLS[$ALLOY_ENV]}${NC} (remote)"
 fi
+if [ "$AGENT_RUNNER_ENV" = "local" ]; then
+    echo -e "Agent Runner:    ${GREEN}http://localhost:5005${NC}"
+else
+    echo -e "Agent Runner:    ${GREEN}${AGENT_RUNNER_URLS[$AGENT_RUNNER_ENV]}${NC} (remote)"
+fi
 echo -e "${BLUE}================================${NC}"
 echo -e "\n${YELLOW}Follow logs:${NC}"
 if [ "$BACKEND_ENV" = "local" ]; then
@@ -838,6 +972,9 @@ if [ "$AGENT_CREATOR_ENV" = "local" ]; then
 fi
 if [ "$ALLOY_ENV" = "local" ]; then
     echo -e "  tail -f ${LOG_DIR}/alloy.log"
+fi
+if [ "$AGENT_RUNNER_ENV" = "local" ]; then
+    echo -e "  tail -f ${LOG_DIR}/agent-runner.log"
 fi
 echo -e "  tail -f ${LOG_DIR}/frontend.log"
 echo -e "\n${YELLOW}Press Ctrl+C to stop all components${NC}\n"

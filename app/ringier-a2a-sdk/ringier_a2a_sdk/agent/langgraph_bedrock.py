@@ -436,23 +436,26 @@ class LangGraphBedrockAgent(BaseAgent):
             # DynamoDB table, so we MUST use different thread_id values to prevent checkpoint
             # pollution and "missing tool_result" errors.
             #
-            # For some reason the checkpoint_ns alone is no longer sufficient - the configurable thread_id must also be
-            # unique to ensure complete isolation.
-            #
             # Format: {context_id}::{checkpoint_ns}
             # - Maintains relationship to conversation via context_id prefix
             # - Ensures complete isolation via unique partition key
             # - Consistent with dynamic sub-agent pattern
             #
+            # For scheduled jobs, the A2A context_id is stored as conversation_id in the
+            # scheduled_job_runs table for tracking and cost attribution.
+            #
             # IMPORTANT: Must include __pregel_checkpointer in config to prevent LangGraph from
-            # interpreting checkpoint_ns as a subgraph identifier (see LangGraph pregel/main.py:1244)
+            # interpreting checkpoint_ns as a subgraph identifier (see LangGraph pregel /main.py:1244)
             checkpoint_ns = self._get_checkpoint_namespace()
+            # Use natural A2A context_id with checkpoint namespace for thread isolation.
+            effective_thread_id = f"{task.context_id}::{checkpoint_ns}"
             config = self.create_runnable_config(
                 user_sub=user_config.user_sub,
                 conversation_id=task.context_id,
-                thread_id=f"{task.context_id}::{checkpoint_ns}",  # Unique thread_id for isolation
+                thread_id=effective_thread_id,
                 checkpoint_ns=checkpoint_ns,
                 checkpointer=self._checkpointer,
+                scheduled_job_id=user_config.scheduled_job_id,
             )
 
             # Convert query to messages format

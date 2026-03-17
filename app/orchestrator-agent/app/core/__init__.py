@@ -17,7 +17,7 @@ Usage:
     from app.core.executor import AgentExecutor
     from app.core.discovery import AgentDiscoveryService
     from app.core.graph_factory import GraphFactory
-    from app.core.model_factory import create_model, get_available_models, is_valid_model
+    from agent_common.core.model_factory import create_model, get_available_models, is_valid_model
 """
 
 # DO NOT import OrchestratorDeepAgent, AgentExecutor, or GraphFactory here
@@ -25,7 +25,7 @@ Usage:
 # DO NOT import from discovery here either - causes circular import via models
 # Import model_factory utilities directly when needed
 
-from .model_factory import (
+from agent_common.core.model_factory import (
     MODEL_CONFIG,
     create_model,
     get_available_models,

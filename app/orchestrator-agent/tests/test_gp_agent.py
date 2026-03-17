@@ -12,18 +12,14 @@ Tests cover:
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agent_common.a2a.base import SubAgentInput
+from agent_common.a2a.structured_response import SubAgentResponseSchema
+from agent_common.models.base import ModelType
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphInterrupt
 
-from app.a2a_utils.base import SubAgentInput
-from app.a2a_utils.structured_response import SubAgentResponseSchema
 from app.agents.gp_agent import GPAgentRunnable, create_gp_local_subagent
-from app.models.base import ModelType
 from app.models.config import GraphRuntimeContext
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_context(**kwargs) -> GraphRuntimeContext:
@@ -81,12 +77,6 @@ def _make_runnable(
     )
     return runnable, mock_graph
 
-
-# ---------------------------------------------------------------------------
-# Properties
-# ---------------------------------------------------------------------------
-
-
 class TestProperties:
     def test_name_is_general_purpose(self):
         runnable, _ = _make_runnable()
@@ -103,10 +93,6 @@ class TestProperties:
         assert runnable.description == GP_DESCRIPTION
 
 
-# ---------------------------------------------------------------------------
-# _process — success path
-# ---------------------------------------------------------------------------
-
 
 class TestProcessSuccess:
     @pytest.mark.asyncio
@@ -122,7 +108,7 @@ class TestProcessSuccess:
             }
         )
 
-        result = await runnable._process(_make_input())
+        result = await runnable._process(_make_input(), config={})
 
         assert result["state"] == "completed"
         assert result["is_complete"] is True
@@ -141,7 +127,7 @@ class TestProcessSuccess:
             }
         )
 
-        result = await runnable._process(_make_input("Create a ticket"))
+        result = await runnable._process(_make_input("Create a ticket"), config={})
 
         assert result["state"] == "input_required"
         assert result["is_complete"] is False
@@ -160,7 +146,7 @@ class TestProcessSuccess:
             }
         )
 
-        result = await runnable._process(_make_input())
+        result = await runnable._process(_make_input(), config={})
 
         assert result["state"] == "failed"
         assert result["is_complete"] is False
@@ -180,7 +166,7 @@ class TestProcessSuccess:
         ]
         mock_graph.ainvoke = AsyncMock(return_value={"messages": [mock_message]})
 
-        result = await runnable._process(_make_input())
+        result = await runnable._process(_make_input(), config={})
 
         assert result["state"] == "completed"
         assert result["is_complete"] is True
@@ -195,14 +181,9 @@ class TestProcessSuccess:
             }
         )
 
-        result = await runnable._process(_make_input(context_id="my-context-id"))
+        result = await runnable._process(_make_input(context_id="my-context-id"), config={})
 
         assert result.get("context_id") == "my-context-id"
-
-
-# ---------------------------------------------------------------------------
-# _process — error handling
-# ---------------------------------------------------------------------------
 
 
 class TestProcessErrorHandling:
@@ -211,7 +192,7 @@ class TestProcessErrorHandling:
         runnable, mock_graph = _make_runnable()
         mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("upstream failure"))
 
-        result = await runnable._process(_make_input())
+        result = await runnable._process(_make_input(), config={})
 
         assert result["state"] == "failed"
         assert result["is_complete"] is False
@@ -223,7 +204,7 @@ class TestProcessErrorHandling:
         mock_graph.ainvoke = AsyncMock(side_effect=GraphInterrupt("interrupt!"))
 
         with pytest.raises(GraphInterrupt):
-            await runnable._process(_make_input())
+            await runnable._process(_make_input(), config={})
 
     @pytest.mark.asyncio
     async def test_missing_tracking_ids_raises_value_error(self):
@@ -242,12 +223,7 @@ class TestProcessErrorHandling:
         )
 
         with pytest.raises(ValueError, match="Missing context_id"):
-            await runnable._process(bad_input)
-
-
-# ---------------------------------------------------------------------------
-# Checkpoint isolation
-# ---------------------------------------------------------------------------
+            await runnable._process(bad_input, config={})
 
 
 class TestCheckpointIsolation:
@@ -271,9 +247,11 @@ class TestCheckpointIsolation:
                 "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
             }
 
+        input_data = _make_input(context_id="abc-123")
+        config = runnable._instrument(input_data=input_data, config={"tags": ["tag1", "tag2"]})
         mock_graph.ainvoke = capture_invoke
 
-        await runnable._process(_make_input(context_id="abc-123"))
+        await runnable._process(input_data, config=config)
 
         configurable = captured_config.get("configurable", {})
         thread_id = configurable.get("thread_id", "")
@@ -296,16 +274,17 @@ class TestCheckpointIsolation:
 
         mock_graph.ainvoke = capture_invoke
 
-        await runnable._process(_make_input(context_id="ctx-aaa"))
-        await runnable._process(_make_input(context_id="ctx-bbb"))
+        await runnable._process(
+            _make_input(context_id="ctx-aaa"),
+            config=runnable._instrument(input_data=_make_input(context_id="ctx-aaa"), config={"tags": ["tag1"]}),
+        )
+        await runnable._process(
+            _make_input(context_id="ctx-bbb"),
+            config=runnable._instrument(input_data=_make_input(context_id="ctx-bbb"), config={"tags": ["tag2"]}),
+        )
 
         assert len(thread_ids) == 2
         assert thread_ids[0] != thread_ids[1]
-
-
-# ---------------------------------------------------------------------------
-# Cache clearing
-# ---------------------------------------------------------------------------
 
 
 class TestCacheClearing:
@@ -325,7 +304,7 @@ class TestCacheClearing:
         # Before _process: cache exists
         assert ctx._cached_selected_tools is not None
 
-        await runnable._process(_make_input())
+        await runnable._process(_make_input(), config={})
 
         # After _process invokes ainvoke, cache should have been cleared at the start
         # (the graph itself may re-populate it, but we verify it was reset beforehand)
@@ -351,14 +330,9 @@ class TestCacheClearing:
 
         mock_graph.ainvoke = check_cache
 
-        await runnable._process(_make_input())
+        await runnable._process(_make_input(), config={})
 
         assert cache_at_invoke_time == [None]
-
-
-# ---------------------------------------------------------------------------
-# create_gp_local_subagent factory
-# ---------------------------------------------------------------------------
 
 
 class TestCreateGpLocalSubagent:

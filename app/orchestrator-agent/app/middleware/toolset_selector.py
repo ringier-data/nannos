@@ -40,6 +40,7 @@ import textwrap
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
+from agent_common.core.model_factory import create_model
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -51,7 +52,6 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
-from ..core.model_factory import create_model
 from ..models.config import AgentSettings, GraphRuntimeContext
 
 logger = logging.getLogger(__name__)
@@ -295,7 +295,7 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
 
         return create_model(
             model_type=AgentSettings.TOOLSET_SELECTION_MODEL,
-            config=AgentSettings,
+            bedrock_region=AgentSettings.get_bedrock_region(),
             thinking_level=None,
             callbacks=callbacks if callbacks else None,
         )

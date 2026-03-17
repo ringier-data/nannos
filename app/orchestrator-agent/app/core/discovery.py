@@ -10,16 +10,15 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from a2a.types import AgentCard
+from agent_common.a2a.config import A2AClientConfig
+from agent_common.a2a.factory import make_a2a_async_runnable
 from deepagents import CompiledSubAgent
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
-from ..a2a_utils.config import A2AClientConfig
-from ..a2a_utils.factory import make_a2a_async_runnable
-from ..middleware import A2ATaskTrackingMiddleware
-from ..models.config import AgentSettings, UserConfig
+from ..models.config import AgentSettings
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +47,12 @@ class AgentDiscoveryService:
         self,
         agent_metadata: dict[str, dict[str, Any]],
         token: str,
-        user_config: Optional[UserConfig] = None,
-        streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
     ) -> List[CompiledSubAgent]:
         """Discover available sub-agents by fetching their agent cards.
 
         Args:
             agent_metadata: Metadata map from agent_url -> {sub_agent_id, name, description}
             token: User's access token for authentication and token exchange
-            user_config: Optional[UserConfig] containing user configuration
-            client_credentials_auth: Optional OidcClientCredentialsAuth for client credentials flow
-            streaming_middleware: Optional middleware for registering streaming runnables
 
         Returns:
             List of discovered sub-agents
@@ -75,9 +69,7 @@ class AgentDiscoveryService:
 
                 agent = await self._discover_single_agent(
                     base_url,
-                    streaming_middleware,
                     token,
-                    user_config,
                     sub_agent_id=sub_agent_id,  # Pass sub_agent_id to discovery
                 )
                 if agent:
@@ -93,18 +85,14 @@ class AgentDiscoveryService:
     async def _discover_single_agent(
         self,
         base_url: str,
-        streaming_middleware: Optional[A2ATaskTrackingMiddleware] = None,
         user_token: Optional[str] = None,
-        user_config: Optional[UserConfig] = None,
         sub_agent_id: Optional[int] = None,
     ) -> Optional[CompiledSubAgent]:
         """Discover a single agent from the given URL.
 
         Args:
             base_url: Base URL of the agent
-            streaming_middleware: Optional middleware for registering streaming runnables
             user_token: User's access token for authentication
-            user_config: Optional UserConfig containing user context for token exchange
 
         Returns:
             CompiledSubAgent if discovery succeeds, None otherwise
@@ -131,24 +119,12 @@ class AgentDiscoveryService:
             agent_card,
             self.oauth2_client,
             user_token=user_token,
-            user_config=user_config,
             config=config,
         )
         logger.debug(f"A2A runnable created successfully for {agent_card.url} with sub_agent_id={sub_agent_id}")
 
         # Create the sub-agent (middleware will be applied by create_deep_agent)
         agent_name = agent_card.name.replace(" ", "")  # Remove spaces for tool name
-
-        # Register streaming runnable with middleware if provided
-        if streaming_middleware and hasattr(base_runnable, "_streaming_runnable"):
-            if hasattr(streaming_middleware, "register_streaming_runnable"):
-                streaming_middleware.register_streaming_runnable(
-                    agent_name,
-                    base_runnable._streaming_runnable,  # type: ignore
-                )
-                logger.debug(f"Registered streaming runnable for {agent_name}")
-        elif hasattr(base_runnable, "_streaming_runnable"):
-            logger.warning(f"No streaming middleware provided for {agent_name}")
 
         agent = CompiledSubAgent(
             name=agent_name,
@@ -296,6 +272,17 @@ class ToolDiscoveryService:
             if not connections:
                 logger.warning("No valid server connections created, returning empty tool list")
                 return []
+
+            # Add playground-backend as an additional MCP server
+            # Playground-backend MCP endpoints require Gatana token for calling Gatana gateway
+            if self.config.PLAYGROUND_BACKEND_URL:
+                playground_mcp_url = f"{self.config.PLAYGROUND_BACKEND_URL}/mcp"
+                connections["playground"] = StreamableHttpConnection(
+                    transport="streamable_http",
+                    url=playground_mcp_url,
+                    headers={"Authorization": f"Bearer {mcp_gateway_token}"},
+                )
+                logger.debug(f"Added playground MCP connection: {playground_mcp_url}")
 
             logger.debug(f"Created {len(connections)} MCP server connections: {list(connections.keys())}")
 

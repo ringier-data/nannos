@@ -17,7 +17,10 @@ from collections.abc import AsyncIterable
 from typing import Any, Optional
 
 from a2a.types import Part, TaskState
+from agent_common.core.s3_service import get_s3_service
+from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
@@ -25,12 +28,10 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ..core.graph_factory import GraphFactory
 from ..handlers import StreamHandler
 from ..models import AgentFrameworkAuthError, AgentStreamResponse
-from ..models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from ..models.config import AgentSettings, GraphRuntimeContext, UserConfig
 from ..utils import build_runtime_context
 from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
-from .s3_service import get_s3_service
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ class OrchestratorDeepAgent:
         middleware setup, and graph creation.
 
         Args:
-            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', or 'claude-haiku-4-5')
+            model_type: The type of model ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
@@ -164,6 +165,7 @@ class OrchestratorDeepAgent:
             cost_logger=self._graph_factory.cost_logger,
             backend_url=backend_url,
             gp_graph_provider=self._graph_factory.get_gp_graph,
+            task_scheduler_graph_provider=self._graph_factory.get_task_scheduler_graph,
         )
 
     async def get_or_create_graph(
@@ -176,7 +178,7 @@ class OrchestratorDeepAgent:
         - User tools/subagents come from GraphRuntimeContext at runtime via DynamicToolDispatchMiddleware
 
         Args:
-            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
+            model_type: The type of model ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
 
         Returns:
             CompiledStateGraph: The compiled LangGraph for this model type
@@ -306,7 +308,9 @@ class OrchestratorDeepAgent:
 
             # Stream the response with CUSTOM EVENTS for progressive A2A status updates
             # Using stream_mode='custom' to receive both state updates and custom events
-            # CRITICAL: Pass runtime_context via `context` parameter for runtime personalization
+            # CRITICAL: Pass BOTH config and context parameters:
+            # - config: Infrastructure (checkpointing via thread_id, metadata for LangSmith)
+            # - context: Runtime data (tools, user preferences, sub-agents)
             async for event in graph.astream(input_data, config, stream_mode="custom", context=runtime_context):  # type: ignore
                 chunk_count += 1
                 logger.info(f"===== EVENT {chunk_count} =====")
@@ -412,6 +416,17 @@ class OrchestratorDeepAgent:
                     state=TaskState.failed,
                     content="We are unable to process your request at the moment. Please try again.",
                 )
+
+        except GraphRecursionError as e:
+            # TODO: should be language-specific
+            # Handle recursion limit gracefully with an informative message
+            logger.error(f"Recursion limit reached during stream processing: {e}", exc_info=True)
+            yield AgentStreamResponse(
+                state=TaskState.failed,
+                content="I've been working on this task for a while and need to take a break. "
+                "I've made some progress, but the task requires more steps than I can complete in one go. "
+                "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",
+            )
 
         except Exception as e:
             # We are handling here unexpected exceptions during streaming, not handled by middlewares

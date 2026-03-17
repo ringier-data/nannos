@@ -54,7 +54,34 @@ The orchestrator uses a **middleware-based architecture** to handle subagent inv
 
 ## Architecture Components
 
-### 1. GraphRuntimeContext
+### 1. Runtime Parameters: config vs context
+
+**LangGraph invocations use TWO distinct parameters:**
+
+#### `config` (RunnableConfig) - Execution Control
+Standard LangGraph parameter for infrastructure/observability:
+- **Checkpoint isolation**: `configurable.thread_id` and `configurable.checkpoint_ns`
+- **Cost tracking**: `tags` for LangSmith attribution
+- **Metadata**: `user_id`, `assistant_id` for tracking
+- **Callbacks**: LangChain handler propagation
+
+#### `context` (GraphRuntimeContext) - Runtime Data
+Custom parameter (enabled by `context_schema=GraphRuntimeContext`) for user-specific data:
+- **Tool registry**: User's MCP tools
+- **SubAgent registry**: Available sub-agents
+- **User preferences**: name, language, custom prompt
+- **File attachments**: Ephemeral content blocks
+
+**Both are required and serve different purposes:**
+```python
+result = await graph.ainvoke(
+    {"messages": [...]},
+    config=config,        # Infrastructure (checkpointing, tracking)
+    context=context,      # Runtime data (tools, user info)
+)
+```
+
+### 2. GraphRuntimeContext
 
 Per-user context passed at invocation time containing:
 
@@ -64,9 +91,10 @@ class GraphRuntimeContext(BaseModel):
     tool_registry: Dict[str, BaseTool]      # MCP tools discovered at runtime
     subagent_registry: Dict[str, CompiledSubAgent]  # All subagents (local + remote)
     a2a_tracking: Dict[str, Dict[str, Any]]  # Per-subagent tracking state
+    # ... plus user preferences, file attachments, etc.
 ```
 
-### 2. CompiledSubAgent
+### 3. CompiledSubAgent
 
 Wrapper around subagent runnables stored in the registry:
 
@@ -78,7 +106,7 @@ CompiledSubAgent = TypedDict("CompiledSubAgent", {
 })
 ```
 
-### 3. BaseA2ARunnable
+### 4. BaseA2ARunnable
 
 Abstract base class for all subagent implementations:
 

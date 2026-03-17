@@ -50,6 +50,9 @@ class UserConfig(BaseModel):
     sub_agent_id: Optional[int] = Field(
         default=None, description="Sub-agent ID for cost attribution (set by orchestrator)"
     )
+    scheduled_job_id: Optional[int] = Field(
+        default=None, description="Scheduled job ID for cost attribution (set by agent-runner)"
+    )
     sub_agents: Optional[list] = Field(default=None, description="Discovered sub-agents")
     tools: Optional[list] = Field(default=None, description="Discovered tools")
 

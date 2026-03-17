@@ -18,13 +18,18 @@ Architecture:
 import logging
 from typing import Any, Optional
 
+from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
+from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
+from agent_common.core.copy_file_tool import create_copy_file_tool
+from agent_common.core.cost_tracking_embeddings import CostTrackingBedrockEmbeddings
+from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
+from agent_common.core.model_factory import create_model
+from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
+from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
 from deepagents import create_deep_agent
-from deepagents.backends.composite import CompositeBackend
-from deepagents.backends.state import StateBackend
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
-from langchain_aws import BedrockEmbeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph.state import CompiledStateGraph
@@ -34,9 +39,6 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
-from ..a2a_utils.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
-from ..a2a_utils.structured_response import get_response_format as get_sub_agent_response_format
-from ..backends import IndexingStoreBackend
 from ..handlers import handle_auth_error, should_retry
 from ..middleware import (
     A2ATaskTrackingMiddleware,
@@ -47,12 +49,9 @@ from ..middleware import (
     ToolsetSelectorMiddleware,
     UserPreferencesMiddleware,
 )
-from ..models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
-from .graph_utils import build_common_middleware_stack
-from .model_factory import create_model
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
@@ -109,6 +108,7 @@ class GraphFactory:
         self._models: dict[tuple[str, str | None], BaseChatModel] = {}
         self._graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
         self._gp_graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
+        self._task_scheduler_graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
 
         # Static tools cache (created once per model type, reused)
         self._static_tools_cache: list[BaseTool] = []
@@ -138,9 +138,10 @@ class GraphFactory:
             f"postgresql://{config.POSTGRES_USER}:{config.POSTGRES_PASSWORD}"
             f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DB}"
         )
-        self._embeddings_model = BedrockEmbeddings(
+        self._embeddings_model = CostTrackingBedrockEmbeddings(
             model_id="amazon.titan-embed-text-v2:0",
             region_name=config.get_bedrock_region(),
+            cost_logger=self.cost_logger,
         )
         self._store: AsyncPostgresStore | None = None
         self._connection_pool: AsyncConnectionPool | None = None
@@ -195,7 +196,7 @@ class GraphFactory:
                 index={
                     "dims": 1024,  # Titan Embeddings V2 dimension
                     "embed": self._embeddings_model,
-                    "fields": ["context_description", "content"],  # Fields to index for semantic search
+                    "fields": ["contextualized_content"],  # description + chunk text combined, ≤50k chars
                 },
             )
             logger.info("Initialized AsyncPostgresStore with Titan Embeddings V2 (1024 dims) and connection pool")
@@ -205,24 +206,18 @@ class GraphFactory:
     def backend_factory(self) -> Any:
         """Get the backend factory for FilesystemMiddleware.
 
-        Returns a factory function that creates a CompositeBackend with:
-        - Default: StateBackend (ephemeral storage in agent state)
-        - /memories/: IndexingStoreBackend (persistent storage with semantic indexing)
+        Returns a factory function that creates a ``CompositeBackend`` with:
+        - Default: ``StateBackend`` (ephemeral storage in agent state)
+        - ``/memories/``: ``IndexingStoreBackend`` (persistent storage with semantic indexing)
 
-        The factory takes a ToolRuntime parameter and returns a CompositeBackend.
-        This is the same backend configuration used by the orchestrator.
+        Delegates to ``create_indexing_backend_factory`` from ``agent_common``.
 
         Returns:
-            Callable that takes ToolRuntime and returns CompositeBackend
+            Callable ``(ToolRuntime) -> CompositeBackend``
         """
-
-        def create_backend(rt: Any) -> CompositeBackend:
-            return CompositeBackend(
-                default=StateBackend(rt),
-                routes={"/memories/": IndexingStoreBackend(rt, self.config)},
-            )
-
-        return create_backend
+        return create_indexing_backend_factory(
+            self.store, self.config.get_bedrock_region(), cost_logger=self.cost_logger
+        )
 
     async def ensure_store_setup(self) -> None:
         """Ensure the database schema is set up for the document store.
@@ -308,7 +303,7 @@ class GraphFactory:
         """Create a model instance for the given model type.
 
         Args:
-            model_type: The type of model to create ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
+            model_type: The type of model to create ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The created model instance
@@ -318,7 +313,9 @@ class GraphFactory:
         if self.cost_logger:
             callbacks.append(CostTrackingCallback(self.cost_logger))
 
-        return create_model(model_type, self.config, thinking_level, callbacks=callbacks if callbacks else None)
+        return create_model(
+            model_type, self.config.get_bedrock_region(), thinking_level, callbacks=callbacks if callbacks else None
+        )
 
     def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
         """Get or create a model instance
@@ -327,7 +324,7 @@ class GraphFactory:
         use with_config on the same model instance, but those parameters are not configurable that way yet.
 
         Args:
-            model_type: The type of model ('gpt4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
+            model_type: The type of model ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
 
         Returns:
             BaseChatModel: The model instance (cached or newly created)
@@ -357,12 +354,17 @@ class GraphFactory:
         # UserPreferencesMiddleware injects user preferences (language, etc.) into system prompt
         user_preferences_middleware = UserPreferencesMiddleware()
 
-        # Order: DynamicToolDispatch → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo
+        # StoragePathsInstructionMiddleware adds filesystem storage paths documentation
+        storage_paths_middleware = StoragePathsInstructionMiddleware()
+
+        # Order: DynamicToolDispatch → UserPreferences → StoragePaths → LoopDetection → Auth → Retry → A2A → Todo
         # UserPreferences comes early to modify system prompt before other middleware
+        # StoragePaths comes after UserPreferences to ensure storage instructions are included
         # LoopDetection comes before Auth/Retry to catch loops early
         return [
             dynamic_tool_middleware,
             user_preferences_middleware,
+            storage_paths_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,
             self._retry_middleware,
@@ -384,6 +386,9 @@ class GraphFactory:
 
             # Add presigned URL tool for dispatching files to sub-agents
             static_tools.append(create_presigned_url_tool())
+
+            # Add copy_file tool for efficient file copying without LLM context loading
+            static_tools.append(create_copy_file_tool(self.backend_factory))
             # if bedrock and thinking is enabled we need to add the final response tool to handle structured output
             if with_response_tool:
                 static_tools.append(
@@ -449,7 +454,7 @@ class GraphFactory:
         # Use AutoStrategy for Bedrock without extended thinking and Gemini models (more efficient, handles structured output natively)
         # For bedrock models with extended thinking use None and add FinalResponseSchema to static tools
         requires_response_tool = False
-        if model_type in ("gpt4o", "gpt-4o-mini"):
+        if model_type in ("gpt-4o", "gpt-4o-mini"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
         elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
             # if thinking is enabled we need to set response_format to None since the bedrock api can't handle
@@ -515,14 +520,15 @@ class GraphFactory:
         - Uses AnthropicPromptCachingMiddleware for prompt caching on Anthropic models
         - Uses PatchToolCallsMiddleware to normalise tool call format
 
-        Middleware ordering:
+        Middleware ordering (first = outermost wrapper):
         1. ToolsetSelectorMiddleware: reads ALL MCP tools from tool_registry,
            Phase 1 selects relevant MCP servers, Phase 2 selects individual tools.
            Both phases are cached across model calls within a single GP invocation.
         2. DynamicToolDispatchMiddleware(skip_tool_injection=True): converts BaseTool→dict
-           for Gemini compatibility, but does NOT inject from tool_registry. Handles MCP
-           tool execution in awrap_tool_call.
-        3-9. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
+           for Gemini compatibility, but does NOT inject from tool_registry. Resolves
+           dynamic (MCP) tools via request.override(tool=...) so the full inner chain
+           executes for every tool call — no middleware inside it is bypassed.
+        3-8. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
            AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware,
            ToolRetryMiddleware, RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware.
 
@@ -549,6 +555,7 @@ class GraphFactory:
                 "docstore_search",
                 "read_personal_file",
                 "docstore_export",
+                "copy_file",
             ],
             cost_logger=self.cost_logger,
         )
@@ -563,10 +570,14 @@ class GraphFactory:
             cost_logger=self.cost_logger,
         )
 
+        # DynamicToolDispatchMiddleware now resolves dynamic (MCP) tools via
+        # request.override(tool=...) and delegates to handler, so the full inner chain
+        # runs for every tool call.  No hoisting of FilesystemMiddleware is needed.
+        common_stack = build_common_middleware_stack(model, backend, add_docstore_hint=self.store is not None)
         middleware = [
             toolset_selector,
             gp_dynamic_dispatch,
-            *build_common_middleware_stack(model, backend),
+            *common_stack,  # FilesystemMiddleware, SummarizationMiddleware, caching, retry, etc.
         ]
 
         # Get response_format for structured output (SubAgentResponseSchema)
@@ -618,3 +629,103 @@ class GraphFactory:
             logger.info(f"Creating GP graph for model: {effective_model}, thinking_level={thinking_level}")
             self._gp_graphs[cache_key] = self._create_gp_graph(effective_model, thinking_level)
         return self._gp_graphs[cache_key]
+
+    def _create_task_scheduler_graph(self, model_type: ModelType) -> CompiledStateGraph:
+        """Create a custom task scheduler agent graph with middleware.
+
+        The task-scheduler agent has:
+        - context_schema=GraphRuntimeContext for accessing tools at runtime
+        - DynamicToolDispatchMiddleware for tool execution (scheduler + playground tools from SYSTEM_TOOLS)
+        - Common middleware stack for file handling, summarization, caching, etc.
+        - Structured output via SubAgentResponseSchema for explicit task_state determination
+
+        Unlike GP agent, task-scheduler does NOT use ToolsetSelectorMiddleware because it
+        always needs the same fixed set of tools (scheduler_* and playground_*). These tools
+        are provided via SYSTEM_TOOLS in DynamicToolDispatchMiddleware, which bypasses the
+        user's tool whitelist.
+
+        Middleware ordering (first = outermost wrapper):
+        1. DynamicToolDispatchMiddleware: Injects scheduler/playground tools from SYSTEM_TOOLS,
+           handles tool execution for MCP tools
+        2-7. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
+           AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware,
+           ToolRetryMiddleware, RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware
+
+        Args:
+            model_type: The type of model (defaults to claude-3.7-sonnet)
+
+        Returns:
+            CompiledStateGraph: The compiled task-scheduler agent graph
+        """
+        from ..agents.task_scheduler import (
+            TASK_SCHEDULER_SYSTEM_PROMPT,
+        )
+
+        model = self._get_or_create_model(model_type, thinking_level=None)
+
+        backend = self.backend_factory
+
+        # DynamicToolDispatchMiddleware without tool selection
+        # - Injects scheduler/playground tools from SYSTEM_TOOLS
+        # - Handles tool execution for MCP tools not in ToolNode
+        task_scheduler_dispatch = DynamicToolDispatchMiddleware(
+            static_tools=[],
+            skip_tool_injection=False,  # Inject tools from registry + SYSTEM_TOOLS
+            agent_settings=self.config,
+            cost_logger=self.cost_logger,
+        )
+
+        # Common middleware stack (file handling, summarization, caching, etc.)
+        common_stack = build_common_middleware_stack(model, backend, add_docstore_hint=self.store is not None)
+        middleware = [
+            task_scheduler_dispatch,
+            *common_stack,  # FilesystemMiddleware, SummarizationMiddleware, caching, retry, etc.
+        ]
+
+        # Get response_format for structured output (SubAgentResponseSchema)
+        # Enables task-scheduler to explicitly set task_state
+        static_tools_list = self.get_static_tools(with_response_tool=False)
+        response_format = get_sub_agent_response_format(
+            model=model,
+            tools=static_tools_list,
+            thinking_enabled=False,  # Task-scheduler doesn't use thinking
+        )
+
+        task_scheduler_graph = create_agent(
+            model=model,
+            tools=static_tools_list,
+            system_prompt=TASK_SCHEDULER_SYSTEM_PROMPT + SUB_AGENT_PROTOCOL_ADDENDUM,
+            middleware=middleware,  # type: ignore[arg-type]
+            context_schema=GraphRuntimeContext,
+            checkpointer=self._checkpointer,
+            store=self.store,
+            response_format=response_format,
+        )
+
+        task_scheduler_graph = task_scheduler_graph.with_config({"recursion_limit": self.config.MAX_RECURSION_LIMIT})
+        logger.info(f"Task-scheduler graph created for model: {model_type}")
+
+        return task_scheduler_graph
+
+    def get_task_scheduler_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:
+        """Get or create a custom task-scheduler graph for the given model type.
+
+        Task-scheduler graphs are cached by model_type only (no thinking_level).
+        They are created lazily on first request. And will be used as task_scheduler_graph_provider for
+        the scheduler agent runnable.
+
+        Args:
+            model_type: The type of model (defaults to claude-3.7-sonnet)
+
+        Returns:
+            CompiledStateGraph: The task-scheduler graph instance (cached or newly created)
+        """
+        from ..agents.task_scheduler import DEFAULT_TASK_SCHEDULER_MODEL
+
+        effective_model: ModelType = model_type or DEFAULT_TASK_SCHEDULER_MODEL
+        cache_key = (effective_model, None)  # No thinking level for task-scheduler
+
+        if cache_key not in self._task_scheduler_graphs:
+            logger.info(f"Creating task-scheduler graph for model: {effective_model}")
+            self._task_scheduler_graphs[cache_key] = self._create_task_scheduler_graph(effective_model)
+        return self._task_scheduler_graphs[cache_key]

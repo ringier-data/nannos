@@ -1,6 +1,7 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { Download, ChevronDown, ChevronRight, MessageSquare, Copy, Check, ExternalLink } from 'lucide-react';
+import { Download, ChevronDown, ChevronRight, MessageSquare, Copy, Check, Calendar, X, Filter, ExternalLink } from 'lucide-react';
 import {
   getMyUsageSummaryApiV1UsageMySummaryGetOptions,
   getMyDetailedUsageApiV1UsageMyDetailedGetOptions,
@@ -8,7 +9,6 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { UsageBySubAgent, BillingUnitBreakdown, UsageLog } from '@/api/generated';
 import { Button } from '@/components/ui/button';
-import { config } from '@/config';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Select,
@@ -42,13 +42,33 @@ import {
   getBillingUnitColorClass,
   groupBillingUnits,
 } from '@/lib/billing-units';
+import { useAuth } from '@/contexts/AuthContext';
+import { config } from '@/config';
 
 export function UsagePage() {
+  const { isAdmin } = useAuth();
+  const [searchParams] = useSearchParams();
+  const conversationIdParam = searchParams.get('conversation_id');
+  
   const [days, setDays] = useState('30');
   const [logPage, setLogPage] = useState(1);
   const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [copiedConversationId, setCopiedConversationId] = useState<string | null>(null);
   const logLimit = 50;
+
+  // Auto-expand conversation from query param
+  useEffect(() => {
+    if (conversationIdParam && !expandedConversations.has(conversationIdParam)) {
+      setExpandedConversations(prev => new Set(prev).add(conversationIdParam));
+      // Scroll to the conversation after a brief delay to let the page render
+      setTimeout(() => {
+        const element = document.getElementById(`conversation-${conversationIdParam}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 100);
+    }
+  }, [conversationIdParam]);
 
   const { data: summary, isLoading: summaryLoading } = useQuery({
     ...getMyUsageSummaryApiV1UsageMySummaryGetOptions({
@@ -68,6 +88,7 @@ export function UsagePage() {
         page: logPage, 
         limit: logLimit,
         days: parseInt(days),
+        conversation_id: conversationIdParam || undefined, // Filter by conversation if provided
       },
     }),
   });
@@ -104,6 +125,8 @@ export function UsagePage() {
         callCount: logs.length,
         mostRecent: new Date(logs[0].invoked_at),
         oldestCall: new Date(logs[logs.length - 1].invoked_at),
+        scheduledJobName: logs[0]?.scheduled_job_name ?? null,
+        scheduledJobId: logs[0]?.scheduled_job_id ?? null,
       }))
       .sort((a, b) => b.mostRecent.getTime() - a.mostRecent.getTime());
   }, [logs]);
@@ -374,10 +397,32 @@ export function UsagePage() {
       <Card>
         <CardHeader>
           <div className="flex justify-between items-center">
-            <div>
-              <CardTitle>Usage Logs by Conversation</CardTitle>
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <CardTitle>Usage Logs by Conversation</CardTitle>
+                {conversationIdParam && (
+                  <Badge variant="secondary" className="flex items-center gap-1">
+                    <Filter className="h-3 w-3" />
+                    Filtered
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-4 w-4 p-0 ml-1 hover:bg-transparent"
+                      onClick={() => {
+                        window.location.href = '/app/usage';
+                      }}
+                      title="Clear filter and show all conversations"
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </Badge>
+                )}
+              </div>
               <CardDescription>
-                Grouped by conversation on this page. Note: Long conversations may span multiple pages.
+                {conversationIdParam
+                  ? `Showing logs for conversation ${conversationIdParam.substring(0, 8)}... on this page.`
+                  : 'Grouped by conversation on this page. Note: Long conversations may span multiple pages.'
+                }
               </CardDescription>
             </div>
             <Button
@@ -403,17 +448,18 @@ export function UsagePage() {
                   <TableHead>Unit Breakdown</TableHead>
                   <TableHead className="text-right">Units</TableHead>
                   <TableHead className="text-right">Cost (USD)</TableHead>
+                  {isAdmin && <TableHead className="text-center w-16">Trace</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
               {conversationGroups.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-muted-foreground">
+                  <TableCell colSpan={isAdmin ? 8 : 7} className="text-center text-muted-foreground">
                     No usage data found
                   </TableCell>
                 </TableRow>
               ) : (
-                conversationGroups.map(({ conversationId, logs, totalCost, totalUnits, callCount, mostRecent, oldestCall }) => {
+                conversationGroups.map(({ conversationId, logs, totalCost, totalUnits, callCount, mostRecent, oldestCall, scheduledJobName, scheduledJobId }) => {
                   const isExpanded = expandedConversations.has(conversationId);
                   const isNoConversation = conversationId === '_no_conversation';
                   const isCopied = copiedConversationId === conversationId;
@@ -429,6 +475,7 @@ export function UsagePage() {
                       {/* Conversation Summary Row */}
                       <TableRow
                         key={conversationId}
+                        id={`conversation-${conversationId}`}
                         className="bg-muted/50 hover:bg-muted cursor-pointer font-medium"
                         onClick={() => toggleConversation(conversationId)}
                       >
@@ -473,30 +520,18 @@ export function UsagePage() {
                                         </TooltipContent>
                                       </Tooltip>
                                     </TooltipProvider>
-                                    <TooltipProvider>
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            className="h-6 w-6 p-0 hover:bg-muted-foreground/20"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              const url = `https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${conversationId}`;
-                                              window.open(url, '_blank', 'noopener,noreferrer');
-                                            }}
-                                          >
-                                            <ExternalLink className="w-3 h-3" />
-                                          </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>
-                                          <p>View trace in LangSmith</p>
-                                        </TooltipContent>
-                                      </Tooltip>
-                                    </TooltipProvider>
+
                                   </>
                                 )}
                               </div>
+                              {scheduledJobId && (
+                                <div className="flex items-center gap-1 mt-0.5">
+                                  <Calendar className="w-3 h-3 text-muted-foreground" />
+                                  <span className="text-xs font-medium text-muted-foreground">
+                                    Scheduled: {scheduledJobName || `Job #${scheduledJobId}`}
+                                  </span>
+                                </div>
+                              )}
                               <div className="text-xs text-muted-foreground">
                                 {callCount} call{callCount !== 1 ? 's' : ''} on this page • {mostRecent.toLocaleDateString()}
                                 {callCount > 1 && ` - ${oldestCall.toLocaleDateString()}`}
@@ -515,6 +550,22 @@ export function UsagePage() {
                         </TableCell>
                         <TableCell className="text-right font-medium">{totalUnits.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-bold">${totalCost.toFixed(4)}</TableCell>
+                        {isAdmin && (
+                          <TableCell className="text-center">
+                            {!isNoConversation && (
+                              <a
+                                href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${conversationId}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                                title="View trace in LangSmith"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                            )}
+                          </TableCell>
+                        )}
                       </TableRow>
 
                       {/* Individual Call Rows (shown when expanded) */}
@@ -548,6 +599,17 @@ export function UsagePage() {
                                       <span>• Config: {log.sub_agent_config_version_id}</span>
                                     )}
                                   </div>
+                                  {log.scheduled_job_id && (
+                                    <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                                      <Calendar className="w-3 h-3" />
+                                      <span>{log.scheduled_job_name || `Job #${log.scheduled_job_id}`}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : log.scheduled_job_id ? (
+                                <div className="flex items-center gap-1 text-muted-foreground">
+                                  <Calendar className="w-3 h-3" />
+                                  <span>{log.scheduled_job_name || `Job #${log.scheduled_job_id}`}</span>
                                 </div>
                               ) : (
                                 <span className="text-muted-foreground">Orchestrator</span>
@@ -598,6 +660,21 @@ export function UsagePage() {
                             <TableCell className="text-right font-medium">
                               ${parseFloat(log.total_cost_usd).toFixed(4)}
                             </TableCell>
+                            {isAdmin && (
+                              <TableCell className="text-center">
+                                {log.conversation_id && (
+                                  <a
+                                    href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${log.conversation_id}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                                    title="View trace in LangSmith"
+                                  >
+                                    <ExternalLink className="h-3 w-3" />
+                                  </a>
+                                )}
+                              </TableCell>
+                            )}
                           </TableRow>
                         );
                       })}

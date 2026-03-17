@@ -34,7 +34,7 @@ The agent has access to:
 1. `playground_list_sub_agents` - View existing agents
 2. `playground_create_sub_agent` - Create new agents
 3. `playground_update_sub_agent` - Modify existing agents
-4. `playground_list_mcp_tools` - Discover available tools
+4. `playground_grep_mcp_tools` - Discover available tools
 
 ## Running Locally
 

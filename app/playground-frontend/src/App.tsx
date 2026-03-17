@@ -8,6 +8,9 @@ import { SubAgentsPage } from './pages/SubAgentsPage';
 import { SubAgentCreatePage } from './pages/SubAgentCreatePage';
 import { SubAgentDetailPage } from './pages/SubAgentDetailPage';
 import { UsagePage } from './pages/UsagePage';
+import { SchedulerPage } from './pages/SchedulerPage';
+import { SchedulerJobDetailPage } from './pages/SchedulerJobDetailPage';
+import { DeliveryChannelsPage } from './pages/DeliveryChannelsPage';
 import { AdminRoute } from './components/AdminRoute';
 import { GroupManagerRoute } from './components/GroupManagerRoute';
 import { UsersPage } from './pages/admin/UsersPage';
@@ -55,6 +58,9 @@ function App() {
         <Route path="subagents/new" element={<SubAgentCreatePage />} />
         <Route path="subagents/:id" element={<SubAgentDetailPage />} />
         <Route path="usage" element={<UsagePage />} />
+        <Route path="scheduler" element={<SchedulerPage />} />
+        <Route path="scheduler/:id" element={<SchedulerJobDetailPage />} />
+        <Route path="delivery-channels" element={<DeliveryChannelsPage />} />
         <Route path="groups" element={<GroupManagerRoute><GroupsPage /></GroupManagerRoute>} />
         <Route path="groups/:id" element={<GroupManagerRoute><GroupDetailPage /></GroupManagerRoute>} />
         <Route path="admin/users" element={<AdminRoute><UsersPage /></AdminRoute>} />

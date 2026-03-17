@@ -16,6 +16,7 @@ import logging
 import mimetypes
 
 from a2a.types import FilePart, Part, TextPart
+from agent_common.core.s3_service import get_s3_service
 from langchain_core.messages import (
     AudioContentBlock,
     ContentBlock,
@@ -23,8 +24,6 @@ from langchain_core.messages import (
     ImageContentBlock,
     VideoContentBlock,
 )
-
-from ..core.s3_service import get_s3_service
 
 logger = logging.getLogger(__name__)
 

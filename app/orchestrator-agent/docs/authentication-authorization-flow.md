@@ -362,7 +362,7 @@ class GraphFactory:
 ```
 
 **Key Architecture Decisions:**
-- **ONE universal graph per model type** (`gpt4o` or `claude-sonnet-4.5`)
+- **ONE universal graph per model type** (`gpt-4o` or `claude-sonnet-4.5`)
 - Tools are NOT "baked" into graphs - they come from `GraphRuntimeContext` at runtime
 - `DynamicToolDispatchMiddleware` intercepts model calls and binds user-specific tools
 - User isolation is achieved via `thread_id` in the checkpointer
@@ -429,20 +429,32 @@ def _create_middleware_stack(self, is_bedrock: bool) -> list:
 **Critical Design Principle:** Credentials are **injected at runtime**, not stored in checkpoints.
 
 ```python
-# GraphRuntimeContext carries user-specific data at runtime
-runtime_context = user_config.to_runtime_context()
-
-# Graph execution with runtime context
+# Two distinct parameters for graph invocation:
+# 1. config (RunnableConfig): Infrastructure control
 config = {
     "configurable": {
-        "thread_id": context_id,  # Only thread_id is checkpointed
-    }
+        "thread_id": context_id,  # Checkpoint isolation
+        "checkpoint_ns": "orchestrator",
+    },
+    "tags": ["user:123"],  # Cost tracking
+    "metadata": {"user_id": "123", "assistant_id": "456"},  # LangSmith attribution
 }
 
-# Credentials are in runtime_context, NOT in the checkpoint
+# 2. context (GraphRuntimeContext): Runtime data injection
+runtime_context = user_config.to_runtime_context()  # Contains tools, credentials, preferences
+
+# Both are required and serve different purposes:
+# - config: Controls HOW the graph runs (checkpointing, observability)
+# - context: Controls WHAT the graph accesses (tools, credentials, user data)
 async for event in graph.astream(input_data, config, stream_mode="custom", context=runtime_context):
     ...
 ```
+
+**Why credentials are in context, not config:**
+- Credentials are user-specific runtime data (like tools and preferences)
+- Config is for infrastructure (checkpointing, tracking)
+- Credentials must never be checkpointed
+- Context is passed per-invocation but not persisted
 
 **GraphRuntimeContext Structure:**
 
@@ -549,7 +561,7 @@ class OidcOAuth2Client:
 │                       │  │                       │  │                       │
 │ For each sub-agent:   │  │ Token Exchange to     │  │ ONE graph per model:  │
 │ ┌───────────────────┐ │  │ mcp-gateway:          │  │ ┌───────────────────┐ │
-│ │SmartTokenInterceptor│ │  │                       │  │ │ gpt4o             │ │
+│ │SmartTokenInterceptor│ │  │                       │  │ │ gpt-4o             │ │
 │ │                   │ │  │ oauth2_client         │  │ │ claude-sonnet-4.5 │ │
 │ │ Detect auth scheme│ │  │   .exchange_token(    │  │ └───────────────────┘ │
 │ │ from AgentCard    │ │  │     user_token,       │  │                       │
@@ -632,7 +644,7 @@ class OidcOAuth2Client:
 The current architecture is designed for **single-user conversations**:
 
 1. **Graph Caching by Model Type**
-   - Graphs are cached by model type (`gpt4o` or `claude-sonnet-4.5`), not by user or capability
+   - Graphs are cached by model type (`gpt-4o` or `claude-sonnet-4.5`), not by user or capability
    - Multiple users share graph instances, customized via `GraphRuntimeContext`
    - User isolation relies on `thread_id` in checkpointer
 

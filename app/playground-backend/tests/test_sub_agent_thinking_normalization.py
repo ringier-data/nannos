@@ -35,7 +35,7 @@ class TestNormalizeThinkingConfig:
 
     def test_unsupported_model_returns_none(self):
         """Test that unsupported models return None for thinking config."""
-        for model in ["gpt4o", "gpt-4o-mini", "unsupported-model"]:
+        for model in ["gpt-4o", "gpt-4o-mini", "unsupported-model"]:
             enable, level = _normalize_thinking_config(
                 model=model,
                 enable_thinking=True,
@@ -117,7 +117,7 @@ class TestModelsSupportingThinking:
 
     def test_unsupported_models_not_in_set(self):
         """Test that unsupported models are not in the set."""
-        assert "gpt4o" not in MODELS_SUPPORTING_THINKING
+        assert "gpt-4o" not in MODELS_SUPPORTING_THINKING
         assert "gpt-4o-mini" not in MODELS_SUPPORTING_THINKING
 
 
@@ -158,7 +158,7 @@ class TestThinkingConfigScenarios:
         level_before = ThinkingLevel.MEDIUM
 
         # Switch to GPT-4o (doesn't support thinking)
-        model_after = "gpt4o"
+        model_after = "gpt-4o"
         enable_after = True
         level_after = ThinkingLevel.MEDIUM
 

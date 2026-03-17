@@ -366,7 +366,7 @@ export function SettingsPage() {
           <div>
             <h2 className="text-lg font-semibold">MCP Tools</h2>
             <p className="text-sm text-muted-foreground mt-1">
-              Enable or disable MCP tools available to the orchestrator agent.
+              Enable or disable MCP tools available to the orchestrator agent.<br/> Mind that the <b>general-purpose agent</b> will have access to all the tools by default.
             </p>
           </div>
           <div className="flex-1 overflow-y-auto min-h-0">

@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 
-from app.a2a_utils.models import LocalLangGraphSubAgentConfig
 from app.core.registry import RegistryConfig, RegistryService, User
 
 
@@ -129,7 +129,7 @@ class TestRegistryService:
                         "sub_agent_id": 2,
                         "version": 1,
                         "description": "Analyzes data and generates insights",
-                        "model": "gpt-4",
+                        "model": "gpt-4o",
                         "agent_url": None,
                         "system_prompt": "You are a data analysis expert.",
                         "mcp_url": "https://mcp.example.com",
@@ -170,7 +170,7 @@ class TestRegistryService:
             assert local_agent.description == "Analyzes data and generates insights"
             assert local_agent.system_prompt == "You are a data analysis expert."
             assert local_agent.mcp_tools is None  # No tools specified
-            assert local_agent.model_name == "gpt-4"
+            assert local_agent.model_name == "gpt-4o"
 
     @pytest.mark.asyncio
     async def test_get_user_success_with_mixed_agents(self, mock_registry_service):

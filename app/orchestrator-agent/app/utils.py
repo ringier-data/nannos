@@ -1,308 +1,25 @@
 """Shared utility functions for the orchestrator agent."""
 
 import logging
-from enum import Enum
 from typing import Any
+
+# Re-export extracted utilities from agent_common for backwards compatibility
+from agent_common.utils import (  # noqa: F401
+    LANGUAGE_NAMES,
+    CleanupLevel,
+    clean_schema_properties,
+    get_language_display_name,
+    validate_and_clean_tool_dict,
+)
+
+from app.models.config import AgentSettings, UserConfig
 
 logger = logging.getLogger(__name__)
 
 
-class CleanupLevel(Enum):
-    """Progressive schema cleanup levels for Gemini compatibility.
-
-    MINIMAL: Only remove None values (documented Gemini requirement)
-    MODERATE: Also remove ALL enum constraints (global state space limit)
-    AGGRESSIVE: Also remove format, min/max bounds, and array constraints
-
-    Testing revealed Gemini has a GLOBAL state space limit across all tools:
-    - Individual complex tools work fine with enums
-    - 80+ tools combined hit the limit (cumulative enum state)
-    - Removing ALL enums from all tools solves the issue
-    """
-
-    MINIMAL = "minimal"
-    MODERATE = "moderate"
-    AGGRESSIVE = "aggressive"
-
-
-# Language code to display name mapping
-LANGUAGE_NAMES: dict[str, str] = {
-    "en": "English",
-    "de": "German",
-    "fr": "French",
-    "it": "Italian",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "cs": "Czech",
-    "sk": "Slovak",
-    "hu": "Hungarian",
-    "ro": "Romanian",
-    "bg": "Bulgarian",
-    "hr": "Croatian",
-    "sl": "Slovenian",
-    "sr": "Serbian",
-    "uk": "Ukrainian",
-    "ru": "Russian",
-    "zh": "Chinese",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "ar": "Arabic",
-    "he": "Hebrew",
-    "tr": "Turkish",
-    "vi": "Vietnamese",
-    "th": "Thai",
-    "id": "Indonesian",
-    "ms": "Malay",
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "ta": "Tamil",
-    "te": "Telugu",
-    "sw": "Swahili",
-}
-
-
-def get_language_display_name(language_code: str) -> str:
-    """Get the display name for a language code.
-
-    Args:
-        language_code: ISO 639-1 language code (e.g., 'en', 'de', 'fr')
-
-    Returns:
-        Human-readable language name, or the code itself if not found
-    """
-    return LANGUAGE_NAMES.get(language_code.lower(), language_code)
-
-
-# ============================================================================
-# Tool Schema Cleaning for Gemini Compatibility
-# ============================================================================
-"""
-CONTEXT: LangChain's tool conversion and Gemini's strict schema validation
-===========================================================================
-
-This section provides workarounds for a schema validation issue when using
-LangChain tools with Google's Gemini models via langchain-google-genai.
-
-THE ISSUE:
-----------
-Some LangChain tools (particularly those from deepagents like FilesystemMiddleware)
-have parameters with:
-1. None as the annotation type
-2. None as the default value
-3. Complex types like BaseStore that Pydantic can't serialize
-
-When these tools are converted to OpenAI function format via convert_to_openai_tool(),
-the resulting schema contains properties with None values, which Gemini's strict
-validation rejects with:
-
-    pydantic_core.ValidationError: 1 validation error for Schema
-    properties.runtime
-      Input should be a valid dictionary or object to extract fields from
-      [type=model_attributes_type, input_value=None, input_type=NoneType]
-
-OpenAI and Claude models accept these schemas, but Gemini does not.
-
-THE SOLUTION:
--------------
-Progressive retry with three cleanup levels:
-
-1. MINIMAL (documented requirement): Remove only None values and empty dicts
-   - This is the ONLY documented Gemini requirement
-   - Based on official docs: https://ai.google.dev/gemini-api/docs/function-calling
-   
-2. MODERATE (global state limit): Also remove ALL enum constraints
-   - Testing proved Gemini has a CUMULATIVE enum state limit across all tools
-   - Individual complex tools work fine with enums
-   - 80+ tools combined exceed the global state space threshold
-   - Applied on retry if MINIMAL fails
-   
-3. AGGRESSIVE (last resort): Also remove format, min/max bounds, array constraints
-   - Applied as final fallback if MODERATE fails
-   - Removes all remaining schema constraints
-   - Only needed in rare edge cases
-
-This is handled by middleware (DynamicToolDispatchMiddleware and ToolSchemaCleaningMiddleware)
-which intercepts model calls and progressively retries with more aggressive cleaning
-when INVALID_ARGUMENT schema errors occur, while keeping the original BaseTool instances
-intact for execution.
-
-WHY PROGRESSIVE RETRY:
-----------------------
-- Start with minimal cleaning (only documented requirements)
-- MODERATE removes enums
-- AGGRESSIVE is rarely needed (only extreme edge cases)
-- Log which cleanup level succeeds to track patterns
-- Based on empirical testing: enum removal solves the issue
-
-USAGE:
-------
-For orchestrator:
-    # Handled automatically by DynamicToolDispatchMiddleware with retry
-    
-For sub-agents:
-    # Handled automatically by ToolSchemaCleaningMiddleware with retry
-
-FINDINGS:
----------
-Empirical testing revealed Gemini's actual constraint:
-- NOT per-tool complexity (individual complex tools work fine)
-- NOT specific enum values or constraints
-- GLOBAL cumulative enum state across ALL tools in a request
-- With 80+ GitHub tools, total enum combinations exceed Gemini's threshold
-- Solution: Remove ALL enums (MODERATE level) for large tool sets
-
-===========================================================================
-"""
-
-
-def clean_schema_properties(
-    properties: dict[str, Any],
-    level: CleanupLevel = CleanupLevel.MINIMAL,
-    tool_name: str | None = None,
-    depth: int = 0,
-) -> dict[str, Any]:
-    """Recursively remove invalid property schemas with progressive cleanup levels.
-
-    MINIMAL: Only removes None values, empty dicts (documented Gemini requirement)
-    MODERATE: Also removes ALL enum constraints (global state space limit)
-    AGGRESSIVE: Also removes format, min/max bounds, array length constraints
-
-    Args:
-        properties: Properties dict from JSON Schema
-        level: Cleanup level to apply
-        tool_name: Name of the tool (for logging only, not used for targeting)
-
-    Returns:
-        Cleaned properties dict
-    """
-    if not isinstance(properties, dict):
-        return properties
-
-    cleaned = {}
-    for key, value in properties.items():
-        # MINIMAL: Remove None values (documented Gemini requirement)
-        if value is None:
-            logger.debug(f"Removing property '{key}' with None value")
-            continue
-
-        if isinstance(value, dict) and len(value) == 0:
-            logger.debug(f"Removing property '{key}' with empty dict")
-            continue
-
-        if isinstance(value, dict) and value == {"default": None}:
-            logger.debug(f"Removing property '{key}' with default: None")
-            continue
-
-        if isinstance(value, dict) and any(v is None for k, v in value.items()):
-            logger.debug(f"Removing property '{key}' containing None values: {value}")
-            continue
-
-        # Recursively clean nested schemas
-        if isinstance(value, dict):
-            value_copy = dict(value)
-
-            # MODERATE & AGGRESSIVE: Remove ALL enums (global state space limit)
-            if level in (CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE) and "enum" in value_copy:
-                logger.debug(
-                    f"[{level.value}] Removing 'enum' constraint from property '{key}' ({len(value_copy['enum'])} values)"
-                )
-                del value_copy["enum"]
-
-            # AGGRESSIVE: Also remove format and min/max constraints
-            if level == CleanupLevel.AGGRESSIVE:
-                if "format" in value_copy:
-                    logger.debug(f"[{level.value}] Removing 'format' constraint from property '{key}'")
-                    del value_copy["format"]
-                for constraint in [
-                    "minimum",
-                    "maximum",
-                    "exclusiveMinimum",
-                    "exclusiveMaximum",
-                    "minItems",
-                    "maxItems",
-                ]:
-                    if constraint in value_copy:
-                        logger.debug(f"[{level.value}] Removing '{constraint}' constraint from property '{key}'")
-                        del value_copy[constraint]
-
-            # Recursively clean nested properties
-            if "properties" in value_copy:
-                value_copy["properties"] = clean_schema_properties(
-                    value_copy["properties"], level, tool_name, depth + 1
-                )
-            if "items" in value_copy and isinstance(value_copy["items"], dict):
-                if "properties" in value_copy["items"]:
-                    value_copy["items"]["properties"] = clean_schema_properties(
-                        value_copy["items"]["properties"], level, tool_name, depth + 1
-                    )
-
-                # Remove enum from array items (MODERATE & AGGRESSIVE)
-                if level in (CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE) and "enum" in value_copy["items"]:
-                    logger.debug(f"[{level.value}] Removing 'enum' from array items in property '{key}'")
-                    del value_copy["items"]["enum"]
-
-                # Remove format from array items (AGGRESSIVE only)
-                if level == CleanupLevel.AGGRESSIVE and "format" in value_copy["items"]:
-                    del value_copy["items"]["format"]
-
-            cleaned[key] = value_copy
-        else:
-            cleaned[key] = value
-
-    return cleaned
-
-
-def validate_and_clean_tool_dict(
-    tool_dict: dict[str, Any], level: CleanupLevel = CleanupLevel.MINIMAL
-) -> dict[str, Any]:
-    """Validate and clean tool dict schema for Gemini compatibility.
-
-    Ensures parameters has valid JSON Schema structure and cleans properties
-    with None values.
-
-    Args:
-        tool_dict: Tool in OpenAI dict format
-        level: Cleanup level to apply
-
-    Returns:
-        Tool dict with validated and cleaned parameters schema
-    """
-    # Ensure function key exists
-    if "function" not in tool_dict:
-        tool_dict = {"function": tool_dict, "type": "function"}
-
-    function_dict = tool_dict["function"]
-    parameters = function_dict.get("parameters")
-
-    # Extract tool name for TARGETED enum removal
-    tool_name = function_dict.get("name")
-
-    # Ensure parameters has valid structure
-    if parameters is None or not isinstance(parameters, dict):
-        function_dict["parameters"] = {"type": "object", "properties": {}}
-    elif "properties" not in parameters:
-        parameters["properties"] = {}
-
-    # Clean invalid properties and sync required array
-    if "properties" in function_dict["parameters"]:
-        original_props = function_dict["parameters"]["properties"]
-        cleaned_props = clean_schema_properties(original_props, level, tool_name)
-        function_dict["parameters"]["properties"] = cleaned_props
-
-        # Remove cleaned properties from required array
-        if "required" in function_dict["parameters"]:
-            function_dict["parameters"]["required"] = [
-                r for r in function_dict["parameters"]["required"] if r in cleaned_props
-            ]
-
-    return tool_dict
-
-
 def build_runtime_context(
-    user_config: Any,  # UserConfig
-    agent_settings: Any = None,
+    user_config: UserConfig,
+    agent_settings: AgentSettings | None = None,
     oauth2_client: Any = None,
     checkpointer: Any = None,
     static_tools: list[Any] | None = None,
@@ -313,12 +30,13 @@ def build_runtime_context(
     cost_logger: Any = None,
     backend_url: str | None = None,
     gp_graph_provider: Any = None,
+    task_scheduler_graph_provider: Any = None,
 ) -> Any:  # GraphRuntimeContext
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
     Transforms discovered tools and subagents lists into registries
     for dynamic tool dispatch at runtime. Also includes:
-    - Built-in local sub-agents (like file-analyzer)
+    - Built-in local sub-agents (like file-analyzer, task-scheduler)
     - Remote A2A agents from discovery
     - Dynamic local sub-agents from user configuration
     - General-purpose (GP) agent (if gp_graph_provider is provided)
@@ -346,21 +64,23 @@ def build_runtime_context(
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
         gp_graph_provider: Callable(model_type, thinking_level) -> CompiledStateGraph for GP agent.
+        task_scheduler_graph_provider: Callable(model_type) -> CompiledStateGraph for task-scheduler agent.
 
     Returns:
         GraphRuntimeContext for graph invocation
     """
     # Import here to avoid circular dependencies
+    from agent_common.a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
+    from agent_common.agents.dynamic_agent import create_dynamic_local_subagent
+    from agent_common.agents.foundry_agent import create_foundry_local_subagent
+    from agent_common.core.document_store_tools import create_document_store_tools
+    from agent_common.core.model_factory import create_model, get_default_model, is_valid_model
     from deepagents import CompiledSubAgent
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
-    from .a2a_utils.models import LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig
-    from .agents.dynamic_agent import create_dynamic_local_subagent
     from .agents.file_analyzer import create_file_analyzer_subagent
-    from .agents.foundry_agent import create_foundry_local_subagent
     from .agents.gp_agent import create_gp_local_subagent
-    from .core.document_store_tools import create_document_store_tools
-    from .core.model_factory import create_model, get_default_model, is_valid_model
+    from .agents.task_scheduler import create_task_scheduler_subagent
     from .models.config import GraphRuntimeContext
 
     # Convert tools list to tool_registry (name -> tool mapping)
@@ -385,7 +105,7 @@ def build_runtime_context(
             tool_registry[tool.name] = tool
         logger.info(f"Added {len(doc_tools)} document store tools: {[t.name for t in doc_tools]}")
 
-    # Start with built-in local sub-agents (like file-analyzer)
+    # Start with built-in local sub-agents (like file-analyzer, task-scheduler)
     # These run in-process but use the same registry as remote A2A agents
     subagent_registry: dict[str, CompiledSubAgent] = {}
     subagent_registry["file-analyzer"] = create_file_analyzer_subagent(
@@ -396,6 +116,52 @@ def build_runtime_context(
         # This is intentional: file-analyzer is a built-in capability (not a user-created
         # sub-agent), so its costs are considered part of orchestrator overhead.
     )
+
+    # Add task-scheduler sub-agent if graph provider is available
+    # Task-scheduler requires a LangGraph graph with middleware for tool access
+    if task_scheduler_graph_provider is not None:
+        # Import here since we need GraphRuntimeContext which is defined in the calling module
+        from .models.config import GraphRuntimeContext
+
+        # Build task-scheduler's tool whitelist
+        # Include specific tools needed for scheduling operations:
+        # - All scheduler_* tools (validate, create, list, get, update, pause)
+        # - Only specific playground tools for sub-agent management and structured MCP tool discovery
+        allowed_playground_tools = {
+            "playground_list_sub_agents",
+            # "playground_create_sub_agent",  # The sub-agent normally can be created by the task-scheduler tool itself
+            "playground_update_sub_agent",  # TODO: in theory we should allow only to update automated sub-agents
+            # MCP tool discovery - hierarchical navigation (servers -> tools -> details)
+            "playground_list_mcp_servers",  # List available MCP integration servers (GitHub, Jira, etc.)
+            "playground_grep_mcp_tools",  # Discover available MCP tools
+        }
+        task_scheduler_tool_names = [
+            t.name
+            for t in (user_config.tools or [])
+            if t.name.startswith("scheduler_") or t.name in allowed_playground_tools
+        ]
+        logger.debug(f"Task-scheduler tool whitelist: {task_scheduler_tool_names}")
+
+        # We'll create a partial context just for task-scheduler registration
+        # The full context will be passed at invocation time
+        # IMPORTANT: Use tool_registry (not user_config.tools) to include document store tools
+        task_scheduler_context = GraphRuntimeContext(
+            user_id=user_config.user_id,
+            user_sub=user_config.user_sub,
+            name=user_config.name or "",
+            email=user_config.email or "",
+            tool_registry=tool_registry,  # Use full registry with docstore tools
+            subagent_registry={},  # Empty for now, filled below
+            whitelisted_tool_names=task_scheduler_tool_names,
+        )
+
+        subagent_registry["task-scheduler"] = create_task_scheduler_subagent(
+            task_scheduler_graph_provider=task_scheduler_graph_provider,
+            user_context=task_scheduler_context,
+            model_type=user_config.model or get_default_model(),
+            user_sub=user_config.user_sub,
+            cost_logger=cost_logger,
+        )
 
     # Add remote A2A sub-agents from discovery
     for subagent in user_config.sub_agents or []:
@@ -462,7 +228,7 @@ def build_runtime_context(
                         callbacks = [CostTrackingCallback(cost_logger)]
                         subagent_model = create_model(
                             subagent_model_type,
-                            agent_settings,
+                            agent_settings.get_bedrock_region(),
                             thinking_level=thinking_level_to_use,
                             callbacks=callbacks,
                         )
@@ -473,7 +239,9 @@ def build_runtime_context(
                     else:
                         # Fallback: create model without callbacks
                         subagent_model = create_model(
-                            subagent_model_type, agent_settings, thinking_level=thinking_level_to_use
+                            subagent_model_type,
+                            agent_settings.get_bedrock_region(),
+                            thinking_level=thinking_level_to_use,
                         )
                         logger.warning(
                             f"Sub-agent '{config.name}' model created WITHOUT cost tracking "
@@ -499,7 +267,8 @@ def build_runtime_context(
                         custom_prompt=user_config.custom_prompt,
                         store=document_store,
                         backend_factory=backend_factory,
-                        agent_settings=agent_settings,
+                        mcp_gateway_url=agent_settings.MCP_GATEWAY_URL if agent_settings else None,
+                        mcp_gateway_client_id=agent_settings.MCP_GATEWAY_CLIENT_ID if agent_settings else None,
                     )
                     subagent_registry[config.name] = dynamic_subagent
                     logger.info(f"Registered dynamic local sub-agent: {config.name} (model: {subagent_model_type})")

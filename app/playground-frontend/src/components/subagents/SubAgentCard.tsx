@@ -28,6 +28,7 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
   const status = subAgent.config_version?.status ?? 'draft';
   const statusInfo = statusConfig[status];
   const TypeIcon = subAgent.type === 'remote' ? Globe : subAgent.type === 'foundry' ? Database : Terminal;
+  const isAutomated = subAgent.type === 'automated';
   
   const isOwner = subAgent.owner_user_id === user?.id;
   const isAdministrator = user?.is_administrator ?? false;
@@ -123,6 +124,11 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
               <TypeIcon className="h-3 w-3" />
               <span className="capitalize">{subAgent.type}</span>
             </span>
+            {isAutomated && (
+              <Badge variant="secondary" className="flex items-center gap-1 text-xs">
+                🤖 Automated
+              </Badge>
+            )}
             {subAgent.activated_by && (
               <>
                 {subAgent.activated_by === 'user' && (

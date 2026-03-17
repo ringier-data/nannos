@@ -1,0 +1,434 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Agent Runner Infrastructure - ECS task and service (v{{ project_version }})'
+
+Conditions:
+  IsProd:
+    !Equals ['{{ env }}', 'prod']
+
+
+Resources:
+
+  AgentRunnerEcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-ecs-er'
+      Description: 'Agent Runner ECS task execution role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-execution-role-arn'
+      Policies:
+        - PolicyName: 'AgentRunnerTaskExecutionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'ECRGetImageAgentRunner'
+                Effect: 'Allow'
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'ecr:BatchCheckLayerAvailability'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/{{ agent_runner_ecr_repository_name }}'
+              - Sid: 'GetAgentRunnerSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_openai_api_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_langsmith_api_key }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_orchestrator_oidc_client_secret }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_rds_docstore_password }}'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_gcp_key }}'
+              - Sid: 'GetProjectSsmParams'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:DescribeParameters'
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/{{ software_component }}/*'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-ecs-execution-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  AgentRunnerEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-task-role'
+      Description: 'Agent Runner ECS task role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs-tasks.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !ImportValue '{{ project_id }}-common-for-task-role-arn'
+      Policies:
+        - PolicyName: 'AgentRunnerTaskPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+              - Sid: 's3CheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:PutObjectTagging'
+                  - 's3:GetBucketLifecycleConfiguration'
+                  - 's3:PutBucketLifecycleConfiguration'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+              - Sid: 'BedrockInvokeModel'
+                Effect: 'Allow'
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+              - Sid: 'S3DocumentStoreAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-task-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  # CloudWatch Logs Group for Agent Runner
+  AgentRunnerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner'
+      RetentionInDays: !If [IsProd, 30, 7]
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-logs' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  AgentRunnerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: AgentRunnerLogGroup
+    Properties:
+      Family: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner'
+      TaskRoleArn: !GetAtt AgentRunnerEcsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt AgentRunnerEcsExecutionRole.Arn
+      Cpu: '{{ agent_runner_task_cpu }}'
+      Memory: '{{ agent_runner_task_memory }}'
+      NetworkMode: 'awsvpc'
+      RequiresCompatibilities: [ 'FARGATE' ]
+      RuntimePlatform: { CpuArchitecture: 'ARM64', OperatingSystemFamily: 'LINUX' }
+      ContainerDefinitions:
+        - Name: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner'
+          Image: '{{ agent_runner_docker_image }}'
+          Essential: true
+          Interactive: true
+          PortMappings:
+            - { ContainerPort: '{{ agent_runner_public_api_port }}', Protocol: 'tcp' }
+          Environment:
+            - { Name: 'LOG_MODE', Value: 'JSON' }
+            - { Name: 'LOG_LEVEL', Value: '{{ log_level }}' }
+            - { Name: 'LOG_SET_EXCEPTHOOK', Value: '1' }
+            - { Name: 'ENV', Value: '{{ env }}' }
+            - { Name: 'AWS_REGION', Value: !Ref 'AWS::Region' }
+            - { Name: 'APP_VERSION', Value: 'v{{ project_version }}' }
+            - { Name: 'OIDC_ISSUER', Value: '{{ oidc_issuer }}' }
+            - { Name: 'OIDC_CLIENT_ID', Value: '{{ agent_runner_client_id }}' }
+            - { Name: 'AGENT_BASE_URL', Value: 'https://{{ agent_runner_fqdn }}' }
+            - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
+            - { Name: 'PLAYGROUND_FRONTEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
+            - { Name: 'MCP_GATEWAY_URL', Value: '{{ mcp_gateway_url }}' }
+            - { Name: 'MCP_TIMEOUT_SECONDS', Value: '{{ mcp_timeout_seconds }}' }
+            - { Name: 'BEDROCK_MODEL_ID', Value: '{{ bedrock_model_id }}' }
+            - { Name: 'CHECKPOINT_DYNAMODB_TABLE_NAME', Value: '{{ checkpoint_dynamodb_table_name }}' }
+            - { Name: 'CHECKPOINT_S3_BUCKET_NAME', Value: '{{ checkpoint_s3_bucket_name }}' }
+            - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing | string | lower }}' }
+            - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
+            - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
+            - {
+                Name: 'POSTGRES_HOST',
+                Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",
+              }
+            - { Name: 'POSTGRES_PORT', Value: "{{ rds_port }}" }
+            - { Name: 'POSTGRES_DB', Value: "{{ rds_db_name }}" }
+            - { Name: 'POSTGRES_USER', Value: "orchestrator_docstore" }
+            - { Name: 'POSTGRES_SCHEMA', Value: "{{ rds_schema }}" }
+            - { Name: 'POSTGRES_USE_SSL', Value: "true" }
+            - { Name: 'POSTGRES_VERIFY_SSL', Value: "true" }
+            - { Name: 'DOCUMENT_STORE_S3_BUCKET', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-files' }
+          Secrets:
+            - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
+            - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
+            - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_oidc_client_secret }}' }
+            - { Name: 'GCP_KEY', ValueFrom: '{{ ssmkey_gcp_key }}' }
+            - { Name: 'POSTGRES_PASSWORD', ValueFrom: '{{ ssmkey_rds_docstore_password }}' }
+            - {
+                Name: 'POSTGRES_SSL_CA',
+                ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",
+              }
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub '/ecs/{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'ecs'
+          HealthCheck:
+            Command: ['CMD-SHELL', 'python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:{{ agent_runner_public_api_port }}/.well-known/agent-card.json\").read()" || exit 1']
+            Interval: 60
+            Retries: 3
+            StartPeriod: 60
+            Timeout: 5
+
+  AgentRunnerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      GroupDescription: 'Agent Runner Infrastructure security group'
+      SecurityGroupIngress:
+        - { IpProtocol: 'tcp', FromPort: '{{ agent_runner_public_api_port }}', ToPort: '{{ agent_runner_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpc-cidr4', Description: 'Agent Runner - Local VPC (IPv4)' }
+        - { IpProtocol: 'tcp', FromPort: '{{ agent_runner_public_api_port }}', ToPort: '{{ agent_runner_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpc-cidr6', Description: 'Agent Runner - Local VPC (IPv6)' }
+        - { IpProtocol: 'tcp', FromPort: '{{ agent_runner_public_api_port }}', ToPort: '{{ agent_runner_public_api_port }}', CidrIp: !ImportValue '{{ project_id }}-vpn-cidr4', Description: 'Agent Runner - VPN (IPv4)' }
+        - { IpProtocol: 'tcp', FromPort: '{{ agent_runner_public_api_port }}', ToPort: '{{ agent_runner_public_api_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpn-cidr6', Description: 'Agent Runner - VPN (IPv6)' }
+        - { IpProtocol: 'tcp', FromPort: '{{ agent_runner_public_api_port }}', ToPort: '{{ agent_runner_public_api_port }}', SourceSecurityGroupId: !ImportValue '{{ project_id }}-public-alb-v2-security-group-id', Description: 'Agent Runner - LoadBalancer' }
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-sg' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  AgentRunnerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: '/.well-known/agent-card.json'
+      HealthCheckPort: '{{ agent_runner_public_api_port }}'
+      HealthCheckProtocol: 'HTTP'
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      Port: '{{ agent_runner_public_api_port }}'
+      Protocol: 'HTTP'
+      TargetGroupAttributes:
+        - Key: 'deregistration_delay.timeout_seconds'
+          Value: !If [IsProd, '30', '0']
+        - Key: 'stickiness.enabled'
+          Value: false
+      TargetType: 'ip'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  AgentRunnerAlbListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref AgentRunnerTargetGroup
+      Conditions:
+        - Field: 'host-header'
+          HostHeaderConfig:
+            Values:
+              - '{{ agent_runner_fqdn }}'
+      ListenerArn: !ImportValue '{{ project_id }}-public-alb-v2-https-listener'
+      # NOTE: The Priority is global and must have unique value across all services we have
+      Priority: 607
+
+  AgentRunnerService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner'
+      Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+      LaunchType: 'FARGATE'
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: 1
+      TaskDefinition: !Ref AgentRunnerTaskDefinition
+      EnableECSManagedTags: true
+      EnableExecuteCommand: true
+      PropagateTags: 'TASK_DEFINITION'
+      HealthCheckGracePeriodSeconds: 300
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: 'DISABLED'
+          SecurityGroups:
+            - !Ref AgentRunnerSecurityGroup
+            - !ImportValue '{{ project_id }}-public-alb-v2-security-group-id'
+          Subnets:
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1a'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1b'
+            - !ImportValue '{{ project_id }}-subnet-dual-pri1c'
+      LoadBalancers:
+        - TargetGroupArn: !Ref AgentRunnerTargetGroup
+          ContainerPort: '{{ agent_runner_public_api_port }}'
+          ContainerName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner'
+
+  AgentRunnerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !If [IsProd, 2, 1]
+      MinCapacity: !If [IsProd, 1, 1]
+      RoleARN: !GetAtt AgentRunnerEcsAutoScalingRole.Arn
+      ServiceNamespace: 'ecs'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ResourceId:
+        !Sub
+          - 'service/${Cluster}/${Name}'
+          - Cluster: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+            Name: !GetAtt AgentRunnerService.Name
+
+  AgentRunnerEcsAutoScalingPolicyCPU:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-target-tracking-cpu50'
+      PolicyType: 'TargetTrackingScaling'
+      ScalingTargetId: !Ref AgentRunnerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 50.0
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: 'ECSServiceAverageCPUUtilization'
+
+  AgentRunnerEcsAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-ecs-as'
+      Description: 'Agent Runner ECS auto-scaling role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'ecs.application-autoscaling.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'AllowCloudwatchAlarms'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                  - 'cloudwatch:DeleteAlarms'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action: 'ecs:UpdateService'
+                Resource:
+                  - !Ref AgentRunnerService
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-ecs-as-role' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  AgentRunnerCpuUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'AgentRunnerCpuUtilizationHigh'
+      AlarmDescription: 'Agent Runner - CPUUtilization is higher than 90% for 20 minutes'
+      MetricName: 'CPUUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt AgentRunnerService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  AgentRunnerMemoryUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'AgentRunnerMemoryUtilizationHigh'
+      AlarmDescription: 'Agent Runner - MemoryUtilization is higher than 90% for 20 minutes'
+      MetricName: 'MemoryUtilization'
+      Namespace: 'AWS/ECS'
+      Dimensions:
+        - Name: 'ClusterName'
+          Value: !ImportValue '{{ project_id }}-shared-ecs-cluster'
+        - Name: 'ServiceName'
+          Value: !GetAtt AgentRunnerService.Name
+      ComparisonOperator: 'GreaterThanThreshold'
+      Statistic: 'Average'
+      Threshold: 90
+      Period: 1200
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'
+
+  AgentRunnerHealthyHostCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: 'AgentRunnerHealthyHostCount'
+      AlarmDescription: 'Agent Runner - HealthyHostCount is lower than 1 for 1 minute'
+      MetricName: 'HealthyHostCount'
+      ComparisonOperator: 'LessThanThreshold'
+      Namespace: 'AWS/ApplicationELB'
+      Dimensions:
+        - Name: 'LoadBalancer'
+          Value: !ImportValue '{{ project_id }}-public-alb-v2-full-name'
+        - Name: 'TargetGroup'
+          Value: !GetAtt AgentRunnerTargetGroup.TargetGroupFullName
+      Statistic: 'Maximum'
+      Threshold: 1
+      Period: 60
+      EvaluationPeriods: 1
+      TreatMissingData: 'breaching'

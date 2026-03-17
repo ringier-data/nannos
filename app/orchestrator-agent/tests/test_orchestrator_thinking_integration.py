@@ -4,9 +4,9 @@ import os
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from agent_common.models.base import ThinkingLevel
 
 from app.core.executor import OrchestratorDeepAgentExecutor
-from app.models.base import ThinkingLevel
 
 
 class TestOrchestratorThinkingConfig:
@@ -24,11 +24,11 @@ class TestOrchestratorThinkingConfig:
         # Re-import to pick up environment variables
         from importlib import reload
 
-        from app.models import base
+        import agent_common.models.base as _ac_base
 
-        reload(base)
+        reload(_ac_base)
 
-        assert base.DEFAULT_THINKING_LEVEL == ThinkingLevel.medium
+        assert _ac_base.DEFAULT_THINKING_LEVEL == ThinkingLevel.medium
 
     @patch.dict(
         os.environ,
@@ -40,11 +40,11 @@ class TestOrchestratorThinkingConfig:
         """Test that thinking is disabled when ORCHESTRATOR_ENABLE_THINKING is false."""
         from importlib import reload
 
-        from app.models import base
+        import agent_common.models.base as _ac_base
 
-        reload(base)
+        reload(_ac_base)
 
-        assert base.DEFAULT_THINKING_LEVEL is None
+        assert _ac_base.DEFAULT_THINKING_LEVEL is None
 
     @pytest.mark.asyncio
     async def test_user_thinking_overrides_default(self):
@@ -188,7 +188,7 @@ class TestGraphCreationWithThinking:
         mock_config.get_bedrock_region.return_value = "eu-central-1"
 
         with patch("app.core.graph_factory.DynamoDBSaver"):
-            with patch("app.core.graph_factory.BedrockEmbeddings"):
+            with patch("app.core.graph_factory.CostTrackingBedrockEmbeddings"):
                 with patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent:
                     mock_create_deep_agent.return_value = Mock()
 

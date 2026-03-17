@@ -1,1 +1,5 @@
 ---
+
+# Auto-approve constraints for automated sub-agents
+auto_approve_max_system_prompt_length: 500
+auto_approve_max_mcp_tools_count: 3

@@ -25,6 +25,7 @@ def download_nltk_data():
         nltk.data.find("tokenizers/punkt")
     except LookupError:
         nltk.download("punkt", quiet=True)
+        nltk.download("punkt_tab", quiet=True)
 
 
 # Configure pytest-asyncio
