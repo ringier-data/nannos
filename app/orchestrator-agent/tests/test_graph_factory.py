@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 import pytest
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from langchain.agents.middleware import ToolRetryMiddleware
+from ringier_a2a_sdk.middleware.bedrock_prompt_caching import BedrockPromptCachingMiddleware
 
 from app.core.graph_factory import GraphFactory
 from app.middleware import (
@@ -109,16 +110,17 @@ class TestMiddlewareStack:
 
         stack = factory._create_middleware_stack()
 
-        # Verify correct order (DynamicTool must be first)
-        assert len(stack) == 8
+        # Verify correct order (DynamicTool first, static content before cache point, user prefs after)
+        assert len(stack) == 9
         assert isinstance(stack[0], DynamicToolDispatchMiddleware)
-        assert isinstance(stack[1], UserPreferencesMiddleware)
-        assert isinstance(stack[2], StoragePathsInstructionMiddleware)
-        assert isinstance(stack[3], RepeatedToolCallMiddleware)
-        assert isinstance(stack[4], AuthErrorDetectionMiddleware)
-        assert isinstance(stack[5], ToolRetryMiddleware)
-        assert isinstance(stack[6], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[7], TodoStatusMiddleware)
+        assert isinstance(stack[1], StoragePathsInstructionMiddleware)
+        assert isinstance(stack[2], BedrockPromptCachingMiddleware)
+        assert isinstance(stack[3], UserPreferencesMiddleware)
+        assert isinstance(stack[4], RepeatedToolCallMiddleware)
+        assert isinstance(stack[5], AuthErrorDetectionMiddleware)
+        assert isinstance(stack[6], ToolRetryMiddleware)
+        assert isinstance(stack[7], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[8], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_middleware_stack_dynamic_tool_dispatch_config(self, mock_dynamodb, mock_config):

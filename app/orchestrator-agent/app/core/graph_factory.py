@@ -38,6 +38,7 @@ from langgraph_checkpoint_aws import DynamoDBSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
+from ringier_a2a_sdk.middleware.bedrock_prompt_caching import BedrockPromptCachingMiddleware
 
 from ..handlers import handle_auth_error, should_retry
 from ..middleware import (
@@ -357,14 +358,15 @@ class GraphFactory:
         # StoragePathsInstructionMiddleware adds filesystem storage paths documentation
         storage_paths_middleware = StoragePathsInstructionMiddleware()
 
-        # Order: DynamicToolDispatch → UserPreferences → StoragePaths → LoopDetection → Auth → Retry → A2A → Todo
-        # UserPreferences comes early to modify system prompt before other middleware
-        # StoragePaths comes after UserPreferences to ensure storage instructions are included
+        # Order: DynamicToolDispatch → StoragePaths → PromptCaching → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo
+        # BedrockPromptCaching places cache point after all static content (system prompt + storage paths),
+        # so that the cache is shared across all users. StoragePaths is included in the cache.
         # LoopDetection comes before Auth/Retry to catch loops early
         return [
             dynamic_tool_middleware,
-            user_preferences_middleware,
             storage_paths_middleware,
+            BedrockPromptCachingMiddleware(),
+            user_preferences_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,
             self._retry_middleware,

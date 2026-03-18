@@ -1,5 +1,6 @@
 """Middleware components for A2A authentication and request processing."""
 
+from .bedrock_prompt_caching import BedrockPromptCachingMiddleware
 from .jwt_validator_middleware import JWTValidatorMiddleware
 from .sub_agent_id_middleware import SubAgentIdMiddleware, current_sub_agent_id
 from .user_context_middleware import (
@@ -8,6 +9,7 @@ from .user_context_middleware import (
 )
 
 __all__ = [
+    "BedrockPromptCachingMiddleware",
     "JWTValidatorMiddleware",
     "UserContextFromRequestStateMiddleware",
     "SubAgentIdMiddleware",

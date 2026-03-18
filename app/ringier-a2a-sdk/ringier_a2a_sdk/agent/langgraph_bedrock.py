@@ -29,6 +29,7 @@ from langgraph_checkpoint_aws import DynamoDBSaver
 from pydantic import BaseModel, Field
 
 from ..agent.base import BaseAgent
+from ..middleware.bedrock_prompt_caching import BedrockPromptCachingMiddleware
 from ..middleware.credential_injector import BaseCredentialInjector
 from ..models import AgentStreamResponse, UserConfig
 
@@ -637,15 +638,16 @@ class LangGraphBedrockAgent(BaseAgent):
     def _get_middleware(self) -> list[AgentMiddleware]:
         """Return agent middleware list.
 
-        Default: Empty list (no middleware)
+        Default: Includes BedrockPromptCachingMiddleware for system prompt caching.
 
-        Subclasses can override to provide middleware for tool call interception,
-        parameter enforcement, etc.
+        Subclasses can override to add middleware for tool call interception,
+        parameter enforcement, etc. Call super()._get_middleware() to preserve
+        prompt caching.
 
         Returns:
             List of AgentMiddleware instances
         """
-        return []
+        return [BedrockPromptCachingMiddleware()]
 
     def _get_tool_interceptors(self) -> list:
         """Return tool interceptors for credential injection or request modification.
