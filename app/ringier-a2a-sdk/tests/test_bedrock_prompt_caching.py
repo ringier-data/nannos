@@ -14,20 +14,22 @@ def middleware():
     return BedrockPromptCachingMiddleware()
 
 
-def _make_request(system_content=None, messages=None):
-    """Create a mock ModelRequest with given system message and messages."""
+def _make_request(system_content=None, messages=None, tools=None):
+    """Create a mock ModelRequest with given system message, messages, and tools."""
 
-    def _build(model, system_message, msgs):
+    def _build(model, system_message, msgs, tls):
         req = MagicMock()
         req.model = model
         req.system_message = system_message
         req.messages = msgs
+        req.tools = tls
 
         def fake_override(**kwargs):
             return _build(
                 model=model,
                 system_message=kwargs.get("system_message", req.system_message),
                 msgs=kwargs.get("messages", req.messages),
+                tls=kwargs.get("tools", req.tools),
             )
 
         req.override = fake_override
@@ -35,7 +37,7 @@ def _make_request(system_content=None, messages=None):
 
     model = MagicMock(spec=ChatBedrockConverse)
     system_message = None if system_content is None else SystemMessage(content=system_content)
-    return _build(model, system_message, messages or [])
+    return _build(model, system_message, messages or [], tools or [])
 
 
 class TestSystemPromptCaching:
@@ -342,17 +344,91 @@ class TestConversationHistoryCaching:
         assert called_req.messages[1].content == "Hello!"
 
     def test_disable_all_caching(self):
-        """Both flags False → middleware is a no-op for Bedrock models."""
-        mw = BedrockPromptCachingMiddleware(cache_system_prompt=False, cache_conversation=False)
+        """All flags False → middleware is a no-op for Bedrock models."""
+        mw = BedrockPromptCachingMiddleware(
+            cache_system_prompt=False, cache_conversation=False, cache_tools=False
+        )
         messages = [
             HumanMessage(content="Hi"),
             AIMessage(content="Hello!"),
             HumanMessage(content="More"),
         ]
-        request = _make_request(system_content="Be helpful.", messages=messages)
+        tools = [{"toolSpec": {"name": "search", "description": "Search", "inputSchema": {"json": {}}}}]
+        request = _make_request(system_content="Be helpful.", messages=messages, tools=tools)
         handler = MagicMock(return_value="result")
         mw.wrap_model_call(request, handler)
 
         called_req = handler.call_args[0][0]
         assert called_req.system_message.content == "Be helpful."
         assert called_req.messages[1].content == "Hello!"
+        assert len(called_req.tools) == 1  # No cache point added
+
+
+class TestToolsCaching:
+    def test_adds_cache_point_to_tools(self, middleware):
+        """Cache point is appended to the tools list."""
+        tools = [
+            {"toolSpec": {"name": "search", "description": "Search the web", "inputSchema": {"json": {}}}},
+            {"toolSpec": {"name": "calculator", "description": "Do math", "inputSchema": {"json": {}}}},
+        ]
+        request = _make_request(system_content="System", tools=tools)
+        handler = MagicMock(return_value="result")
+        middleware.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        assert len(called_req.tools) == 3
+        assert called_req.tools[2] == {"cachePoint": {"type": "default"}}
+
+    def test_skips_empty_tools(self, middleware):
+        """No tools → no cache point."""
+        request = _make_request(system_content="System", tools=[])
+        handler = MagicMock(return_value="result")
+        middleware.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        assert called_req.tools == []
+
+    def test_skips_if_tools_cache_point_already_present(self, middleware):
+        """Does not duplicate cachePoint in tools list."""
+        tools = [
+            {"toolSpec": {"name": "search", "description": "Search", "inputSchema": {"json": {}}}},
+            {"cachePoint": {"type": "default"}},
+        ]
+        request = _make_request(system_content="System", tools=tools)
+        handler = MagicMock(return_value="result")
+        middleware.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        cache_points = [t for t in called_req.tools if isinstance(t, dict) and "cachePoint" in t]
+        assert len(cache_points) == 1
+
+    def test_disable_tools_caching(self):
+        """cache_tools=False skips tools cache point."""
+        mw = BedrockPromptCachingMiddleware(cache_tools=False)
+        tools = [{"toolSpec": {"name": "search", "description": "Search", "inputSchema": {"json": {}}}}]
+        request = _make_request(system_content="System", tools=tools)
+        handler = MagicMock(return_value="result")
+        mw.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        assert len(called_req.tools) == 1
+
+    def test_all_three_cache_points(self, middleware):
+        """System prompt, conversation, and tools all get cache points."""
+        messages = [
+            HumanMessage(content="Hi"),
+            AIMessage(content="Hello!"),
+            HumanMessage(content="Search for X"),
+        ]
+        tools = [{"toolSpec": {"name": "search", "description": "Search", "inputSchema": {"json": {}}}}]
+        request = _make_request(system_content="Be helpful.", messages=messages, tools=tools)
+        handler = MagicMock(return_value="result")
+        middleware.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        # System message cache point
+        assert called_req.system_message.content[-1] == {"cachePoint": {"type": "default"}}
+        # Conversation cache point
+        assert called_req.messages[1].content[-1] == {"cachePoint": {"type": "default"}}
+        # Tools cache point
+        assert called_req.tools[-1] == {"cachePoint": {"type": "default"}}
