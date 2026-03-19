@@ -304,3 +304,55 @@ class TestConversationHistoryCaching:
         called_req = handler.call_args[0][0]
         cached_msg = called_req.messages[3]  # second-to-last
         assert cached_msg.content[-1] == {"cachePoint": {"type": "default"}}
+
+    def test_disable_system_prompt_caching(self):
+        """cache_system_prompt=False skips system message cache point."""
+        mw = BedrockPromptCachingMiddleware(cache_system_prompt=False)
+        messages = [
+            HumanMessage(content="Hi"),
+            AIMessage(content="Hello!"),
+            HumanMessage(content="More"),
+        ]
+        request = _make_request(system_content="Be helpful.", messages=messages)
+        handler = MagicMock(return_value="result")
+        mw.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        # System message unchanged (still a string)
+        assert called_req.system_message.content == "Be helpful."
+        # Conversation cache point still applied
+        assert called_req.messages[1].content[-1] == {"cachePoint": {"type": "default"}}
+
+    def test_disable_conversation_caching(self):
+        """cache_conversation=False skips conversation cache point."""
+        mw = BedrockPromptCachingMiddleware(cache_conversation=False)
+        messages = [
+            HumanMessage(content="Hi"),
+            AIMessage(content="Hello!"),
+            HumanMessage(content="More"),
+        ]
+        request = _make_request(system_content="Be helpful.", messages=messages)
+        handler = MagicMock(return_value="result")
+        mw.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        # System message has cache point
+        assert called_req.system_message.content[-1] == {"cachePoint": {"type": "default"}}
+        # Conversation messages unchanged
+        assert called_req.messages[1].content == "Hello!"
+
+    def test_disable_all_caching(self):
+        """Both flags False → middleware is a no-op for Bedrock models."""
+        mw = BedrockPromptCachingMiddleware(cache_system_prompt=False, cache_conversation=False)
+        messages = [
+            HumanMessage(content="Hi"),
+            AIMessage(content="Hello!"),
+            HumanMessage(content="More"),
+        ]
+        request = _make_request(system_content="Be helpful.", messages=messages)
+        handler = MagicMock(return_value="result")
+        mw.wrap_model_call(request, handler)
+
+        called_req = handler.call_args[0][0]
+        assert called_req.system_message.content == "Be helpful."
+        assert called_req.messages[1].content == "Hello!"

@@ -53,9 +53,13 @@ class BedrockPromptCachingMiddleware(AgentMiddleware):
     def __init__(
         self,
         unsupported_model_behavior: str = "ignore",
+        cache_system_prompt: bool = True,
+        cache_conversation: bool = True,
         min_messages: int = 2,
     ) -> None:
         self.unsupported_model_behavior = unsupported_model_behavior
+        self.cache_system_prompt = cache_system_prompt
+        self.cache_conversation = cache_conversation
         self.min_messages = min_messages
 
     def _should_apply(self, request: ModelRequest) -> bool:
@@ -106,8 +110,10 @@ class BedrockPromptCachingMiddleware(AgentMiddleware):
 
     def _apply(self, request: ModelRequest) -> ModelRequest:
         """Apply all cache points to the request."""
-        request = self._add_system_cache_point(request)
-        request = self._add_conversation_cache_point(request)
+        if self.cache_system_prompt:
+            request = self._add_system_cache_point(request)
+        if self.cache_conversation:
+            request = self._add_conversation_cache_point(request)
         return request
 
     def wrap_model_call(
