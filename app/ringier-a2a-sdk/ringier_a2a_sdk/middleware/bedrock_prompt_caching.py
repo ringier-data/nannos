@@ -88,18 +88,19 @@ class BedrockPromptCachingMiddleware(AgentMiddleware):
         return request.override(system_message=SystemMessage(content=new_content))
 
     def _add_conversation_cache_point(self, request: ModelRequest) -> ModelRequest:
-        """Add a cachePoint to the last message before the current user message.
+        """Add a cachePoint to the last conversation message.
 
-        This caches the conversation history prefix so only new messages
-        need to be processed on subsequent turns.
+        Uses Bedrock's simplified cache management: a single cache point on the
+        last message lets Bedrock automatically find the longest matching prefix
+        by looking back up to ~20 content blocks.
+
+        See: https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html#prompt-caching-simplified
         """
         messages = request.messages
         if len(messages) < self.min_messages:
             return request
 
-        # Cache point goes on the second-to-last message
-        # (the one right before the latest user query)
-        target_idx = len(messages) - 2
+        target_idx = len(messages) - 1
         target_msg = messages[target_idx]
 
         new_content = _append_cache_point(target_msg.content)

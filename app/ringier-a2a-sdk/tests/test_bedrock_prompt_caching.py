@@ -120,8 +120,8 @@ class TestSystemPromptCaching:
 
 
 class TestConversationHistoryCaching:
-    def test_adds_cache_point_to_second_to_last_message(self, middleware):
-        """Cache point is added to the message before the latest user message."""
+    def test_adds_cache_point_to_last_message(self, middleware):
+        """Cache point is added to the last message (simplified cache management)."""
         messages = [
             HumanMessage(content="What is Python?"),
             AIMessage(content="Python is a programming language."),
@@ -132,10 +132,10 @@ class TestConversationHistoryCaching:
         middleware.wrap_model_call(request, handler)
 
         called_req = handler.call_args[0][0]
-        cached_msg = called_req.messages[1]  # The AIMessage
+        cached_msg = called_req.messages[2]  # The last HumanMessage
         assert isinstance(cached_msg.content, list)
         assert cached_msg.content[-1] == {"cachePoint": {"type": "default"}}
-        assert cached_msg.content[0] == {"type": "text", "text": "Python is a programming language."}
+        assert cached_msg.content[0] == {"type": "text", "text": "Tell me more."}
 
     def test_skips_single_message(self, middleware):
         """Only one message (current user query) → no conversation cache point."""
@@ -155,76 +155,67 @@ class TestConversationHistoryCaching:
         middleware.wrap_model_call(request, handler)
         handler.assert_called_once()
 
-    def test_preserves_ai_message_metadata(self, middleware):
-        """AIMessage metadata and tool_calls are preserved."""
-        ai_msg = AIMessage(
-            content="I'll search for that.",
-            tool_calls=[{"name": "search", "args": {"q": "test"}, "id": "tc1", "type": "tool_call"}],
-            response_metadata={"model_id": "anthropic.claude-3-5-sonnet"},
-        )
+    def test_preserves_message_metadata(self, middleware):
+        """Message metadata is preserved when adding cache point."""
         messages = [
             HumanMessage(content="Search for test"),
-            ai_msg,
-            HumanMessage(content="What did you find?"),
+            AIMessage(
+                content="I'll search for that.",
+                tool_calls=[{"name": "search", "args": {"q": "test"}, "id": "tc1", "type": "tool_call"}],
+                response_metadata={"model_id": "anthropic.claude-3-5-sonnet"},
+            ),
+            HumanMessage(content="What did you find?", additional_kwargs={"foo": "bar"}),
         ]
         request = _make_request(system_content="System", messages=messages)
         handler = MagicMock(return_value="result")
         middleware.wrap_model_call(request, handler)
 
         called_req = handler.call_args[0][0]
-        cached_msg = called_req.messages[1]
-        assert isinstance(cached_msg, AIMessage)
-        assert cached_msg.tool_calls == ai_msg.tool_calls
-        assert cached_msg.response_metadata == ai_msg.response_metadata
+        cached_msg = called_req.messages[2]  # last message
+        assert isinstance(cached_msg, HumanMessage)
+        assert cached_msg.additional_kwargs == {"foo": "bar"}
         assert cached_msg.content[-1] == {"cachePoint": {"type": "default"}}
 
     def test_handles_list_content_in_conversation(self, middleware):
         """Messages with list content blocks get cachePoint appended."""
-        ai_msg = AIMessage(
-            content=[
-                {"type": "text", "text": "Here is what I found:"},
-                {"type": "text", "text": "Result details..."},
-            ]
-        )
         messages = [
             HumanMessage(content="Search"),
-            ai_msg,
-            HumanMessage(content="More?"),
+            AIMessage(content="Found it"),
+            HumanMessage(content=[
+                {"type": "text", "text": "Tell me more about:"},
+                {"type": "text", "text": "Result details..."},
+            ]),
         ]
         request = _make_request(system_content="System", messages=messages)
         handler = MagicMock(return_value="result")
         middleware.wrap_model_call(request, handler)
 
         called_req = handler.call_args[0][0]
-        cached_msg = called_req.messages[1]
+        cached_msg = called_req.messages[2]  # last message
         assert len(cached_msg.content) == 3
         assert cached_msg.content[2] == {"cachePoint": {"type": "default"}}
 
     def test_skips_if_conversation_cache_point_already_present(self, middleware):
         """Does not duplicate cachePoint on conversation messages."""
-        ai_msg = AIMessage(
-            content=[
-                {"type": "text", "text": "Response"},
-                {"cachePoint": {"type": "default"}},
-            ]
-        )
         messages = [
             HumanMessage(content="First"),
-            ai_msg,
-            HumanMessage(content="Second"),
+            AIMessage(content="Response"),
+            HumanMessage(content=[
+                {"type": "text", "text": "Second"},
+                {"cachePoint": {"type": "default"}},
+            ]),
         ]
         request = _make_request(system_content="System", messages=messages)
         handler = MagicMock(return_value="result")
         middleware.wrap_model_call(request, handler)
 
-        # Should not add another cache point to the AI message
         called_req = handler.call_args[0][0]
-        cached_msg = called_req.messages[1]
+        cached_msg = called_req.messages[2]  # last message
         cache_points = [b for b in cached_msg.content if isinstance(b, dict) and "cachePoint" in b]
         assert len(cache_points) == 1
 
-    def test_works_with_tool_messages(self, middleware):
-        """Cache point goes on second-to-last even if it's a ToolMessage."""
+    def test_cache_point_on_last_message_regardless_of_type(self, middleware):
+        """Cache point always goes on the last message regardless of its type."""
         messages = [
             HumanMessage(content="Search for X"),
             AIMessage(content="Searching...", tool_calls=[{"name": "search", "args": {}, "id": "tc1", "type": "tool_call"}]),
@@ -236,9 +227,9 @@ class TestConversationHistoryCaching:
         middleware.wrap_model_call(request, handler)
 
         called_req = handler.call_args[0][0]
-        # ToolMessage at index 2 should get the cache point
-        cached_msg = called_req.messages[2]
-        assert isinstance(cached_msg, ToolMessage)
+        # Last message (HumanMessage at index 3) should get the cache point
+        cached_msg = called_req.messages[3]
+        assert isinstance(cached_msg, HumanMessage)
         assert cached_msg.content[-1] == {"cachePoint": {"type": "default"}}
 
     def test_both_system_and_conversation_cache_points(self, middleware):
@@ -256,8 +247,8 @@ class TestConversationHistoryCaching:
         # System message has cache point
         sys_content = called_req.system_message.content
         assert sys_content[-1] == {"cachePoint": {"type": "default"}}
-        # Conversation message has cache point
-        conv_content = called_req.messages[1].content
+        # Conversation message has cache point (on last message)
+        conv_content = called_req.messages[2].content
         assert conv_content[-1] == {"cachePoint": {"type": "default"}}
 
     @pytest.mark.asyncio
@@ -304,7 +295,7 @@ class TestConversationHistoryCaching:
         mw.wrap_model_call(request, handler)
 
         called_req = handler.call_args[0][0]
-        cached_msg = called_req.messages[3]  # second-to-last
+        cached_msg = called_req.messages[4]  # last message
         assert cached_msg.content[-1] == {"cachePoint": {"type": "default"}}
 
     def test_disable_system_prompt_caching(self):
@@ -322,8 +313,8 @@ class TestConversationHistoryCaching:
         called_req = handler.call_args[0][0]
         # System message unchanged (still a string)
         assert called_req.system_message.content == "Be helpful."
-        # Conversation cache point still applied
-        assert called_req.messages[1].content[-1] == {"cachePoint": {"type": "default"}}
+        # Conversation cache point still applied (on last message)
+        assert called_req.messages[2].content[-1] == {"cachePoint": {"type": "default"}}
 
     def test_disable_conversation_caching(self):
         """cache_conversation=False skips conversation cache point."""
@@ -428,7 +419,7 @@ class TestToolsCaching:
         called_req = handler.call_args[0][0]
         # System message cache point
         assert called_req.system_message.content[-1] == {"cachePoint": {"type": "default"}}
-        # Conversation cache point
-        assert called_req.messages[1].content[-1] == {"cachePoint": {"type": "default"}}
+        # Conversation cache point (on last message)
+        assert called_req.messages[2].content[-1] == {"cachePoint": {"type": "default"}}
         # Tools cache point
         assert called_req.tools[-1] == {"cachePoint": {"type": "default"}}
