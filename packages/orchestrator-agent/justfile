@@ -1,0 +1,27 @@
+# List all available recipes
+default:
+  just -l
+
+start:
+    uv run uvicorn main:app --host 0.0.0.0 --port 8000
+
+# Download NLTK punkt tokenizer
+nltk-data:
+    uv run python -m nltk.downloader punkt 
+
+# Run linters (ruff + mypy)
+lint: nltk-data
+    uv run ruff check .
+    uv run mypy . --explicit-package-bases
+
+# Start a Python REPL
+python:
+    uv run python
+
+# Run tests
+test:
+    uv run pytest tests/ -v
+
+# Run tests with coverage
+test-cov:
+    uv run pytest tests/ --cov=app --cov-report=term-missing --cov-report=html

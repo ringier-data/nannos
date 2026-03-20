@@ -1,0 +1,130 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach: Backend",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/app/playground-backend",
+          "remoteRoot": "."
+        }
+      ],
+      "justMyCode": false,
+      "django": false
+    },
+    {
+      "name": "Attach: Orchestrator",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5679
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/app/orchestrator-agent",
+          "remoteRoot": "."
+        }
+      ],
+      "justMyCode": false
+    },
+    {
+      "name": "Attach: Agent Creator",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5680
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/app/agent-creator",
+          "remoteRoot": "."
+        }
+      ],
+      "justMyCode": false
+    },
+    {
+      "name": "Attach: Alloy Agent",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5681
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/app/alloy-agent",
+          "remoteRoot": "."
+        }
+      ],
+      "justMyCode": false
+    },
+    {
+      "name": "Attach: Agent Runner",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5682
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/app/agent-runner",
+          "remoteRoot": "."
+        }
+      ],
+      "justMyCode": false
+    },
+    {
+      "name": "Attach: Frontend",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:5173",
+      "webRoot": "${workspaceFolder}/app/playground-frontend/src",
+      "sourceMapPathOverrides": {
+        "webpack:///src/*": "${webRoot}/*"
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Debug: All Services",
+      "configurations": [
+        "Attach: Backend",
+        "Attach: Orchestrator",
+        "Attach: Agent Creator",
+        "Attach: Alloy Agent",
+        "Attach: Agent Runner",
+        "Attach: Frontend"
+      ],
+      "stopAll": true,
+      "preLaunchTask": ""
+    },
+    {
+      "name": "Debug: Backend + Orchestrator",
+      "configurations": [
+        "Attach: Backend",
+        "Attach: Orchestrator"
+      ],
+      "stopAll": true
+    },
+    {
+      "name": "Debug: Backend Services",
+      "configurations": [
+        "Attach: Backend",
+        "Attach: Orchestrator",
+        "Attach: Agent Creator",
+        "Attach: Alloy Agent",
+        "Attach: Agent Runner"
+      ],
+      "stopAll": true
+    }
+  ]
+}

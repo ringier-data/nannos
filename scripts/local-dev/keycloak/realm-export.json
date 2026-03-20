@@ -1,0 +1,411 @@
+{
+  "id": "nannos",
+  "realm": "nannos",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "offlineSessionMaxLifespan": 5184000,
+  "roles": {
+    "realm": [
+      {
+        "name": "offline_access",
+        "description": "Grants offline access for refresh tokens"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "nannos-team",
+      "path": "/nannos-team",
+      "realmRoles": ["offline_access"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "agent-console",
+      "name": "Nannos Console",
+      "description": "Frontend SPA for Nannos Console",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-secret",
+      "clientAuthenticatorType": "client-secret",
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": true,
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://localhost:5001/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "http://localhost:5001"
+      ],
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:5001/*",
+        "use.refresh.tokens": "true",
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles",
+        "offline_access"
+      ],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "lightweight.claim": "true"
+          }
+        },
+        {
+          "name": "audience-agent-console",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "agent-console",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "lightweight.claim": "true"
+          }
+        },
+        {
+          "name": "audience-orchestrator",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "orchestrator",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "lightweight.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "authorizationSettings": {
+        "allowRemoteResourceManagement": true,
+        "policyEnforcementMode": "ENFORCING",
+        "decisionStrategy": "AFFIRMATIVE",
+        "resources": [
+          {
+            "name": "Default Resource",
+            "type": "urn:agent-console:resources:default",
+            "ownerManagedAccess": false,
+            "displayName": "agent-console default resource",
+            "uris": ["/*"]
+          }
+        ],
+        "scopes": [
+          {
+            "name": "token-exchange",
+            "displayName": "Token Exchange Scope"
+          }
+        ],
+        "policies": [
+          {
+            "name": "token-exchange-policy-orchestrator",
+            "type": "client",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "clients": "[\"orchestrator\"]"
+            }
+          },
+          {
+            "name": "token-exchange-permission",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "scopes": "[\"token-exchange\"]",
+              "applyPolicies": "[\"token-exchange-policy-orchestrator\"]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "clientId": "orchestrator",
+      "name": "Orchestrator Agent",
+      "description": "Backend orchestrator service",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-secret",
+      "clientAuthenticatorType": "client-secret",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": true,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "attributes": {
+        "use.refresh.tokens": "true",
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "lightweight.claim": "true"
+          }
+        },
+        {
+          "name": "audience-orchestrator",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "orchestrator",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "lightweight.claim": "true"
+          }
+        },
+        {
+          "name": "audience-agent-console",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "agent-console",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "lightweight.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "audience-agent-creator",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "agent-creator",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "lightweight.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "authorizationSettings": {
+        "allowRemoteResourceManagement": true,
+        "policyEnforcementMode": "ENFORCING",
+        "decisionStrategy": "AFFIRMATIVE",
+        "resources": [
+          {
+            "name": "Default Resource",
+            "type": "urn:orchestrator:resources:default",
+            "ownerManagedAccess": false,
+            "displayName": "orchestrator default resource",
+            "uris": ["/*"]
+          }
+        ],
+        "scopes": [
+          {
+            "name": "token-exchange",
+            "displayName": "Token Exchange Scope"
+          }
+        ],
+        "policies": [
+          {
+            "name": "token-exchange-policy-agent-console",
+            "type": "client",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "clients": "[\"agent-console\"]"
+            }
+          },
+          {
+            "name": "token-exchange-permission",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "scopes": "[\"token-exchange\"]",
+              "applyPolicies": "[\"token-exchange-policy-agent-console\"]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "clientId": "agent-creator",
+      "name": "Agent Creator",
+      "description": "Agent design assistant service",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-secret",
+      "clientAuthenticatorType": "client-secret",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": true,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "attributes": {
+        "use.refresh.tokens": "true",
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "lightweight.claim": "true"
+          }
+        },
+        {
+          "name": "audience-agent-creator",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "agent-creator",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "lightweight.claim": "true"
+          }
+        }
+      ],
+      "authorizationSettings": {
+        "allowRemoteResourceManagement": true,
+        "policyEnforcementMode": "ENFORCING",
+        "decisionStrategy": "AFFIRMATIVE",
+        "resources": [
+          {
+            "name": "Default Resource",
+            "type": "urn:agent-creator:resources:default",
+            "ownerManagedAccess": false,
+            "displayName": "agent-creator default resource",
+            "uris": ["/*"]
+          }
+        ],
+        "scopes": [
+          {
+            "name": "token-exchange",
+            "displayName": "Token Exchange Scope"
+          }
+        ],
+        "policies": [
+          {
+            "name": "token-exchange-policy-orchestrator",
+            "type": "client",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "clients": "[\"orchestrator\"]"
+            }
+          },
+          {
+            "name": "token-exchange-permission",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "scopes": "[\"token-exchange\"]",
+              "applyPolicies": "[\"token-exchange-policy-orchestrator\"]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "clientId": "nannos-admin",
+      "name": "Nannos Admin Service",
+      "description": "Service account for Keycloak group synchronization",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-secret",
+      "clientAuthenticatorType": "client-secret",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "openid",
+        "profile",
+        "email",
+        "roles"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "test@local.dev",
+      "email": "test@local.dev",
+      "firstName": "Test",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "groups": ["/nannos-team"]
+    }
+  ]
+}

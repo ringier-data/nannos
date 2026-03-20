@@ -1,0 +1,414 @@
+# List all available recipes (default when running `just` with no args)
+default:
+    @just --list
+
+# ─── Per-Package Versioning & Release ──────────────────────────────
+#
+# Each package has its own semver version stored in:
+#   - package.json   (Node.js packages: console-frontend)
+#   - pyproject.toml (Python packages: everything else)
+#
+# Git tags: <package>/v<version>  (e.g. orchestrator-agent/v0.7.0)
+#
+# Workflow:
+#   just changed                            → see which packages changed since last release
+#   just release patch                      → bump & tag all changed packages
+#   just release-pkg orchestrator-agent patch → bump & tag a single package
+#   just build                              → build Docker images for all buildable packages
+#   just push=true build                    → build & push Docker images
+#   just build-pkg orchestrator-agent       → build a single package image
+#   just push=true build-pkg orchestrator-agent → build & push a single package image
+
+# ─── Configuration ─────────────────────────────────────────────────
+
+# TODO: set your container registry
+registry := "ghcr.io/ringier-data"
+
+# Per-package image names (only packages with Dockerfiles)
+img_agent_creator    := registry + "/nannos-agent-creator"
+img_orchestrator     := registry + "/nannos-orchestrator-agent"
+img_console_backend  := registry + "/nannos-console-backend"
+img_console_frontend := registry + "/nannos-console-frontend"
+
+
+# Default build platform
+platform := "linux/arm64"
+
+# Timestamp for dev prerelease suffix (YYYYMMDDHHmmss UTC)
+build_ts := `date -u +%Y%m%d%H%M%S`
+
+# Packages that have Dockerfiles (used by build recipes)
+_buildable_packages := "agent-creator orchestrator-agent console-backend console-frontend"
+
+# Build flags (override on CLI, e.g. just push=true build)
+push := ""
+tag := ""
+all_archs := ""
+
+# ─── Version Helpers ───────────────────────────────────────────────
+
+# Show a package's current version
+[private]
+pkg-version pkg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+    get_package_version "{{ pkg }}"
+
+# Map package name → image ref
+[private]
+pkg-image pkg:
+    #!/usr/bin/env bash
+    case "{{ pkg }}" in
+      agent-creator)      echo "{{ img_agent_creator }}" ;;
+      orchestrator-agent) echo "{{ img_orchestrator }}" ;;
+      console-backend)    echo "{{ img_console_backend }}" ;;
+      console-frontend)   echo "{{ img_console_frontend }}" ;;
+      *) echo "" ;;
+    esac
+
+# ─── Release ───────────────────────────────────────────────────────
+
+# Show which packages have changed since their last release
+changed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+    CYAN='\033[1;36m' GREEN='\033[1;32m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
+    for pkg in $ALL_PACKAGES; do
+      VERSION=$(get_package_version "$pkg")
+      LAST_TAG=$(get_last_tag "$pkg")
+      CHANGED=$(has_changes "$pkg")
+      if [[ "$CHANGED" == "true" ]]; then
+        printf "${YELLOW}● %-30s${RESET} v%-10s (last tag: %s)\n" "$pkg" "$VERSION" "${LAST_TAG:-none}"
+      else
+        printf "${DIM}  %-30s v%-10s (%s)${RESET}\n" "$pkg" "$VERSION" "${LAST_TAG:-none}"
+      fi
+    done
+
+# Detect changed packages, bump versions, commit, tag, docker(build&push)
+release bump:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
+
+    # Detect which packages have changes since their last release tag
+    CHANGED=()
+    UNCHANGED=()
+    for pkg in $ALL_PACKAGES; do
+      if [[ "$(has_changes "$pkg")" == "true" ]]; then
+        CHANGED+=("$pkg")
+      else
+        UNCHANGED+=("$pkg")
+      fi
+    done
+
+    if [[ ${#CHANGED[@]} -eq 0 ]]; then
+      echo "✅ No packages have changes since their last release."
+      exit 0
+    fi
+
+    printf "${CYAN}📦 Packages with changes since last release:${RESET}\n"
+    for pkg in "${CHANGED[@]}"; do
+      CURRENT=$(get_package_version "$pkg")
+      LAST_TAG=$(get_last_tag "$pkg")
+      printf "  ${YELLOW}%-30s${RESET} v%-10s (last tag: %s)\n" "$pkg" "$CURRENT" "${LAST_TAG:-none}"
+    done
+    echo ""
+    if [[ ${#UNCHANGED[@]} -gt 0 ]]; then
+      printf "${DIM}Unchanged: %s${RESET}\n\n" "${UNCHANGED[*]}"
+    fi
+
+    # Bump versions
+    RELEASES=()
+    BUILDABLE="{{ _buildable_packages }}"
+    for pkg in "${CHANGED[@]}"; do
+      printf "${CYAN}🔄 Bumping %s ({{ bump }})...${RESET}\n" "$pkg"
+      NEW_VERSION=$(bump_version "$pkg" "{{ bump }}")
+      printf "   v%s\n" "$NEW_VERSION"
+      RELEASES+=("${pkg}/v${NEW_VERSION}")
+    done
+    echo ""
+
+    # Commit version bumps and create per-package tags
+    RELEASE_MSG="release: $(IFS=', '; echo "${RELEASES[*]}")"
+    git add -A
+    git commit -m "$RELEASE_MSG"
+    for pkg in "${CHANGED[@]}"; do
+      VERSION=$(get_package_version "$pkg")
+      tag_package "$pkg" "$VERSION"
+    done
+    printf "${GREEN}✅ Released: %s${RESET}\n" "${RELEASES[*]}"
+
+    # Build all Docker images first (no push)
+    TO_BUILD=()
+    for pkg in "${CHANGED[@]}"; do
+      if [[ " $BUILDABLE " =~ " $pkg " ]]; then
+        TO_BUILD+=("$pkg")
+      fi
+    done
+    if [[ ${#TO_BUILD[@]} -gt 0 ]]; then
+      just push=true build
+    fi
+
+# Release a single package (bump version, commit, tag)
+release-pkg pkg bump:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' RESET='\033[0m'
+    PKG="{{ pkg }}"
+    BUMP="{{ bump }}"
+
+    # Validate package name
+    if [[ ! " $ALL_PACKAGES " =~ " $PKG " ]]; then
+      echo "❌ Unknown package: $PKG"
+      echo "   Available: $ALL_PACKAGES"
+      exit 1
+    fi
+
+    CURRENT=$(get_package_version "$PKG")
+    printf "${CYAN}🔄 Bumping %s from v%s (%s)...${RESET}\n" "$PKG" "$CURRENT" "$BUMP"
+    NEW_VERSION=$(bump_version "$PKG" "$BUMP")
+    printf "   → v%s\n\n" "$NEW_VERSION"
+
+    git add -A
+    git commit -m "release: ${PKG}/v${NEW_VERSION}"
+    tag_package "$PKG" "$NEW_VERSION"
+    printf "${GREEN}✅ Released ${PKG}/v${NEW_VERSION}${RESET}\n"
+
+    # Build & push Docker image if this package is buildable
+    IMAGE=$(just pkg-image "$PKG")
+    if [[ -n "$IMAGE" ]]; then
+      just push=true build-pkg "$PKG"
+    fi
+
+# ─── Docker Build & Push ──────────────────────────────────────────
+
+# Build Docker images for all buildable packages (optionally push)
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BUILDABLE="{{ _buildable_packages }}"
+    for pkg in $BUILDABLE; do
+      just tag="{{ tag }}" push="{{ push }}" all_archs="{{ all_archs }}" build-pkg "$pkg"
+    done
+
+# Build a single package's Docker image (optionally push)
+build-pkg pkg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' RESET='\033[0m'
+    tmux_tip
+    PKG="{{ pkg }}"
+    DO_PUSH="{{ push }}"
+
+    if [[ "{{ all_archs }}" == "true" ]]; then
+      PLATFORM="linux/amd64,linux/arm64"
+    else
+      PLATFORM="{{ platform }}"
+    fi
+
+    IMAGE=$(just pkg-image "$PKG")
+    if [[ -z "$IMAGE" ]]; then
+      echo "❌ Package '$PKG' has no Dockerfile (no image to build)"
+      echo "   Buildable: {{ _buildable_packages }}"
+      exit 1
+    fi
+
+    DIR="$(pkg_dir "$PKG")"
+    if [[ -n "{{ tag }}" ]]; then
+      TAG="{{ tag }}"
+    else
+      TAG="v$(get_package_version "$PKG")"
+    fi
+
+    LOGFILE=$(mktemp /tmp/nannos-build-XXXXXX)
+    trap 'rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"; printf "${RED}❌ Build failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
+
+    printf "${CYAN}🏗️  Building %s (%s)...${RESET}" "$PKG" "$TAG"
+    T=$SECONDS
+
+    cp -r packages/ringier-a2a-sdk "${DIR}/ringier-a2a-sdk"
+    cp -r packages/agent-common "${DIR}/agent-common"
+
+    build_with_pane "$PKG" "$LOGFILE" \
+      docker buildx build --platform "$PLATFORM" \
+      -t "${IMAGE}:${TAG}" "${DIR}"
+
+    rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"
+    printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
+    printf "${GREEN}✅ Built${RESET} ${IMAGE}:${TAG}\n"
+
+    if [[ "$DO_PUSH" == "true" ]]; then
+      printf "${CYAN}📤 Pushing %s (%s)...${RESET}" "$PKG" "$TAG"
+      T=$SECONDS
+
+      cp -r packages/ringier-a2a-sdk "${DIR}/ringier-a2a-sdk"
+      cp -r packages/agent-common "${DIR}/agent-common"
+      trap 'rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"; printf "${RED}❌ Push failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
+
+      build_with_pane "$PKG" "$LOGFILE" \
+        docker buildx build --platform "$PLATFORM" \
+        -t "${IMAGE}:${TAG}" --push "${DIR}"
+
+      rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"
+      printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
+      printf "${GREEN}✅ Pushed${RESET} ${IMAGE}:${TAG}\n"
+    fi
+
+    rm -f "$LOGFILE"
+
+# Builds and pushes a dev prerelease image (v<version>-next.<build_ts>) for a single package
+build-dev pkg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/release-helpers.sh
+    VERSION="$(get_package_version "{{ pkg }}")"
+    TAG="v${VERSION}-next.{{ build_ts }}"
+    just tag="$TAG" push=true build-pkg "{{ pkg }}"
+
+# ─── Local Database ───────────────────────────────────────────────
+
+LOCAL_DB_PORT := "4700"
+LOCAL_DB_DATA := ".local-db-data"
+TEST_DB_PORT  := "4000"
+
+# Migration image (built locally from sqlmigrations package)
+_migrations_image := "nannos-migrations:local"
+_migrations_dir := "packages/orchestrator-agent/sqlmigrations"
+
+# Start local postgres for development (persistent data)
+local-db:
+  #!/usr/bin/env bash
+  set -e
+  mkdir -p {{LOCAL_DB_DATA}}
+
+  if docker ps --filter publish={{LOCAL_DB_PORT}} --format '{{{{.Names}}}}' | grep -q .; then
+    echo "✓ PostgreSQL already running on port {{LOCAL_DB_PORT}}"
+    exit 0
+  fi
+
+  docker ps -aq --filter name=nannos-local-db | xargs -r docker rm -f 2>/dev/null || true
+
+  echo "Starting PostgreSQL 18 on port {{LOCAL_DB_PORT}}..."
+  docker run -d \
+    --name nannos-local-db \
+    -p {{LOCAL_DB_PORT}}:5432 \
+    -v "$(pwd)/{{LOCAL_DB_DATA}}:/var/lib/postgresql" \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_PASSWORD=password \
+    -e POSTGRES_DB=nannos \
+    pgvector/pgvector:pg18
+
+  echo "Waiting for PostgreSQL to be ready..."
+  until docker exec nannos-local-db pg_isready -U postgres > /dev/null 2>&1; do
+    sleep 0.5
+  done
+  echo "✓ PostgreSQL is ready on port {{LOCAL_DB_PORT}}"
+
+# Start a disposable test postgres (no persistent data)
+_start-test-db:
+  #!/usr/bin/env bash
+  set -e
+
+  if docker ps --filter publish={{TEST_DB_PORT}} --format '{{{{.Names}}}}' | grep -q .; then
+    echo "✓ Test PostgreSQL already running on port {{TEST_DB_PORT}}"
+    exit 0
+  fi
+
+  docker ps -aq --filter name=nannos-test-db | xargs -r docker rm -f 2>/dev/null || true
+
+  echo "Starting test PostgreSQL 18 on port {{TEST_DB_PORT}}..."
+  docker run -d \
+    --name nannos-test-db \
+    -p {{TEST_DB_PORT}}:5432 \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_PASSWORD=password \
+    -e POSTGRES_DB=nannos \
+    pgvector/pgvector:pg18
+
+  echo "Waiting for PostgreSQL to be ready..."
+  until docker exec nannos-test-db pg_isready -U postgres > /dev/null 2>&1; do
+    sleep 0.5
+  done
+  echo "✓ Test PostgreSQL is ready on port {{TEST_DB_PORT}}"
+
+# Build the migrations image locally
+[private]
+_build-migrations:
+  #!/usr/bin/env bash
+  set -e
+  docker build -t {{_migrations_image}} {{_migrations_dir}}
+
+# Run migrations against a given port
+[private]
+_run-migrations port: _build-migrations
+  #!/usr/bin/env bash
+  set -e
+  docker run --rm \
+    --network host \
+    -v "$(pwd)/{{_migrations_dir}}/ddl:/migrations/ddl:ro" \
+    -e PGHOST=127.0.0.1 \
+    -e PGPORT={{port}} \
+    -e PGUSER=postgres \
+    -e PGPASSWORD=password \
+    -e PGDATABASE=nannos \
+    -e PGSCHEMA=nannos \
+    -e RAMBLER_SSLMODE=disable \
+    {{_migrations_image}}
+
+# Start test db and run migrations
+test-db: _start-test-db
+  #!/usr/bin/env bash
+  set -e
+  echo "Running migrations against test db (port {{TEST_DB_PORT}})..."
+  just _run-migrations {{TEST_DB_PORT}}
+  echo "✓ Test db ready with migrations on port {{TEST_DB_PORT}}"
+
+# Reset local dev database (deletes all data)
+reset-db:
+  #!/usr/bin/env bash
+  set -e
+  docker ps -q --filter name=nannos-local-db | xargs -r docker stop
+  docker ps -aq --filter name=nannos-local-db | xargs -r docker rm
+  rm -rf {{LOCAL_DB_DATA}}
+  echo "✓ Dev database cleared. Run 'just local-db' to start fresh."
+
+# Reset test database (stop & remove container)
+reset-test-db:
+  #!/usr/bin/env bash
+  set -e
+  docker ps -q --filter name=nannos-test-db | xargs -r docker stop
+  docker ps -aq --filter name=nannos-test-db | xargs -r docker rm
+  echo "✓ Test database cleared. Run 'just test-db' to start fresh."
+
+# Connect to local dev database via psql
+psql: local-db
+  PGPASSWORD=password psql -h localhost -p {{LOCAL_DB_PORT}} -U postgres -d nannos
+
+# Connect to test database via psql
+test-db-psql: test-db
+  PGPASSWORD=password psql -h localhost -p {{TEST_DB_PORT}} -U postgres -d nannos
+
+# ─── Local Development ────────────────────────────────────────────
+
+# Start all services locally (requires OPENAI_COMPATIBLE_BASE_URL)
+start-local:
+  ./scripts/start-local.sh
+
+# Stop local infrastructure (PostgreSQL + Keycloak) and all services
+stop-local:
+  tmux kill-session -t nannos 2>/dev/null || true
+  cd scripts/local-dev && docker compose down
+
+# Stop local infrastructure and delete all data
+reset-local:
+  tmux kill-session -t nannos 2>/dev/null || true
+  cd scripts/local-dev && docker compose down -v
+  @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."

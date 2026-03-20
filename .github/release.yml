@@ -1,0 +1,48 @@
+# .github/release.yml
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: "🚀 New Features and Enhancements "
+      labels:
+        - "feature"
+        - "enhancement"
+        - "ui"
+    - title: "💣 Breaking Changes "
+      labels:
+        - "breaking-change"
+    - title: "🏇 Optimizations "
+      labels:
+        - "optimize"
+        - "performance"
+    - title: "🐛 Bug Fixes "
+      labels:
+        - "bugfix"
+        - "bug"
+    - title: "🔍 Observability"
+      labels:
+        - "observability"
+    - title: "📚 Documentation"
+      labels:
+        - "documentation"
+        - "docs"
+    - title: "🔗 Dependencies"
+      labels:
+        - "dependencies"
+    - title: "🔨 Maintenance "
+      labels:
+        - "tech-debt"
+        - "maintenance"
+        - "refactoring"
+        - "refactor"
+        - "chore"
+        - "build"
+        - "ci"
+    - title: Other Changes
+      labels:
+        - "*"
+      exclude:
+        labels:
+        - "do-not-merge"

@@ -1,0 +1,51 @@
+[project]
+name = "agent-creator-a2a-server"
+version = "0.7.0"
+description = "Agent Creator - Designs and creates specialized AI agents"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    # Core A2A
+    "a2a-sdk[http-server]>=0.3.9",
+    "uvicorn>=0.38.0",
+    "click>=8.1.8",
+    # DeepAgents and LangChain
+    "deepagents>=0.4.5,<0.5.0",
+    "langchain>=1.0.0",
+    "langchain-aws>=1.1.0",
+    # Checkpointing
+    "langgraph-checkpoint-aws>=1.0.1",
+    "aiodynamo>=24.7",
+    # HTTP clients
+    "httpx>=0.28.1",
+    # Data models
+    "pydantic>=2.10.6",
+    # Auth
+    "pyjwt>=2.10.1",
+    "authlib>=1.6.5",
+    # Shared SDKs
+    "rcplus-alloy-common>=8.6.1",
+    "ringier-a2a-sdk>=0.1.0",
+    "agent-common[openai,google]>=0.7.0",
+    # Utilities
+    "python-dotenv>=1.1.0",
+    "pyyaml>=6.0.3",
+    "langchain-mcp-adapters>=0.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.20",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+]
+
+[tool.uv.sources]
+ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }
+agent-common = { path = "../agent-common", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

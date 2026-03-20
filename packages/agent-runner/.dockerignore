@@ -1,0 +1,8 @@
+**
+!agent/*
+!pyproject.toml
+!uv.lock
+!main.py
+!log_conf.yml
+!ringier-a2a-sdk/*
+!agent-common/*

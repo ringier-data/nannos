@@ -1,0 +1,95 @@
+[project]
+name = "orchestrator-agent-a2a-server"
+version = "0.7.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "a2a-sdk[http-server]>=0.3.9",
+    "uvicorn>=0.38.0",
+    "click>=8.1.8",
+    "httpx>=0.28.1",
+    "langchain>=1.0.0",
+    "langchain-google-genai>=2.0.10",
+    "google-auth>=2.36.0",
+    "langchain-openai>=0.1.0",
+    "pydantic>=2.10.6",
+    "pyjwt>=2.10.1",
+    "python-dotenv>=1.1.0",
+    "sse-starlette>=2.3.6",
+    "starlette>=0.46.2",
+    "deepagents>=0.4.0,<0.5.0",
+    "rcplus-alloy-common>=8.6.1",
+    "langchain-mcp-adapters>=0.1.11",
+    "pytest>=8.4.2",
+    "authlib>=1.3.0",
+    "aiodynamo>=24.7",
+    "langsmith>=0.4.37",
+    "ringier-a2a-sdk>=0.1.0",
+    "agent-common[all]>=0.1.0",
+    "langchain-aws>=1.1.0",
+    "langgraph-checkpoint-aws>=1.0.1",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.11",
+    "aiobotocore>=2.26.0",
+    "python-dateutil>=2.8.2",
+    "foundry-platform-sdk==1.63.0",
+    "nltk>=3.9.1",
+    "psycopg>=3.2.0",
+    "psycopg-binary>=3.2.0",
+    "python-json-logger>=3.2.0,<4",
+]
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.20",
+    "moto>=5.1.15",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-env>=1.2.0",
+    "pytest-mock>=3.12.0",
+]
+
+[tool.uv.sources]
+ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }
+agent-common = { path = "../agent-common", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+]
+markers = [
+    "asyncio: marks tests as async (deselect with '-m \"not asyncio\"')",
+    "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests",
+    "slow: marks tests as slow running",
+]
+env = [
+    "OIDC_ISSUER=https://login.p.nannos.rcplus.io/realms/nannos",
+    "OIDC_CLIENT_ID=orchestrator",
+    "OIDC_CLIENT_SECRET=test-secret",
+    "AZURE_OPENAI_ENDPOINT=https://rcplus-alloy-eu-prod.openai.azure.com",
+    "AZURE_OPENAI_API_KEY=test-key",
+    "LOG_LEVEL=INFO",
+    "LOG_MODE=JSON",
+    "LANGSMITH_TRACING=false",
+    "LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com",
+    "LANGSMITH_PROJECT=dev-nannos-agent-framework",
+    "LANGSMITH_API_KEY=test-key",
+    "DYNAMODB_USERS_TABLE=dev-nannos-infrastructure-agents-users",
+    "AWS_ACCESS_KEY_ID=testing",
+    "AWS_SECRET_ACCESS_KEY=testing",
+    "AWS_SECURITY_TOKEN=testing",
+    "AWS_SESSION_TOKEN=testing",
+    "AWS_DEFAULT_REGION=eu-central-1",
+]
