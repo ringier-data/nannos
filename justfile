@@ -12,8 +12,10 @@ default:
 #
 # Workflow:
 #   just changed                            → see which packages changed since last release
-#   just release patch                      → bump & tag all changed packages
-#   just release-pkg orchestrator-agent patch → bump & tag a single package
+#   just release                             → auto-bump & tag all changed packages
+#   just release patch                       → force bump level for all changed packages
+#   just release-pkg orchestrator-agent       → auto-bump & tag a single package
+#   just release-pkg orchestrator-agent patch → force bump level for a single package
 #   just build                              → build Docker images for all buildable packages
 #   just push=true build                    → build & push Docker images
 #   just build-pkg orchestrator-agent       → build a single package image
@@ -87,7 +89,7 @@ changed:
     done
 
 # Detect changed packages, bump versions, commit, tag, docker(build&push)
-release bump:
+release bump="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/release-helpers.sh
@@ -125,8 +127,12 @@ release bump:
     RELEASES=()
     BUILDABLE="{{ _buildable_packages }}"
     for pkg in "${CHANGED[@]}"; do
-      printf "${CYAN}🔄 Bumping %s ({{ bump }})...${RESET}\n" "$pkg"
-      NEW_VERSION=$(bump_version "$pkg" "{{ bump }}")
+      BUMP="{{ bump }}"
+      if [[ -z "$BUMP" ]]; then
+        BUMP=$(get_bump_action "$pkg")
+      fi
+      printf "${CYAN}🔄 Bumping %s (%s)...${RESET}\n" "$pkg" "$BUMP"
+      NEW_VERSION=$(bump_version "$pkg" "$BUMP")
       printf "   v%s\n" "$NEW_VERSION"
       RELEASES+=("${pkg}/v${NEW_VERSION}")
     done
@@ -154,7 +160,7 @@ release bump:
     fi
 
 # Release a single package (bump version, commit, tag)
-release-pkg pkg bump:
+release-pkg pkg bump="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/release-helpers.sh
@@ -168,6 +174,10 @@ release-pkg pkg bump:
       echo "❌ Unknown package: $PKG"
       echo "   Available: $ALL_PACKAGES"
       exit 1
+    fi
+
+    if [[ -z "$BUMP" ]]; then
+      BUMP=$(get_bump_action "$PKG")
     fi
 
     CURRENT=$(get_package_version "$PKG")

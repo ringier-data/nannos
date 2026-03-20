@@ -130,6 +130,36 @@ bump_version() {
   echo "$new_version"
 }
 
+# Determine bump action (major/minor/patch) from conventional commits since last tag
+# Scoped to the package's directory.
+get_bump_action() {
+  local pkg="$1"
+  local tag dir log_range
+  tag="$(get_last_tag "$pkg")"
+  dir="$(pkg_dir "$pkg")"
+
+  if [[ -n "$tag" ]]; then
+    log_range="${tag}..HEAD"
+  else
+    log_range="HEAD"
+  fi
+
+  local commits
+  commits="$(git log --pretty=format:'%B' "$log_range" -- "$dir")"
+
+  # BREAKING CHANGE: type(scope)!: or footer BREAKING CHANGE:
+  local regex_pattern='^[a-z]+(\([^ ]*\))?!:'
+  if echo "$commits" | grep -Eic "$regex_pattern" > /dev/null 2>&1 && [[ $(echo "$commits" | grep -Eic "$regex_pattern") -gt 0 ]]; then
+    echo "major"
+  elif [[ $(echo "$commits" | grep -c "BREAKING CHANGE:") -gt 0 ]]; then
+    echo "major"
+  elif echo "$commits" | grep -iq "^feat"; then
+    echo "minor"
+  else
+    echo "patch"
+  fi
+}
+
 # Create a git tag for a package release
 tag_package() {
   local pkg="$1"
