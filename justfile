@@ -254,19 +254,22 @@ build-pkg pkg:
     fi
 
     LOGFILE=$(mktemp /tmp/nannos-build-XXXXXX)
-    trap 'rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"; printf "${RED}❌ Build failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
+    trap 'printf "${RED}❌ Build failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
+
+    # Shared packages as additional build contexts (no copying into pkg dir)
+    BUILD_CTX_ARGS=(
+      --build-context "ringier-a2a-sdk=packages/ringier-a2a-sdk"
+      --build-context "agent-common=packages/agent-common"
+    )
 
     printf "${CYAN}🏗️  Building %s (%s)...${RESET}" "$PKG" "$TAG"
     T=$SECONDS
 
-    cp -r packages/ringier-a2a-sdk "${DIR}/ringier-a2a-sdk"
-    cp -r packages/agent-common "${DIR}/agent-common"
-
     build_with_pane "$PKG" "$LOGFILE" \
       docker buildx build --platform "$PLATFORM" \
+      "${BUILD_CTX_ARGS[@]}" \
       -t "${IMAGE}:${TAG}" "${DIR}"
 
-    rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"
     printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
     printf "${GREEN}✅ Built${RESET} ${IMAGE}:${TAG}\n"
 
@@ -274,15 +277,13 @@ build-pkg pkg:
       printf "${CYAN}📤 Pushing %s (%s)...${RESET}" "$PKG" "$TAG"
       T=$SECONDS
 
-      cp -r packages/ringier-a2a-sdk "${DIR}/ringier-a2a-sdk"
-      cp -r packages/agent-common "${DIR}/agent-common"
-      trap 'rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"; printf "${RED}❌ Push failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
+      trap 'printf "${RED}❌ Push failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
 
       build_with_pane "$PKG" "$LOGFILE" \
         docker buildx build --platform "$PLATFORM" \
+        "${BUILD_CTX_ARGS[@]}" \
         -t "${IMAGE}:${TAG}" --push "${DIR}"
 
-      rm -rf "${DIR}/ringier-a2a-sdk" "${DIR}/agent-common"
       printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
       printf "${GREEN}✅ Pushed${RESET} ${IMAGE}:${TAG}\n"
     fi

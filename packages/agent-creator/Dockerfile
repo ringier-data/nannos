@@ -19,8 +19,8 @@ RUN find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && 
     find . -name "*.pyc" -delete 2>/dev/null || true && \
     find . -name "*.pyo" -delete 2>/dev/null || true
 
-# Move shared SDK to parent directory
-RUN mv ringier-a2a-sdk ../ringier-a2a-sdk
+# Copy shared SDK from named build context
+COPY --from=ringier-a2a-sdk . ../ringier-a2a-sdk
 
 # Install dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \

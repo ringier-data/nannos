@@ -18,8 +18,9 @@ COPY . .
 RUN find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
     find . -name "*.pyc" -delete 2>/dev/null || true && \
     find . -name "*.pyo" -delete 2>/dev/null || true
-RUN mv ringier-a2a-sdk ../ringier-a2a-sdk
-RUN mv agent-common ../agent-common
+# Copy shared packages from named build contexts
+COPY --from=ringier-a2a-sdk . ../ringier-a2a-sdk
+COPY --from=agent-common . ../agent-common
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 FROM docker.rcplus.io/python:3.13-slim AS nannos-runtime
