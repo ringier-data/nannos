@@ -160,6 +160,25 @@ get_bump_action() {
   fi
 }
 
+# Preview bumped version without writing to disk
+preview_bump() {
+  local pkg="$1"
+  local part="$2"
+  local current_version
+  current_version="$(get_package_version "$pkg")"
+
+  local major minor patch
+  IFS='.' read -r major minor patch <<< "$current_version"
+
+  case "$part" in
+    major) major=$((major + 1)); minor=0; patch=0 ;;
+    minor) minor=$((minor + 1)); patch=0 ;;
+    patch) patch=$((patch + 1)) ;;
+  esac
+
+  echo "${major}.${minor}.${patch}"
+}
+
 # Create a git tag for a package release
 tag_package() {
   local pkg="$1"

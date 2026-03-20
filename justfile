@@ -82,7 +82,9 @@ changed:
       LAST_TAG=$(get_last_tag "$pkg")
       CHANGED=$(has_changes "$pkg")
       if [[ "$CHANGED" == "true" ]]; then
-        printf "${YELLOW}● %-30s${RESET} v%-10s (last tag: %s)\n" "$pkg" "$VERSION" "${LAST_TAG:-none}"
+        BUMP=$(get_bump_action "$pkg")
+        NEXT=$(preview_bump "$pkg" "$BUMP")
+        printf "${YELLOW}● %-30s${RESET} v%-10s → v%-10s ${DIM}(%s, last tag: %s)${RESET}\n" "$pkg" "$VERSION" "$NEXT" "$BUMP" "${LAST_TAG:-none}"
       else
         printf "${DIM}  %-30s v%-10s (%s)${RESET}\n" "$pkg" "$VERSION" "${LAST_TAG:-none}"
       fi
@@ -112,16 +114,8 @@ release bump="":
       exit 0
     fi
 
-    printf "${CYAN}📦 Packages with changes since last release:${RESET}\n"
-    for pkg in "${CHANGED[@]}"; do
-      CURRENT=$(get_package_version "$pkg")
-      LAST_TAG=$(get_last_tag "$pkg")
-      printf "  ${YELLOW}%-30s${RESET} v%-10s (last tag: %s)\n" "$pkg" "$CURRENT" "${LAST_TAG:-none}"
-    done
+    just changed
     echo ""
-    if [[ ${#UNCHANGED[@]} -gt 0 ]]; then
-      printf "${DIM}Unchanged: %s${RESET}\n\n" "${UNCHANGED[*]}"
-    fi
 
     # Phase 1: Pre-build verification (buildable packages only)
     # Build with current code to catch errors before touching git history.
