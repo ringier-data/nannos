@@ -123,9 +123,20 @@ release bump="":
       printf "${DIM}Unchanged: %s${RESET}\n\n" "${UNCHANGED[*]}"
     fi
 
-    # Bump versions
-    RELEASES=()
+    # Phase 1: Pre-build verification (buildable packages only)
+    # Build with current code to catch errors before touching git history.
     BUILDABLE="{{ _buildable_packages }}"
+    for pkg in "${CHANGED[@]}"; do
+      if [[ " $BUILDABLE " =~ " $pkg " ]]; then
+        printf "${CYAN}🔨 Pre-build check: %s...${RESET}\n" "$pkg"
+        just tag="prebuild" build-pkg "$pkg"
+        printf "${GREEN}   ✓ Build OK${RESET}\n"
+      fi
+    done
+    echo ""
+
+    # Phase 2: Bump versions, commit & tag
+    RELEASES=()
     for pkg in "${CHANGED[@]}"; do
       BUMP="{{ bump }}"
       if [[ -z "$BUMP" ]]; then
@@ -138,7 +149,6 @@ release bump="":
     done
     echo ""
 
-    # Commit version bumps and create per-package tags
     RELEASE_MSG="release: $(IFS=', '; echo "${RELEASES[*]}")"
     git add -A
     git commit -m "$RELEASE_MSG"
@@ -148,16 +158,12 @@ release bump="":
     done
     printf "${GREEN}✅ Released: %s${RESET}\n" "${RELEASES[*]}"
 
-    # Build all Docker images first (no push)
-    TO_BUILD=()
+    # Phase 3: Build & push with release version tags
     for pkg in "${CHANGED[@]}"; do
       if [[ " $BUILDABLE " =~ " $pkg " ]]; then
-        TO_BUILD+=("$pkg")
+        just push=true build-pkg "$pkg"
       fi
     done
-    if [[ ${#TO_BUILD[@]} -gt 0 ]]; then
-      just push=true build
-    fi
 
 # Release a single package (bump version, commit, tag)
 release-pkg pkg bump="":
@@ -181,6 +187,16 @@ release-pkg pkg bump="":
     fi
 
     CURRENT=$(get_package_version "$PKG")
+    IMAGE=$(just pkg-image "$PKG")
+
+    # Phase 1: Pre-build verification
+    if [[ -n "$IMAGE" ]]; then
+      printf "${CYAN}🔨 Pre-build check: %s...${RESET}\n" "$PKG"
+      just tag="prebuild" build-pkg "$PKG"
+      printf "${GREEN}   ✓ Build OK${RESET}\n\n"
+    fi
+
+    # Phase 2: Bump, commit & tag
     printf "${CYAN}🔄 Bumping %s from v%s (%s)...${RESET}\n" "$PKG" "$CURRENT" "$BUMP"
     NEW_VERSION=$(bump_version "$PKG" "$BUMP")
     printf "   → v%s\n\n" "$NEW_VERSION"
@@ -190,8 +206,7 @@ release-pkg pkg bump="":
     tag_package "$PKG" "$NEW_VERSION"
     printf "${GREEN}✅ Released ${PKG}/v${NEW_VERSION}${RESET}\n"
 
-    # Build & push Docker image if this package is buildable
-    IMAGE=$(just pkg-image "$PKG")
+    # Phase 3: Build & push with release version tag
     if [[ -n "$IMAGE" ]]; then
       just push=true build-pkg "$PKG"
     fi
