@@ -14,13 +14,14 @@
 # Compatible with bash 3.2+ (macOS default).
 #
 
-ALL_PACKAGES="agent-creator orchestrator-agent console-backend console-frontend ringier-a2a-sdk"
+ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk"
 
 # ── Package metadata (case-based, bash 3.2 compatible) ──────────────
 
 pkg_dir() {
   case "$1" in
     agent-creator)           echo "packages/agent-creator" ;;
+    agent-runner)            echo "packages/agent-runner" ;;
     orchestrator-agent)      echo "packages/orchestrator-agent" ;;
     console-backend)         echo "packages/console-backend" ;;
     console-frontend)        echo "packages/console-frontend" ;;
@@ -32,7 +33,7 @@ pkg_dir() {
 pkg_type() {
   case "$1" in
     console-frontend) echo "node" ;;
-    agent-creator|orchestrator-agent|console-backend|ringier-a2a-sdk) echo "python" ;;
+    agent-creator|agent-runner|orchestrator-agent|console-backend|ringier-a2a-sdk) echo "python" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }

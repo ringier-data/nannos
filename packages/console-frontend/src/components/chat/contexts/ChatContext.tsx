@@ -686,6 +686,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   // orchestrator uses its own default (which respects OPENAI_COMPATIBLE_MODEL).
   const DEFAULT_SETTINGS: Settings = {
     agentUrl: config.orchestratorUrl,
+    model: '',
   };
 
   // Initialize on mount - use existing settings or defaults

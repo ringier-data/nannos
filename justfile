@@ -28,6 +28,7 @@ registry := "ghcr.io/ringier-data"
 
 # Per-package image names (only packages with Dockerfiles)
 img_agent_creator    := registry + "/nannos-agent-creator"
+img_agent_runner     := registry + "/nannos-agent-runner"
 img_orchestrator     := registry + "/nannos-orchestrator-agent"
 img_console_backend  := registry + "/nannos-console-backend"
 img_console_frontend := registry + "/nannos-console-frontend"
@@ -40,7 +41,7 @@ platform := "linux/arm64"
 build_ts := `date -u +%Y%m%d%H%M%S`
 
 # Packages that have Dockerfiles (used by build recipes)
-_buildable_packages := "agent-creator orchestrator-agent console-backend console-frontend"
+_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend console-frontend"
 
 # Build flags (override on CLI, e.g. just push=true build)
 push := ""
@@ -63,6 +64,7 @@ pkg-image pkg:
     #!/usr/bin/env bash
     case "{{ pkg }}" in
       agent-creator)      echo "{{ img_agent_creator }}" ;;
+      agent-runner)       echo "{{ img_agent_runner }}" ;;
       orchestrator-agent) echo "{{ img_orchestrator }}" ;;
       console-backend)    echo "{{ img_console_backend }}" ;;
       console-frontend)   echo "{{ img_console_frontend }}" ;;
@@ -117,20 +119,10 @@ release bump="":
     just changed
     echo ""
 
-    # Phase 1: Pre-build verification (buildable packages only)
-    # Build with current code to catch errors before touching git history.
-    BUILDABLE="{{ _buildable_packages }}"
-    for pkg in "${CHANGED[@]}"; do
-      if [[ " $BUILDABLE " =~ " $pkg " ]]; then
-        printf "${CYAN}🔨 Pre-build check: %s...${RESET}\n" "$pkg"
-        just tag="prebuild" build-pkg "$pkg"
-        printf "${GREEN}   ✓ Build OK${RESET}\n"
-      fi
-    done
-    echo ""
-
-    # Phase 2: Bump versions, commit & tag
+    # Phase 1: Bump versions, commit & tag
     RELEASES=()
+    TAGS=()
+    BUILDABLE="{{ _buildable_packages }}"
     for pkg in "${CHANGED[@]}"; do
       BUMP="{{ bump }}"
       if [[ -z "$BUMP" ]]; then
@@ -140,32 +132,53 @@ release bump="":
       NEW_VERSION=$(bump_version "$pkg" "$BUMP")
       printf "   v%s\n" "$NEW_VERSION"
       RELEASES+=("${pkg}/v${NEW_VERSION}")
+      TAGS+=("${pkg}/v${NEW_VERSION}")
     done
     echo ""
 
     RELEASE_MSG="release: $(IFS=', '; echo "${RELEASES[*]}")"
     git add -A
-    git commit -m "$RELEASE_MSG"
-    for pkg in "${CHANGED[@]}"; do
-      VERSION=$(get_package_version "$pkg")
-      tag_package "$pkg" "$VERSION"
+    COMMIT_SHA=$(git commit -m "$RELEASE_MSG" --quiet && git rev-parse HEAD)
+    for tag_name in "${TAGS[@]}"; do
+      git tag "$tag_name" -m "release: $tag_name"
     done
-    printf "${GREEN}✅ Released: %s${RESET}\n" "${RELEASES[*]}"
+    printf "${GREEN}✅ Released: %s${RESET}\n\n" "${RELEASES[*]}"
 
-    # Phase 3: Build & push with release version tags
+    # Rollback helper: undo commit and tags on failure
+    rollback() {
+      printf "\n${RED}💥 Build/push failed — rolling back release commit and tags...${RESET}\n"
+      for tag_name in "${TAGS[@]}"; do
+        git tag -d "$tag_name" 2>/dev/null || true
+      done
+      git reset --soft HEAD~1
+      git restore --staged .
+      git checkout -- .
+      printf "${YELLOW}↩️  Rolled back to previous state. Git history is clean.${RESET}\n"
+      exit 1
+    }
+    trap rollback ERR
+
+    # Phase 2: Build all (uses bumped versions, warms cache)
+    for pkg in "${CHANGED[@]}"; do
+      if [[ " $BUILDABLE " =~ " $pkg " ]]; then
+        just build-pkg "$pkg"
+      fi
+    done
+
+    # Phase 3: Push all (reuses cached builds)
     for pkg in "${CHANGED[@]}"; do
       if [[ " $BUILDABLE " =~ " $pkg " ]]; then
         just push=true build-pkg "$pkg"
       fi
     done
 
-# Release a single package (bump version, commit, tag)
+# Release a single package (bump version, commit, tag, build, push)
 release-pkg pkg bump="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/release-helpers.sh
 
-    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' RESET='\033[0m'
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
     PKG="{{ pkg }}"
     BUMP="{{ bump }}"
 
@@ -183,24 +196,35 @@ release-pkg pkg bump="":
     CURRENT=$(get_package_version "$PKG")
     IMAGE=$(just pkg-image "$PKG")
 
-    # Phase 1: Pre-build verification
-    if [[ -n "$IMAGE" ]]; then
-      printf "${CYAN}🔨 Pre-build check: %s...${RESET}\n" "$PKG"
-      just tag="prebuild" build-pkg "$PKG"
-      printf "${GREEN}   ✓ Build OK${RESET}\n\n"
-    fi
-
-    # Phase 2: Bump, commit & tag
+    # Phase 1: Bump, commit & tag
     printf "${CYAN}🔄 Bumping %s from v%s (%s)...${RESET}\n" "$PKG" "$CURRENT" "$BUMP"
     NEW_VERSION=$(bump_version "$PKG" "$BUMP")
+    TAG_NAME="${PKG}/v${NEW_VERSION}"
     printf "   → v%s\n\n" "$NEW_VERSION"
 
     git add -A
-    git commit -m "release: ${PKG}/v${NEW_VERSION}"
-    tag_package "$PKG" "$NEW_VERSION"
-    printf "${GREEN}✅ Released ${PKG}/v${NEW_VERSION}${RESET}\n"
+    git commit -m "release: $TAG_NAME" --quiet
+    git tag "$TAG_NAME" -m "release: $TAG_NAME"
+    printf "${GREEN}✅ Released ${TAG_NAME}${RESET}\n"
 
-    # Phase 3: Build & push with release version tag
+    # Rollback helper: undo commit and tag on failure
+    rollback() {
+      printf "\n${RED}💥 Build/push failed — rolling back release commit and tag...${RESET}\n"
+      git tag -d "$TAG_NAME" 2>/dev/null || true
+      git reset --soft HEAD~1
+      git restore --staged .
+      git checkout -- .
+      printf "${YELLOW}↩️  Rolled back to previous state. Git history is clean.${RESET}\n"
+      exit 1
+    }
+    trap rollback ERR
+
+    # Phase 2: Build (warms cache)
+    if [[ -n "$IMAGE" ]]; then
+      just build-pkg "$PKG"
+    fi
+
+    # Phase 3: Push (reuses cached build)
     if [[ -n "$IMAGE" ]]; then
       just push=true build-pkg "$PKG"
     fi
@@ -265,10 +289,9 @@ build-pkg pkg:
       -t "${IMAGE}:${TAG}" "${DIR}"
 
     printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
-    printf "${GREEN}✅ Built${RESET} ${IMAGE}:${TAG}\n"
 
     if [[ "$DO_PUSH" == "true" ]]; then
-      printf "${CYAN}📤 Pushing %s (%s)...${RESET}" "$PKG" "$TAG"
+      printf "${CYAN}   Pushing...${RESET}"
       T=$SECONDS
 
       trap 'printf "${RED}❌ Push failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
@@ -279,8 +302,8 @@ build-pkg pkg:
         -t "${IMAGE}:${TAG}" --push "${DIR}"
 
       printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
-      printf "${GREEN}✅ Pushed${RESET} ${IMAGE}:${TAG}\n"
     fi
+    printf "${GREEN}✅ ${IMAGE}:${TAG}${RESET}\n"
 
     rm -f "$LOGFILE"
 
