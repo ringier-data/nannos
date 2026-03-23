@@ -184,7 +184,7 @@ def clean_schema_properties(
 
 def validate_and_clean_tool_dict(
     tool_dict: dict[str, Any], level: CleanupLevel = CleanupLevel.MINIMAL
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Validate and clean tool dict schema for Gemini compatibility.
 
     Ensures parameters has valid JSON Schema structure and cleans properties
@@ -195,16 +195,25 @@ def validate_and_clean_tool_dict(
         level: Cleanup level to apply
 
     Returns:
-        Tool dict with validated and cleaned parameters schema
+        Tool dict with validated and cleaned parameters schema, or None if invalid
     """
     # Ensure function key exists
     if "function" not in tool_dict:
         tool_dict = {"function": tool_dict, "type": "function"}
 
     function_dict = tool_dict["function"]
-    parameters = function_dict.get("parameters")
 
+    # CRITICAL: Validate that function dict has a 'name' field
+    # This is required by both OpenAI and Bedrock tool formats
     tool_name = function_dict.get("name")
+    if not tool_name or not isinstance(tool_name, str):
+        logger.error(
+            f"Tool validation failed: function dict missing required 'name' field. "
+            f"Function keys: {list(function_dict.keys())}"
+        )
+        return None
+
+    parameters = function_dict.get("parameters")
 
     # Ensure parameters has valid structure
     if parameters is None or not isinstance(parameters, dict):

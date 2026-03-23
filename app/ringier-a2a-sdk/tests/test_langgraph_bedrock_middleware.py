@@ -106,3 +106,47 @@ class TestLangGraphBedrockAgentMiddleware:
         assert isinstance(middleware[0], BedrockPromptCachingMiddleware)
         assert isinstance(middleware[1], ToolSchemaCleaningMiddleware)
         assert isinstance(middleware[2], CustomMiddleware)
+
+    def test_middleware_filters_invalid_tools(self):
+        """Test that ToolSchemaCleaningMiddleware filters out invalid tools."""
+        from unittest.mock import MagicMock
+
+        from langchain.agents.middleware.types import ModelRequest
+        from langchain_core.tools import tool
+
+        @tool
+        def valid_tool(x: int) -> int:
+            """A valid tool."""
+            return x * 2
+
+        # Create tools with various invalid formats
+        tools = [
+            valid_tool,  # Valid BaseTool
+            None,  # Invalid: None
+            {"function": {"description": "Missing name"}},  # Invalid: missing name
+            {"function": {"name": "", "description": "Empty name"}},  # Invalid: empty name
+            {"function": {"name": 123, "description": "Invalid name type"}},  # Invalid: non-string name
+            "not_a_tool",  # Invalid: string instead of tool
+        ]
+
+        middleware = ToolSchemaCleaningMiddleware()
+
+        # Create a mock request with required model parameter
+        mock_model = MagicMock()
+        request = ModelRequest(
+            system_message="Test",
+            messages=[],
+            tools=tools,
+            model=mock_model,
+        )
+
+        # Mock handler that just returns the request
+        def mock_handler(req):
+            return req
+
+        # Call the middleware
+        result = middleware.wrap_model_call(request, mock_handler)
+
+        # Should only have 1 valid tool (the valid_tool)
+        assert len(result.tools) == 1
+        assert result.tools[0]["function"]["name"] == "valid_tool"
