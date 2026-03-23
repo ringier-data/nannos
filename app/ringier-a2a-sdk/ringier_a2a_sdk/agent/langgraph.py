@@ -39,13 +39,26 @@ logger = logging.getLogger(__name__)
 class FinalResponseSchema(BaseModel):
     """Schema for final response from LangGraph agents."""
 
-    task_state: str = Field(
+    task_state: TaskState = Field(
         ...,
         description="The final state of the task: 'completed', 'failed', 'input_required', or 'working'",
     )
     message: str = Field(
         ...,
-        description="A clear, helpful message to the user about the task outcome",
+        description=(
+            "A clear, helpful message to the user about the task outcome.\n"
+            "This message is the ONLY output the orchestrator will see. "
+            "The orchestrator has NO access to your internal state, tool results, or conversation history.\n"
+            "\n"
+            "YOU MUST include ALL important information, results, findings, and data in this message.\n"
+            "FORMAT GUIDELINES:\n"
+            "- Use markdown for structure (headers, lists, bold for key info)\n"
+            "- Include specific identifiers, numbers, and names\n"
+            "- Explain significance and implications, not just raw data\n"
+            "- For large results: summarize key points but include all critical information\n"
+            "\n"
+            "Remember: The calling agent has NO other way to see your work. Make this complete!"
+        ),
     )
 
 
