@@ -59,6 +59,7 @@ class ConcreteLangGraphAgent(LangGraphAgent):
         self._graph = graph
         self._mcp_client = None
         self.tool_query_regex = None
+        self.recursion_limit = 50  # Add recursion_limit attribute
 
     def _create_model(self):
         return self._model
@@ -136,6 +137,7 @@ class TestStreamImplRegularTextStreaming:
             yield _v2_updates_part("model", {"messages": [final_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -178,6 +180,7 @@ class TestStreamImplRegularTextStreaming:
             yield _v2_updates_part("model", {"messages": [final_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -213,6 +216,7 @@ class TestStreamImplFinalResponseSchema:
             yield _v2_updates_part("model", {"messages": [final_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -260,6 +264,7 @@ class TestStreamImplFinalResponseSchema:
             yield _v2_updates_part("model", {"messages": [final_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -292,6 +297,7 @@ class TestStreamImplFinalResponseSchema:
             yield _v2_updates_part("model", {"messages": [final_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -328,6 +334,7 @@ class TestStreamImplFinalResponseSchema:
             yield _v2_updates_part("model", {"messages": [regular_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -369,6 +376,7 @@ class TestStreamImplTodos:
             yield _v2_updates_part("model", {"messages": [final_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -400,6 +408,7 @@ class TestStreamImplInterrupts:
             yield  # make it an async generator
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -426,6 +435,7 @@ class TestStreamImplContentFallback:
             yield _v2_updates_part("model", {"messages": [msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -448,6 +458,7 @@ class TestStreamImplContentFallback:
             yield
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -469,6 +480,7 @@ class TestStreamImplErrorHandling:
             yield  # make it an async generator
 
         graph.astream = failing_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -501,6 +513,7 @@ class TestStreamImplErrorHandling:
             yield _v2_updates_part("model", {"messages": [msg_with_schema]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)
@@ -537,6 +550,7 @@ class TestStreamImplBufferFlush:
             yield _v2_updates_part("model", {"messages": [final_msg]})
 
         graph.astream = fake_astream
+        graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
         responses = await _collect(agent)

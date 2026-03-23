@@ -50,18 +50,22 @@ class LangGraphGoogleGenAIAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     - _create_graph(): Create LangGraph with tools (has default implementation)
     """
 
-    def __init__(self, tool_query_regex: str | None = None):
+    def __init__(self, tool_query_regex: str | None = None, recursion_limit: int | None = None):
         """Initialize the LangGraph Google Generative AI Agent.
 
         Sets up Google Generative AI configuration before calling the generic LangGraphAgent
         init, which will call _create_model() and _create_checkpointer().
+
+        Args:
+            tool_query_regex: Optional regex pattern to filter MCP tools by name
+            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
         """
         self.gcp_project = os.getenv("GCP_PROJECT_ID")
         self.gcp_location = os.getenv("GCP_LOCATION", "europe-west4")
         self.gcp_model_id = self._get_gcp_model_id()
         self.thinking_level = self._get_thinking_level()
 
-        super().__init__(tool_query_regex=tool_query_regex)
+        super().__init__(tool_query_regex=tool_query_regex, recursion_limit=recursion_limit)
 
     def _create_model(self) -> BaseChatModel:
         """Create ChatGoogleGenerativeAI model with streaming=True.
