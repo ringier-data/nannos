@@ -143,6 +143,8 @@ class StructuredResponseStreamer:
 def extract_text_from_content(content: Any) -> Tuple[str, List[Dict[str, str]]]:
     """Extract plain text and thinking blocks from an AIMessageChunk's content.
 
+    Filters out protocol noise like tool_use blocks that should not be displayed to users.
+
     Bedrock models with extended thinking return content as a list of blocks::
 
         [{"type": "reasoning_content", "reasoning_content": {"text": "..."}},
@@ -153,6 +155,10 @@ def extract_text_from_content(content: Any) -> Tuple[str, List[Dict[str, str]]]:
         [{"type": "thinking", "thinking": "..."},
          {"type": "text", "text": "..."}]
 
+    Tool calls appear as::
+
+        [{"type": "tool_use", "name": "tool_name", "input": {...}, "id": "..."}]
+
     GPT-4o and other models return content as a simple string.
 
     Args:
@@ -160,7 +166,7 @@ def extract_text_from_content(content: Any) -> Tuple[str, List[Dict[str, str]]]:
 
     Returns:
         A tuple of ``(plain_text, thinking_blocks)`` where:
-        - ``plain_text`` is the concatenated text content
+        - ``plain_text`` is the concatenated text content (tool_use blocks filtered out)
         - ``thinking_blocks`` is a list of ``{"thinking": "..."}`` dicts
     """
     if isinstance(content, str):
@@ -190,6 +196,9 @@ def extract_text_from_content(content: Any) -> Tuple[str, List[Dict[str, str]]]:
                 text = block.get("text", "")
                 if text:
                     text_parts.append(text)
+            elif block_type == "tool_use":
+                # Skip tool_use blocks - these are handled separately as tool_call_chunks
+                continue
         elif isinstance(block, str):
             text_parts.append(block)
 
