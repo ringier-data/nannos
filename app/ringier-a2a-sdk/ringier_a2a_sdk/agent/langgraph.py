@@ -25,15 +25,25 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
 from ..agent.base import BaseAgent
 from ..middleware.credential_injector import BaseCredentialInjector
+from ..middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from ..models import TODO_STATE_MAP, AgentStreamResponse, TodoItem, UserConfig
 from ..utils.streaming import StreamBuffer, StructuredResponseStreamer, extract_text_from_content
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of LangGraph steps before recursion limit is hit
+_MAX_RECURSION_LIMIT = 50
+
+
+def _get_default_recursion_limit() -> int:
+    """Get recursion limit from environment or default."""
+    return int(os.getenv("LANGGRAPH_RECURSION_LIMIT", str(_MAX_RECURSION_LIMIT)))
 
 
 class FinalResponseSchema(BaseModel):
@@ -83,15 +93,23 @@ class LangGraphAgent(BaseAgent):
     - _get_middleware(): Return agent middleware list (default: [])
     - _get_tool_interceptors(): Return tool interceptors (default: [])
     - _create_graph(): Create LangGraph with tools (has default implementation)
+
+    Args:
+        tool_query_regex: Optional regex pattern to filter MCP tools by name
+        recursion_limit: Maximum number of LangGraph steps (default: 50, configurable via LANGGRAPH_RECURSION_LIMIT env var)
     """
 
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
 
-    def __init__(self, tool_query_regex: str | None = None):
+    def __init__(self, tool_query_regex: str | None = None, recursion_limit: int | None = None):
         """Initialize the LangGraph Agent.
 
         Calls subclass factory methods to create the model and checkpointer,
         then sets up cost tracking and lazy MCP tool discovery.
+
+        Args:
+            tool_query_regex: Optional regex pattern to filter MCP tools by name
+            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
         """
         super().__init__()
 
@@ -113,6 +131,7 @@ class LangGraphAgent(BaseAgent):
         self._graph: CompiledStateGraph | None = None
         self._mcp_client: MultiServerMCPClient | None = None
         self.tool_query_regex = re.compile(tool_query_regex) if tool_query_regex else None
+        self.recursion_limit = recursion_limit if recursion_limit is not None else _get_default_recursion_limit()
 
     # --- Abstract factory methods (subclasses must implement) ---
 
@@ -170,8 +189,20 @@ class LangGraphAgent(BaseAgent):
     # --- Optional methods with defaults ---
 
     def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware list. Default: empty."""
-        return []
+        """Return agent middleware with schema cleaning for MCP tools.
+
+        Includes ToolSchemaCleaningMiddleware by default to clean MCP tool schemas
+        before binding to the model. This removes invalid enum values like "NULL"
+        that some models (e.g., Gemini) reject.
+
+        Provider-specific subclasses (Bedrock, Anthropic, Google) should call
+        super()._get_middleware() and extend the list to preserve schema cleaning.
+
+        Returns:
+            List of middleware: [ToolSchemaCleaningMiddleware]
+        """
+
+        return [ToolSchemaCleaningMiddleware()]
 
     def _get_tool_interceptors(self) -> list:
         """Return tool interceptors for credential injection. Default: empty."""
@@ -401,7 +432,7 @@ class LangGraphAgent(BaseAgent):
             _current_msg_id = None
             _current_msg_is_json = False
 
-            async for part in self._graph.astream(
+            async for part in self._graph.with_config({"recursion_limit": self.recursion_limit}).astream(
                 {"messages": input_messages}, config, stream_mode=["updates", "messages"], version="v2"
             ):
                 chunk_count += 1
@@ -668,6 +699,16 @@ class LangGraphAgent(BaseAgent):
                 content=final_content,
             )
             logger.info("Final response sent successfully")
+
+        except GraphRecursionError as e:
+            # Handle recursion limit gracefully with an informative message
+            logger.error(f"Recursion limit reached during stream processing: {e}", exc_info=True)
+            yield AgentStreamResponse(
+                state=TaskState.failed,
+                content="I've been working on this task for a while and need to take a break. "
+                "I've made some progress, but the task requires more steps than I can complete in one go. "
+                "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",
+            )
 
         except Exception as e:
             logger.error(f"Error in {self.__class__.__name__}.stream: {e}", exc_info=True)

@@ -11,13 +11,11 @@ import json
 import logging
 import os
 
-from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph.state import CompiledStateGraph
 
-from ..middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
 from .langgraph import LangGraphAgent
 
@@ -52,18 +50,22 @@ class LangGraphGoogleGenAIAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     - _create_graph(): Create LangGraph with tools (has default implementation)
     """
 
-    def __init__(self, tool_query_regex: str | None = None):
+    def __init__(self, tool_query_regex: str | None = None, recursion_limit: int | None = None):
         """Initialize the LangGraph Google Generative AI Agent.
 
         Sets up Google Generative AI configuration before calling the generic LangGraphAgent
         init, which will call _create_model() and _create_checkpointer().
+
+        Args:
+            tool_query_regex: Optional regex pattern to filter MCP tools by name
+            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
         """
         self.gcp_project = os.getenv("GCP_PROJECT_ID")
         self.gcp_location = os.getenv("GCP_LOCATION", "europe-west4")
         self.gcp_model_id = self._get_gcp_model_id()
         self.thinking_level = self._get_thinking_level()
 
-        super().__init__(tool_query_regex=tool_query_regex)
+        super().__init__(tool_query_regex=tool_query_regex, recursion_limit=recursion_limit)
 
     def _create_model(self) -> BaseChatModel:
         """Create ChatGoogleGenerativeAI model with streaming=True.
@@ -135,17 +137,6 @@ class LangGraphGoogleGenAIAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     def _get_thinking_level(self) -> str | None:
         """Return thinking level if enabled. Can be: minimal, low, medium, high. Default: None (disabled)."""
         return os.getenv("GCP_THINKING_LEVEL")
-
-    def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware - includes schema cleaning for Gemini compatibility.
-
-        ToolSchemaCleaningMiddleware cleans MCP tool schemas before binding to ChatGoogleGenerativeAI.
-        Specifically removes invalid enum values like "NULL" that Gemini rejects.
-
-        Returns:
-            List of middleware: [ToolSchemaCleaningMiddleware]
-        """
-        return [ToolSchemaCleaningMiddleware()]
 
     def _create_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
         """Create LangGraph with explicit FinalResponseSchema tool for Gemini.

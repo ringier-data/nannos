@@ -249,6 +249,60 @@ class TestValidateAndCleanToolDict:
         assert "none_prop" not in required
         assert len(required) == 1
 
+    def test_missing_name_field_returns_none(self):
+        """Test that tools missing the required 'name' field return None."""
+        tool_dict = {
+            "function": {
+                # Missing "name" field
+                "description": "Test",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict)
+
+        assert result is None
+
+    def test_empty_name_field_returns_none(self):
+        """Test that tools with empty name field return None."""
+        tool_dict = {
+            "function": {
+                "name": "",  # Empty name
+                "description": "Test",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict)
+
+        assert result is None
+
+    def test_invalid_name_type_returns_none(self):
+        """Test that tools with non-string name return None."""
+        tool_dict = {
+            "function": {
+                "name": 12345,  # Invalid type
+                "description": "Test",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict)
+
+        assert result is None
+
 
 class TestCleanupLevels:
     """Tests for progressive cleanup levels (MINIMAL -> MODERATE -> AGGRESSIVE)."""

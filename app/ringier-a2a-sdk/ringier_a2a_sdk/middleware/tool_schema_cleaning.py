@@ -162,20 +162,36 @@ class ToolSchemaCleaningMiddleware(AgentMiddleware):
 
         cleaned_tools = []
 
-        for tool in tools:
+        for i, tool in enumerate(tools):
+            if tool is None:
+                logger.warning(f"Skipping tool at index {i}: tool is None")
+                continue
+
             if isinstance(tool, BaseTool):
                 # Convert to dict (creates a copy, doesn't modify original)
-                tool_dict = convert_to_openai_tool(tool)
-                # Clean the dict schema for Gemini
-                tool_dict = validate_and_clean_tool_dict(tool_dict, level)
-                cleaned_tools.append(tool_dict)
+                try:
+                    tool_dict = convert_to_openai_tool(tool)
+                    # Clean the dict schema for Gemini
+                    tool_dict = validate_and_clean_tool_dict(tool_dict, level)
+                    cleaned_tools.append(tool_dict)
+                except Exception as e:
+                    logger.error(f"Failed to convert BaseTool '{tool.name}' at index {i}: {e}")
+                    continue
             elif isinstance(tool, dict):
                 # Already in dict format, just clean
-                tool_dict = validate_and_clean_tool_dict(tool, level)
-                cleaned_tools.append(tool_dict)
+                try:
+                    tool_dict = validate_and_clean_tool_dict(tool, level)
+                    if tool_dict:  # Only add if validation succeeded
+                        cleaned_tools.append(tool_dict)
+                    else:
+                        logger.warning(f"Skipping tool at index {i}: validation returned empty dict")
+                except Exception as e:
+                    logger.error(f"Failed to clean tool dict at index {i}: {e}")
+                    continue
             else:
-                # Unknown format, pass through
-                cleaned_tools.append(tool)
+                # Unknown format - log and skip instead of passing through
+                logger.warning(f"Skipping tool at index {i}: unexpected type {type(tool).__name__}")
+                continue
 
         return cleaned_tools
 

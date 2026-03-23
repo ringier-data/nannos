@@ -9,11 +9,13 @@ import os
 
 import boto3
 from botocore.config import Config as BotoConfig
+from langchain.agents.middleware.types import AgentMiddleware
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
+from ..middleware.bedrock_prompt_caching import BedrockPromptCachingMiddleware
 from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
 from .langgraph import LangGraphAgent
 
@@ -77,18 +79,22 @@ class LangGraphBedrockAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     - _create_graph(): Create LangGraph with tools (has default implementation)
     """
 
-    def __init__(self, tool_query_regex: str | None = None):
+    def __init__(self, tool_query_regex: str | None = None, recursion_limit: int | None = None):
         """Initialize the LangGraph Bedrock Agent.
 
         Sets up Bedrock configuration before calling the generic LangGraphAgent init,
         which will call _create_model() and _create_checkpointer().
+
+        Args:
+            tool_query_regex: Optional regex pattern to filter MCP tools by name
+            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
         """
         # Bedrock configuration (needed by _create_model before __init__ calls it)
         self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "eu-central-1")
         self.bedrock_model_id = self._get_bedrock_model_id()
         self.thinking_level = self._get_thinking_level()
 
-        super().__init__(tool_query_regex=tool_query_regex)
+        super().__init__(tool_query_regex=tool_query_regex, recursion_limit=recursion_limit)
 
     def _create_model(self) -> BaseChatModel:
         """Create ChatBedrockConverse model with optional extended thinking.
@@ -168,6 +174,21 @@ class LangGraphBedrockAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     def _get_thinking_level(self) -> str | None:
         """Return thinking level if enabled. Can be: minimal, low, medium, high. Default: None (disabled)."""
         return os.getenv("BEDROCK_THINKING_LEVEL")
+
+    def _get_middleware(self) -> list[AgentMiddleware]:
+        """Return agent middleware with Bedrock prompt caching and schema cleaning.
+
+        Adds BedrockPromptCachingMiddleware before base middleware
+        (ToolSchemaCleaningMiddleware) to ensure correct execution order:
+        1. Prompt caching adds cache points to the request structure
+        2. Schema cleaning converts tools to final format right before model
+
+        Subclasses should call super()._get_middleware() to preserve this order.
+
+        Returns:
+            List of middleware: [BedrockPromptCachingMiddleware, ToolSchemaCleaningMiddleware]
+        """
+        return [BedrockPromptCachingMiddleware()] + super()._get_middleware()
 
     def _create_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
         """Create LangGraph with thinking-aware response format.
