@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
-import { Send, AlertTriangle, Mic, X, Paperclip } from 'lucide-react';
+import { Send, AlertTriangle, Mic, X, Paperclip, Square } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
@@ -21,7 +21,7 @@ interface PendingFile {
 }
 
 export function ChatInput() {
-  const { sendMessage, isConnected, activeConversationId } = useChat();
+  const { sendMessage, isConnected, isWaiting, interruptTask, activeConversationId } = useChat();
   const { isImpersonating } = useAuth();
   const [value, setValue] = useState('');
   const [isRecording, setIsRecording] = useState(false);
@@ -35,7 +35,7 @@ export function ChatInput() {
   const canSend = isConnected && (value.trim().length > 0 || pendingFiles.length > 0) && !isUploading;
 
   const handleSend = async () => {
-    if (!canSend || !activeConversationId) return;
+    if (!canSend) return;
 
     let fileAttachments: Array<{ 
       uri: string;
@@ -49,7 +49,11 @@ export function ChatInput() {
       setIsUploading(true);
       try {
         const formData = new FormData();
-        formData.append('conversation_id', activeConversationId);
+        // If no active conversation yet, the backend will handle creating one
+        // or the upload will fail with a helpful error message
+        if (activeConversationId) {
+          formData.append('conversation_id', activeConversationId);
+        }
         
         pendingFiles.forEach((pendingFile) => {
           formData.append('files', pendingFile.file, pendingFile.name);
@@ -368,16 +372,29 @@ export function ChatInput() {
             className={cn('flex-1 resize-none', 'transition-all duration-200')}
             data-testid="input-message"
           />
-          <Button
-            onClick={handleSend}
-            disabled={!canSend}
-            size="icon"
-            className="flex-shrink-0 h-auto p-3"
-            data-testid="button-send"
-            aria-label="Send message"
-          >
-            <Send className="w-5 h-5" />
-          </Button>
+          {isWaiting ? (
+            <Button
+              onClick={interruptTask}
+              size="icon"
+              variant="destructive"
+              className="flex-shrink-0 h-auto p-3"
+              data-testid="button-stop"
+              aria-label="Stop generation"
+            >
+              <Square className="w-4 h-4 fill-current" />
+            </Button>
+          ) : (
+            <Button
+              onClick={handleSend}
+              disabled={!canSend}
+              size="icon"
+              className="flex-shrink-0 h-auto p-3"
+              data-testid="button-send"
+              aria-label="Send message"
+            >
+              <Send className="w-5 h-5" />
+            </Button>
+          )}
         </div>
       </div>
 

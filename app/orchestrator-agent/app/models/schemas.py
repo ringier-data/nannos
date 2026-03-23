@@ -8,8 +8,6 @@ the A2A task status when the graph execution completes. The model considers:
 3. Whether user input or authentication is needed
 """
 
-from typing import Optional
-
 from a2a.types import TaskState
 from pydantic import BaseModel, Field, field_validator
 
@@ -60,26 +58,6 @@ class FinalResponseSchema(BaseModel):
             "\n"
             "ONLY add a message if sub-agent returns raw data WITHOUT explanation (rare)."
         )
-    )
-
-    # reasoning: str = Field(
-    #     description=(
-    #         "Brief internal reasoning for why this task_state was chosen. "
-    #         "Explain the key factors from todo list and conversation that led to this decision. "
-    #         "This helps with debugging and transparency but is not shown to the user.\n"
-    #         "\n"
-    #         "When using include_subagent_output=true, also explain:\n"
-    #         "- Why passing through the sub-agent's output is appropriate (e.g., 'complete answer', 'detailed analysis')\n"
-    #         "- Whether you're providing an introduction or pure pass-through (empty message)"
-    #     )
-    # )
-
-    todo_summary: Optional[str] = Field(
-        default=None,
-        description=(
-            "Optional brief summary of todo list state (e.g., '3/5 tasks completed, 2 in progress'). "
-            "Useful for 'working' state to give progress visibility."
-        ),
     )
 
     include_subagent_output: bool = Field(

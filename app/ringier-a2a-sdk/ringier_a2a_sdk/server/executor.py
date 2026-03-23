@@ -1,6 +1,7 @@
 """Base agent executor for A2A protocol."""
 
 import logging
+import uuid
 from abc import ABC
 from typing import Any
 
@@ -124,8 +125,12 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 sub_agent_id=sub_agent_id,  # For cost tracking attribution
                 scheduled_job_id=scheduled_job_id_from_meta,  # For scheduled-job cost attribution
             )
+            streaming_artifact_id = str(uuid.uuid4())
+            first_chunk_sent = False  # Track if we've sent the initial artifact
             async for item in self.agent.stream(query, user_config, task):
-                await self._handle_stream_item(item, updater, task)
+                first_chunk_sent = await self._handle_stream_item(
+                    item, updater, task, streaming_artifact_id, first_chunk_sent
+                )
         except Exception as e:
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}")
 
@@ -141,7 +146,6 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                         task.context_id,
                         task.id,
                     ),
-                    final=True,
                 )
                 logger.info(f"Emitted TaskState.failed to orchestrator: {error_message}")
             except Exception as emit_error:
@@ -150,17 +154,57 @@ class BaseAgentExecutor(AgentExecutor, ABC):
 
             raise ServerError(error=InternalError()) from e
 
-    async def _handle_stream_item(self, item, updater, task) -> None:
+    async def _handle_stream_item(
+        self, item, updater, task, streaming_artifact_id: str, first_chunk_sent: bool = False
+    ) -> bool:
         """Handle a stream item from the agent and update the task accordingly.
+
+        Streaming chunks (metadata.streaming_chunk=True) are emitted as
+        TaskArtifactUpdateEvents with append=True, following the A2A protocol's
+        recommended pattern for incremental content delivery.
+        Status updates and terminal events use TaskStatusUpdateEvents.
 
         Args:
             item: AgentStreamResponse object from agent
             updater: TaskUpdater for sending updates
             task: Current task being processed
+            streaming_artifact_id: Stable artifact ID for streaming chunks
+            first_chunk_sent: Whether we've already sent the first chunk
+
+        Returns:
+            Updated first_chunk_sent flag
         """
         # item is an AgentStreamResponse object
         state = item.state
         content = item.content
+        metadata = item.metadata or {}
+
+        # --- Streaming content chunks → artifact-append ---
+        if state == TaskState.working and metadata.get("streaming_chunk"):
+            is_intermediate = metadata.get("intermediate_output", False)
+
+            # Intermediate-output chunks (thinking/reasoning) go into a SEPARATE
+            # artifact stream so they don't mix with the main response artifact.
+            # Matches the orchestrator's executor pattern.
+            if is_intermediate:
+                effective_artifact_id = streaming_artifact_id + "-thought"
+            else:
+                effective_artifact_id = streaming_artifact_id
+
+            # First chunk creates the artifact (append=False), subsequent chunks append (append=True)
+            append = first_chunk_sent
+            await updater.add_artifact(
+                [Part(root=TextPart(text=content))],
+                artifact_id=effective_artifact_id,
+                append=append,  # False for first chunk, True for subsequent
+                last_chunk=False,
+                metadata={"streaming_chunk": True},
+            )
+            # Intermediate-output chunks must NOT claim first_chunk_sent — the main
+            # response comes later. Only main content chunks advance the flag.
+            if is_intermediate:
+                return first_chunk_sent
+            return True  # Mark that first chunk has been sent
 
         # Handle different A2A task states
         if state == TaskState.working:
@@ -173,11 +217,11 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=False,  # Not final - keep the task open
+                metadata=metadata or None,
             )
 
         elif state == TaskState.failed:
-            # Handle failure state
+            # Handle failure state (terminal state - stream will close)
             await updater.update_status(
                 TaskState.failed,
                 new_agent_text_message(
@@ -185,7 +229,6 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=True,
             )
 
         elif state == TaskState.input_required:
@@ -197,7 +240,6 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=False,
             )
 
         elif state == TaskState.auth_required:
@@ -209,16 +251,31 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=False,
             )
 
         elif state == TaskState.completed:
             # Task completed successfully
-            await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
-                name="agent_result",
+            # If we've been streaming chunks, don't create a new artifact - content already streamed
+            # Just complete the task; the streaming artifact contains all the content
+            if not first_chunk_sent:
+                # Only create artifact if we haven't been streaming
+                await updater.add_artifact(
+                    [Part(root=TextPart(text=content))],
+                    name="agent_result",
+                )
+            # Always include final content in completion message so downstream
+            # consumers (e.g. orchestrator) can extract the full response from
+            # task.status.message even when content was streamed via artifacts.
+            # TODO: is this duplication necessary, or can we rely on the artifact content alone for completed tasks?
+            await updater.complete(
+                message=new_agent_text_message(
+                    content,
+                    task.context_id,
+                    task.id,
+                )
+                if content
+                else None,
             )
-            await updater.complete()
 
         else:
             # Unknown state - log warning and treat as completed
@@ -228,6 +285,9 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 name="agent_result",
             )
             await updater.complete()
+
+        # Return first_chunk_sent unchanged for non-streaming paths
+        return first_chunk_sent
 
     def _validate_request(self, context: RequestContext) -> bool:
         """Validate the request context.

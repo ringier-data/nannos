@@ -26,11 +26,12 @@ tool whitelists, enabling specialized assistants without deploying separate A2A 
 
 import logging
 import os
+from collections.abc import AsyncIterable
 from typing import Any, Dict, List, Optional
 
 from deepagents import CompiledSubAgent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -39,9 +40,20 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphInterrupt
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
+from ringier_a2a_sdk.utils.streaming import StreamBuffer, StructuredResponseStreamer, extract_text_from_content
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.a2a.stream_events import (
+    ActivityLogMeta,
+    ArtifactUpdate,
+    ErrorEvent,
+    IntermediateOutputMeta,
+    StreamEvent,
+    TaskUpdate,
+    WorkPlanMeta,
+)
+from agent_common.a2a.stream_utils import retrieve_final_state
 from agent_common.a2a.structured_response import (
     A2A_PROTOCOL_ADDENDUM,
     StructuredResponseMixin,
@@ -429,31 +441,28 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         return self._agent
 
-    async def _process(
-        self,
-        input_data: SubAgentInput,
-        config: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Process the input using the LangGraph agent.
+    async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
+        """Stream dynamic agent execution with real-time status updates and content.
 
-        Creates the agent lazily on first call, then invokes it with the content.
-        Translates the agent's response into A2A protocol format.
+        Streams the internal LangGraph execution to provide progress visibility for:
+        - MCP tool invocations
+        - Multi-step reasoning
+        - Long-running operations
+        - Incremental content delivery via artifact_update events
 
         Args:
-            input_data: The complete sub-agent input with content, IDs, and tracking
-            config: Extended config from ainvoke (checkpoint isolation + cost tracking already applied)
+            input_data: Validated input with messages and tracking IDs
+            config: Extended config with checkpoint isolation and cost tracking
 
-        Returns:
-            Dict with 'messages' and A2A metadata (state, is_complete, etc.)
+        Yields:
+            Status updates and content chunks matching middleware expectations:
+            - {\"type\": \"task_update\", \"state\": \"working\", ...} for status/activity
+            - {\"type\": \"artifact_update\", \"content\": \"...\"} for streaming content
+            - Terminal result in final yield
 
-        Note on Checkpointing:
-            Dynamic sub-agents use DynamoDB checkpointer with unique thread_id for isolation.
-            The config is automatically extended by LocalA2ARunnable.ainvoke() with:
-            - Checkpoint isolation (thread_id, checkpoint_ns, checkpointer)
-            - Cost tracking tags (sub_agent:{identifier})
-            - Inherited metadata (user_id, assistant_id) from orchestrator
-
-        TODO: shall we handle streaming responses here?
+        Raises:
+            ValueError: If context_id missing from input
+            GraphInterrupt: If user intervention needed
         """
         # Extract content and IDs from input_data
         content = self._extract_message_content(input_data)
@@ -465,40 +474,144 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
             agent_input = {"messages": [HumanMessage(content=content)]}
 
-            # Config is already extended by ainvoke with checkpoint isolation and cost tracking
+            # CRITICAL: Dynamic agent graphs are standalone, not subgraphs.
+            # checkpoint_ns must be "" for standalone graphs (same pattern as GPAgentRunnable).
+            # Thread isolation is already provided by unique thread_id="{context_id}::dynamic-{name}".
+            standalone_config = {
+                **config,
+                "configurable": {
+                    **config.get("configurable", {}),
+                    "checkpoint_ns": "",  # Empty for standalone graph (not a subgraph)
+                },
+            }
+
             logger.debug(
-                f"[COST TRACKING] Dynamic agent '{self.name}' invoking with tags: {config.get('tags', [])} "
-                f"(thread_id={config.get('configurable', {}).get('thread_id')})"
+                f"[COST TRACKING] Dynamic agent '{self.name}' streaming with tags: {standalone_config.get('tags', [])} "
+                f"(thread_id={standalone_config.get('configurable', {}).get('thread_id')})"
             )
 
-            # Invoke the agent with pre-configured config from base class
-            logger.debug(f"Invoking dynamic agent '{self.name}' with content: {content[:100]}...")
-            result = await agent.ainvoke(agent_input, config=config)
+            # Shared streaming helpers
+            response_streamer = StructuredResponseStreamer("SubAgentResponseSchema")
+            stream_buffer = StreamBuffer()
+            emitted_tool_calls: set[str] = set()  # Track tool calls to avoid duplicates
 
-            # Extract response from agent result
-            return self._translate_agent_result(result, context_id, task_id)
+            # Stream the agent with custom events and messages using v2 format
+            # v2: every chunk is a StreamPart dict: {"type": ..., "ns": ..., "data": ...}
+            async for part in agent.astream(
+                agent_input,
+                config=standalone_config,
+                stream_mode=["custom", "messages"],
+                version="v2",
+            ):
+                # Extract working-state messages from intermediate updates
+                status_text = None
+                part_type = part["type"]
+
+                # Capture tool calls and stream content from message chunks
+                if part_type == "messages":
+                    msg_chunk, _metadata = part["data"]
+                    if not isinstance(msg_chunk, AIMessageChunk):
+                        continue
+
+                    # --- Tool call detection for activity log + structured response streaming ---
+                    if msg_chunk.tool_call_chunks:
+                        for tc_chunk in msg_chunk.tool_call_chunks:
+                            tool_name = tc_chunk.get("name")
+                            # Emit status for tool calls (excluding response schemas)
+                            if (
+                                tool_name
+                                and tool_name not in ("FinalResponseSchema", "SubAgentResponseSchema")
+                                and tool_name not in emitted_tool_calls
+                            ):
+                                emitted_tool_calls.add(tool_name)
+                                yield TaskUpdate(
+                                    status_text=f"Using {tool_name}\u2026",
+                                    event_metadata=ActivityLogMeta(),
+                                )
+                            # Incremental structured response streaming
+                            delta = response_streamer.feed(tc_chunk)
+                            if delta:
+                                stream_buffer.append(delta)
+                                for chunk in stream_buffer.flush_ready():
+                                    yield ArtifactUpdate(content=chunk)
+                        continue
+
+                    # --- Regular content streaming ---
+                    if msg_chunk.content:
+                        token_text, thinking_blocks = extract_text_from_content(msg_chunk.content)
+                        for tb in thinking_blocks:
+                            yield ArtifactUpdate(
+                                content=tb["thinking"],
+                                event_metadata=IntermediateOutputMeta(),
+                            )
+                        if token_text:
+                            stream_buffer.append(token_text)
+                            for chunk in stream_buffer.flush_ready():
+                                yield ArtifactUpdate(content=chunk)
+                    continue
+
+                if part_type == "custom":
+                    event_data = part["data"]
+                    if isinstance(event_data, tuple) and len(event_data) == 2:
+                        event_type, payload = event_data
+                        if isinstance(payload, dict):
+                            # Forward work plan updates from the sub-agent graph
+                            if event_type == "todo_status" and "todos" in payload:
+                                yield TaskUpdate(
+                                    event_metadata=WorkPlanMeta(todos=payload["todos"]),
+                                )
+                                continue
+                            status_text = payload.get("status")
+                    elif isinstance(event_data, dict):
+                        status_text = event_data.get("status")
+
+                # Yield working-state status updates
+                if status_text:
+                    yield TaskUpdate(
+                        status_text=status_text,
+                        event_metadata=ActivityLogMeta(),
+                    )
+
+            # Flush remaining buffer
+            remaining = stream_buffer.flush_all()
+            if remaining:
+                yield ArtifactUpdate(content=remaining)
+
+            # Retrieve final state (checkpointer saves it after each node)
+            final_values = retrieve_final_state(agent, standalone_config)
+            result = self._translate_agent_result(final_values, context_id, task_id)
+
+            # Yield terminal result
+            # TODO: shall we enforce a state here?
+            yield TaskUpdate(
+                data=result,
+            )
 
         except GraphInterrupt as gi:
-            # is not an error - just an interrupt from the graph execution
-            logger.info(f"[DYNAMIC AGENT] Graph interrupted in '{self.name}': {gi}")
-            # Re-raise so the orchestrator can handle it properly
+            logger.info(f"[DYNAMIC AGENT] Graph interrupted during streaming in '{self.name}': {gi}")
             raise
 
         except Exception as e:
-            logger.exception(f"Error in dynamic agent '{self.name}': {e}")
+            logger.exception(f"Error streaming dynamic agent '{self.name}': {e}")
 
             # Check if this is an MCP discovery error
-            if "MCP" in str(e) or "tool" in str(e).lower():
-                return self._build_error_response(
+            error_msg = str(e)
+            if "MCP" in error_msg or "tool" in error_msg.lower():
+                error_result = self._build_error_response(
                     f"Failed to initialize agent tools: {e}",
                     context_id=context_id,
                     task_id=task_id,
                 )
+            else:
+                error_result = self._build_error_response(
+                    f"Agent execution error: {e}",
+                    context_id=context_id,
+                    task_id=task_id,
+                )
 
-            return self._build_error_response(
-                f"Agent execution error: {e}",
-                context_id=context_id,
-                task_id=task_id,
+            yield ErrorEvent(
+                error=error_msg,
+                data=error_result,
             )
 
     # _translate_agent_result and _build_response_from_schema are provided by StructuredResponseMixin

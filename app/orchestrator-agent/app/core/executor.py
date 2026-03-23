@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import Literal
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -25,6 +26,13 @@ from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
 from app.models.responses import AgentStreamResponse
 
 from ..models.config import UserConfig
+from .a2a_extensions import (
+    ACTIVITY_LOG_EXTENSION,
+    INTERMEDIATE_OUTPUT_EXTENSION,
+    WORK_PLAN_EXTENSION,
+    new_activity_log_message,
+    new_work_plan_message,
+)
 
 # from google.adk.sessions import InMemorySessionService
 from .agent import OrchestratorDeepAgent
@@ -257,7 +265,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
-                final=True,
             )
             return
 
@@ -317,8 +324,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # channel, she should have access to all files shared in that channel.
             # This is a design decision based on Slack's permission model.
             # Create config for graph execution with interrupt support
+            # CRITICAL: Include __pregel_checkpointer to prevent LangGraph from misinterpreting checkpoint_ns as subgraph
             config = {
-                "configurable": {"thread_id": task.context_id},
+                "configurable": {
+                    "thread_id": task.context_id,
+                    "__pregel_checkpointer": graph.checkpointer,  # Required for proper checkpoint isolation
+                },
                 "metadata": {
                     "assistant_id": slack_channel_id
                     if slack_channel_id
@@ -413,35 +424,178 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             if resume_value is None:
                 logger.info("Normal execution (not resuming from interrupt)")
 
-            # emit a started status update
-            await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(
-                    "Agent execution started.",
-                    task.context_id,
-                    task.id,
-                ),
-                final=False,
-            )
+            # Extension activation: client must send X-A2A-Extensions header to enable
+            # extensions. No header = extensions disabled (per A2A spec).
+            requested_extensions: set[str] | None = None
+            if context.call_context and hasattr(context.call_context, "requested_extensions"):
+                requested_extensions = context.call_context.requested_extensions
+            if requested_extensions is not None:
+                logger.info(f"[EXTENSIONS] Client requested extensions: {requested_extensions}")
+            else:
+                logger.info("[EXTENSIONS] No extensions requested (header absent)")
+
+            # emit a started status update as part of activity log
+            if requested_extensions is not None and ACTIVITY_LOG_EXTENSION in requested_extensions:
+                logger.debug("Agent execution started. Emitting initial activity log message.")
+                await updater.update_status(
+                    TaskState.working,
+                    new_activity_log_message(
+                        "Agent execution started.",
+                        task.context_id,
+                        task.id,
+                    ),
+                )
+                logger.debug("Initial activity log message emitted.")
+
+            # Stable artifact ID for streaming content chunks (A2A artifact-append pattern)
+            streaming_artifact_id = str(uuid.uuid4())
+            first_chunk_sent = False  # Track if we've sent the initial artifact
 
             async for item in self.agent.stream(message_parts, user_config, config=config, resume=resume_value):
-                current_state = graph.get_state(config)  # type: ignore
-                if hasattr(current_state, "interrupts") and current_state.interrupts:
-                    is_final = False
+                # Skip costly graph.get_state() for transient streaming chunks
+                metadata = item.metadata or {}
+                if metadata.get("streaming_chunk"):
+                    is_final = True  # Doesn't matter for streaming chunks
                 else:
-                    is_final = True
-                await self._handle_stream_item(item, updater, task, is_final=is_final)
+                    current_state = graph.get_state(config)  # type: ignore
+                    if hasattr(current_state, "interrupts") and current_state.interrupts:
+                        is_final = False
+                    else:
+                        is_final = True
+
+                # Pass first_chunk_sent flag and update it after each chunk
+                first_chunk_sent = await self._handle_stream_item(
+                    item,
+                    updater,
+                    task,
+                    is_final=is_final,
+                    streaming_artifact_id=streaming_artifact_id,
+                    first_chunk_sent=first_chunk_sent,
+                    active_extensions=requested_extensions,
+                )
         except Exception as e:
-            logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}")
+            logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}", exc_info=True)
             raise ServerError(error=InternalError()) from e
 
     async def _handle_stream_item(
-        self, item: AgentStreamResponse, updater: TaskUpdater, task: Task, is_final: bool
-    ) -> None:
-        """Handle a stream item from the agent and update the task accordingly."""
+        self,
+        item: AgentStreamResponse,
+        updater: TaskUpdater,
+        task: Task,
+        is_final: bool,
+        streaming_artifact_id: str = "",
+        first_chunk_sent: bool = False,
+        active_extensions: set[str] | None = None,
+    ) -> bool:
+        """Handle a stream item from the agent and update the task accordingly.
+
+        Streaming chunks (metadata.streaming_chunk=True) are emitted as
+        TaskArtifactUpdateEvents with append=True for ALL chunks (including first).
+        The backend accumulates all artifact-update messages into a single response.
+        Status updates and terminal events use TaskStatusUpdateEvents.
+
+        Args:
+            item: The stream response item
+            updater: Task updater for sending events
+            task: Current task
+            is_final: Whether this is the final state
+            streaming_artifact_id: Stable artifact ID for streaming chunks
+            first_chunk_sent: Whether we've already sent the first chunk
+
+        Returns:
+            Updated first_chunk_sent flag
+        """
         # item is an AgentStreamResponse object
         state = item.state
         content = item.content
+        metadata = item.metadata or {}
+
+        # Extension activation: helper to check if an extension should be emitted.
+        # None means no header was sent → all extensions disabled (per A2A spec).
+        def _ext_active(uri: str) -> bool:
+            return active_extensions is not None and uri in active_extensions
+
+        # --- Activity log items (tool calls, delegations) → status-update with extension ---
+        # Must be handled BEFORE streaming_chunk check.
+        if metadata.get("activity_log"):
+            if not _ext_active(ACTIVITY_LOG_EXTENSION):
+                return first_chunk_sent  # Client didn't request this extension
+            source = metadata.get("source")
+            logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, content: {content[:50]}")
+            await updater.update_status(
+                TaskState.working,
+                new_activity_log_message(
+                    content,
+                    task.context_id,
+                    task.id,
+                    source=source,
+                ),
+            )
+            return first_chunk_sent  # Don't modify first_chunk_sent flag
+
+        # --- Work plan items (todo snapshots) → status-update with DataPart extension ---
+        if metadata.get("work_plan"):
+            if not _ext_active(WORK_PLAN_EXTENSION):
+                return first_chunk_sent  # Client didn't request this extension
+            todos = metadata.get("todos", [])
+            logger.info(f"[WORK_PLAN] Emitting work plan with {len(todos)} todos")
+            await updater.update_status(
+                TaskState.working,
+                new_work_plan_message(
+                    todos,
+                    task.context_id,
+                    task.id,
+                ),
+            )
+            return first_chunk_sent  # Don't modify first_chunk_sent flag
+
+        # --- Streaming content chunks → artifact-append ---
+        # NOTE: Using proper A2A artifact-append protocol
+        # Known limitation: The A2A client library may buffer artifact-update events
+        # until the next status-update event arrives (SSE buffering in the Python client)
+        # Streaming chunks will appear with slight delay until next natural status update
+        # (which happens frequently during LLM token streaming)
+        if state == TaskState.working and metadata.get("streaming_chunk"):
+            # Intermediate-output chunks (sub-agent thoughts, orchestrator reasoning) go into
+            # a SEPARATE artifact stream so they don't mix with the main response artifact.
+            # Main response chunks use streaming_artifact_id; thoughts use a "-thought" suffix.
+            # This also ensures first_chunk_sent correctly reflects MAIN CONTENT only, so that
+            # include_subagent_output=True can still produce a non-streaming final response.
+            if metadata.get("intermediate_output"):
+                effective_artifact_id = streaming_artifact_id + "-thought"
+            else:
+                effective_artifact_id = streaming_artifact_id
+
+            append = True  # Always True for all chunks (backend accumulates all artifact-update messages)
+            logger.info(
+                f"[STREAMING] Calling add_artifact: len={len(content)}, append={append}, artifact_id={effective_artifact_id}"
+            )
+            # Determine artifact extensions for intermediate output (sub-agent thoughts)
+            artifact_extensions = [INTERMEDIATE_OUTPUT_EXTENSION] if metadata.get("intermediate_output") else None
+            # If intermediate output extension isn't active, suppress entirely (don't leak reasoning to clients)
+            if artifact_extensions and not _ext_active(INTERMEDIATE_OUTPUT_EXTENSION):
+                return first_chunk_sent
+            # Keep agent_name in artifact metadata for attribution
+            artifact_metadata = {}
+            if metadata.get("agent_name"):
+                artifact_metadata["agent_name"] = metadata["agent_name"]
+            await updater.add_artifact(
+                [Part(root=TextPart(text=content))],
+                artifact_id=effective_artifact_id,
+                append=append,
+                last_chunk=False,
+                metadata=artifact_metadata or {},
+                extensions=artifact_extensions,
+            )
+            logger.info("[STREAMING] Artifact chunk enqueued")
+            # Intermediate-output chunks are supplementary (sub-agent thinking).
+            # They must NOT claim first_chunk_sent — the main response comes later
+            # either as regular orchestrator streaming tokens or via include_subagent_output.
+            # If we set first_chunk_sent=True here the executor would skip emitting the
+            # include_subagent_output content and the final answer would never reach the user.
+            if metadata.get("intermediate_output"):
+                return first_chunk_sent
+            return True  # Mark that first chunk has been sent
 
         # Handle different A2A task states
         if state == TaskState.working and not is_final:
@@ -454,12 +608,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
-                final=False,  # Not final - keep the task open
+                metadata=metadata or None,
             )
 
         elif state == TaskState.working and is_final:
-            logger.info(f"Contradictory working final state, treating as working: {content}")
-            # Treat as working
+            # Working state with no pending interrupts - still working
             await updater.update_status(
                 TaskState.working,
                 new_agent_text_message(
@@ -467,11 +620,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
-                final=False,  # Not final - keep the task open
+                metadata=metadata or None,
             )
 
         elif state == TaskState.failed:
-            # Handle failure state
+            # Handle failure state (terminal state - stream will close)
             await updater.update_status(
                 TaskState.failed,
                 new_agent_text_message(
@@ -479,7 +632,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
-                final=True,
             )
 
         elif state == TaskState.input_required:
@@ -491,7 +643,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
-                final=False,
             )
 
         elif state == TaskState.auth_required:
@@ -503,16 +654,39 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
-                final=False,
             )
 
         elif state == TaskState.completed and is_final:
             # Task completed successfully
-            await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
-                name="orchestrator_result",
-            )
-            await updater.complete()
+            if first_chunk_sent:
+                # We streamed ORCHESTRATOR token chunks (not sub-agent thoughts)
+                # Close the artifact stream and send completion status without message.
+                # The streamed chunks already contain the complete response.
+                logger.info("[STREAMING] Closing artifact stream (orchestrator content already streamed)")
+                await updater.add_artifact(
+                    [Part(root=TextPart(text=""))],
+                    artifact_id=streaming_artifact_id,
+                    append=True,
+                    last_chunk=True,
+                    metadata={},
+                )
+                await updater.update_status(
+                    TaskState.completed,
+                    metadata=metadata or None,
+                )
+            else:
+                # Non-streaming completion: include content in the status message.
+                # This is the orchestrator's FINAL ANSWER - always send it.
+                # Sub-agent outputs were intermediate thoughts; this is authoritative.
+                await updater.update_status(
+                    TaskState.completed,
+                    new_agent_text_message(
+                        content if content else "Task completed successfully",
+                        task.context_id,
+                        task.id,
+                    ),
+                    metadata=metadata or None,
+                )
 
         elif state == TaskState.completed and not is_final:
             logger.info(f"Contradictory completed non-final state, treating as input_required: {content}")
@@ -524,7 +698,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
-                final=False,
             )
         else:
             # Unknown state - log warning and treat as completed
@@ -534,6 +707,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 name="orchestrator_result",
             )
             await updater.complete()
+
+        # Return first_chunk_sent unchanged for non-streaming paths
+        return first_chunk_sent
 
     def _validate_request(self, context: RequestContext) -> bool:
         return False

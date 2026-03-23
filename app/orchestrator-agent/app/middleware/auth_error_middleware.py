@@ -1,19 +1,34 @@
 """Authentication Error Detection Middleware for deterministic auth error handling.
 
-This middleware detects authentication errors from ANY tool (not just sub-agents) and
-uses LangGraph's interrupt mechanism to pause execution in a resumable state.
+This middleware detects authentication errors from tool responses and uses
+LangGraph's interrupt mechanism to pause execution in a resumable state.
 
 Key Features:
 - Detects structured JSON auth errors (errorCode: "need-credentials")
-- Detects text-based auth error patterns
-- Works with ALL tools (regular tools and sub-agent tasks)
+- Detects text-based auth error patterns ("401 unauthorized", etc.)
 - Uses interrupt() to pause graph execution when auth is required
 - Supports resumable execution after authentication completion
 
-Architecture:
-- Wrap-style hooks: Intercept ALL tool calls to detect auth errors in responses
-- Uses interrupt() to pause execution and surface auth requirements to client
-- Graph can be resumed after authentication using Command.resume()
+Middleware Stack Position:
+    This middleware sits INNER to ``DynamicToolDispatchMiddleware`` (see
+    ``graph_factory._create_middleware_stack``).  The middleware list uses
+    LangChain's convention for ``wrap_*`` hooks: **first in list = outermost**.
+    Because ``DynamicToolDispatchMiddleware`` is first, it short-circuits the
+    ``task`` tool for A2A sub-agent dispatch *before* this middleware ever sees
+    the call.  As a result, A2A 401 errors are NOT intercepted here — they are
+    returned as ToolMessages and handled by the LLM naturally.
+
+    Additionally, response-schema tools (``FinalResponseSchema``,
+    ``SubAgentResponseSchema``) are explicitly skipped to avoid false-positive
+    interrupts when the LLM merely *reports* an upstream auth error.
+
+Limitations — ``interrupt()`` and ToolNode's error handling:
+    When ``interrupt()`` raises ``GraphBubbleUp`` from inside a middleware
+    ``awrap_tool_call``, ToolNode's ``_arun_one`` catches it via a broad
+    ``except Exception`` and converts it to an error ToolMessage.  This means
+    interrupt-based auth detection only works reliably for tools executed through
+    the standard ``_execute_tool_async`` path (where ``GraphBubbleUp`` is
+    re-raised), **not** when the exception escapes the middleware wrapper.
 
 Integration:
     ```python
@@ -22,10 +37,13 @@ Integration:
         tools=tools,
         subagents=subagents,
         middleware=[
-            AuthErrorDetectionMiddleware(),  # Auth detection (inner)
-            ToolRetryMiddleware(),           # Retry logic (outer)
+            DynamicToolDispatchMiddleware(),  # [0] outermost
+            ...
+            AuthErrorDetectionMiddleware(),   # [5] inner
+            ToolRetryMiddleware(),            # [6] inner
+            ...
         ],
-        checkpointer=MemorySaver()  # Required for interrupt/resume functionality
+        checkpointer=MemorySaver()  # Required for interrupt/resume
     )
     ```
 """
@@ -71,38 +89,46 @@ class AuthErrorState(AgentState):
 class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
     """Middleware for deterministic authentication error detection using LangGraph interrupts.
 
-    ARCHITECTURE:
-    This middleware uses the LangGraph interrupt() mechanism to pause graph execution
-    when authentication is required, allowing for resumable workflows.
-
     How it works:
-    1. awrap_tool_call: Intercept ALL tool executions
-    2. Tool executes and returns ToolMessage
+    1. awrap_tool_call: Intercept tool executions (excluding response-schema tools)
+    2. Tool executes via ``handler(request)`` and returns ToolMessage
     3. _detect_auth_error: Check response content for auth error patterns
-    4. If auth error found: Call interrupt() with auth requirement data
+    4. If auth error found: Call ``interrupt()`` with auth requirement data
     5. Graph execution pauses and surfaces the interrupt value to the client
-    6. Client handles authentication and resumes with Command.resume()
+    6. Client handles authentication and resumes with ``Command.resume()``
 
-    Resumable Execution:
-    - The graph maintains its state when interrupted
-    - After authentication, client can resume using: graph.stream(Command.resume(auth_token), config)
-    - The graph resumes from where it was interrupted
-    - Requires checkpointer to be enabled for state persistence
+    Skipped Tools:
+    - ``FinalResponseSchema`` / ``SubAgentResponseSchema``: These carry the LLM's
+      message to the user, not an external-service response.  Scanning their content
+      caused false-positive interrupts when the LLM reported an upstream 401.
+
+    Visibility Limitation:
+    - ``DynamicToolDispatchMiddleware`` is outermost in the middleware stack and
+      short-circuits the ``task`` tool for A2A dispatch.  This middleware (inner)
+      therefore never sees ``task`` tool calls — A2A auth errors propagate back
+      as normal ToolMessages and are handled by the LLM.
+
+    ``interrupt()`` Caveat:
+    - When ``interrupt()`` is called from a middleware ``awrap_tool_call``,
+      ``GraphBubbleUp`` can be caught by ToolNode's ``_arun_one`` broad
+      ``except Exception`` and silently converted to an error ToolMessage.
+      The interrupt only propagates correctly when raised inside
+      ``_execute_tool_async`` where ``GraphBubbleUp`` is explicitly re-raised.
 
     Supported Auth Error Formats:
     - JSON: {"errorCode": "need-credentials", "authorizeUrl": "...", "message": "..."}
     - Text patterns: "authentication required", "401 unauthorized", etc.
 
-    Interrupt Value Format:
-    The interrupt value contains:
-    {
-        "task_state": TaskState.auth_required,
-        "tool": "tool_name",
-        "message": "Authentication required message",
-        "auth_url": "https://oauth.example.com/authorize",
-        "error_code": "need-credentials",
-        "timestamp": 1234567890.123
-    }
+    Interrupt Value Format::
+
+        {
+            "task_state": TaskState.auth_required,
+            "tool": "tool_name",
+            "message": "Authentication required message",
+            "auth_url": "https://oauth.example.com/authorize",
+            "error_code": "need-credentials",
+            "timestamp": 1234567890.123
+        }
 
     This value is interpreted by the agent_executor to set TaskState.auth_required.
     """
@@ -287,6 +313,14 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
         logger.info(
             f"[AUTH MIDDLEWARE awrap_tool_call] Intercepting async {tool_name} tool for auth error detection (BEFORE retry middleware)"
         )
+
+        # # Skip response schema tools — they carry the LLM's message to the user,
+        # # not an actual external-service response.  Scanning their content causes
+        # # false-positive interrupts when the LLM merely *reports* a 401 it already
+        # # handled (e.g. "I encountered a 401 Unauthorized error…").
+        RESPONSE_TOOLS = {"FinalResponseSchema", "SubAgentResponseSchema"}
+        if tool_name in RESPONSE_TOOLS:
+            return await handler(request)
 
         # Extract subagent_type from tool call args (if this is a task tool)
         subagent_type = None

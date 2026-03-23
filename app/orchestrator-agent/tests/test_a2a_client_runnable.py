@@ -25,6 +25,7 @@ from a2a.types import Role as A2ARole
 from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.a2a.config import A2AClientConfig
+from agent_common.a2a.stream_events import ErrorEvent, TaskUpdate
 from langchain_core.messages import AIMessage, HumanMessage
 
 
@@ -134,64 +135,6 @@ class TestA2AClientRunnableTextExtraction:
 
         assert "Text content" in result
         assert '"key": "value"' in result  # JSON serialized
-
-
-class TestA2AClientRunnableArtifactExtraction:
-    """Test artifact extraction from Task objects."""
-
-    def test_extract_artifacts_with_text_parts(self, a2a_client_runnable):
-        """Test extracting artifacts with text parts."""
-        artifact = Artifact(
-            artifact_id="art-1",
-            name="Test Artifact",
-            description="Test description",
-            parts=[Part(root=TextPart(text="Artifact content"))],
-        )
-        task = Task(
-            id="task-1",
-            context_id="ctx-1",
-            status=TaskStatus(state=TaskState.completed),
-            artifacts=[artifact],
-        )
-
-        result = a2a_client_runnable._extract_artifacts_data(task)
-
-        assert len(result) == 1
-        assert result[0]["id"] == "art-1"
-        assert result[0]["name"] == "Test Artifact"
-        assert result[0]["parts"][0]["type"] == "text"
-        assert result[0]["parts"][0]["content"] == "Artifact content"
-
-    def test_extract_artifacts_empty_list(self, a2a_client_runnable):
-        """Test extracting artifacts from task with no artifacts."""
-        task = Task(
-            id="task-1",
-            context_id="ctx-1",
-            status=TaskStatus(state=TaskState.completed),
-            artifacts=[],
-        )
-
-        result = a2a_client_runnable._extract_artifacts_data(task)
-
-        assert result == []
-
-    def test_extract_artifacts_with_metadata(self, a2a_client_runnable):
-        """Test extracting artifacts preserves metadata."""
-        artifact = Artifact(
-            artifact_id="art-1",
-            name="Test Artifact",
-            parts=[Part(root=TextPart(text="Content", metadata={"priority": "high"}))],
-        )
-        task = Task(
-            id="task-1",
-            context_id="ctx-1",
-            status=TaskStatus(state=TaskState.completed),
-            artifacts=[artifact],
-        )
-
-        result = a2a_client_runnable._extract_artifacts_data(task)
-
-        assert result[0]["parts"][0]["metadata"]["priority"] == "high"
 
 
 class TestA2AClientRunnableSyntheticMessage:
@@ -408,13 +351,13 @@ class TestA2AClientRunnableTaskResponse:
 
         result = await a2a_client_runnable._handle_task_response(task)
 
-        assert result["task_id"] == "task-1"
-        assert result["context_id"] == "ctx-1"
-        assert result["state"] == TaskState.completed
-        assert result["is_complete"] is True
-        assert result["requires_auth"] is False
-        assert len(result["messages"]) == 1
-        assert isinstance(result["messages"][0], AIMessage)
+        assert result.task_id == "task-1"
+        assert result.context_id == "ctx-1"
+        assert result.state == TaskState.completed
+        assert result.is_complete is True
+        assert result.requires_auth is False
+        assert len(result.messages) == 1
+        assert isinstance(result.messages[0], AIMessage)
 
     @pytest.mark.asyncio
     async def test_handle_task_response_auth_required(self, a2a_client_runnable):
@@ -427,9 +370,9 @@ class TestA2AClientRunnableTaskResponse:
 
         result = await a2a_client_runnable._handle_task_response(task)
 
-        assert result["state"] == TaskState.auth_required
-        assert result["requires_auth"] is True
-        assert result["is_complete"] is False
+        assert result.state == TaskState.auth_required
+        assert result.requires_auth is True
+        assert result.is_complete is False
 
     @pytest.mark.asyncio
     async def test_handle_task_response_failed(self, a2a_client_runnable):
@@ -450,9 +393,9 @@ class TestA2AClientRunnableTaskResponse:
 
         result = await a2a_client_runnable._handle_task_response(task)
 
-        assert result["state"] == TaskState.failed
-        assert result["is_complete"] is True
-        assert "failed" in result["messages"][0].content.lower()
+        assert result.state == TaskState.failed
+        assert result.is_complete is True
+        assert "failed" in result.messages[0].content.lower()
 
 
 class TestA2AClientRunnableMessageCreation:
@@ -519,9 +462,9 @@ class TestA2AClientRunnableStreaming:
                 updates.append(update)
 
         assert len(updates) == 1
-        assert updates[0]["type"] == "task_update"
-        assert updates[0]["state"] == str(TaskState.completed)
-        assert updates[0]["is_complete"] is True
+        assert updates[0].type == "task_update"
+        assert updates[0].data.state == TaskState.completed
+        assert updates[0].data.is_complete is True
 
     @pytest.mark.asyncio
     async def test_astream_auth_required_task(self, a2a_client_runnable, sub_agent_input):
@@ -545,8 +488,9 @@ class TestA2AClientRunnableStreaming:
                 updates.append(update)
 
         assert len(updates) == 1
-        assert updates[0]["state"] == str(TaskState.auth_required)
-        assert updates[0]["requires_input"] is True
+        assert updates[0].data.state == TaskState.auth_required
+        assert updates[0].data.requires_input is False
+        assert updates[0].data.requires_auth is True
 
     @pytest.mark.asyncio
     async def test_astream_multiple_updates(self, a2a_client_runnable, sub_agent_input):
@@ -584,10 +528,10 @@ class TestA2AClientRunnableStreaming:
                 updates.append(update)
 
         assert len(updates) == 2
-        assert updates[0]["state"] == str(TaskState.working)
-        assert updates[0]["is_complete"] is False
-        assert updates[1]["state"] == str(TaskState.completed)
-        assert updates[1]["is_complete"] is True
+        assert updates[0].data.state == TaskState.working
+        assert updates[0].data.is_complete is False
+        assert updates[1].data.state == TaskState.completed
+        assert updates[1].data.is_complete is True
 
     @pytest.mark.asyncio
     async def test_astream_ignores_non_task_items(self, a2a_client_runnable, sub_agent_input):
@@ -613,7 +557,7 @@ class TestA2AClientRunnableStreaming:
 
         # Should only get the valid task update
         assert len(updates) == 1
-        assert updates[0]["type"] == "task_update"
+        assert updates[0].type == "task_update"
 
 
 class TestA2AClientRunnableInvoke:
@@ -646,9 +590,10 @@ class TestA2AClientRunnableInvoke:
         with patch.object(a2a_client_runnable, "_get_client", return_value=mock_client):
             result = await a2a_client_runnable.ainvoke(sub_agent_input.model_dump())
 
-        assert result["task_id"] == "task-1"
-        assert result["state"] == TaskState.completed
-        assert result["is_complete"] is True
+        assert isinstance(result, TaskUpdate)
+        assert result.data.task_id == "task-1"
+        assert result.data.state == TaskState.completed
+        assert result.data.is_complete is True
 
     @pytest.mark.asyncio
     async def test_ainvoke_handles_connection_error(self, a2a_client_runnable, sub_agent_input):
@@ -665,11 +610,10 @@ class TestA2AClientRunnableInvoke:
         with patch.object(a2a_client_runnable, "_get_client", return_value=mock_client):
             result = await a2a_client_runnable.ainvoke(sub_agent_input.model_dump())
 
-        assert "error" in result
-        assert result["error_type"] == "ConnectError"  # httpx.ConnectError.__name__
-        assert result["requires_retry"] is True  # Defaults to True in ainvoke line 419
-        assert len(result["messages"]) == 1
-        assert "error" in result["messages"][0].content.lower()
+        assert isinstance(result, ErrorEvent)
+        assert result.error
+        assert result.error_type == "ConnectError"
+        assert result.requires_retry is False
 
     @pytest.mark.asyncio
     async def test_ainvoke_handles_timeout_error(self, a2a_client_runnable, sub_agent_input):
@@ -686,10 +630,10 @@ class TestA2AClientRunnableInvoke:
         with patch.object(a2a_client_runnable, "_get_client", return_value=mock_client):
             result = await a2a_client_runnable.ainvoke(sub_agent_input.model_dump())
 
-        assert "error" in result
-        assert result["error_type"] == "TimeoutException"  # httpx.TimeoutException.__name__
-        assert result["requires_retry"] is True
-        assert "timed out" in result["messages"][0].content.lower()
+        assert isinstance(result, ErrorEvent)
+        assert result.error
+        assert result.error_type == "TimeoutException"
+        assert result.requires_retry is False
 
     @pytest.mark.asyncio
     async def test_ainvoke_detects_unexpected_disconnect(self, a2a_client_runnable, sub_agent_input):
@@ -711,9 +655,8 @@ class TestA2AClientRunnableInvoke:
         with patch.object(a2a_client_runnable, "_get_client", return_value=mock_client):
             result = await a2a_client_runnable.ainvoke(sub_agent_input.model_dump())
 
-        assert result["state"] == str(TaskState.failed)
-        assert result["is_complete"] is True
-        assert "stopped responding" in result["messages"][0].content
+        assert isinstance(result, ErrorEvent)
+        assert "stopped responding" in result.error
 
 
 class TestA2AClientRunnableTraceHeaders:
@@ -809,21 +752,16 @@ class TestA2AClientRunnableSyncStream:
 
 
 class TestA2AClientRunnableMessageExtraction:
-    """Test message extraction from sub-agent input."""
+    """Test message and part extraction from sub-agent input."""
 
-    def test_extract_message_parts(self, a2a_client_runnable):
-        """Test extracting message parts from A2A message."""
-        message = Message(
-            role=A2ARole.agent,
-            parts=[
-                Part(root=TextPart(text="First part", metadata={"type": "greeting"})),
-                Part(root=TextPart(text="Second part")),
-            ],
-            message_id="msg-1",
-            context_id="ctx-1",
-        )
+    def test_extract_parts(self, a2a_client_runnable):
+        """Test extracting parts from A2A Part list."""
+        parts = [
+            Part(root=TextPart(text="First part", metadata={"type": "greeting"})),
+            Part(root=TextPart(text="Second part")),
+        ]
 
-        result = a2a_client_runnable._extract_message_parts(message)
+        result = a2a_client_runnable._extract_parts(parts)
 
         assert len(result) == 2
         assert result[0]["type"] == "text"
@@ -833,7 +771,7 @@ class TestA2AClientRunnableMessageExtraction:
 
     @pytest.mark.asyncio
     async def test_handle_message_response(self, a2a_client_runnable):
-        """Test handling message response."""
+        """Test handling message response returns TaskResponseData."""
         message = Message(
             role=A2ARole.agent,
             parts=[Part(root=TextPart(text="Response message"))],
@@ -844,11 +782,12 @@ class TestA2AClientRunnableMessageExtraction:
 
         result = await a2a_client_runnable._handle_message_response(message)
 
-        assert result["message_id"] == "msg-1"
-        assert result["role"] == A2ARole.agent
-        assert result["context_id"] == "ctx-1"
-        assert result["task_id"] == "task-1"
-        assert len(result["parts"]) == 1
+        assert result.task_id == "task-1"
+        assert result.context_id == "ctx-1"
+        assert len(result.messages) == 1
+        assert result.messages[0].content == "Response message"
+        assert result.metadata["message_id"] == "msg-1"
+        assert result.metadata["role"] == str(A2ARole.agent)
 
 
 class TestA2AClientRunnableTrackingIDExtraction:

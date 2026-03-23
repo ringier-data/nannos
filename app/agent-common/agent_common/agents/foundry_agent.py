@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
 from agent_common.a2a.models import LocalFoundrySubAgentConfig
+from agent_common.a2a.stream_events import StreamEvent, TaskResponseData
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +264,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         context_id: Optional[str],
         task_id: Optional[str],
         foundry_session_rid: Optional[str] = None,
-    ) -> dict[str, Any]:
+    ) -> TaskResponseData:
         """Build A2A response from structured response schema.
 
         Args:
@@ -273,7 +274,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             foundry_session_rid: Foundry session RID for conversation continuity
 
         Returns:
-            Dict with 'messages' and A2A metadata
+            TaskResponseData with typed lifecycle fields
         """
         if schema.task_state == "completed":
             return self._build_success_response(
@@ -288,7 +289,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
                 schema.message, context_id=context_id, task_id=task_id, foundry_session_rid=foundry_session_rid
             )
 
-    async def _process(self, input_data: SubAgentInput, config: dict[str, Any]) -> dict[str, Any]:
+    async def _process(self, input_data: SubAgentInput, config: dict[str, Any]) -> TaskResponseData:
         """Execute the Foundry agent.
 
         Args:
@@ -296,7 +297,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             config: Pre-configured RunnableConfig with checkpoint isolation and cost tracking
 
         Returns:
-            Dict with A2A protocol response format (plain, will be wrapped by base class)
+            TaskResponseData (plain, will be wrapped by base class)
         """
         try:
             # Extract content and tracking IDs using inherited helpers
@@ -406,7 +407,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         else:
             return TaskState.completed
 
-    async def ainvoke(self, input_data: dict[str, Any], *, config: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    async def ainvoke(self, input_data: dict[str, Any], *, config: Optional[dict[str, Any]] = None) -> StreamEvent:
         """Async invoke with automatic cost tracking flush.
 
         Overrides parent to flush cost tracking after each invocation,
@@ -417,7 +418,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             config: Optional parent config for checkpoint isolation and cost tracking
 
         Returns:
-            Dict with 'messages' and A2A metadata
+            The final StreamEvent from the stream
         """
         try:
             # Call parent implementation

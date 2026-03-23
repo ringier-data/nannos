@@ -161,7 +161,7 @@ class TestA2ATaskTrackingMiddlewareBeforeModel:
         assert result["a2a_tracking"]["jira-agent"]["is_complete"] is True
 
     def test_before_model_preserves_additional_metadata_fields(self):
-        """Test that before_model preserves requires_auth, requires_input, artifacts."""
+        """Test that before_model preserves requires_auth, requires_input."""
         tool_message = ToolMessage(
             content="Need authentication",
             tool_call_id="call-123",
@@ -172,7 +172,6 @@ class TestA2ATaskTrackingMiddlewareBeforeModel:
                     "is_complete": False,
                     "requires_auth": True,
                     "requires_input": False,
-                    "artifacts": [{"type": "file", "uri": "s3://bucket/file"}],
                 }
             },
         )
@@ -188,7 +187,6 @@ class TestA2ATaskTrackingMiddlewareBeforeModel:
         tracking = result["a2a_tracking"]["jira-agent"]
         assert tracking["requires_auth"] is True
         assert tracking["requires_input"] is False
-        assert tracking["artifacts"] == [{"type": "file", "uri": "s3://bucket/file"}]
 
     def test_before_model_ignores_non_task_tools(self):
         """Test that before_model returns None for non-task tool calls."""

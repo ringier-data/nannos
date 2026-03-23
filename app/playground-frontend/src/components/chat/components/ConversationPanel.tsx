@@ -1,4 +1,4 @@
-import { Plus, MessageSquare } from 'lucide-react';
+import { Plus, MessageSquare, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -45,8 +45,8 @@ function ConversationItem({ conversation, isActive, onClick }: ConversationItemP
             {titleText}
           </span>
           {conversation.hasActiveTasks && (
-            <div
-              className="w-2 h-2 bg-green-500 rounded-full animate-pulse shrink-0"
+            <Loader2
+              className="w-3.5 h-3.5 text-green-500 animate-spin shrink-0"
               role="status"
               aria-label="Task running"
             />

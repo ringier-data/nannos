@@ -5,7 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "a2a-sdk[http-server]>=0.3.9",
+    "a2a-sdk[http-server]>=0.3.25,<1.0.0",
     "uvicorn>=0.38.0",
     "click>=8.1.8",
     "httpx>=0.28.1",
@@ -18,7 +18,7 @@ dependencies = [
     "python-dotenv>=1.1.0",
     "sse-starlette>=2.3.6",
     "starlette>=0.46.2",
-    "deepagents>=0.4.0,<0.5.0",
+    "deepagents>=0.4.10,<0.5.0",
     "rcplus-alloy-common>=8.6.1",
     "langchain-mcp-adapters>=0.1.11",
     "pytest>=8.4.2",
@@ -29,7 +29,7 @@ dependencies = [
     "agent-common[all]>=0.1.0",
     "langchain-aws>=1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
-    "langgraph>=0.2.0",
+    "langgraph>=1.1.0",
     "langgraph-checkpoint-postgres>=2.0.11",
     "aiobotocore>=2.26.0",
     "python-dateutil>=2.8.2",
@@ -49,6 +49,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-env>=1.2.0",
     "pytest-mock>=3.12.0",
+    "langsmith[pytest]>=0.4.37",
 ]
 
 [tool.uv.sources]
@@ -67,12 +68,14 @@ addopts = [
     "--tb=short",
     "--strict-markers",
     "--disable-warnings",
+    "--ignore=tests/integration",
 ]
 markers = [
     "asyncio: marks tests as async (deselect with '-m \"not asyncio\"')",
     "unit: marks tests as unit tests",
     "integration: marks tests as integration tests",
     "slow: marks tests as slow running",
+    "langsmith: marks tests tracked in LangSmith experiments",
 ]
 env = [
     "OIDC_ISSUER=https://login.p.nannos.rcplus.io/realms/nannos",

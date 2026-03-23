@@ -6,6 +6,7 @@ import { Markdown } from '@/components/ui/markdown';
 import { useChat } from '../contexts';
 import { formatTime } from '../utils';
 import type { Message } from '../types';
+import { UnifiedTimelineBlock } from './UnifiedTimelineBlock';
 
 interface MessageCardProps {
   message: Message;
@@ -165,21 +166,47 @@ function EmptyState() {
 }
 
 export function MessageList() {
-  const { messages, isLoadingMessages } = useChat();
+  const { messages, isLoadingMessages, streamingMessage, liveTimeline } = useChat();
 
   if (isLoadingMessages) {
     return <LoadingState />;
   }
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !streamingMessage && liveTimeline.length === 0) {
     return <EmptyState />;
   }
 
   return (
     <div className="flex flex-col px-4 divide-y divide-border/50">
       {messages.map((msg) => (
-        <MessageCard key={msg.id} message={msg} />
+        <div key={msg.id}>
+          {/* Render unified timeline for chronological display of all events */}
+          {msg.timeline && msg.timeline.length > 0 && (
+            <UnifiedTimelineBlock timeline={msg.timeline} complete={true} />
+          )}
+          {/* Only render MessageCard if message has actual content */}
+          {msg.showMessageCard !== false && <MessageCard message={msg} />}
+        </div>
       ))}
+      {/* Live streaming events - unified timeline maintains chronological order */}
+      {liveTimeline.length > 0 && (
+        <UnifiedTimelineBlock timeline={liveTimeline} complete={false} />
+      )}
+      {streamingMessage && (
+        <div className="flex gap-3 py-4">
+          <Avatar className="shrink-0 h-8 w-8 bg-muted text-muted-foreground">
+            <AvatarFallback className="bg-muted text-muted-foreground">
+              <Bot className="w-4 h-4" />
+            </AvatarFallback>
+          </Avatar>
+          <div className="flex-1 min-w-0 w-0 space-y-1">
+            <div className="rounded-lg px-4 py-2 max-w-[85%] overflow-hidden bg-muted">
+              <Markdown className="text-sm">{streamingMessage}</Markdown>
+              <span className="inline-block w-1.5 h-4 bg-foreground/70 animate-pulse ml-0.5 align-text-bottom rounded-sm" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

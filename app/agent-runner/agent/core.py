@@ -33,6 +33,7 @@ from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.config import A2AClientConfig
 from agent_common.a2a.factory import make_a2a_async_runnable
 from agent_common.a2a.models import LocalFoundrySubAgentConfig
+from agent_common.a2a.stream_events import ArtifactUpdate, ErrorEvent, TaskResponseData, TaskUpdate
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM, SubAgentResponseSchema, get_response_format
 from agent_common.agents.foundry_agent import create_foundry_local_subagent
 from agent_common.core.cost_tracking_embeddings import CostTrackingBedrockEmbeddings
@@ -41,7 +42,7 @@ from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.model_factory import DEFAULT_MODEL, create_model, is_valid_model
 from agent_common.core.s3_service import get_s3_service
 from jsonpath_ng.ext import parse as jsonpath_parse
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -141,6 +142,62 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
     except Exception:
         pass
     return {}
+
+
+async def _collect_stream_text(runnable: Any, input_data: SubAgentInput) -> str | None:
+    """Collect the final text result from an A2A runnable's stream.
+
+    Accumulates non-intermediate ``ArtifactUpdate`` content (the main
+    response chunks).  Falls back
+    to extracting text from the last ``TaskResponseData`` messages when
+    neither artifact nor message content was streamed.
+
+    Returns the accumulated text, or None if the stream produced no
+    readable content.
+    """
+    parts: list[str] = []
+    last_data: TaskResponseData = TaskResponseData()
+
+    async for item in runnable.astream(input_data.model_dump()):
+        if isinstance(item, ArtifactUpdate) and item.event_metadata is None:
+            if item.content:
+                parts.append(item.content)
+        elif isinstance(item, TaskUpdate):
+            last_data = item.data
+        elif isinstance(item, ErrorEvent):
+            return f"Error: {item.error}" if item.error else None
+
+    if parts:
+        return "".join(parts).strip() or None
+
+    # Fallback: extract text from the last TaskResponseData messages
+    return _extract_text_from_messages(last_data.messages)
+
+
+def _extract_text_from_messages(messages: list) -> str | None:
+    """Extract human-readable text from A2A response messages.
+
+    Messages produced by ``_wrap_message_with_metadata`` are AIMessages
+    whose ``content`` is a JSON string ``{"content": "...", "a2a": {...}}``.
+    This helper unwraps that JSON, falling back to plain text content.
+    """
+    for msg in reversed(messages):
+        raw = getattr(msg, "content", None) if not isinstance(msg, dict) else msg.get("content")
+        if not raw:
+            continue
+        if isinstance(raw, str):
+            try:
+                text = json.loads(raw).get("content", "")
+            except (json.JSONDecodeError, AttributeError):
+                text = raw
+        elif isinstance(raw, list):
+            text = " ".join(c.get("text", "") for c in raw if isinstance(c, dict) and c.get("type") == "text").strip()
+        else:
+            continue
+        text = text.strip()
+        if text:
+            return text
+    return None
 
 
 class AgentRunner(BaseAgent):
@@ -788,11 +845,13 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             messages = [HumanMessage(content=prompt)]
 
             # Use astream for proper streaming support (respects recursion_limit set with .with_config())
-            # stream_mode="values" yields state snapshots - we consume all and use the final state.
-            # This enables future streaming progress updates while still working for one-shot scheduler execution.
+            # stream_mode="values" with version="v2" yields StreamPart dicts:
+            #   {"type": "values", "ns": (), "data": <state snapshot>}
+            # We consume all and use the final state.
             final_state = None
-            async for state in graph.astream({"messages": messages}, config=config, stream_mode="values"):
-                final_state = state
+            async for part in graph.astream({"messages": messages}, config=config, stream_mode="values", version="v2"):
+                if part["type"] == "values":
+                    final_state = part["data"]
                 # Future: could yield progress events here for streaming execution
 
             output_messages = final_state.get("messages", []) if final_state else []
@@ -937,25 +996,11 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
         )
 
-        # Invoke the foundry runnable via the A2A SubAgentInput interface
+        # Stream the foundry runnable via the A2A SubAgentInput interface
         input_data = SubAgentInput(
             messages=[{"role": "user", "content": prompt}],
         )
-        result = await compiled_subagent["runnable"].ainvoke(input_data)
-
-        # Extract result from A2A response
-        result_messages = result.get("messages", [])
-        result_summary: str | None = None
-        for msg in reversed(result_messages):
-            if isinstance(msg, dict) and msg.get("role") == "agent":
-                parts = msg.get("parts", [])
-                for part in parts:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        result_summary = part.get("text", "").strip()
-                        if result_summary:
-                            break
-            if result_summary:
-                break
+        result_summary = await _collect_stream_text(compiled_subagent["runnable"], input_data)
 
         logger.info(
             "Foundry agent execution complete for job %d: %d chars",
@@ -1035,20 +1080,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             messages=[{"role": "user", "content": prompt}],
             scheduled_job_id=scheduled_job_id,
         )
-        result = await runnable.ainvoke(input_data)
-
-        # Extract result from A2A response
-        result_messages: list[AIMessage] = result.get("messages", [])
-        result_summary = ""
-        for msg in reversed(result_messages):
-            try:
-                if msg.content is None:
-                    continue
-                content = json.loads(msg.content).get("content", "") if msg.content else ""
-            except json.JSONDecodeError:
-                content = msg.content or ""
-            if content:
-                result_summary += content.strip()
+        result_summary = await _collect_stream_text(runnable, input_data)
 
         logger.info(
             "Remote agent execution complete for job %d: %d chars",

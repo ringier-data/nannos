@@ -111,9 +111,9 @@ app.add_middleware(TracingMiddleware)  # Receives trace from orchestrator
 ```
 
 **How it works:**
-1. Orchestrator injects LangSmith trace headers (`langsmith-trace`, `baggage`) in HTTP requests
-2. `TracingMiddleware` extracts headers and continues the trace context
-3. All alloy-agent operations appear as children of the orchestrator's run in LangSmith
+1. The orchestrator's `A2AClientRunnable` injects `langsmith-trace` and `baggage` headers into outgoing HTTP requests via an httpx event hook that reads the current `RunTree` from `contextvars`
+2. `TracingMiddleware` extracts these headers from the incoming request and re-creates the trace context
+3. All alloy-agent operations appear as child spans of the orchestrator's run in LangSmith
 4. MCP tool calls are also captured in the trace hierarchy
 
 **Requirements:**

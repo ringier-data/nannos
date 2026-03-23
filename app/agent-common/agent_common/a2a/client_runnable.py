@@ -29,6 +29,7 @@ from a2a.types import (
     FileWithUri,
     Message,
     Task,
+    TaskArtifactUpdateEvent,
     TaskState,
     TextPart,
     TransportProtocol,
@@ -49,16 +50,17 @@ from agent_common.a2a.authentication import (
 )
 from agent_common.a2a.base import BaseA2ARunnable, SubAgentInput
 from agent_common.a2a.config import A2AClientConfig
+from agent_common.a2a.stream_events import (
+    TERMINAL_STATES,
+    ArtifactUpdate,
+    ErrorEvent,
+    StreamEvent,
+    TaskResponseData,
+    TaskUpdate,
+    parse_event_metadata,
+)
 
 logger = logging.getLogger(__name__)
-
-# Terminal task states that indicate task completion
-TERMINAL_TASK_STATES = [
-    TaskState.completed,
-    TaskState.failed,
-    TaskState.canceled,
-    TaskState.rejected,
-]
 
 
 class A2AClientRunnable(BaseA2ARunnable):
@@ -222,17 +224,15 @@ class A2AClientRunnable(BaseA2ARunnable):
             "corporate_sso_preferred": True,  # Indicate preference for corporate SSO
         }
 
-    async def _handle_task_response(self, task: Task) -> Dict[str, Any]:
+    async def _handle_task_response(self, task: Task) -> TaskResponseData:
         """
         Process task response using clean A2A protocol compliance.
 
         Uses A2A SDK types directly and follows protocol specification.
-        Returns dict for LangChain/DeepAgents compatibility.
+        Returns TaskResponseData for type-safe downstream consumption.
         """
-        from agent_common.a2a.models import A2ATaskResponse
-
         # Application-specific metadata (separate from A2A protocol)
-        app_metadata = {}
+        app_metadata: dict[str, Any] = {}
 
         # Handle different task states following A2A protocol
         if task.status.state == TaskState.auth_required:
@@ -244,63 +244,45 @@ class A2AClientRunnable(BaseA2ARunnable):
         messages = [AIMessage(content=content)]
         logger.debug(f"Added synthetic message: {content}")
 
-        # Create A2A response model
-        response = A2ATaskResponse(task=task, app_metadata=app_metadata, messages=messages)
+        return TaskResponseData(
+            task_id=task.id,
+            context_id=task.context_id,
+            state=task.status.state,
+            messages=messages,
+            metadata=app_metadata if app_metadata else {},
+        )
 
-        # Return dict for LangChain/DeepAgents compatibility
-        return {
-            "task_id": task.id,
-            "context_id": task.context_id,
-            "state": task.status.state,
-            "artifacts": self._extract_artifacts_data(task),
-            "is_complete": response.is_complete,
-            "requires_auth": response.requires_auth,
-            "requires_input": response.requires_input,
-            "messages": messages,
-            **app_metadata,
-        }
+    @staticmethod
+    def _extract_parts(parts: Sequence[A2APart]) -> list[Dict[str, Any]]:
+        """Extract A2A parts into plain dicts.
+
+        Works with both ``Message.parts`` and ``Artifact.parts`` since
+        both are ``list[Part]`` (TextPart | FilePart | DataPart).
+        """
+        parts_data: list[Dict[str, Any]] = []
+        for part in parts:
+            inner = part.root
+            if inner.kind == "text":
+                parts_data.append({"type": "text", "content": inner.text, "metadata": inner.metadata or {}})
+            elif inner.kind == "file":
+                parts_data.append({"type": "file", "file": inner.file, "metadata": inner.metadata or {}})
+            elif inner.kind == "data":
+                parts_data.append({"type": "data", "content": inner.data, "metadata": inner.metadata or {}})
+        return parts_data
 
     def _extract_artifacts_data(self, task: Task) -> list[Dict[str, Any]]:
         """Extract artifacts data following A2A protocol structure."""
-        artifacts_data = []
-
-        if task.artifacts:
-            for artifact in task.artifacts:
-                artifact_data = {
-                    "id": artifact.artifact_id,
-                    "name": artifact.name,
-                    "description": artifact.description,
-                    "parts": [],
-                }
-                for part in artifact.parts:
-                    inner_part = part.root
-                    if inner_part.kind == "text":
-                        artifact_data["parts"].append(
-                            {
-                                "type": "text",
-                                "content": inner_part.text,
-                                "metadata": inner_part.metadata or {},
-                            }
-                        )
-                    elif inner_part.kind == "file":
-                        artifact_data["parts"].append(
-                            {
-                                "type": "file",
-                                "file": inner_part.file,
-                                "metadata": inner_part.metadata or {},
-                            }
-                        )
-                    elif inner_part.kind == "data":
-                        artifact_data["parts"].append(
-                            {
-                                "type": "data",
-                                "content": inner_part.data,
-                                "metadata": inner_part.metadata or {},
-                            }
-                        )
-                artifacts_data.append(artifact_data)
-
-        return artifacts_data
+        if not task.artifacts:
+            return []
+        return [
+            {
+                "id": artifact.artifact_id,
+                "name": artifact.name,
+                "description": artifact.description,
+                "parts": self._extract_parts(artifact.parts),
+            }
+            for artifact in task.artifacts
+        ]
 
     def _create_synthetic_message_content(self, task: Task, app_metadata: Dict[str, Any]) -> str:
         """Create synthetic message content following A2A protocol.
@@ -340,7 +322,7 @@ class A2AClientRunnable(BaseA2ARunnable):
         elif task.status.state == TaskState.working:
             # Agent is still processing - this should NOT be treated as completion
             content = f"INCOMPLETE: Agent is still working - {content}"
-        elif task.status.state not in TERMINAL_TASK_STATES:
+        elif task.status.state not in TERMINAL_STATES:
             # Any other non-terminal state (input_required, auth_required, etc.)
             # Prepend state information for clarity
             state_name = task.status.state.value if hasattr(task.status.state, "value") else str(task.status.state)
@@ -348,169 +330,92 @@ class A2AClientRunnable(BaseA2ARunnable):
 
         return content
 
-    async def _handle_message_response(self, message: Message) -> Dict[str, Any]:
+    async def _handle_message_response(self, message: Message) -> TaskResponseData:
+        """Convert an A2A Message response into a TaskResponseData.
+
+        Extracts text from message parts and wraps it as an AIMessage so
+        that downstream consumers (which expect ``TaskResponseData.messages``)
+        can process it uniformly — no separate ``MessageResponseData`` needed.
         """
-        Process message response using clean A2A protocol compliance.
-        """
-        # Return dict for compatibility
-        return {
-            "message_id": message.message_id,
-            "role": message.role,
-            "context_id": message.context_id,
-            "task_id": message.task_id,
-            "parts": self._extract_message_parts(message),
-        }
+        text = self._extract_text_from_parts(message.parts)
+        return TaskResponseData(
+            task_id=message.task_id or "",
+            context_id=message.context_id or "",
+            messages=[AIMessage(content=text)] if text else [],
+            metadata={
+                "message_id": message.message_id,
+                "role": str(message.role),
+                "parts": self._extract_parts(message.parts),
+            },
+        )
 
-    def _extract_message_parts(self, message: Message) -> list[Dict[str, Any]]:
-        """Extract message parts following A2A protocol structure."""
-        parts_data = []
+    async def ainvoke(self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> StreamEvent:
+        """Non-streaming invoke by collecting all stream events.
 
-        for part in message.parts:
-            inner_part = part.root
-            if inner_part.kind == "text":
-                parts_data.append(
-                    {
-                        "type": "text",
-                        "content": inner_part.text,
-                        "metadata": inner_part.metadata or {},
-                    }
-                )
-            elif inner_part.kind == "file":
-                parts_data.append(
-                    {
-                        "type": "file",
-                        "file": inner_part.file,
-                        "metadata": inner_part.metadata or {},
-                    }
-                )
-            elif inner_part.kind == "data":
-                parts_data.append(
-                    {
-                        "type": "data",
-                        "content": inner_part.data,
-                        "metadata": inner_part.metadata or {},
-                    }
-                )
-
-        return parts_data
-
-    async def ainvoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Non-streaming invoke by collecting all stream updates.
-
-        Backwards compatible with existing code that expects a single result.
-        Internally uses astream() and collects the final result.
-
-        IMPORTANT: If the stream ends without reaching a terminal state (completed, failed,
-        canceled, rejected), we treat it as a failure. This handles cases where the sub-agent
-        crashes or disconnects before emitting a final status.
+        Returns the final StreamEvent from the stream. If the stream ends
+        without reaching a terminal state (completed, failed, canceled, rejected),
+        returns an ErrorEvent indicating unexpected disconnect.
 
         Note: May log SSE cleanup warnings ("generator didn't stop after athrow()") which are
         cosmetic and don't affect functionality. These occur when asyncio.run() tears down the
         event loop before the A2A library's SSE connection fully cleans up.
         """
-        final_result = {}
-        last_state = None
+        last_event: StreamEvent | None = None
 
         try:
-            async for item in self.astream(input_data):
-                # Keep updating with latest data
-                if item.get("type") == "task_update" or item.get("type") == "message":
-                    final_result = item.get("data", {})
-                    last_state = item.get("state")
-                # For errors, return error response immediately
-                elif item.get("type") == "error":
-                    return {
-                        "error": item.get("error"),
-                        "error_type": item.get("error_type"),
-                        "is_complete": True,  # Mark as complete since it's a terminal error
-                        "state": str(TaskState.failed),
-                        "requires_retry": item.get("requires_retry", True),
-                        "messages": [AIMessage(content=f"Error: {item.get('error')}")],
-                    }
+            async for item in self.astream(input_data, config):
+                last_event = item
+                # For errors, return immediately
+                if isinstance(item, ErrorEvent):
+                    return item
+
+            if last_event is None:
+                return ErrorEvent(error="No response received from agent")
 
             # CRITICAL: Check if stream ended without reaching a terminal state
             # This handles cases where sub-agent crashes or disconnects unexpectedly
-            if final_result:
-                result_state = final_result.get("state")
-                # Convert state string back to TaskState for comparison
-                state_str = str(result_state) if result_state else last_state
+            if isinstance(last_event, TaskUpdate):
+                state = last_event.data.state
 
-                # Check if we ended in a non-terminal state
-                is_terminal = any(
-                    terminal.value in str(state_str).lower() or str(terminal) in str(state_str)
-                    for terminal in TERMINAL_TASK_STATES
-                )
-                is_intervention = "input_required" in str(state_str) or "auth_required" in str(state_str)
-
-                if not is_terminal and not is_intervention:
-                    # Stream ended without terminal state - treat as unexpected failure
+                if state not in TERMINAL_STATES and state not in (TaskState.input_required, TaskState.auth_required):
                     logger.warning(
-                        f"A2A stream ended with non-terminal state: {state_str}. "
+                        f"A2A stream ended with non-terminal state: {state}. "
                         "Sub-agent may have crashed or disconnected. Treating as failure."
                     )
-
-                    # Update the result to indicate failure
                     original_content = ""
-                    if final_result.get("messages"):
-                        last_msg = final_result["messages"][-1]
+                    if isinstance(last_event.data, TaskResponseData) and last_event.data.messages:
+                        last_msg = last_event.data.messages[-1]
                         if hasattr(last_msg, "content"):
                             original_content = last_msg.content
 
-                    error_content = (
-                        f"The agent stopped responding unexpectedly. Last status: {state_str}. {original_content}"
+                    return ErrorEvent(
+                        error=f"The agent stopped responding unexpectedly. Last status: {state}. {original_content}",
+                        data=last_event.data,
                     )
 
-                    final_result["state"] = str(TaskState.failed)
-                    final_result["is_complete"] = True
-                    final_result["messages"] = [AIMessage(content=error_content)]
+            return last_event
 
-            return final_result or {
-                "is_complete": True,
-                "state": str(TaskState.failed),
-                "messages": [AIMessage(content="No response received from agent")],
-            }
         except httpx.ConnectError as e:
             logger.error(f"A2A connection failed: {e}")
-
-            return {
-                "error": "Unable to connect to A2A service. The service may be offline.",
-                "error_type": type(e).__name__,
-                "is_complete": False,
-                "requires_retry": False,
-                "timestamp": time.time(),
-                "messages": [
-                    AIMessage(content="The requested service is currently unavailable. Please try again later.")
-                ],
-            }
+            return ErrorEvent(
+                error="Unable to connect to A2A service. The service may be offline.",
+                error_type=type(e).__name__,
+                requires_retry=False,
+            )
         except httpx.TimeoutException as e:
             logger.error(f"A2A request timed out: {e}")
-
-            return {
-                "error": "A2A request timed out. The service may be slow or unavailable.",
-                "error_type": type(e).__name__,
-                "is_complete": False,
-                "requires_retry": True,
-                "timestamp": time.time(),
-                "messages": [AIMessage(content="The request timed out. Please try again.")],
-            }
+            return ErrorEvent(
+                error="A2A request timed out. The service may be slow or unavailable.",
+                error_type=type(e).__name__,
+                requires_retry=True,
+            )
         except Exception as e:
             logger.error(f"A2A invocation failed: {e}")
-
-            # Provide user-friendly error message
-            error_msg = str(e)
-            user_friendly_msg = "An error occurred while processing your request."
-
-            if "HTTP" in error_msg and ("500" in error_msg or "502" in error_msg or "503" in error_msg):
-                user_friendly_msg = "The service is temporarily unavailable. Please try again later."
-
-            return {
-                "error": error_msg,
-                "error_type": type(e).__name__,
-                "is_complete": False,
-                "requires_retry": True,
-                "timestamp": time.time(),
-                "messages": [AIMessage(content=user_friendly_msg)],
-            }
+            return ErrorEvent(
+                error=str(e),
+                error_type=type(e).__name__,
+                requires_retry=True,
+            )
 
     def stream(self, input_data: Dict[str, Any]):
         """Synchronous streaming is not supported - use astream instead.
@@ -630,7 +535,9 @@ class A2AClientRunnable(BaseA2ARunnable):
 
     # NOTE: _wrap_message_with_metadata is inherited from BaseA2ARunnable
 
-    async def astream(self, input_data: Dict[str, Any]) -> AsyncIterable[Dict[str, Any]]:
+    async def astream(
+        self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None
+    ) -> AsyncIterable[StreamEvent]:
         """Stream A2A status updates in real-time.
 
         Yields status updates as they arrive from the A2A service, enabling
@@ -641,6 +548,10 @@ class A2AClientRunnable(BaseA2ARunnable):
 
         Args:
             input_data: Input containing messages and a2a_tracking state
+            config: Optional RunnableConfig for LangChain callback/tracing propagation.
+                Not used directly by the remote client (trace headers are injected
+                via httpx event hooks), but accepted for interface consistency with
+                LangChain's Runnable.astream() and LocalA2ARunnable.astream().
 
         Yields:
             Status update dictionaries with type, state, and data
@@ -666,35 +577,32 @@ class A2AClientRunnable(BaseA2ARunnable):
             # Stream responses from A2A service
             message_count = 0
             task_updates_count = 0
-            MAX_MESSAGES = 100  # Prevent infinite message loops
+            MAX_MESSAGES = 1000  # Prevent infinite message loops
 
+            logger.info("[STREAMING] A2A client starting to iterate over client.send_message() stream")
             try:
                 async for item in client.send_message(a2a_message):
                     message_count += 1
-                    logger.debug(f"Stream item #{message_count}: {type(item).__name__}")
+                    item_type = type(item).__name__
+                    logger.info(f"[STREAMING] A2A stream item #{message_count}: {item_type}")
 
                     # Safety check to prevent infinite loops
                     if message_count > MAX_MESSAGES:
                         logger.warning(f"Stream exceeded maximum message limit ({MAX_MESSAGES}), terminating")
-                        yield {
-                            "type": "error",
-                            "error": f"Stream exceeded maximum message limit ({MAX_MESSAGES})",
-                            "error_type": "StreamLimitExceeded",
-                            "is_complete": True,
-                            "message_count": message_count,
-                        }
+                        yield ErrorEvent(
+                            error=f"Stream exceeded maximum message limit ({MAX_MESSAGES})",
+                            error_type="StreamLimitExceeded",
+                        )
                         break
 
                     # Handle Message responses - yield immediately
                     if isinstance(item, Message):
+                        logger.info(f"[STREAMING] A2A client processing Message response #{message_count}")
                         response = await self._handle_message_response(item)
-                        yield {
-                            "type": "message",
-                            "data": response,
-                            "is_complete": False,
-                            "message_count": message_count,
-                        }
-                        logger.info(f"Streamed message response #{message_count}")
+                        yield TaskUpdate(
+                            data=response,
+                        )
+                        logger.info("[STREAMING] A2A client yielded TaskUpdate from message")
 
                     # Handle Task status updates - yield immediately
                     elif isinstance(item, tuple) and len(item) == 2:
@@ -704,6 +612,26 @@ class A2AClientRunnable(BaseA2ARunnable):
                             logger.debug(f"Ignoring non-Task tuple item: {type(task)}")
                             continue
 
+                        # Handle artifact streaming events (TaskArtifactUpdateEvent)
+                        if isinstance(update_event, TaskArtifactUpdateEvent):
+                            text_parts = []
+                            for part in update_event.artifact.parts:
+                                if part.root.kind == "text":
+                                    text_parts.append(part.root.text)
+                            text_content = "".join(text_parts)
+                            if text_content:
+                                logger.info(
+                                    f"[STREAMING] A2A client yielding ArtifactUpdate: {len(text_content)} chars, append={update_event.append}"
+                                )
+                                yield ArtifactUpdate(
+                                    content=text_content,
+                                    artifact_id=update_event.artifact.artifact_id,
+                                    append=update_event.append,
+                                    last_chunk=update_event.last_chunk,
+                                    metadata=update_event.artifact.metadata,
+                                )
+                            continue
+
                         task_updates_count += 1
                         logger.debug(f"Task state: {task.status.state} (update #{task_updates_count})")
                         task_response = await self._handle_task_response(task)
@@ -711,20 +639,28 @@ class A2AClientRunnable(BaseA2ARunnable):
                         # Yield status update with wrapped metadata
                         wrapped_response = self._wrap_message_with_metadata(task_response)
 
-                        yield {
-                            "type": "task_update",
-                            "state": str(task.status.state),
-                            "data": wrapped_response,
-                            "is_complete": task.status.state in TERMINAL_TASK_STATES,
-                            "requires_input": task.status.state in [TaskState.auth_required, TaskState.input_required],
-                            "message_count": message_count,
-                            "task_updates_count": task_updates_count,
-                        }
+                        # Extract event-level metadata (e.g. todo_snapshot) from
+                        # the TaskStatusUpdateEvent — separate from TaskStatus.
+                        raw_event_metadata = getattr(update_event, "metadata", None) or {}
+                        event_metadata = parse_event_metadata(raw_event_metadata)
+
+                        # Extract raw status text from A2A protocol (before synthetic wrapping).
+                        # This is the actual human-readable message the sub-agent intended to
+                        # show, without _create_synthetic_message_content() transformations.
+                        raw_status_text = ""
+                        if task.status.message and task.status.message.parts:
+                            raw_status_text = self._extract_text_from_parts(task.status.message.parts)
+
+                        yield TaskUpdate(
+                            data=wrapped_response,
+                            event_metadata=event_metadata,
+                            status_text=raw_status_text,
+                        )
 
                         logger.info(f"Streamed task update #{task_updates_count}: {task.status.state}")
 
                         # Terminal or intervention states: final yield and stop
-                        if task.status.state in TERMINAL_TASK_STATES:
+                        if task.status.state in TERMINAL_STATES:
                             logger.info(f"Task reached terminal state: {task.status.state}")
                             break
                         elif task.status.state in [TaskState.auth_required, TaskState.input_required]:
@@ -734,39 +670,33 @@ class A2AClientRunnable(BaseA2ARunnable):
                     else:
                         logger.debug(f"Ignoring unknown item type: {type(item)}")
 
+                logger.info(f"[STREAMING] A2A client stream complete - received {message_count} items total")
+
             except asyncio.TimeoutError:
                 logger.error("A2A stream timed out")
-                yield {
-                    "type": "error",
-                    "error": "A2A operation timed out",
-                    "error_type": "TimeoutError",
-                    "is_complete": False,
-                    "requires_retry": True,
-                    "message_count": message_count,
-                }
+                yield ErrorEvent(
+                    error="A2A operation timed out",
+                    error_type="TimeoutError",
+                    requires_retry=True,
+                )
             except Exception as e:
                 logger.error(f"A2A stream error: {e}")
                 import traceback
 
                 logger.debug(f"Traceback: {traceback.format_exc()}")
-                yield {
-                    "type": "error",
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "is_complete": False,
-                    "message_count": message_count,
-                }
+                yield ErrorEvent(
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
 
             logger.debug("========== A2A STREAM END ==========")
 
         except Exception as e:
             logger.error(f"A2A stream initialization error: {e}")
-            yield {
-                "type": "error",
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "is_complete": False,
-            }
+            yield ErrorEvent(
+                error=str(e),
+                error_type=type(e).__name__,
+            )
 
     async def __aenter__(self):
         """Async context manager entry."""

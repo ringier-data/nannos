@@ -3,13 +3,9 @@
 import logging
 from typing import Any
 
-# Re-export extracted utilities from agent_common for backwards compatibility
 from agent_common.utils import (  # noqa: F401
     LANGUAGE_NAMES,
-    CleanupLevel,
-    clean_schema_properties,
     get_language_display_name,
-    validate_and_clean_tool_dict,
 )
 
 from app.models.config import AgentSettings, UserConfig
@@ -168,6 +164,26 @@ def build_runtime_context(
         if isinstance(subagent, dict) and "name" in subagent:
             subagent_registry[subagent["name"]] = subagent
 
+    # Build whitelisted tool names for orchestrator
+    # Start with backend registry (user_config.tool_names)
+    whitelisted_tool_names = set(user_config.tool_names or [])
+
+    # Auto-include scheduler tools and playground tools (always available from MCP)
+    # These are essential for the orchestrator to delegate to task-scheduler sub-agent
+    allowed_orchestrator_tools = {
+        "playground_list_sub_agents",
+        "playground_update_sub_agent",
+        "playground_list_mcp_servers",
+        "playground_grep_mcp_tools",
+    }
+    orchestrator_auto_tools = {
+        name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
+    }
+    whitelisted_tool_names.update(orchestrator_auto_tools)
+    logger.debug(
+        f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/playground tools)"
+    )
+
     # Add dynamic local sub-agents from user configuration
     # Requires agent_settings for model creation
     if user_config.local_subagents and agent_settings:
@@ -283,11 +299,7 @@ def build_runtime_context(
             f"Skipping {len(user_config.local_subagents)} dynamic sub-agents."
         )
 
-    # Calculate whitelisted tool names (tools the orchestrator can use)
-    whitelisted_tool_names = set(user_config.tool_names or [])
-
     logger.debug(f"Tool registry contains {len(tool_registry)} total tools")
-    logger.debug(f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools")
 
     context = GraphRuntimeContext(
         user_id=user_config.user_id,  # Database ID (stable)

@@ -73,7 +73,6 @@ def test_parse_status_update_with_nested_message():
     """Test parsing status-update with nested status.message."""
     response = {
         "contextId": "dde49b7a-b4b8-48ba-9276-11a42d820f22",
-        "final": False,
         "kind": "status-update",
         "status": {
             "message": {
@@ -98,7 +97,6 @@ def test_parse_status_update_with_nested_message():
     assert parsed["role"] == "assistant"  # 'agent' normalized to 'assistant'
 
     assert parsed["state"] == TaskState.working
-    assert parsed["final"] is False
     assert parsed["task_id"] == "98ab980a-2209-42a5-aaae-55e93e3108e0"
     assert len(parsed["parts"]) == 1
     assert parsed["parts"][0]["text"] == "📋 **Plan created** (5 tasks)"
@@ -108,7 +106,6 @@ def test_parse_status_update_without_message():
     """Test parsing status-update with only state (no nested message)."""
     response = {
         "contextId": "dde49b7a-b4b8-48ba-9276-11a42d820f22",
-        "final": True,
         "kind": "status-update",
         "status": {"state": "completed", "timestamp": "2025-11-21T09:24:00.493443+00:00"},
         "taskId": "98ab980a-2209-42a5-aaae-55e93e3108e0",
@@ -120,7 +117,6 @@ def test_parse_status_update_without_message():
     assert parsed["kind"] == "status-update"
 
     assert parsed["state"] == TaskState.completed
-    assert parsed["final"] is True
     assert parsed["task_id"] == "98ab980a-2209-42a5-aaae-55e93e3108e0"
     # Should create synthetic status part
     assert len(parsed["parts"]) == 1
@@ -230,7 +226,7 @@ async def test_save_agent_response_with_history():
             raw_payload=kwargs["raw_payload"],
             metadata=kwargs["metadata"],
             ttl=0,
-            final=kwargs["final"],
+            final=False,  # A2A 1.0.0: final field removed from protocol
             kind=kwargs["kind"],
         )
 

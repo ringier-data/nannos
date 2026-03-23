@@ -1,9 +1,30 @@
 """Common models for A2A agents."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from a2a.types import TaskState
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+TodoState = Literal["submitted", "working", "completed", "failed"]
+
+# Map internal todo statuses to A2A TodoState values
+TODO_STATE_MAP: dict[str, str] = {
+    "pending": "submitted",
+    "in_progress": "working",
+    "completed": "completed",
+    "failed": "failed",
+}
+
+
+class TodoItem(BaseModel):
+    """A single item in a work-plan todo checklist.
+
+    Serialised inside a DataPart of work-plan status-update messages.
+    """
+
+    name: str = Field(..., description="Human-readable task description")
+    state: TodoState = Field(..., description="Current task state")
+    source: Optional[str] = Field(default=None, description="Sub-agent that owns this item")
 
 
 class BaseAgentStreamResponse(BaseModel):

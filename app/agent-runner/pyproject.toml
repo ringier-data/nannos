@@ -5,17 +5,17 @@ description = "Internal execution service for scheduled automated sub-agent jobs
 requires-python = ">=3.12"
 dependencies = [
     # A2A server
-    "a2a-sdk[http-server]>=0.3.9",
+    "a2a-sdk[http-server]>=0.3.25,<1.0.0",
     "click>=8.1.8",
     # HTTP server
     "uvicorn>=0.38.0",
     # LangChain / DeepAgents
-    "deepagents>=0.4.0,<0.5.0",
+    "deepagents>=0.4.10,<0.5.0",
     "langchain>=1.0.0",
     "langchain-aws>=1.1.0",
     "langchain-mcp-adapters>=0.1.11",
     # LangGraph with AWS checkpointing
-    "langgraph>=0.2.0",
+    "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
     # LangGraph PostgreSQL store (pgvector)
     "langgraph-checkpoint-postgres>=2.0.11",

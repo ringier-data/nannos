@@ -8,9 +8,14 @@ import logging
 import os
 from datetime import timedelta
 
+from langchain.agents.middleware.types import AgentMiddleware
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
+from ringier_a2a_sdk.agent.dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
+from ringier_a2a_sdk.agent.langgraph_anthropic import LangGraphAnthropicAgent
 from ringier_a2a_sdk.agent.langgraph_bedrock import LangGraphBedrockAgent
+from ringier_a2a_sdk.agent.langgraph_google import LangGraphGoogleGenAIAgent
 from ringier_a2a_sdk.middleware.credential_injector import PassThroughCredentialInjector
+from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -219,13 +224,25 @@ Remember: You're not just executing commands, you're managing campaigns. Think s
 """
 
 
-class NaonousAgent(LangGraphBedrockAgent):
+class NaonousBedrockAgent(LangGraphBedrockAgent, DynamoDBCheckpointerMixin):
     """Naonous Agent - Manages BYOK campaign lifecycle on Alloy.
 
     This agent uses Claude Sonnet 4.5 via AWS Bedrock and has access to the
     Naonous MCP server for campaign management operations.
 
-    Architecture:
+    Features:
+    - Claude extended thinking mode (optional, configure via BEDROCK_THINKING_LEVEL)
+    - Streaming conversation state persistence via DynamoDB
+    - MCP tool access with dynamic credential injection
+    - Configurable timeout for long-running operations (MCP_TIMEOUT_SECONDS)
+
+    Configuration:
+    - BEDROCK_MODEL_ID: Claude model ID (default: claude-sonnet-4-5)
+    - BEDROCK_THINKING_LEVEL: Enable thinking (minimal/low/medium/high)
+    - MCP_TIMEOUT_SECONDS: Timeout for MCP operations (default: 600s)
+    - MCP_GATEWAY_URL: URL to MCP gateway (required)
+
+    Architecture
     - Extends LangGraphBedrockAgent base class
     - MCP tools discovered once at initialization (no authentication required)
     - Shared DynamoDB checkpointer for conversation persistence
@@ -242,7 +259,16 @@ class NaonousAgent(LangGraphBedrockAgent):
 
         super().__init__()
 
-    # Abstract method implementations
+    def _get_middleware(self) -> list[AgentMiddleware]:
+        """Return agent middleware - includes schema cleaning for tool compatibility.
+
+        ToolSchemaCleaningMiddleware cleans MCP tool schemas before binding to the model.
+        Specifically removes invalid enum values like "NULL" that Gemini rejects.
+
+        Returns:
+            List of middleware: [ToolSchemaCleaningMiddleware]
+        """
+        return [ToolSchemaCleaningMiddleware()]
 
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection for Naonous server.
@@ -286,6 +312,110 @@ class NaonousAgent(LangGraphBedrockAgent):
     def _get_bedrock_model_id(self) -> str:
         """Return Bedrock model ID for Naonous agent."""
         return os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
+
+    def _get_tool_interceptors(self) -> list:
+        """Return credential injector for MCP tool calls."""
+        return [self._credential_injector]
+
+
+class NaonousAnthropicAgent(LangGraphAnthropicAgent, DynamoDBCheckpointerMixin):
+    """Naonous Agent using Anthropic API (Claude) directly.
+
+    Uses ChatAnthropic with optional extended thinking mode.
+
+    Configuration:
+    - ANTHROPIC_API_KEY: Anthropic API key (required)
+    - ANTHROPIC_MODEL_ID: Model ID (default: claude-3-5-sonnet-20241022)
+    - ANTHROPIC_THINKING_LEVEL: Thinking level (minimal/low/medium/high, optional)
+    - MCP_TIMEOUT_SECONDS: Timeout for MCP operations (default: 600s)
+    - MCP_GATEWAY_URL: URL to MCP gateway (required)
+    """
+
+    def __init__(self):
+        """Initialize the Naonous Anthropic Agent."""
+        self.mcp_gateway_url = os.environ["MCP_GATEWAY_URL"]
+        self._credential_injector = PassThroughCredentialInjector()
+        super().__init__()
+
+    def _get_middleware(self) -> list[AgentMiddleware]:
+        """Return agent middleware - includes schema cleaning for tool compatibility."""
+        return [ToolSchemaCleaningMiddleware()]
+
+    async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+        """Return MCP server connection for Naonous server."""
+        headers = await self.get_headers()
+        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "600"))
+        return {
+            "gatana": StreamableHttpConnection(
+                transport="streamable_http",
+                url=f"{self.mcp_gateway_url}?includeOnlyServerSlugs=naonous-riad,naonous-smg",
+                headers=headers,
+                timeout=timedelta(seconds=mcp_timeout_seconds),
+                sse_read_timeout=timedelta(seconds=mcp_timeout_seconds),
+            )
+        }
+
+    def _get_system_prompt(self) -> str:
+        """Return Naonous agent system prompt."""
+        return NAONOUS_AGENT_SYSTEM_PROMPT
+
+    def _get_checkpoint_namespace(self) -> str:
+        """Return checkpoint namespace for alloy-agent."""
+        return "alloy-agent"
+
+    def _get_tool_interceptors(self) -> list:
+        """Return credential injector for MCP tool calls."""
+        return [self._credential_injector]
+
+
+class NaonousGoogleGenAIAgent(LangGraphGoogleGenAIAgent, DynamoDBCheckpointerMixin):
+    """Naonous Agent using Google Generative AI (Gemini) — for validating the streaming pipeline.
+
+    Uses ChatGoogleGenerativeAI with streaming=True so tokens arrive incrementally even
+    when MCP tools are bound, proving the SSE → orchestrator → backend → Socket.IO
+    pipeline streams in real-time.
+
+    Requires GCP_PROJECT_ID and optionally GCP_KEY, GCP_LOCATION, GCP_MODEL_ID, GCP_THINKING_LEVEL.
+    """
+
+    def __init__(self):
+        """Initialize the Naonous Google Generative AI Agent."""
+        self.mcp_gateway_url = os.environ["MCP_GATEWAY_URL"]
+        self._credential_injector = PassThroughCredentialInjector()
+        super().__init__()
+
+    def _get_middleware(self) -> list[AgentMiddleware]:
+        """Return agent middleware - includes schema cleaning for Gemini compatibility.
+
+        ToolSchemaCleaningMiddleware cleans MCP tool schemas before binding to ChatGoogleGenerativeAI.
+        Specifically removes invalid enum values like "NULL" that Gemini rejects.
+
+        Returns:
+            List of middleware: [ToolSchemaCleaningMiddleware]
+        """
+        return [ToolSchemaCleaningMiddleware()]
+
+    async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
+        """Return MCP server connection (same configuration as NaonousBedrockAgent)."""
+        headers = await self.get_headers()
+        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "600"))
+        return {
+            "gatana": StreamableHttpConnection(
+                transport="streamable_http",
+                url=f"{self.mcp_gateway_url}?includeOnlyServerSlugs=naonous-riad,naonous-smg",
+                headers=headers,
+                timeout=timedelta(seconds=mcp_timeout_seconds),
+                sse_read_timeout=timedelta(seconds=mcp_timeout_seconds),
+            )
+        }
+
+    def _get_system_prompt(self) -> str:
+        """Return Naonous agent system prompt."""
+        return NAONOUS_AGENT_SYSTEM_PROMPT
+
+    def _get_checkpoint_namespace(self) -> str:
+        """Return checkpoint namespace for alloy-agent."""
+        return "alloy-agent"
 
     def _get_tool_interceptors(self) -> list:
         """Return credential injector for MCP tool calls."""

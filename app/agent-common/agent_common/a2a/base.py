@@ -13,11 +13,15 @@ import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterable
 from typing import Any, Dict, List, Optional
 
+from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent.cost_tracking_mixin import CostTrackingMixin
+
+from .stream_events import ErrorEvent, StreamEvent, TaskResponseData, TaskUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -87,19 +91,27 @@ class BaseA2ARunnable(ABC):
         """Return the agent description use for agent selection."""
         ...
 
-    @abstractmethod
-    async def ainvoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Async invoke the sub-agent.
+    async def ainvoke(self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> StreamEvent:
+        """Async invoke the sub-agent by collecting stream results.
+
+        Delegates to astream() and collects the final StreamEvent, ensuring
+        a single code path for both streaming and non-streaming invocations.
 
         Args:
             input_data: Input data matching SubAgentInput schema
+            config: Optional RunnableConfig for LangChain callback/tracing propagation
 
         Returns:
-            Dict with 'messages', 'task_id', 'context_id', 'state', etc.
+            The final StreamEvent (TaskUpdate or ErrorEvent)
         """
-        ...
+        last_event: StreamEvent | None = None
+        async for item in self.astream(input_data, config):
+            last_event = item
+        if last_event is None:
+            return ErrorEvent(error="No response received from agent")
+        return last_event
 
-    def invoke(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+    def invoke(self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> StreamEvent:
         """Synchronous invoke wrapper.
 
         Default implementation runs ainvoke in a new event loop.
@@ -109,13 +121,13 @@ class BaseA2ARunnable(ABC):
             input_data: Input data matching SubAgentInput schema
 
         Returns:
-            Dict with 'messages', 'task_id', 'context_id', 'state', etc.
+            The final StreamEvent (TaskUpdate or ErrorEvent)
         """
         import asyncio
 
-        return asyncio.run(self.ainvoke(input_data))
+        return asyncio.run(self.ainvoke(input_data, config))
 
-    def _wrap_message_with_metadata(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _wrap_message_with_metadata(self, result: TaskResponseData) -> TaskResponseData:
         """Wrap the result message with A2A metadata embedded in content.
 
         The deepagents library strips additional_kwargs when creating ToolMessage,
@@ -125,45 +137,45 @@ class BaseA2ARunnable(ABC):
         ensure the middleware can extract A2A metadata.
 
         Args:
-            result: Result dictionary containing messages and metadata
+            result: TaskResponseData containing messages and metadata
 
         Returns:
             Updated result with wrapped message
         """
-        if not result.get("messages"):
+        if not result.messages:
             # Create synthetic message if none exists
             content = "Task processed"
-            if "input_prompt" in result:
-                content = result["input_prompt"]
-            elif "error_message" in result:
-                content = f"Error: {result['error_message']}"
-            elif "responses" in result and result["responses"]:
-                content = result["responses"][-1] if result["responses"] else "Processing complete"
+            meta = result.metadata
+            if "input_prompt" in meta:
+                content = meta["input_prompt"]
+            elif "error_message" in meta:
+                content = f"Error: {meta['error_message']}"
+            elif "responses" in meta and meta["responses"]:
+                content = meta["responses"][-1] if meta["responses"] else "Processing complete"
 
-            result["messages"] = [AIMessage(content=content)]
+            result.messages = [AIMessage(content=content)]
             logger.debug(f"Created synthetic message: {content}")
 
         # Wrap last message with metadata
-        last_message = result["messages"][-1]
+        last_message = result.messages[-1]
         if isinstance(last_message, AIMessage):
             a2a_metadata = {
                 k: v
                 for k, v in {
-                    "task_id": result.get("task_id"),
-                    "context_id": result.get("context_id"),
-                    "is_complete": result.get("is_complete"),
-                    "requires_auth": result.get("requires_auth"),
-                    "requires_input": result.get("requires_input"),
-                    "state": str(result.get("state")) if result.get("state") else None,
-                    "artifacts": result.get("artifacts"),
-                    "foundry_session_rid": result.get("foundry_session_rid"),
+                    "task_id": result.task_id,
+                    "context_id": result.context_id,
+                    "is_complete": result.is_complete,
+                    "requires_auth": result.requires_auth,
+                    "requires_input": result.requires_input,
+                    "state": result.state.value if result.state else None,
+                    **{k: v for k, v in result.metadata.items() if v is not None},
                 }.items()
                 if v is not None
             }
 
             wrapped_content = {"content": last_message.content, "a2a": a2a_metadata}
 
-            result["messages"][-1] = AIMessage(content=json.dumps(wrapped_content))
+            result.messages[-1] = AIMessage(content=json.dumps(wrapped_content))
             logger.debug(f"Wrapped message with metadata: task_id={a2a_metadata.get('task_id')}")
 
         return result
@@ -174,53 +186,36 @@ class BaseA2ARunnable(ABC):
         *,
         task_id: Optional[str] = None,
         context_id: Optional[str] = None,
-        state: str = "completed",
-        requires_input: bool = False,
-        requires_auth: bool = False,
-        artifacts: Optional[List[Dict[str, Any]]] = None,
+        state: TaskState = TaskState.completed,
         **extra_metadata: Any,
-    ) -> Dict[str, Any]:
+    ) -> TaskResponseData:
         """Build a structured response in A2A-compatible format.
 
-        Creates a response dict with 'messages' and top-level metadata fields,
-        ensuring consistent format across all sub-agent implementations.
+        Creates a ``TaskResponseData`` with typed lifecycle fields and an
+        extensible ``metadata`` dict, following the A2A protocol pattern.
 
         Args:
             content: The message content
             task_id: Unique ID for this task (generated if not provided)
             context_id: Persistent ID for conversation continuity
-            state: Task state (completed, input_required, failed, etc.)
-            requires_input: Whether user/orchestrator input is needed
-            requires_auth: Whether authentication is required
-            artifacts: Optional list of artifacts
-            **extra_metadata: Additional metadata to include at top level
+            state: Task state (``TaskState`` enum)
+            **extra_metadata: Additional metadata to include in ``metadata``
 
         Returns:
-            Dict with 'messages' list and A2A metadata fields at top level
+            TaskResponseData with typed core fields and extra metadata
         """
-        # Generate IDs if not provided
         if task_id is None:
             task_id = str(uuid.uuid4())
         if context_id is None:
             context_id = str(uuid.uuid4())
 
-        # Build response dict (plain, no JSON wrapping)
-        # Wrapping will be done by _wrap_message_with_metadata() in ainvoke()
-        response = {
-            "messages": [AIMessage(content=content)],
-            "task_id": task_id,
-            "context_id": context_id,
-            "state": state,
-            "is_complete": state == "completed",
-            "requires_input": requires_input,
-            "requires_auth": requires_auth,
-            **extra_metadata,
-        }
-
-        if artifacts:
-            response["artifacts"] = artifacts
-
-        return response
+        return TaskResponseData(
+            task_id=task_id,
+            context_id=context_id,
+            state=state,
+            messages=[AIMessage(content=content)],
+            metadata=extra_metadata if extra_metadata else {},
+        )
 
     def _build_error_response(
         self,
@@ -228,24 +223,23 @@ class BaseA2ARunnable(ABC):
         context_id: Optional[str] = None,
         task_id: Optional[str] = None,
         **extra_metadata: Any,
-    ) -> Dict[str, Any]:
+    ) -> TaskResponseData:
         """Build an error/failed response.
 
         Args:
             message: Error description
             context_id: Optional context ID for conversation continuity
             task_id: Optional task ID
-            **extra_metadata: Additional metadata to include at top level
+            **extra_metadata: Additional metadata to include in ``metadata``
 
         Returns:
-            Dict with messages and A2A metadata indicating failure
+            TaskResponseData indicating failure
         """
         return self._build_response(
             message,
             context_id=context_id,
             task_id=task_id,
-            state="failed",
-            requires_input=False,
+            state=TaskState.failed,
             **extra_metadata,
         )
 
@@ -255,24 +249,23 @@ class BaseA2ARunnable(ABC):
         context_id: Optional[str] = None,
         task_id: Optional[str] = None,
         **extra_metadata: Any,
-    ) -> Dict[str, Any]:
+    ) -> TaskResponseData:
         """Build an input_required response for the orchestrator to handle.
 
         Args:
             message: Explanation of what input is needed
             context_id: Optional context ID for conversation continuity
             task_id: Optional task ID
-            **extra_metadata: Additional metadata to include at top level
+            **extra_metadata: Additional metadata to include in ``metadata``
 
         Returns:
-            Dict with messages and A2A metadata indicating input is required
+            TaskResponseData indicating input is required
         """
         return self._build_response(
             message,
             context_id=context_id,
             task_id=task_id,
-            state="input_required",
-            requires_input=True,
+            state=TaskState.input_required,
             **extra_metadata,
         )
 
@@ -281,28 +274,24 @@ class BaseA2ARunnable(ABC):
         content: str,
         context_id: Optional[str] = None,
         task_id: Optional[str] = None,
-        artifacts: Optional[List[Dict[str, Any]]] = None,
         **extra_metadata: Any,
-    ) -> Dict[str, Any]:
+    ) -> TaskResponseData:
         """Build a successful completion response.
 
         Args:
             content: The result content
             context_id: Optional context ID for conversation continuity
             task_id: Optional task ID
-            artifacts: Optional list of artifacts
-            **extra_metadata: Additional metadata to include at top level
+            **extra_metadata: Additional metadata to include in ``metadata``
 
         Returns:
-            Dict with messages and A2A metadata indicating completion
+            TaskResponseData indicating completion
         """
         return self._build_response(
             content,
             context_id=context_id,
             task_id=task_id,
-            state="completed",
-            requires_input=False,
-            artifacts=artifacts,
+            state=TaskState.completed,
             **extra_metadata,
         )
 
@@ -396,11 +385,12 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
     - `name` property: Sub-agent identifier
     - `get_checkpoint_ns()`: Return checkpoint namespace
     - `get_sub_agent_identifier()`: Return identifier for cost tracking tags
-    - `_process()`: Main processing logic
+    - `_process()` OR `_astream_impl()`: Processing logic (implement at least one)
 
     Optional overrides:
     - `get_thread_id()`: Custom thread_id pattern (default: {context_id}::{checkpoint_ns})
     - `get_checkpointer()`: Custom checkpointer backend (default: None = inherit parent)
+    - Both `_process()` and `_astream_impl()` can be implemented for dual support
 
     Example:
         class MyLocalAgent(LocalA2ARunnable):
@@ -573,32 +563,28 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
 
         return extended
 
-    @abstractmethod
     async def _process(self, input_data: SubAgentInput, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Process the input and return a response.
+        """Non-streaming process implementation.
 
-        Subclasses implement this method with their specific logic.
-        Use `_build_*_response` helpers to format the response.
+        Override for agents that don't support streaming.
+        Used as fallback when _astream_impl is not implemented.
+        At least one of _process or _astream_impl must be implemented.
 
         Args:
             input_data: Validated input with messages, a2a_tracking, and files
-            config: Optional parent config from LangChain invocation context (for metadata propagation)
+            config: Parent config from LangChain invocation context (for metadata propagation)
 
         Returns:
-            Dict with 'messages' and A2A metadata (plain, will be wrapped by ainvoke)
+            Dict with 'messages' and A2A metadata (plain, will be wrapped by astream)
 
         Example:
             async def _process(self, input_data: SubAgentInput, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 content = self._extract_message_content(input_data)
                 context_id, task_id = self._extract_tracking_ids(input_data)
-
-                # Access a2a_tracking for custom state
-                custom_state = input_data.a2a_tracking.get(self.name, {})
-
                 result = await do_something(content)
                 return self._build_success_response(result, context_id=context_id)
         """
-        ...
+        raise NotImplementedError(f"{self.__class__.__name__} must implement either _astream_impl() or _process()")
 
     def _instrument(self, input_data: SubAgentInput, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Add instrumentation for cost tracking and observability.
@@ -640,8 +626,16 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         )
         return extended_config
 
-    async def ainvoke(self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Async invoke the local sub-agent.
+    async def astream(
+        self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None
+    ) -> AsyncIterable[StreamEvent]:
+        """Stream local sub-agent execution with real-time status updates.
+
+        Enables streaming of intermediate progress from LangGraph-based sub-agents.
+        For sub-agents that support streaming, this provides:
+        - Real-time working-state status messages
+        - Progress visibility during long-running operations
+        - Terminal state with wrapped A2A metadata
 
         Automatically handles:
         1. Input validation
@@ -654,8 +648,13 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
             input_data: Input data matching SubAgentInput schema
             config: Parent config from orchestrator (contains metadata, tags, callbacks)
 
-        Returns:
-            Dict with 'messages' containing JSON-wrapped content and A2A metadata
+        Yields:
+            Status update dictionaries compatible with A2AClientRunnable.astream format:
+            - {"type": "task_update", "state": "working", "data": {...}, "is_complete": False}
+            - {"type": "task_update", "state": "completed", "data": {...}, "is_complete": True}
+
+        Raises:
+            NotImplementedError: If subclass doesn't implement _astream_impl()
         """
         try:
             # Validate input
@@ -664,21 +663,56 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
             # Instrumentation: set up cost tracking context
             extended_config = self._instrument(validated, config)
             logger.debug(
-                f"[{self.name}] Extended config: thread_id={extended_config.get('configurable', {}).get('thread_id', '')}, "
+                f"[{self.name}] Streaming with config: thread_id={extended_config.get('configurable', {}).get('thread_id', '')}, "
                 f"checkpoint_ns={extended_config.get('configurable', {}).get('checkpoint_ns', '')}, tags={extended_config.get('tags', [])}"
             )
 
-            # Delegate to subclass implementation with extended config
+            # Try streaming first
+            try:
+                async for item in self._astream_impl(validated, extended_config):
+                    yield item
+                return  # Streaming succeeded
+            except NotImplementedError:
+                pass  # Fall through to _process
+
+            # Fallback for non-streaming agents: use _process directly
+            # (Not ainvoke, which would create a circular dependency since ainvoke collects astream)
+            logger.debug(f"[{self.name}] Streaming not implemented, falling back to _process")
             result = await self._process(validated, extended_config)
-
-            # Wrap message with A2A metadata (same as A2AClientRunnable)
-            return self._wrap_message_with_metadata(result)
-
+            wrapped = self._wrap_message_with_metadata(result)
+            yield TaskUpdate(data=wrapped)
         except ValueError as e:
             # Content extraction errors
+            logger.error(f"[{self.name}] Stream validation error: {e}")
             result = self._build_error_response(str(e))
-            return self._wrap_message_with_metadata(result)
+            wrapped = self._wrap_message_with_metadata(result)
+            yield ErrorEvent(error=str(e), data=wrapped)
         except Exception as e:
-            logger.exception(f"Error in {self.name}: {e}")
+            logger.exception(f"Error streaming {self.name}: {e}")
             result = self._build_error_response(f"Internal error: {str(e)}")
-            return self._wrap_message_with_metadata(result)
+            wrapped = self._wrap_message_with_metadata(result)
+            yield ErrorEvent(error=str(e), data=wrapped)
+
+    async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
+        """Stream implementation to be provided by subclasses.
+
+        For LangGraph-based agents, this should:
+        1. Stream the internal graph
+        2. Extract working-state messages from intermediate events
+        3. Yield status updates in A2A-compatible format
+        4. Return terminal result
+
+        Args:
+            input_data: Validated input with messages and tracking IDs
+            config: Extended config with checkpoint isolation and cost tracking
+
+        Yields:
+            Dict with format matching A2AClientRunnable.astream:
+            - {"type": "task_update", "state": "working", "data": {...}, "is_complete": False}
+            - {"type": "task_update", "state": "completed", "data": {...}, "is_complete": True}
+
+        Raises:
+            NotImplementedError: Default implementation for non-streaming agents
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} doesn't implement streaming")
+        yield  # Make this an async generator so callers get an AsyncIterator, not a coroutine

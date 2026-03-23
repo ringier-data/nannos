@@ -15,7 +15,8 @@ from ringier_a2a_sdk.cost_tracking.logger import (
     start_cost_batching,
 )
 
-from .models import AgentStreamResponse, BaseAgentStreamResponse, UserConfig
+from .models import AgentStreamResponse, BaseAgentStreamResponse, TodoItem, UserConfig
+from .utils.schema_cleaning import CleanupLevel, clean_schema_properties, validate_and_clean_tool_dict
 
 
 # Lazy import for CostTrackingCallback (requires langchain_core)
@@ -27,12 +28,13 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__version__ = "0.1.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "BaseAgentStreamResponse",
     "AgentStreamResponse",
     "UserConfig",
+    "TodoItem",
     "CostLogger",
     "CostTrackingCallback",
     "set_request_access_token",

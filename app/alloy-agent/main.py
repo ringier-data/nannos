@@ -29,7 +29,7 @@ from ringier_a2a_sdk.middleware import (
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 
-from agent import NaonousAgent
+from agent import NaonousAnthropicAgent, NaonousBedrockAgent, NaonousGoogleGenAIAgent
 
 # Load environment variables
 load_dotenv()
@@ -39,8 +39,18 @@ logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("agent"))
 configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 
-# Initialize agent globally for reload support
-agent = NaonousAgent()
+# Select agent implementation based on MODEL_PROVIDER env var.
+# Set MODEL_PROVIDER=google to use Gemini via Google Generative AI (streaming=True),
+# which proves the end-to-end streaming pipeline works in real-time.
+_model_provider = os.getenv("MODEL_PROVIDER", "bedrock").lower()
+if _model_provider == "google":
+    logger.info("Using Google Generative AI (Gemini) agent — streaming=True mode")
+    agent = NaonousGoogleGenAIAgent()
+elif _model_provider == "anthropic":
+    logger.info("Using Anthropic API (Claude) agent")
+    agent = NaonousAnthropicAgent()
+else:
+    agent = NaonousBedrockAgent()
 
 
 @asynccontextmanager

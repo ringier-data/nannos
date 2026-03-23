@@ -17,6 +17,7 @@ from a2a.server.tasks import (
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentExtension,
     AgentSkill,
     OpenIdConnectSecurityScheme,
     SecurityScheme,
@@ -30,6 +31,11 @@ from ringier_a2a_sdk.middleware import (
 )
 from ringier_a2a_sdk.server import AuthRequestContextBuilder
 
+from app.core.a2a_extensions import (
+    ACTIVITY_LOG_EXTENSION,
+    INTERMEDIATE_OUTPUT_EXTENSION,
+    WORK_PLAN_EXTENSION,
+)
 from app.core.agent import OrchestratorDeepAgent
 from app.core.budget_guard import init_budget_guard
 from app.core.executor import OrchestratorDeepAgentExecutor
@@ -38,6 +44,7 @@ from app.models.config import AgentSettings
 logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("app"))
 configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
+# configure_existing_logger(logging.getLogger("a2a"), log_level=logging.DEBUG)
 
 
 class MissingAPIKeyError(Exception):
@@ -100,7 +107,24 @@ def create_app():
         if not os.getenv("GOOGLE_API_KEY"):
             raise MissingAPIKeyError("GOOGLE_API_KEY environment variable not set.")
 
-    capabilities = AgentCapabilities(streaming=True, push_notifications=True)
+    capabilities = AgentCapabilities(
+        streaming=True,
+        push_notifications=True,
+        extensions=[
+            AgentExtension(
+                uri=ACTIVITY_LOG_EXTENSION,
+                description="Emits tool-usage and delegation status events as a timeline via Message.extensions on status updates.",
+            ),
+            AgentExtension(
+                uri=WORK_PLAN_EXTENSION,
+                description="Emits structured todo-checklist progress via DataPart in status updates.",
+            ),
+            AgentExtension(
+                uri=INTERMEDIATE_OUTPUT_EXTENSION,
+                description="Streams draft content from sub-agents via Artifact.extensions on artifact updates.",
+            ),
+        ],
+    )
     skill = AgentSkill(
         id="orchestrate_tasks",
         name="Task Orchestration",

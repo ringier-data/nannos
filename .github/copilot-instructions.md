@@ -116,15 +116,21 @@ The system implements distributed tracing across the orchestrator and all A2A su
 
 ### How It Works
 
-1. **Orchestrator Side**: The `A2AClientRunnable` in `app/orchestrator-agent/app/subagents/runnable.py` uses httpx event hooks to dynamically inject LangSmith trace headers (`langsmith-trace` and `baggage`) into every HTTP request to A2A sub-agents.
+Tracing spans two mechanisms: **in-process** context propagation via Python `contextvars`, and **cross-process** propagation via HTTP headers.
 
-2. **Sub-Agent Side**: Both agent-creator and alloy-agent use `TracingMiddleware` from `langsmith.middleware` to receive and continue the trace context from incoming request headers.
+1. **Orchestrator dispatch** (`app/orchestrator-agent/app/middleware/dynamic_tool_dispatch.py`): The `@traceable` decorator on `astream_a2a_agent()` creates a LangSmith `RunTree` and stores it in a `contextvars.ContextVar`. This context automatically propagates through all `await` chains within the function.
 
-3. **Result**: All operations appear as a single hierarchical trace in LangSmith with the orchestrator as the parent run and sub-agent operations as child runs.
+2. **Header injection** (`app/agent-common/agent_common/a2a/client_runnable.py`): `A2AClientRunnable._inject_trace_headers()` is an httpx event hook that fires before every HTTP request. It calls `get_current_run_tree()` — which reads from the same `contextvars.ContextVar` set by `@traceable` — and injects `langsmith-trace` and `baggage` headers into the outgoing request.
+
+3. **Sub-Agent Side**: Both agent-creator and alloy-agent use `TracingMiddleware` from `langsmith.middleware` to extract trace headers from incoming requests and re-create the trace context, making all sub-agent operations appear as child spans.
+
+4. **Result**: All operations appear as a single hierarchical trace in LangSmith with the orchestrator as the parent run and sub-agent operations as child runs.
 
 ### Key Implementation Details
 
-- **Dynamic Header Injection**: Use httpx event hooks (`event_hooks={"request": [handler]}`) to inject trace headers at request time, not client initialization time
+- **Dynamic Header Injection**: Use httpx event hooks (`event_hooks={"request": [handler]}`) to inject trace headers at request time, not client initialization time. The hook reads from `contextvars` so headers reflect the current active span.
+- **`contextvars` propagation**: `@traceable` → sets `RunTree` in `ContextVar` → `await` chain preserves it → `get_current_run_tree()` reads it in the httpx hook. This is why headers are always fresh per-request.
+- **`config` parameter on `astream()`/`ainvoke()`**: `BaseA2ARunnable`, `A2AClientRunnable`, and `LocalA2ARunnable` all accept an optional `config: Dict` parameter matching LangChain's `Runnable` interface. For remote agents, the config is accepted for interface consistency but tracing relies on `contextvars` + httpx hooks. For local agents, the config carries callbacks, metadata, and tags used for checkpoint isolation and cost tracking.
 - **Middleware Registration**: `TracingMiddleware` must be registered in the FastAPI app for both agent-creator and alloy-agent
 - **Environment Variables**: Ensure `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, `LANGSMITH_ENDPOINT`, and `LANGSMITH_PROJECT` are configured for all services
 - **Infrastructure**: CloudFormation templates must include `LANGSMITH_API_KEY` from SSM and proper IAM permissions
@@ -138,6 +144,52 @@ To ensure new A2A agents participate in distributed tracing:
 3. Add LANGSMITH_API_KEY to CloudFormation task definition (from SSM)
 4. Add SSM permission to read LANGSMITH_API_KEY in the execution role
 5. Update `start-dev.sh` to fetch and set LANGSMITH_API_KEY for the new service
+
+## A2A Extensions Protocol
+
+The orchestrator emits structured streaming events via three custom A2A extensions. This is a cross-cutting concern spanning the orchestrator (emitter), playground-backend (proxy/filter), and playground-frontend (renderer).
+
+### Extension URIs
+
+- `urn:nannos:a2a:activity-log:1.0` — Tool usage & delegation status events (timeline)
+- `urn:nannos:a2a:work-plan:1.0` — Structured todo checklist progress
+- `urn:nannos:a2a:intermediate-output:1.0` — Streaming draft content from sub-agents
+
+### How a Client Should Handle Responses
+
+Extension events arrive as standard A2A `status-update` or `artifact-update` events. Clients classify them by inspecting `Message.extensions` or `Artifact.extensions`:
+
+**1. Activity Log** (`status-update` with `message.extensions` containing `activity-log:1.0`):
+- Extract text from `message.parts[0].text`
+- Optionally read `message.metadata.source` for sub-agent attribution
+- Display as a timeline/activity entry — do NOT show as a chat message bubble
+- These are transient; the backend does not persist them
+
+**2. Work Plan** (`status-update` with `message.extensions` containing `work-plan:1.0`):
+- Extract `message.parts[0].data.todos` (array of `TodoItem` objects)
+- Each todo has `name`, `state` (submitted/working/completed/failed), optional `source`, `target`
+- Merge incoming todos by replacing all items from the same `source` group
+- Display in a sticky progress widget, not in timeline or message history
+- These are transient; the backend does not persist them
+
+**3. Intermediate Output** (`artifact-update` with `artifact.extensions` containing `intermediate-output:1.0`):
+- Extract text from `artifact.parts[0].text` and agent name from `artifact.metadata.agent_name`
+- Append chunks from the same `agent_name` together (streaming)
+- Display as expandable "thinking" blocks — NOT as the final answer
+- The artifact ID has a `-thought` suffix to separate it from the main response artifact
+- These are transient and should not be confused with the main response artifact
+
+**4. Main Response** (artifact-update WITHOUT `intermediate-output` extension):
+- Streaming text chunks with `append=true` — accumulate into the final message bubble
+- This is the orchestrator's actual response that gets persisted
+
+**5. Completed Status Update**:
+- `status.state === "completed"` — finalize the streamed message
+- If a nested `status.message` contains displayable text (no extension tags), show it as the final response
+
+### Extension Activation (opt-in)
+
+Clients send `X-A2A-Extensions` header listing desired extension URIs (comma-separated). If absent, **all extensions are disabled** (per A2A spec — extensions are opt-in). Clients must explicitly request the extensions they want to receive.
 
 ## Common Tasks
 

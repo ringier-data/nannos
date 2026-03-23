@@ -42,11 +42,11 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostLogger
+from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
-from agent_common.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 logger = logging.getLogger(__name__)
 

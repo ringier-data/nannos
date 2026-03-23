@@ -19,6 +19,7 @@ interface SocketContextType {
   agentInfo: AgentInfo | null;
   initializeClient: (settings: Settings, sessionId: string) => Promise<boolean>;
   sendMessage: (payload: SendMessagePayload) => void;
+  cancelTask: (conversationId: string) => void;
   onAgentResponse: (callback: (data: AgentResponseData) => void) => () => void;
   onSchedulerNotification: (callback: (data: SchedulerNotification) => void) => () => void;
 }
@@ -133,6 +134,17 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
     [socket]
   );
 
+  const cancelTask = useCallback(
+    (conversationId: string) => {
+      if (!socket?.connected) {
+        console.error('Socket not connected');
+        return;
+      }
+      socket.emit('cancel_task', { conversationId });
+    },
+    [socket]
+  );
+
   const onAgentResponse = useCallback((callback: (data: AgentResponseData) => void) => {
     responseCallbacksRef.current.add(callback);
     return () => {
@@ -156,6 +168,7 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
         agentInfo,
         initializeClient,
         sendMessage,
+        cancelTask,
         onAgentResponse,
         onSchedulerNotification,
       }}

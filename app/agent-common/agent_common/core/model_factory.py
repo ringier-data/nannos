@@ -113,6 +113,7 @@ def create_model(
     bedrock_region: str | None = None,
     thinking_level: ThinkingLevel | None = None,
     callbacks: list | None = None,
+    streaming: bool = True,
 ) -> BaseChatModel:
     """Create a model instance for the given model type.
 
@@ -185,6 +186,7 @@ def create_model(
             thinking_level=gemini_thinking_level,
             include_thoughts=include_thoughts,
             callbacks=callbacks,
+            streaming=streaming,  # Enable token-level streaming
         )
     elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
         # Lazy import for AWS Bedrock provider
@@ -246,6 +248,7 @@ def create_model(
             if thinking_params["type"] == "enabled"
             else {},
             callbacks=callbacks,
+            # NOTE: Bedrock streams automatically when using .astream() - no 'streaming' parameter needed
         )
     else:
         # Lazy import for Azure OpenAI provider
@@ -271,4 +274,5 @@ def create_model(
             temperature=0.7,
             model=model_name,
             callbacks=callbacks,
+            streaming=streaming,  # Enable token-level streaming
         )

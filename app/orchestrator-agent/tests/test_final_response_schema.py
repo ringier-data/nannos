@@ -17,7 +17,6 @@ def test_final_response_schema_completed():
 
     assert response.task_state == TaskState.completed
     assert response.message == "All tasks completed successfully"
-    assert response.todo_summary is None
 
 
 def test_final_response_schema_working():
@@ -25,12 +24,10 @@ def test_final_response_schema_working():
     response = FinalResponseSchema(
         task_state=TaskState.working,
         message="Long-running task in progress",
-        todo_summary="2/5 tasks completed",
     )
 
     assert response.task_state == TaskState.working
     assert response.message == "Long-running task in progress"
-    assert response.todo_summary == "2/5 tasks completed"
 
 
 def test_final_response_schema_input_required():
@@ -53,7 +50,6 @@ def test_final_response_schema_failed():
 
     assert response.task_state == TaskState.failed
     assert response.message == "Unable to complete the task"
-    assert response.todo_summary is None
 
 
 def test_final_response_schema_validation():
@@ -87,15 +83,10 @@ def test_final_response_schema_optional_fields():
     # Minimal response (no optional fields)
     response = FinalResponseSchema(task_state=TaskState.completed, message="Done")
 
-    assert response.todo_summary is None
     assert response.include_subagent_output is False
 
-    # Response with optional todo_summary
-    response_with_summary = FinalResponseSchema(
-        task_state=TaskState.working, message="In progress", todo_summary="1/3 done"
-    )
+    response_with_summary = FinalResponseSchema(task_state=TaskState.working, message="In progress")
 
-    assert response_with_summary.todo_summary == "1/3 done"
     assert response_with_summary.include_subagent_output is False
 
 

@@ -24,7 +24,7 @@ Usage:
 """
 
 from agent_common.middleware.loop_detection_middleware import LoopDetectionState, RepeatedToolCallMiddleware
-from agent_common.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
+from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 from .a2a_tracking import A2ATaskTrackingMiddleware, A2ATrackingState
 from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState

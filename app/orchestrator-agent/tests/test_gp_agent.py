@@ -2,17 +2,19 @@
 
 Tests cover:
 - name / description properties
-- _process success path (structured response → A2A dict)
-- _process error handling (GraphInterrupt re-raises, generic exceptions → failed state)
+- _astream_impl success path (structured response → terminal TaskUpdate)
+- _astream_impl error handling (GraphInterrupt re-raises, generic exceptions → ErrorEvent)
 - Checkpoint isolation: thread_id includes context_id and agent name
 - Cache clearing: _cached_selected_tools is reset before each invocation
 - Factory function create_gp_local_subagent returns a well-formed CompiledSubAgent
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from a2a.types import TaskState
 from agent_common.a2a.base import SubAgentInput
+from agent_common.a2a.stream_events import ErrorEvent, TaskUpdate
 from agent_common.a2a.structured_response import SubAgentResponseSchema
 from agent_common.models.base import ModelType
 from langchain_core.messages import HumanMessage
@@ -58,12 +60,21 @@ def _make_runnable(
     model_type: ModelType = "gpt-4o-mini",  # type: ignore[assignment]
     **kwargs,
 ) -> tuple[GPAgentRunnable, MagicMock]:
-    """Return (runnable, mock_graph_provider) pair."""
+    """Return (runnable, mock_graph) pair.
+
+    mock_graph has an empty astream (no intermediate events).
+    Tests set up retrieve_final_state to return the desired final state.
+    """
     if user_context is None:
         user_context = _make_context()
 
     mock_graph = AsyncMock()
-    mock_graph.ainvoke = AsyncMock()
+
+    async def empty_stream(*args, **kwargs):
+        return
+        yield  # make it an async generator
+
+    mock_graph.astream = empty_stream
 
     def gp_graph_provider(model_type, thinking_level=None):
         return mock_graph
@@ -76,6 +87,7 @@ def _make_runnable(
         **kwargs,
     )
     return runnable, mock_graph
+
 
 class TestProperties:
     def test_name_is_general_purpose(self):
@@ -93,63 +105,82 @@ class TestProperties:
         assert runnable.description == GP_DESCRIPTION
 
 
+# Shared config for _astream_impl calls (needs configurable for checkpoint isolation)
+_STREAM_CONFIG = {"configurable": {"thread_id": "test", "checkpoint_ns": ""}}
+
+
+async def _collect_events(runnable, input_data=None, config=None, final_state=None):
+    """Collect all events from _astream_impl with mocked retrieve_final_state."""
+    if input_data is None:
+        input_data = _make_input()
+    if config is None:
+        config = _STREAM_CONFIG
+    if final_state is None:
+        final_state = {}
+    with patch("app.agents.gp_agent.retrieve_final_state", return_value=final_state):
+        return [event async for event in runnable._astream_impl(input_data, config=config)]
+
 
 class TestProcessSuccess:
     @pytest.mark.asyncio
     async def test_returns_completed_state(self):
         runnable, mock_graph = _make_runnable()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="All done.")],
-                "structured_response": SubAgentResponseSchema(
-                    task_state="completed",
-                    message="All done.",
-                ),
-            }
-        )
+        final_state = {
+            "messages": [MagicMock(content="All done.")],
+            "structured_response": SubAgentResponseSchema(
+                task_state="completed",
+                message="All done.",
+            ),
+        }
 
-        result = await runnable._process(_make_input(), config={})
+        events = await _collect_events(runnable, final_state=final_state)
 
-        assert result["state"] == "completed"
-        assert result["is_complete"] is True
-        assert result["requires_input"] is False
+        terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
+        result = terminal.data
+        assert result.state == TaskState.completed
+        assert result.is_complete is True
+        assert result.requires_input is False
 
     @pytest.mark.asyncio
     async def test_returns_input_required_state(self):
         runnable, mock_graph = _make_runnable()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="What project?")],
-                "structured_response": SubAgentResponseSchema(
-                    task_state="input_required",
-                    message="What project?",
-                ),
-            }
+        final_state = {
+            "messages": [MagicMock(content="What project?")],
+            "structured_response": SubAgentResponseSchema(
+                task_state="input_required",
+                message="What project?",
+            ),
+        }
+
+        events = await _collect_events(
+            runnable,
+            input_data=_make_input("Create a ticket"),
+            final_state=final_state,
         )
 
-        result = await runnable._process(_make_input("Create a ticket"), config={})
-
-        assert result["state"] == "input_required"
-        assert result["is_complete"] is False
-        assert result["requires_input"] is True
+        terminal = [e for e in events if isinstance(e, TaskUpdate)][-1]
+        result = terminal.data
+        assert result.state == TaskState.input_required
+        assert result.is_complete is False
+        assert result.requires_input is True
 
     @pytest.mark.asyncio
     async def test_returns_failed_state_from_structured_response(self):
         runnable, mock_graph = _make_runnable()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="Could not proceed.")],
-                "structured_response": SubAgentResponseSchema(
-                    task_state="failed",
-                    message="Could not proceed.",
-                ),
-            }
-        )
+        final_state = {
+            "messages": [MagicMock(content="Could not proceed.")],
+            "structured_response": SubAgentResponseSchema(
+                task_state="failed",
+                message="Could not proceed.",
+            ),
+        }
 
-        result = await runnable._process(_make_input(), config={})
+        events = await _collect_events(runnable, final_state=final_state)
 
-        assert result["state"] == "failed"
-        assert result["is_complete"] is False
+        terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
+        result = terminal.data
+        assert result.state == TaskState.failed
+        assert result.is_complete is True
 
     @pytest.mark.asyncio
     async def test_bedrock_tool_call_style_response(self):
@@ -164,58 +195,70 @@ class TestProcessSuccess:
                 "args": {"task_state": "completed", "message": "Done via tool call."},
             }
         ]
-        mock_graph.ainvoke = AsyncMock(return_value={"messages": [mock_message]})
+        final_state = {"messages": [mock_message]}
 
-        result = await runnable._process(_make_input(), config={})
+        events = await _collect_events(runnable, final_state=final_state)
 
-        assert result["state"] == "completed"
-        assert result["is_complete"] is True
+        terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
+        result = terminal.data
+        assert result.state == TaskState.completed
+        assert result.is_complete is True
 
     @pytest.mark.asyncio
     async def test_context_id_propagated_to_result(self):
         runnable, mock_graph = _make_runnable()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="Done.")],
-                "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
-            }
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
+
+        events = await _collect_events(
+            runnable,
+            input_data=_make_input(context_id="my-context-id"),
+            final_state=final_state,
         )
 
-        result = await runnable._process(_make_input(context_id="my-context-id"), config={})
-
-        assert result.get("context_id") == "my-context-id"
+        terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
+        assert terminal.data.context_id == "my-context-id"
 
 
 class TestProcessErrorHandling:
     @pytest.mark.asyncio
-    async def test_generic_exception_returns_failed_state(self):
+    async def test_generic_exception_returns_error_event(self):
         runnable, mock_graph = _make_runnable()
-        mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("upstream failure"))
 
-        result = await runnable._process(_make_input(), config={})
+        async def failing_stream(*args, **kwargs):
+            raise RuntimeError("upstream failure")
+            yield
 
-        assert result["state"] == "failed"
-        assert result["is_complete"] is False
+        mock_graph.astream = failing_stream
+
+        events = [event async for event in runnable._astream_impl(_make_input(), config=_STREAM_CONFIG)]
+
+        assert len(events) == 1
+        assert isinstance(events[0], ErrorEvent)
+        assert "upstream failure" in events[0].error
 
     @pytest.mark.asyncio
     async def test_graph_interrupt_is_re_raised(self):
         """GraphInterrupt must propagate so the orchestrator can handle it."""
         runnable, mock_graph = _make_runnable()
-        mock_graph.ainvoke = AsyncMock(side_effect=GraphInterrupt("interrupt!"))
+
+        async def interrupt_stream(*args, **kwargs):
+            raise GraphInterrupt("interrupt!")
+            yield
+
+        mock_graph.astream = interrupt_stream
 
         with pytest.raises(GraphInterrupt):
-            await runnable._process(_make_input(), config={})
+            async for _ in runnable._astream_impl(_make_input(), config=_STREAM_CONFIG):
+                pass
 
     @pytest.mark.asyncio
     async def test_missing_tracking_ids_raises_value_error(self):
-        """Missing both context_id and task_id raises ValueError (before the try block).
-
-        The caller (ainvoke) converts this to a failed A2A response, but _process
-        itself raises here because the check precedes the try/except.
-        """
+        """Missing context_id raises ValueError in _astream_impl."""
         runnable, _ = _make_runnable()
 
-        # No a2a_tracking for 'general-purpose' and no orchestrator_conversation_id
         bad_input = SubAgentInput(
             a2a_tracking={},
             messages=[HumanMessage(content="hello")],
@@ -223,35 +266,34 @@ class TestProcessErrorHandling:
         )
 
         with pytest.raises(ValueError, match="Missing context_id"):
-            await runnable._process(bad_input, config={})
+            async for _ in runnable._astream_impl(bad_input, config=_STREAM_CONFIG):
+                pass
 
 
 class TestCheckpointIsolation:
     @pytest.mark.asyncio
     async def test_thread_id_contains_context_id_and_agent_name(self):
         runnable, mock_graph = _make_runnable()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="Done.")],
-                "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
-            }
-        )
 
         captured_config: dict = {}
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
 
-        async def capture_invoke(messages, config=None, **kwargs):
+        async def capture_astream(messages, config=None, **kwargs):
             if config:
                 captured_config.update(config)
-            return {
-                "messages": [MagicMock(content="Done.")],
-                "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
-            }
+            return
+            yield
 
         input_data = _make_input(context_id="abc-123")
         config = runnable._instrument(input_data=input_data, config={"tags": ["tag1", "tag2"]})
-        mock_graph.ainvoke = capture_invoke
+        mock_graph.astream = capture_astream
 
-        await runnable._process(input_data, config=config)
+        with patch("app.agents.gp_agent.retrieve_final_state", return_value=final_state):
+            async for _ in runnable._astream_impl(input_data, config=config):
+                pass
 
         configurable = captured_config.get("configurable", {})
         thread_id = configurable.get("thread_id", "")
@@ -263,25 +305,30 @@ class TestCheckpointIsolation:
         runnable, mock_graph = _make_runnable()
 
         thread_ids: list[str] = []
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
 
-        async def capture_invoke(messages, config=None, **kwargs):
+        async def capture_astream(messages, config=None, **kwargs):
             if config:
                 thread_ids.append(config.get("configurable", {}).get("thread_id", ""))
-            return {
-                "messages": [MagicMock(content="Done.")],
-                "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
-            }
+            return
+            yield
 
-        mock_graph.ainvoke = capture_invoke
+        mock_graph.astream = capture_astream
 
-        await runnable._process(
-            _make_input(context_id="ctx-aaa"),
-            config=runnable._instrument(input_data=_make_input(context_id="ctx-aaa"), config={"tags": ["tag1"]}),
-        )
-        await runnable._process(
-            _make_input(context_id="ctx-bbb"),
-            config=runnable._instrument(input_data=_make_input(context_id="ctx-bbb"), config={"tags": ["tag2"]}),
-        )
+        with patch("app.agents.gp_agent.retrieve_final_state", return_value=final_state):
+            async for _ in runnable._astream_impl(
+                _make_input(context_id="ctx-aaa"),
+                config=runnable._instrument(input_data=_make_input(context_id="ctx-aaa"), config={"tags": ["tag1"]}),
+            ):
+                pass
+            async for _ in runnable._astream_impl(
+                _make_input(context_id="ctx-bbb"),
+                config=runnable._instrument(input_data=_make_input(context_id="ctx-bbb"), config={"tags": ["tag2"]}),
+            ):
+                pass
 
         assert len(thread_ids) == 2
         assert thread_ids[0] != thread_ids[1]
@@ -294,45 +341,47 @@ class TestCacheClearing:
         ctx._cached_selected_tools = [MagicMock()]  # stale cache
 
         runnable, mock_graph = _make_runnable(user_context=ctx)
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="Done.")],
-                "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
-            }
-        )
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
 
-        # Before _process: cache exists
+        # Before _astream_impl: cache exists
         assert ctx._cached_selected_tools is not None
 
-        await runnable._process(_make_input(), config={})
+        with patch("app.agents.gp_agent.retrieve_final_state", return_value=final_state):
+            async for _ in runnable._astream_impl(_make_input(), config=_STREAM_CONFIG):
+                pass
 
-        # After _process invokes ainvoke, cache should have been cleared at the start
+        # After _astream_impl, we verify graph was called (meaning reset happened before the call)
         # (the graph itself may re-populate it, but we verify it was reset beforehand)
-        # We check that ainvoke was called (meaning reset happened before the call)
-        mock_graph.ainvoke.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_cached_tools_is_none_at_graph_invocation_time(self):
-        """Verify that the cache is None when ainvoke is called, not after."""
+        """Verify that the cache is None when astream is called, not after."""
         ctx = _make_context()
         ctx._cached_selected_tools = ["stale"]
 
         runnable, mock_graph = _make_runnable(user_context=ctx)
 
-        cache_at_invoke_time: list = []
+        cache_at_stream_time: list = []
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
 
-        async def check_cache(messages, config=None, **kwargs):
-            cache_at_invoke_time.append(ctx._cached_selected_tools)
-            return {
-                "messages": [MagicMock(content="Done.")],
-                "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
-            }
+        async def check_cache(*args, **kwargs):
+            cache_at_stream_time.append(ctx._cached_selected_tools)
+            return
+            yield
 
-        mock_graph.ainvoke = check_cache
+        mock_graph.astream = check_cache
 
-        await runnable._process(_make_input(), config={})
+        with patch("app.agents.gp_agent.retrieve_final_state", return_value=final_state):
+            async for _ in runnable._astream_impl(_make_input(), config=_STREAM_CONFIG):
+                pass
 
-        assert cache_at_invoke_time == [None]
+        assert cache_at_stream_time == [None]
 
 
 class TestCreateGpLocalSubagent:

@@ -4,7 +4,7 @@ requires-python = ">=3.13"
 
 [[package]]
 name = "a2a-sdk"
-version = "0.3.20"
+version = "0.3.25"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-api-core" },
@@ -13,9 +13,9 @@ dependencies = [
     { name = "protobuf" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0a/c1/4c7968e44a318fbfaf82e142b2f63aedcf62ca8da5ee0cea6104a1a29580/a2a_sdk-0.3.20.tar.gz", hash = "sha256:f05bbdf4a8ada6be81dc7e7c73da3add767b20065195d94e8eb6d671d7ea658a", size = 229272, upload-time = "2025-12-03T15:48:22.349Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/55/83/3c99b276d09656cce039464509f05bf385e5600d6dc046a131bbcf686930/a2a_sdk-0.3.25.tar.gz", hash = "sha256:afda85bab8d6af0c5d15e82f326c94190f6be8a901ce562d045a338b7127242f", size = 270638, upload-time = "2026-03-10T13:08:46.417Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/11/33/719a9331421ee5df0338505548b58b4129a6aca82bba5c8e0593ac8864c7/a2a_sdk-0.3.20-py3-none-any.whl", hash = "sha256:35da261aae28fd22440b61f8eb16a8343b60809e1f7ef028a06d01f17b48a8b9", size = 141547, upload-time = "2025-12-03T15:48:20.812Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/f9/6a62520b7ecb945188a6e1192275f4732ff9341cd4629bc975a6c146aeab/a2a_sdk-0.3.25-py3-none-any.whl", hash = "sha256:2fce38faea82eb0b6f9f9c2bcf761b0d78612c80ef0e599b50d566db1b2654b5", size = 149609, upload-time = "2026-03-10T13:08:44.7Z" },
 ]
 
 [package.optional-dependencies]
@@ -60,7 +60,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "a2a-sdk", extras = ["http-server"], specifier = ">=0.3.9" },
+    { name = "a2a-sdk", extras = ["http-server"], specifier = ">=0.3.25,<1.0.0" },
     { name = "aiodynamo", specifier = ">=24.7" },
     { name = "authlib", specifier = ">=1.6.5" },
     { name = "click", specifier = ">=8.1.8" },
@@ -1784,22 +1784,29 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "a2a-sdk", specifier = ">=0.3.9" },
+    { name = "a2a-sdk", specifier = ">=0.3.25,<1.0.0" },
     { name = "aiohttp", specifier = ">=3.11.0" },
     { name = "authlib", specifier = ">=1.6.5" },
     { name = "boto3", marker = "extra == 'langgraph'", specifier = ">=1.35.0" },
+    { name = "boto3", marker = "extra == 'langgraph-google'", specifier = ">=1.35.0" },
     { name = "cryptography", specifier = ">=43.0.0" },
     { name = "deepagents", marker = "extra == 'langgraph'", specifier = ">=0.2.0" },
+    { name = "deepagents", marker = "extra == 'langgraph-google'", specifier = ">=0.2.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", marker = "extra == 'langgraph'", specifier = ">=0.3.18" },
+    { name = "langchain", marker = "extra == 'langgraph-google'", specifier = ">=0.3.18" },
     { name = "langchain-aws", marker = "extra == 'langgraph'", specifier = ">=0.3.0" },
+    { name = "langchain-google-genai", marker = "extra == 'langgraph-google'", specifier = ">=0.1.0" },
     { name = "langchain-mcp-adapters", marker = "extra == 'langgraph'", specifier = ">=0.0.6" },
-    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=0.2.72" },
+    { name = "langchain-mcp-adapters", marker = "extra == 'langgraph-google'", specifier = ">=0.0.6" },
+    { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.1.0" },
+    { name = "langgraph", marker = "extra == 'langgraph-google'", specifier = ">=1.1.0" },
     { name = "langgraph-checkpoint-aws", marker = "extra == 'langgraph'", specifier = ">=0.1.4" },
+    { name = "langgraph-checkpoint-aws", marker = "extra == 'langgraph-google'", specifier = ">=0.1.4" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "starlette", specifier = ">=0.46.2" },
 ]
-provides-extras = ["langgraph"]
+provides-extras = ["langgraph", "langgraph-google"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1808,7 +1815,7 @@ dev = [
     { name = "langchain", specifier = ">=0.3.18" },
     { name = "langchain-aws", specifier = ">=0.3.0" },
     { name = "langchain-mcp-adapters", specifier = ">=0.0.6" },
-    { name = "langgraph", specifier = ">=0.2.72" },
+    { name = "langgraph", specifier = ">=1.1.0" },
     { name = "langgraph-checkpoint-aws", specifier = ">=0.1.4" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },

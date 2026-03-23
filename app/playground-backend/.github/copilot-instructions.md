@@ -158,6 +158,27 @@ Available in `AuditAction` enum:
 2. Create database migration in `infrastructure/roles/basis/files/ddl/scripts/`
 3. Use `ALTER TYPE` to add enum value (PostgreSQL doesn't support removing enum values)
 
+## A2A Extension Event Processing
+
+The playground-backend proxies A2A events from the orchestrator to the frontend via Socket.IO. It classifies events by their extension markers and applies filtering logic.
+
+### Event Filtering in `_process_a2a_response()` (app.py)
+
+- **Work-plan events** (`message.extensions` contains `work-plan:1.0`): Forwarded to frontend via Socket.IO but NOT persisted to the database
+- **Activity-log events** (`message.extensions` contains `activity-log:1.0`): Forwarded to frontend, persisted for history reconstruction
+- **Intermediate-output artifacts** (`artifact.extensions` contains `intermediate-output:1.0`): Forwarded to frontend but NOT accumulated into `_streaming_buffers` (the main response buffer)
+- **Main response artifacts** (no intermediate-output extension, `append=true`): Accumulated into `_streaming_buffers` for final message assembly
+- **Terminal status-only events** (completed/failed with no message content): Skipped for persistence
+
+### Persistence Rules
+
+Only save to database when ALL of these are true:
+- Not a work-plan event
+- Not an artifact append (streaming chunk)
+- Not a terminal-status-only signal
+
+Activity-log events ARE persisted so the frontend can reconstruct timelines from `raw_payload` when loading message history.
+
 ## Database Migrations
 
 - Migrations use Rambler and are located in `infrastructure/roles/basis/files/ddl/scripts/`

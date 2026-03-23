@@ -146,24 +146,46 @@ class TestBillingUnitExtraction:
         assert "cache_read_input_tokens" not in breakdown
         assert breakdown["base_output_tokens"] == 100
 
-    def test_negative_base_tokens_handling(self):
-        """Test handling of edge case where details sum exceeds total (should not happen)."""
+    def test_details_exceed_total_additive_provider(self):
+        """Test when details exceed total — provider reports details as additive (e.g. Bedrock caching)."""
         callback = CostTrackingCallback(cost_logger=None)
 
         usage_metadata = {
             "input_tokens": 100,
             "output_tokens": 50,
             "input_token_details": {
-                "cache_read": 150,  # More than total - edge case
+                "cache_read": 150,  # More than total — details are additive, not included
             },
         }
 
         breakdown = callback._extract_billing_unit_breakdown(usage_metadata, {})
 
-        # Should emit 0 for base_input_tokens and warn
-        assert breakdown["base_input_tokens"] == 0
+        # total IS the base since details are additive
+        assert breakdown["base_input_tokens"] == 100
         assert breakdown["cache_read_input_tokens"] == 150
         assert breakdown["base_output_tokens"] == 50
+
+    def test_bedrock_prompt_caching_real_world(self):
+        """Test real-world Bedrock prompt caching where input_tokens is non-cached only."""
+        callback = CostTrackingCallback(cost_logger=None)
+
+        # Actual pattern from logs: input_tokens=1225, cache_read=78440
+        usage_metadata = {
+            "input_tokens": 1225,
+            "output_tokens": 176,
+            "total_tokens": 1401,
+            "input_token_details": {
+                "cache_read": 78440,
+                "cache_creation": 0,
+            },
+        }
+
+        breakdown = callback._extract_billing_unit_breakdown(usage_metadata, {})
+
+        assert breakdown["base_input_tokens"] == 1225
+        assert breakdown["cache_read_input_tokens"] == 78440
+        assert breakdown["base_output_tokens"] == 176
+        assert "cache_creation_input_tokens" not in breakdown
 
     def test_custom_provider_fields(self):
         """Test that custom provider-specific fields in token details are handled."""

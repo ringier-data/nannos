@@ -26,5 +26,5 @@ class Message(BaseModel):
     raw_payload: str = ""  # Original JSON payload
     metadata: dict[str, Any] = Field(default_factory=dict)  # Optional metadata
     ttl: int  # Unix timestamp for DynamoDB TTL
-    final: bool = False  # Indicates if this is a final message
+    final: bool = False  # DEPRECATED: A2A 1.0.0 removes this field (kept for backward compatibility)
     kind: str = ""  # Message kind: 'message', 'status-update', etc.

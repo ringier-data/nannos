@@ -8,7 +8,6 @@ import logging
 import os
 
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent import LangGraphBedrockAgent
 from ringier_a2a_sdk.middleware.credential_injector import TokenExchangeCredentialInjector
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
@@ -229,24 +228,23 @@ Remember: You're not just creating agents, you're architecting an agent ecosyste
 """
 
 
-class FinalResponseSchema(BaseModel):
-    """Schema for final response from Bedrock models."""
-
-    task_state: str = Field(
-        ...,
-        description="The final state of the task: 'completed', 'failed', 'input_required', or 'working'",
-    )
-    message: str = Field(
-        ...,
-        description="A clear, helpful message to the user about the task outcome",
-    )
-
-
 class AgentCreator(LangGraphBedrockAgent):
     """Agent Creator - Helps users design and create specialized AI agents.
 
     This agent uses Claude Sonnet 4.5 via AWS Bedrock and has access to playground
     backend MCP tools for managing the agent lifecycle.
+
+    Features:
+    - Claude extended thinking mode (optional, configure via BEDROCK_THINKING_LEVEL)
+    - User-specific authentication for MCP tools
+    - Streaming conversation state persistence via DynamoDB
+    - Web-based frontend integration
+
+    Configuration:
+    - BEDROCK_MODEL_ID: Claude model ID (default: claude-sonnet-4-5)
+    - BEDROCK_THINKING_LEVEL: Enable thinking (minimal/low/medium/high)
+    - PLAYGROUND_BACKEND_URL: Backend API URL
+    - PLAYGROUND_FRONTEND_URL: Frontend URL
 
     Architecture:
     - Extends LangGraphBedrockAgent base class

@@ -2,6 +2,7 @@
 .lock-release
 .tmp/
 .env.tmp
+.env.integration
 
 ### Ansible template
 *.retry

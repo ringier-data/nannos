@@ -46,6 +46,7 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 from ringier_a2a_sdk.cost_tracking import CostLogger
+from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +235,7 @@ def _create_file_analyzer_model(callbacks: Optional[List] = None):
             model_name = DEFAULT_FILE_ANALYZER_MODEL
 
     logger.info(f"Creating file analyzer model: {model_name} with callbacks={callbacks}")
-    return create_model(model_name, callbacks=callbacks)  # type: ignore
+    return create_model(model_name, callbacks=callbacks, streaming=False)  # type: ignore
 
 
 class FileAnalyzerRunnable(LocalA2ARunnable):
@@ -416,32 +417,6 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
 
         return content_blocks
 
-    @staticmethod
-    def _extract_text_from_content(content: Any) -> str:
-        """Extract text from LLM response content, handling both string and list formats.
-
-        Gemini and other multimodal models return content as a list of blocks:
-        [{'type': 'text', 'text': '...', 'extras': {...}}]
-
-        Args:
-            content: LLM response content (string or list of content blocks)
-
-        Returns:
-            Extracted text content as string
-        """
-        if isinstance(content, str):
-            return content
-        elif isinstance(content, list):
-            # Extract text from content blocks
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text" and "text" in block:
-                        text_parts.append(block["text"])
-            return " ".join(text_parts) if text_parts else str(content)
-        else:
-            return str(content)
-
     @traceable(name="synthesize_analysis")
     async def _synthesize_analysis(
         self,
@@ -517,7 +492,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
             response = await model.ainvoke([analysis_message])
 
         # Extract text from response content (handles both string and list formats)
-        analysis_text = self._extract_text_from_content(response.content)
+        analysis_text = extract_text_from_content(response.content)[0]
 
         return analysis_text
 

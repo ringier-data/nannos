@@ -340,10 +340,26 @@ class GraphFactory:
     def _create_middleware_stack(self) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
+        Middleware Execution Order (LangChain convention):
+          - before_* hooks: First to last (list order)
+          - after_*  hooks: Last to first (reverse order)
+          - wrap_*   hooks: Nested — first middleware in the list wraps all
+            others (outermost).  For ``awrap_tool_call`` the call path is:
+                [0] → [1] → … → [N] → ToolNode handler
+            So [0] can short-circuit before any later middleware sees the call.
+
+        IMPORTANT: ``DynamicToolDispatchMiddleware`` is deliberately first ([0])
+        because it short-circuits the ``task`` tool for A2A sub-agent dispatch.
+        Being outermost means inner middlewares (Auth, Retry, …) never see the
+        ``task`` tool call — they only see the ToolMessage result if it was
+        returned.  This is why ``AuthErrorDetectionMiddleware`` cannot intercept
+        A2A 401 errors via ``interrupt()``.
+
         Returns:
-            Complete middleware stack with DynamicToolDispatchMiddleware first
+            Ordered middleware list (first = outermost for wrap hooks).
         """
-        # DynamicToolDispatchMiddleware must be first to intercept model calls
+        # DynamicToolDispatchMiddleware must be first (outermost) to intercept
+        # tool calls and short-circuit sub-agent dispatch before inner middlewares.
         # Add Static tools directly to the graph (not via middleware) in case you want
         # FinalResponseSchema's return_direct=True to be respected by the model
         dynamic_tool_middleware = DynamicToolDispatchMiddleware(
@@ -358,10 +374,13 @@ class GraphFactory:
         # StoragePathsInstructionMiddleware adds filesystem storage paths documentation
         storage_paths_middleware = StoragePathsInstructionMiddleware()
 
-        # Order: DynamicToolDispatch → StoragePaths → PromptCaching → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo
+        # Outermost → innermost (for wrap_* hooks):
+        # DynamicToolDispatch[0] → StoragePaths → PromptCaching → UserPreferences
+        # → LoopDetection → Auth → Retry → A2A → Todo[8]
+        #
         # BedrockPromptCaching places cache point after all static content (system prompt + storage paths),
         # so that the cache is shared across all users. StoragePaths is included in the cache.
-        # LoopDetection comes before Auth/Retry to catch loops early
+        # LoopDetection comes before Auth/Retry to catch loops early.
         return [
             dynamic_tool_middleware,
             storage_paths_middleware,
@@ -378,7 +397,8 @@ class GraphFactory:
         """Get static tools for the given model type.
 
         Returns:
-            List of static tools (cached)
+            List of static tools (cached). When with_response_tool=True, returns a
+            new list with FinalResponseSchema appended (does not pollute the cache).
         """
         if not self._static_tools_cache:
             static_tools: list[BaseTool] = []
@@ -391,23 +411,23 @@ class GraphFactory:
 
             # Add copy_file tool for efficient file copying without LLM context loading
             static_tools.append(create_copy_file_tool(self.backend_factory))
-            # if bedrock and thinking is enabled we need to add the final response tool to handle structured output
-            if with_response_tool:
-                static_tools.append(
-                    StructuredTool.from_function(
-                        func=lambda **kwargs: FinalResponseSchema(**kwargs),
-                        name="FinalResponseSchema",
-                        description="ALWAYS use this tool to format your final response to the user.",
-                        args_schema=FinalResponseSchema,
-                        return_direct=True,  # Ensure the model's output is returned directly without additional parsing
-                    )
-                )
 
             self._static_tools_cache = static_tools
-        else:
-            static_tools = self._static_tools_cache
 
-        return static_tools
+        # Return a copy with FinalResponseSchema appended if needed,
+        # to avoid polluting the shared cache for other models
+        if with_response_tool:
+            return list(self._static_tools_cache) + [
+                StructuredTool.from_function(
+                    func=lambda **kwargs: FinalResponseSchema(**kwargs),
+                    name="FinalResponseSchema",
+                    description="ALWAYS use this tool to format your final response to the user.",
+                    args_schema=FinalResponseSchema,
+                    return_direct=True,
+                )
+            ]
+
+        return self._static_tools_cache
 
     def _create_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
         """Create a graph for the given model type.
@@ -419,17 +439,6 @@ class GraphFactory:
             CompiledStateGraph: The newly created graph
         """
         model = self._get_or_create_model(model_type, thinking_level)
-
-        # Bind built-in tools for Gemini models
-        # Google Search and Code Execution are always enabled for Gemini
-        if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
-            logger.info("Binding built-in tools to Gemini model: google_search, code_execution")
-            model = model.bind_tools(
-                [
-                    {"google_search": {}},
-                    {"code_execution": {}},
-                ]
-            )
 
         # Ensure store is initialized before creating graph (required for longterm memory)
         # Access the store property to trigger lazy initialization
@@ -453,8 +462,12 @@ class GraphFactory:
         backend = self.backend_factory
 
         # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
-        # Use AutoStrategy for Bedrock without extended thinking and Gemini models (more efficient, handles structured output natively)
-        # For bedrock models with extended thinking use None and add FinalResponseSchema to static tools
+        # Use AutoStrategy for Bedrock without extended thinking (efficient, handles structured output natively)
+        # For Bedrock with extended thinking and Gemini models: use response_format=None and add
+        # FinalResponseSchema as an explicit static tool. Gemini's AutoStrategy resolves to ToolStrategy
+        # but the model embeds the structured JSON in text content instead of tool_call_chunks,
+        # causing raw JSON to be streamed to the client. The explicit tool approach ensures proper
+        # tool_call_chunks streaming detection.
         requires_response_tool = False
         if model_type in ("gpt-4o", "gpt-4o-mini"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
@@ -466,10 +479,22 @@ class GraphFactory:
                 requires_response_tool = True
             else:
                 response_format = AutoStrategy(schema=FinalResponseSchema)
+        elif model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+            # Gemini models: use explicit FinalResponseSchema tool instead of AutoStrategy/ToolStrategy
+            # because Gemini outputs structured JSON in content text rather than via tool_call_chunks
+            response_format = None
+            requires_response_tool = True
         else:
             response_format = AutoStrategy(schema=FinalResponseSchema)
         middleware = self._create_middleware_stack()
         static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
+
+        # Add Google built-in tools for Gemini models
+        # These are passed via the tools parameter so create_deep_agent can bind them
+        # (bind_tools on the model directly returns a RunnableBinding which isn't a BaseChatModel)
+        if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+            logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
+            static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 
         compiled_graph = create_deep_agent(
             model=model,

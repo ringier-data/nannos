@@ -314,7 +314,7 @@ class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # SubAgentResponseSchema from structured_response or tool call messages
         translated = self._translate_agent_result(result, context_id, task_id)
         logger.debug(
-            f"[TASK-SCHEDULER] Translated result state: {translated.get('state')}, is_complete: {translated.get('is_complete')}"
+            f"[TASK-SCHEDULER] Translated result state: {translated.state}, is_complete: {translated.is_complete}"
         )
         return translated
 

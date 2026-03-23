@@ -274,6 +274,15 @@ socket_notification_manager = SocketNotificationManager(sio)
 # Store in app.state for access by services
 app.state.socket_notification_manager = socket_notification_manager
 
+# Track active send_message tasks for cancellation: "{sid}:{context_id}" → asyncio.Task
+active_tasks: dict[str, asyncio.Task[Any]] = {}
+
+# Buffer for accumulating streaming artifact chunks per conversation.
+# Keyed by context_id. Chunks are assembled here and persisted as a
+# single message when the completion status arrives.
+# Intermediate output (with urn:nannos:a2a:intermediate-output:1.0 extensions) are NOT accumulated.
+_streaming_buffers: dict[str, str] = {}
+
 
 # ==============================================================================
 # Socket.IO Event Helpers
@@ -305,7 +314,6 @@ async def _process_a2a_response(
     # The response payload 'event' (Task, Message, etc.) may have its own 'id',
     # which can differ from the JSON-RPC request/response 'id'. We prioritize
     # the payload's ID for client-side correlation if it exists.
-
     event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Task | Message
     if isinstance(client_event, tuple):
         event = client_event[1] if client_event[1] else client_event[0]
@@ -321,11 +329,24 @@ async def _process_a2a_response(
     response_data["validation_errors"] = validation_errors
 
     try:
-        logger.debug("Agent response full JSON: %s", json.dumps(response_data, default=str))
+        logger.info("Agent response full JSON: %s", json.dumps(response_data, default=str))
     except Exception:
-        logger.debug("Agent response (sid=%s) id=%s", sid, response_id)
+        logger.info("Agent response (sid=%s) id=%s", sid, response_id)
 
     effective_context_id = context_id or response_data.get("contextId")
+
+    # EMIT IMMEDIATELY for real-time streaming - do this BEFORE database access
+    # Artifact chunks with append=true need to appear on the client immediately
+    is_streaming_chunk = response_data.get("kind") == "artifact-update" and response_data.get("append") is True
+    if is_streaming_chunk:
+        logger.info(
+            f"[STREAMING] Emitting artifact chunk immediately: sid={sid}, "
+            f"last_chunk={response_data.get('lastChunk')}, context={effective_context_id}"
+        )
+        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
+        await _emit_debug_log(sid, response_id, "artifact_chunk", response_data)
+        # Don't return yet - we still need to accumulate for persistence below
+
     if effective_context_id:
         try:
             socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
@@ -345,12 +366,114 @@ async def _process_a2a_response(
 
                 messages_service = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
 
-                # Save agent response
-                await messages_service.save_agent_response(
-                    response_data=response_data,
-                    conversation_id=effective_context_id,
-                    user_id=socket_session.user_id,
+                metadata = response_data.get("metadata") or {}
+                # Detect work-plan events via extensions on the status message
+                status_message = (response_data.get("status") or {}).get("message") or {}
+                message_extensions = status_message.get("extensions", []) if isinstance(status_message, dict) else []
+                is_work_plan = "urn:nannos:a2a:work-plan:1.0" in message_extensions
+                is_artifact_append = (
+                    response_data.get("kind") == "artifact-update" and response_data.get("append") is True
                 )
+                is_last_chunk = response_data.get("lastChunk") is True or response_data.get("last_chunk") is True
+
+                # Extract status object early for use in multiple checks below
+                status_obj = response_data.get("status", {})
+                status_state = status_obj.get("state") if isinstance(status_obj, dict) else None
+
+                # Accumulate streaming artifact text for persistence.
+                # Individual chunks are transient (not saved to DB); the assembled
+                # content is persisted when last_chunk arrives.
+                # IMPORTANT: Do NOT accumulate intermediate output (sub-agent thoughts).
+                # Those are display-only events, not part of the final persisted message.
+                if is_artifact_append:
+                    artifact = response_data.get("artifact", {})
+                    artifact_metadata = artifact.get("metadata", {}) if isinstance(artifact, dict) else {}
+                    # Detect intermediate output via extensions array on the artifact
+                    artifact_extensions = artifact.get("extensions", []) if isinstance(artifact, dict) else []
+                    is_intermediate_output = "urn:nannos:a2a:intermediate-output:1.0" in artifact_extensions
+
+                    if not is_intermediate_output:
+                        # Only accumulate orchestrator content, not intermediate output
+                        parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
+                        chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
+
+                        # Always update buffer on artifact-append, even if chunk is empty (for last_chunk handling)
+                        current_buffer = _streaming_buffers.get(effective_context_id, "")
+                        _streaming_buffers[effective_context_id] = current_buffer + chunk_text
+                        if chunk_text:  # Only log if there's actual content
+                            logger.info(
+                                f"[STREAMING] Accumulated chunk ({len(chunk_text)} chars) for context {effective_context_id}. "
+                                f"Total buffer: {len(_streaming_buffers[effective_context_id])} chars. last_chunk={is_last_chunk}"
+                            )
+                        elif is_last_chunk:
+                            logger.info(
+                                f"[STREAMING] Received final empty chunk for context {effective_context_id}. "
+                                f"Buffer size: {len(_streaming_buffers[effective_context_id])} chars"
+                            )
+                    else:
+                        logger.info(
+                            f"[STREAMING] Skipping intermediate output chunk (not persisted): {artifact_metadata.get('agent_name', 'unknown')}"
+                        )
+
+                # Persist accumulated content when the artifact stream closes
+                if is_last_chunk and effective_context_id in _streaming_buffers:
+                    accumulated = _streaming_buffers.pop(effective_context_id)
+                    if accumulated.strip():
+                        logger.info(
+                            f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) for context {effective_context_id}"
+                        )
+                        await messages_service.insert_message(
+                            conversation_id=effective_context_id,
+                            user_id=socket_session.user_id,
+                            role="assistant",
+                            parts=[{"kind": "text", "text": accumulated}],
+                            task_id=response_data.get("taskId", ""),
+                            state=TaskState.completed,
+                            kind="artifact-update",
+                        )
+                    else:
+                        logger.warning(
+                            f"[STREAMING] last_chunk=True but accumulated content is empty for context {effective_context_id}"
+                        )
+                elif is_last_chunk:
+                    logger.warning(
+                        f"[STREAMING] last_chunk=True but no buffer found for context {effective_context_id}. "
+                        f"kind={response_data.get('kind')}, append={response_data.get('append')}"
+                    )
+                # Safety net: persist any buffered content on terminal failure
+                # in case last_chunk was never sent (e.g. unhandled error)
+                elif not is_artifact_append:
+                    if status_state in ("failed", "canceled") and effective_context_id in _streaming_buffers:
+                        accumulated = _streaming_buffers.pop(effective_context_id)
+                        if accumulated.strip():
+                            await messages_service.insert_message(
+                                conversation_id=effective_context_id,
+                                user_id=socket_session.user_id,
+                                role="assistant",
+                                parts=[{"kind": "text", "text": accumulated}],
+                                task_id=response_data.get("taskId", ""),
+                                state=TaskState(status_state),
+                                kind="status-update",
+                            )
+
+                # Save non-streaming responses to database
+                # Skip if:
+                # 1. is_work_plan - transient state updates
+                # 2. is_artifact_append - streaming chunks (saved when last_chunk arrives)
+                # 3. Terminal status without content - pure completion signal after streaming finished
+                is_terminal_status_only = (
+                    response_data.get("kind") == "status-update"
+                    and status_obj
+                    and status_obj.get("state") in ("completed", "failed", "canceled")
+                    and not status_obj.get("message")  # No nested message content
+                )
+
+                if not is_work_plan and not is_artifact_append and not is_terminal_status_only:
+                    await messages_service.save_agent_response(
+                        response_data=response_data,
+                        conversation_id=effective_context_id,
+                        user_id=socket_session.user_id,
+                    )
         except ConversationOwnershipError as ownership_error:
             logger.error(
                 f"Conversation ownership violation in agent response: sid={sid}, response_id={response_id}, "
@@ -365,6 +488,9 @@ async def _process_a2a_response(
         )
 
     await _emit_debug_log(sid, response_id, "response", response_data)
+
+    # Emit the response to the client
+    logger.info(f"[BACKEND_RESPONSE] Emitting response: sid={sid}, kind={response_data.get('kind')}")
     await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
 
 
@@ -548,6 +674,15 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     """Handle the 'disconnect' socket.io event with reconnection guidance."""
     logger.debug(f"Client disconnected: {sid} (reason: {reason})")
 
+    # Cancel any active tasks for this sid
+    prefix = f"{sid}:"
+    for key in list(active_tasks.keys()):
+        if key.startswith(prefix):
+            task = active_tasks.pop(key, None)
+            if task and not task.done():
+                task.cancel()
+                logger.info(f"Cancelled task on disconnect: key={key}")
+
     # Get socket session to  unregister from notification manager
     socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
     if socket_session:
@@ -577,6 +712,11 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
     """
     agent_card_url = data.get("url")
     custom_headers = data.get("customHeaders", {})
+
+    # Playground UI supports all extensions — always request them from the orchestrator
+    custom_headers["X-A2A-Extensions"] = (
+        "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0"
+    )
 
     if custom_headers:
         logger.info(f"Received custom headers for {sid}: {list(custom_headers.keys())}")
@@ -828,8 +968,25 @@ async def _send_message_to_agent(
         assert a2a_client is not None, "a2a_client must not be None"
 
         response_stream = a2a_client.send_message(message)
+        stream_item_count = 0
         async for stream_result in response_stream:
+            stream_item_count += 1
+            result_type = type(stream_result).__name__
+            logger.info(f"[BACKEND_STREAM] Received item #{stream_item_count}: type={result_type}")
+
+            # Log artifact-update events specifically
+            if isinstance(stream_result, tuple):
+                event = stream_result[1] if len(stream_result) > 1 and stream_result[1] else stream_result[0]
+                if hasattr(event, "kind"):
+                    logger.info(f"[BACKEND_STREAM] Event kind: {event.kind}")
+                    if event.kind == "artifact-update":
+                        artifact = getattr(event, "artifact", None)
+                        if artifact and hasattr(artifact, "metadata"):
+                            logger.info(f"[BACKEND_STREAM] artifact-update metadata: {artifact.metadata}")
+
             await _process_a2a_response(stream_result, sid, message_id, message.context_id)
+
+        logger.info(f"[BACKEND_STREAM] Stream complete - received {stream_item_count} total items")
         return create_success_response({"id": message_id})
     except A2AClientHTTPError as http_err:
         logger.error(f"Runtime error during message send: {http_err}", exc_info=True)
@@ -965,7 +1122,22 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             metadata=metadata,
         )
 
-        return await _send_message_to_agent(a2a_client, message, sid, message_id, sio)
+        task_key = f"{sid}:{context_id}"
+        send_task = asyncio.create_task(_send_message_to_agent(a2a_client, message, sid, message_id, sio))
+        active_tasks[task_key] = send_task
+        try:
+            return await send_task
+        except asyncio.CancelledError:
+            logger.info(f"Send message task cancelled: sid={sid}, context_id={context_id}")
+            cancelled_response = {
+                "id": message_id,
+                "contextId": context_id,
+                "status": {"state": "cancelled"},
+            }
+            await sio.emit(SocketEvents.AGENT_RESPONSE, cancelled_response, to=sid)
+            return cancelled_response
+        finally:
+            active_tasks.pop(task_key, None)
 
     except ValueError as e:
         # Validation errors - send specific error details
@@ -1025,6 +1197,41 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         error_response["id"] = message_id
         await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
         return error_response
+
+
+@sio.on(SocketEvents.CANCEL_TASK)  # type: ignore
+@require_socket_auth(sio)
+async def handle_cancel_task(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Handle the 'cancel_task' socket.io event.
+
+    Cancels an active send_message task for the given conversation.
+    """
+    conversation_id = json_data.get("conversationId")
+    if not conversation_id:
+        return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Missing conversationId"})
+
+    # Look up context_id from conversation
+    socket_session: SocketSession = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
+    if not socket_session:
+        return create_error_response(SocketError.SESSION_NOT_FOUND)
+
+    # Try cancelling by context_id (mapped from conversationId)
+    # The task key uses context_id which may differ from conversationId
+    # Try all active tasks for this sid
+    cancelled = False
+    prefix = f"{sid}:"
+    for key in list(active_tasks.keys()):
+        if key.startswith(prefix):
+            task = active_tasks.pop(key, None)
+            if task and not task.done():
+                task.cancel()
+                cancelled = True
+                logger.info(f"Cancelled active task: key={key}")
+
+    if not cancelled:
+        logger.info(f"No active task to cancel for sid={sid}, conversationId={conversation_id}")
+
+    return create_success_response({"cancelled": cancelled})
 
 
 # ==============================================================================

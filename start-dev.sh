@@ -513,7 +513,7 @@ if [ "$BACKEND_ENV" = "local" ]; then
             break
         fi
         if [ $i -eq 30 ]; then
-            echo -e "${RED}Backend failed to start. Check logs/${LOG_DIR}/backend.log${NC}"
+            echo -e "${RED}Backend failed to start. Check ${LOG_DIR}/backend.log${NC}"
             exit 1
         fi
         sleep 1
@@ -733,6 +733,20 @@ if [ "$ALLOY_ENV" = "local" ]; then
         exit 1
     fi
     update_env_var ".env" "LANGSMITH_API_KEY" "$LANGSMITH_API_KEY"
+
+    # GCP and Anthropic credentials — fetched unconditionally so MODEL_PROVIDER
+    # can be toggled at runtime without re-running start-dev.sh.
+    if ! GCP_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/gcp-key --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch GCP_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "GCP_KEY" "'$GCP_KEY'"
+
+    if ! ANTHROPIC_API_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/anthropic-api-key --output json --with-decryption | jq -r .Parameter.Value); then
+        echo -e "${RED}Failed to fetch ANTHROPIC_API_KEY from AWS SSM${NC}"
+        exit 1
+    fi
+    update_env_var ".env" "ANTHROPIC_API_KEY" "$ANTHROPIC_API_KEY"
 
     popd > /dev/null
     
