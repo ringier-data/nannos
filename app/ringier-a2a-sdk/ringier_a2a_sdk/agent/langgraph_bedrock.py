@@ -9,11 +9,13 @@ import os
 
 import boto3
 from botocore.config import Config as BotoConfig
+from langchain.agents.middleware.types import AgentMiddleware
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
+from ..middleware.bedrock_prompt_caching import BedrockPromptCachingMiddleware
 from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
 from .langgraph import LangGraphAgent
 
@@ -168,6 +170,21 @@ class LangGraphBedrockAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     def _get_thinking_level(self) -> str | None:
         """Return thinking level if enabled. Can be: minimal, low, medium, high. Default: None (disabled)."""
         return os.getenv("BEDROCK_THINKING_LEVEL")
+
+    def _get_middleware(self) -> list[AgentMiddleware]:
+        """Return agent middleware with Bedrock prompt caching and schema cleaning.
+
+        Adds BedrockPromptCachingMiddleware before base middleware
+        (ToolSchemaCleaningMiddleware) to ensure correct execution order:
+        1. Prompt caching adds cache points to the request structure
+        2. Schema cleaning converts tools to final format right before model
+
+        Subclasses should call super()._get_middleware() to preserve this order.
+
+        Returns:
+            List of middleware: [BedrockPromptCachingMiddleware, ToolSchemaCleaningMiddleware]
+        """
+        return [BedrockPromptCachingMiddleware()] + super()._get_middleware()
 
     def _create_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
         """Create LangGraph with thinking-aware response format.

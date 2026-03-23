@@ -8,14 +8,12 @@ import logging
 import os
 from datetime import timedelta
 
-from langchain.agents.middleware.types import AgentMiddleware
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.agent.dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
 from ringier_a2a_sdk.agent.langgraph_anthropic import LangGraphAnthropicAgent
 from ringier_a2a_sdk.agent.langgraph_bedrock import LangGraphBedrockAgent
 from ringier_a2a_sdk.agent.langgraph_google import LangGraphGoogleGenAIAgent
 from ringier_a2a_sdk.middleware.credential_injector import PassThroughCredentialInjector
-from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -259,17 +257,6 @@ class NaonousBedrockAgent(LangGraphBedrockAgent, DynamoDBCheckpointerMixin):
 
         super().__init__()
 
-    def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware - includes schema cleaning for tool compatibility.
-
-        ToolSchemaCleaningMiddleware cleans MCP tool schemas before binding to the model.
-        Specifically removes invalid enum values like "NULL" that Gemini rejects.
-
-        Returns:
-            List of middleware: [ToolSchemaCleaningMiddleware]
-        """
-        return [ToolSchemaCleaningMiddleware()]
-
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection for Naonous server.
 
@@ -337,10 +324,6 @@ class NaonousAnthropicAgent(LangGraphAnthropicAgent, DynamoDBCheckpointerMixin):
         self._credential_injector = PassThroughCredentialInjector()
         super().__init__()
 
-    def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware - includes schema cleaning for tool compatibility."""
-        return [ToolSchemaCleaningMiddleware()]
-
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection for Naonous server."""
         headers = await self.get_headers()
@@ -383,17 +366,6 @@ class NaonousGoogleGenAIAgent(LangGraphGoogleGenAIAgent, DynamoDBCheckpointerMix
         self.mcp_gateway_url = os.environ["MCP_GATEWAY_URL"]
         self._credential_injector = PassThroughCredentialInjector()
         super().__init__()
-
-    def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware - includes schema cleaning for Gemini compatibility.
-
-        ToolSchemaCleaningMiddleware cleans MCP tool schemas before binding to ChatGoogleGenerativeAI.
-        Specifically removes invalid enum values like "NULL" that Gemini rejects.
-
-        Returns:
-            List of middleware: [ToolSchemaCleaningMiddleware]
-        """
-        return [ToolSchemaCleaningMiddleware()]
 
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection (same configuration as NaonousBedrockAgent)."""

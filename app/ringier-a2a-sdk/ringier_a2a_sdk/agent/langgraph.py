@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from ..agent.base import BaseAgent
 from ..middleware.credential_injector import BaseCredentialInjector
+from ..middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from ..models import TODO_STATE_MAP, AgentStreamResponse, TodoItem, UserConfig
 from ..utils.streaming import StreamBuffer, StructuredResponseStreamer, extract_text_from_content
 
@@ -170,8 +171,20 @@ class LangGraphAgent(BaseAgent):
     # --- Optional methods with defaults ---
 
     def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware list. Default: empty."""
-        return []
+        """Return agent middleware with schema cleaning for MCP tools.
+
+        Includes ToolSchemaCleaningMiddleware by default to clean MCP tool schemas
+        before binding to the model. This removes invalid enum values like "NULL"
+        that some models (e.g., Gemini) reject.
+
+        Provider-specific subclasses (Bedrock, Anthropic, Google) should call
+        super()._get_middleware() and extend the list to preserve schema cleaning.
+
+        Returns:
+            List of middleware: [ToolSchemaCleaningMiddleware]
+        """
+
+        return [ToolSchemaCleaningMiddleware()]
 
     def _get_tool_interceptors(self) -> list:
         """Return tool interceptors for credential injection. Default: empty."""

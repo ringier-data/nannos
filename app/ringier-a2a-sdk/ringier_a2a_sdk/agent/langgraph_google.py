@@ -11,13 +11,11 @@ import json
 import logging
 import os
 
-from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph.state import CompiledStateGraph
 
-from ..middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
 from .langgraph import LangGraphAgent
 
@@ -135,17 +133,6 @@ class LangGraphGoogleGenAIAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     def _get_thinking_level(self) -> str | None:
         """Return thinking level if enabled. Can be: minimal, low, medium, high. Default: None (disabled)."""
         return os.getenv("GCP_THINKING_LEVEL")
-
-    def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware - includes schema cleaning for Gemini compatibility.
-
-        ToolSchemaCleaningMiddleware cleans MCP tool schemas before binding to ChatGoogleGenerativeAI.
-        Specifically removes invalid enum values like "NULL" that Gemini rejects.
-
-        Returns:
-            List of middleware: [ToolSchemaCleaningMiddleware]
-        """
-        return [ToolSchemaCleaningMiddleware()]
 
     def _create_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
         """Create LangGraph with explicit FinalResponseSchema tool for Gemini.
