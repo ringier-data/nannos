@@ -126,10 +126,11 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 scheduled_job_id=scheduled_job_id_from_meta,  # For scheduled-job cost attribution
             )
             streaming_artifact_id = str(uuid.uuid4())
-            first_chunk_sent = False  # Track if we've sent the initial artifact
+            first_chunk_sent = False  # Track if we've sent the initial main artifact
+            first_intermediate_chunk_sent = False  # Track if we've sent the initial intermediate artifact
             async for item in self.agent.stream(query, user_config, task):
-                first_chunk_sent = await self._handle_stream_item(
-                    item, updater, task, streaming_artifact_id, first_chunk_sent
+                first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
+                    item, updater, task, streaming_artifact_id, first_chunk_sent, first_intermediate_chunk_sent
                 )
         except Exception as e:
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}")
@@ -155,8 +156,14 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             raise ServerError(error=InternalError()) from e
 
     async def _handle_stream_item(
-        self, item, updater, task, streaming_artifact_id: str, first_chunk_sent: bool = False
-    ) -> bool:
+        self,
+        item,
+        updater,
+        task,
+        streaming_artifact_id: str,
+        first_chunk_sent: bool = False,
+        first_intermediate_chunk_sent: bool = False,
+    ) -> tuple[bool, bool]:
         """Handle a stream item from the agent and update the task accordingly.
 
         Streaming chunks (metadata.streaming_chunk=True) are emitted as
@@ -169,10 +176,11 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             updater: TaskUpdater for sending updates
             task: Current task being processed
             streaming_artifact_id: Stable artifact ID for streaming chunks
-            first_chunk_sent: Whether we've already sent the first chunk
+            first_chunk_sent: Whether we've already sent the first main content chunk
+            first_intermediate_chunk_sent: Whether we've already sent the first intermediate output chunk
 
         Returns:
-            Updated first_chunk_sent flag
+            Tuple of (first_chunk_sent, first_intermediate_chunk_sent) flags
         """
         # item is an AgentStreamResponse object
         state = item.state
@@ -192,7 +200,12 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 effective_artifact_id = streaming_artifact_id
 
             # First chunk creates the artifact (append=False), subsequent chunks append (append=True)
-            append = first_chunk_sent
+            # Use separate tracking for intermediate output vs main content
+            if is_intermediate:
+                append = first_intermediate_chunk_sent
+            else:
+                append = first_chunk_sent
+
             await updater.add_artifact(
                 [Part(root=TextPart(text=content))],
                 artifact_id=effective_artifact_id,
@@ -200,11 +213,10 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 last_chunk=False,
                 metadata={"streaming_chunk": True},
             )
-            # Intermediate-output chunks must NOT claim first_chunk_sent — the main
-            # response comes later. Only main content chunks advance the flag.
+            # Update the appropriate tracking flag
             if is_intermediate:
-                return first_chunk_sent
-            return True  # Mark that first chunk has been sent
+                return (first_chunk_sent, True)  # Mark intermediate chunk sent
+            return (True, first_intermediate_chunk_sent)  # Mark main chunk sent
 
         # Handle different A2A task states
         if state == TaskState.working:
@@ -286,8 +298,8 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             )
             await updater.complete()
 
-        # Return first_chunk_sent unchanged for non-streaming paths
-        return first_chunk_sent
+        # Return flags unchanged for non-streaming paths
+        return (first_chunk_sent, first_intermediate_chunk_sent)
 
     def _validate_request(self, context: RequestContext) -> bool:
         """Validate the request context.

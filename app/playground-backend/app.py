@@ -337,11 +337,11 @@ async def _process_a2a_response(
 
     # EMIT IMMEDIATELY for real-time streaming - do this BEFORE database access
     # Artifact chunks with append=true need to appear on the client immediately
-    is_streaming_chunk = response_data.get("kind") == "artifact-update" and response_data.get("append") is True
+    is_streaming_chunk = response_data.get("kind") == "artifact-update" and response_data.get("append")
     if is_streaming_chunk:
         logger.info(
             f"[STREAMING] Emitting artifact chunk immediately: sid={sid}, "
-            f"last_chunk={response_data.get('lastChunk')}, context={effective_context_id}"
+            f"append={response_data.get('append')}, last_chunk={response_data.get('lastChunk')}, context={effective_context_id}"
         )
         await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
         await _emit_debug_log(sid, response_id, "artifact_chunk", response_data)
@@ -366,15 +366,17 @@ async def _process_a2a_response(
 
                 messages_service = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
 
-                metadata = response_data.get("metadata") or {}
                 # Detect work-plan events via extensions on the status message
                 status_message = (response_data.get("status") or {}).get("message") or {}
                 message_extensions = status_message.get("extensions", []) if isinstance(status_message, dict) else []
                 is_work_plan = "urn:nannos:a2a:work-plan:1.0" in message_extensions
-                is_artifact_append = (
-                    response_data.get("kind") == "artifact-update" and response_data.get("append") is True
-                )
-                is_last_chunk = response_data.get("lastChunk") is True or response_data.get("last_chunk") is True
+                is_artifact_append = response_data.get("kind") == "artifact-update" and response_data.get("append")
+                # Handle both camelCase and snake_case, check explicitly for boolean value
+                # Don't use 'or' because False would fallback to checking second field
+                last_chunk_value = response_data.get("lastChunk")
+                if last_chunk_value is None:
+                    last_chunk_value = response_data.get("last_chunk")
+                is_last_chunk = last_chunk_value is True
 
                 # Extract status object early for use in multiple checks below
                 status_obj = response_data.get("status", {})
@@ -403,7 +405,8 @@ async def _process_a2a_response(
                         if chunk_text:  # Only log if there's actual content
                             logger.info(
                                 f"[STREAMING] Accumulated chunk ({len(chunk_text)} chars) for context {effective_context_id}. "
-                                f"Total buffer: {len(_streaming_buffers[effective_context_id])} chars. last_chunk={is_last_chunk}"
+                                f"Total buffer: {len(_streaming_buffers[effective_context_id])} chars. last_chunk={is_last_chunk}. "
+                                f"chunk_preview: {chunk_text[:50]}..."
                             )
                         elif is_last_chunk:
                             logger.info(
@@ -411,8 +414,12 @@ async def _process_a2a_response(
                                 f"Buffer size: {len(_streaming_buffers[effective_context_id])} chars"
                             )
                     else:
+                        # Log intermediate output for debugging
+                        parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
+                        chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
                         logger.info(
-                            f"[STREAMING] Skipping intermediate output chunk (not persisted): {artifact_metadata.get('agent_name', 'unknown')}"
+                            f"[STREAMING] Intermediate output chunk ({len(chunk_text)} chars, last_chunk={is_last_chunk}): "
+                            f"{artifact_metadata.get('agent_name', 'unknown')} - preview: {chunk_text[:50]}..."
                         )
 
                 # Persist accumulated content when the artifact stream closes
@@ -489,9 +496,14 @@ async def _process_a2a_response(
 
     await _emit_debug_log(sid, response_id, "response", response_data)
 
-    # Emit the response to the client
-    logger.info(f"[BACKEND_RESPONSE] Emitting response: sid={sid}, kind={response_data.get('kind')}")
-    await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
+    # Emit the response to the client (skip if already emitted as streaming chunk)
+    if not is_streaming_chunk:
+        logger.info(f"[BACKEND_RESPONSE] Emitting response: sid={sid}, kind={response_data.get('kind')}")
+        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
+    else:
+        logger.debug(
+            f"[BACKEND_RESPONSE] Skipping double-emit for streaming chunk: sid={sid}, kind={response_data.get('kind')}, append={response_data.get('append')}"
+        )
 
 
 def get_card_resolver(client: httpx.AsyncClient, agent_card_url: str) -> A2ACardResolver:
