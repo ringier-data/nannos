@@ -14,7 +14,7 @@
 # Compatible with bash 3.2+ (macOS default).
 #
 
-ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk"
+ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk client-slack client-slack-frontend"
 
 # ── Package metadata (case-based, bash 3.2 compatible) ──────────────
 
@@ -26,13 +26,15 @@ pkg_dir() {
     console-backend)         echo "packages/console-backend" ;;
     console-frontend)        echo "packages/console-frontend" ;;
     ringier-a2a-sdk)         echo "packages/ringier-a2a-sdk" ;;
+    client-slack)            echo "packages/client-slack" ;;
+    client-slack-frontend)   echo "packages/client-slack-frontend" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }
 
 pkg_type() {
   case "$1" in
-    console-frontend) echo "node" ;;
+    console-frontend|client-slack-frontend|client-slack) echo "node" ;;
     agent-creator|agent-runner|orchestrator-agent|console-backend|ringier-a2a-sdk) echo "python" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac

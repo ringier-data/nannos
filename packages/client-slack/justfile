@@ -1,0 +1,87 @@
+LOCAL_DB_PORT := "4700"
+LOCAL_DB_DATA := ".local-db-data"
+
+# Start local postgres (vanilla, with persistent data)
+local-db:
+  #!/usr/bin/env bash
+  set -e
+  mkdir -p {{LOCAL_DB_DATA}}
+  
+  # Check if postgres is already running on the port
+  if docker ps --filter publish={{LOCAL_DB_PORT}} --format '{{{{.Names}}}}' | grep -q .; then
+    echo "✓ PostgreSQL already running on port {{LOCAL_DB_PORT}}"
+    exit 0
+  fi
+  
+  # Stop any stopped containers using our volume
+  docker ps -aq --filter name=nannos-local-db | xargs -r docker rm -f 2>/dev/null || true
+  
+  echo "Starting PostgreSQL 18 on port {{LOCAL_DB_PORT}}..."
+  docker run -d \
+    --name nannos-local-db \
+    -p {{LOCAL_DB_PORT}}:5432 \
+    -v "$(pwd)/{{LOCAL_DB_DATA}}:/var/lib/postgresql" \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_PASSWORD=password \
+    -e POSTGRES_DB=nannos \
+    postgres:18
+  
+  echo "Waiting for PostgreSQL to be ready..."
+  until docker exec nannos-local-db pg_isready -U postgres > /dev/null 2>&1; do
+    sleep 0.5
+  done
+  echo "✓ PostgreSQL is ready"
+
+# Build the migration image
+build-migrations:
+  docker build -t nannos-migrations:latest sqlmigrations
+
+# Run migrations against local db
+migrate: local-db build-migrations
+  #!/usr/bin/env bash
+  set -e
+  echo "Running migrations..."
+  docker run --rm \
+    --network host \
+    -e PGHOST=127.0.0.1 \
+    -e PGPORT={{LOCAL_DB_PORT}} \
+    -e PGUSER=postgres \
+    -e PGPASSWORD=password \
+    -e PGDATABASE=nannos \
+    -e PGSCHEMA=nannos \
+    -e APP_USERNAME=app \
+    -e APP_PASSWORD=apppassword \
+    -e RAMBLER_SSLMODE=disable \
+    nannos-migrations:latest
+  echo "✓ Migrations complete"
+
+# Reset local database (deletes all data)
+reset-db:
+  #!/usr/bin/env bash
+  set -e
+  docker ps -q --filter name=nannos-local-db | xargs -r docker stop
+  docker ps -aq --filter name=nannos-local-db | xargs -r docker rm
+  rm -rf {{LOCAL_DB_DATA}}
+  echo "✓ Database data cleared. Run 'just local-db' to start fresh."
+
+prepare-start: migrate
+  #!/usr/bin/env bash
+  set -e
+  if [ ! -f .env ]; then
+    cp .env.example .env
+    echo "Slack App: Created .env from .env.example. Please fill out packages/client-slack/.env with the required values."
+    read -p "Press Enter to continue..."
+  fi
+  if ! command -v mprocs &> /dev/null; then
+    echo "mprocs is not installed. Install it with: brew install mprocs"
+    exit 1
+  fi
+
+start: prepare-start
+  #!/usr/bin/env bash
+  set -e
+  ./wait-for-postgres.sh postgres:password@localhost:4700/nannos
+  mprocs --names "frontend, backend,postgres" "cd ../client-slack-frontend && npm run dev" "npm run dev" "docker logs -f nannos-local-db"
+    
+psql: local-db
+  PGPASSWORD=password psql -h localhost -p 4700 -U postgres -d nannos

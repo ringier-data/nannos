@@ -179,6 +179,7 @@ else
   printf "${CYAN}│${RESET}    ${DIM}✗ Keycloak        (skipped — using remote OIDC)${RESET}\n"
 fi
 printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} DB migrations   ${DIM}(Rambler, auto-applied)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slack (FE+BE)   ${DIM}(Docker)${RESET}\n"
 
 printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 
@@ -574,6 +575,11 @@ _OPT_LINES=""
 [[ "$_HAS_MCP" == true ]] && _OPT_LINES="${_OPT_LINES}    ✓ MCP Gateway: $MCP_GATEWAY_URL"$'\n'
 [[ -n "${LANGSMITH_API_KEY:-}" ]] && _OPT_LINES="${_OPT_LINES}    ✓ LangSmith tracing enabled"$'\n'
 
+# Prepare Slack
+pushd "$ROOT_DIR/packages/client-slack"
+just prepare-start
+popd
+
 # Generate the info script
 _INFO_SCRIPT=$(mktemp /tmp/nannos-info-XXXXXX.sh)
 cat > "$_INFO_SCRIPT" <<INFOSCRIPT
@@ -785,6 +791,11 @@ procs:
   infra-logs:
     cwd: "$LOCAL_DEV_DIR"
     shell: "docker compose logs -f"
+    stop: "SIGKILL"
+  
+  slack:
+    cwd: "$ROOT_DIR/packages/client-slack"
+    shell: "just start"
     stop: "SIGKILL"
 YAML
 

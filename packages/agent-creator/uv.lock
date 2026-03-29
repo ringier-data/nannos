@@ -100,7 +100,7 @@ dev = [
 
 [[package]]
 name = "agent-creator-a2a-server"
-version = "0.7.0"
+version = "0.8.0"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -1974,7 +1974,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "../ringier-a2a-sdk" }
 dependencies = [
     { name = "a2a-sdk" },

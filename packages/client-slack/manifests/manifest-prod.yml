@@ -1,0 +1,61 @@
+{
+  "_metadata": {
+    "major_version": 1,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "A2A Bot",
+    "description": "Agent-to-Agent communication bot for Slack",
+    "background_color": "#4A154B",
+    "long_description": "The A2A Bot allows you to interact with Agent-to-Agent services directly from Slack. Mention @a2aapp to create tasks, tickets, and artifacts based on your conversations."
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "A2A Bot",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/authorize",
+        "description": "Authorize the bot to access A2A services on your behalf",
+        "usage_hint": "Run this command to start authorization",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://a2a.your-domain.com/oauth/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "im:history",
+        "im:read",
+        "im:write",
+        "users:read",
+        "users:read.email"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://a2a.your-domain.com/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.im"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://a2a.your-domain.com/slack/interactive"
+    },
+    "org_deploy_enabled": true,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": true
+  }
+}

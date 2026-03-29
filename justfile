@@ -32,7 +32,8 @@ img_agent_runner     := registry + "/nannos-agent-runner"
 img_orchestrator     := registry + "/nannos-orchestrator-agent"
 img_console_backend  := registry + "/nannos-console-backend"
 img_console_frontend := registry + "/nannos-console-frontend"
-
+img_client_slack := registry + "/nannos-client-slack"
+img_client_slack_frontend := registry + "/nannos-client-slack-frontend"
 
 # Default build platform
 platform := "linux/arm64"
@@ -41,7 +42,7 @@ platform := "linux/arm64"
 build_ts := `date -u +%Y%m%d%H%M%S`
 
 # Packages that have Dockerfiles (used by build recipes)
-_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend console-frontend"
+_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend console-frontend client-slack client-slack-frontend"
 
 # Build flags (override on CLI, e.g. just push=true build)
 push := ""
@@ -68,6 +69,8 @@ pkg-image pkg:
       orchestrator-agent) echo "{{ img_orchestrator }}" ;;
       console-backend)    echo "{{ img_console_backend }}" ;;
       console-frontend)   echo "{{ img_console_frontend }}" ;;
+      client-slack)       echo "{{ img_client_slack }}" ;;
+      client-slack-frontend) echo "{{ img_client_slack_frontend }}" ;;
       *) echo "" ;;
     esac
 

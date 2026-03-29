@@ -1,0 +1,61 @@
+{
+  "_metadata": {
+    "major_version": 1,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "A2A Bot (Dev)",
+    "description": "Agent-to-Agent communication bot for Slack (Development)",
+    "background_color": "#FFA500",
+    "long_description": "Development environment for A2A Bot. This bot allows you to interact with Agent-to-Agent services directly from Slack."
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "A2A Bot Dev",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/authorize",
+        "description": "Authorize the bot to access A2A services on your behalf",
+        "usage_hint": "Run this command to start authorization",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://a2a-dev.your-domain.com/oauth/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "im:history",
+        "im:read",
+        "im:write",
+        "users:read",
+        "users:read.email"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://a2a-dev.your-domain.com/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.im"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://a2a-dev.your-domain.com/slack/interactive"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
