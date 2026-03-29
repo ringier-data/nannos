@@ -1,6 +1,6 @@
 {
   "name": "rcplus-nannos-a2a-email-client",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "RC+/Alloy A2A Email Client ",
   "type": "module",
   "exports": "./dist/src/index.js",
