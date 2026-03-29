@@ -1,0 +1,41 @@
+# Docker Compose for local development
+
+version: '3.8'
+
+services:
+  a2a-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - ENVIRONMENT=local
+      - NODE_ENV=production
+      - APP_PORT=3000
+      - LOG_LEVEL=debug
+    env_file:
+      - .env
+    volumes:
+      # Mount source for hot reload in development
+      - ./src:/app/src:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/status', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  # Optional: LocalStack for local DynamoDB testing
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=dynamodb
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+    volumes:
+      - "./localstack-data:/tmp/localstack"
+    restart: unless-stopped
