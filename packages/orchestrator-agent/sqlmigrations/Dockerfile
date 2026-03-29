@@ -3,6 +3,7 @@ FROM zhaowde/rambler:5.4.0-rag2 as rambler-source
 
 # Use Ubuntu as final base for glibc compatibility
 FROM ubuntu:22.04
+LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
 
 # Install netcat for connectivity checking and postgresql-client for psql
 RUN apt-get update && apt-get install -y netcat-openbsd postgresql-client && rm -rf /var/lib/apt/lists/*

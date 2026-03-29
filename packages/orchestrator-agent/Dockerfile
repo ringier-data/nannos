@@ -24,6 +24,8 @@ COPY --from=agent-common . ../agent-common
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 FROM docker.rcplus.io/python:3.13-slim AS nannos-runtime
+LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
+
 ARG WORKDIR
 
 WORKDIR ${WORKDIR}

@@ -26,6 +26,7 @@ RUN uv pip install validators
 
 # Final runtime image
 FROM docker.rcplus.io/python:3.13-slim AS runtime
+LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
 ARG WORKDIR
 ARG API_PORT
 ENV API_PORT=${API_PORT}

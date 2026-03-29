@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/node:24-alpine AS builder
+FROM node:24-alpine AS builder
 
 ARG NPMRC_ENCODED
 
@@ -12,7 +12,8 @@ RUN echo $NPMRC_ENCODED | base64 -d > ~/.npmrc \
     && npm --no-color run build
 
 
-FROM public.ecr.aws/docker/library/node:24-alpine
+FROM node:24-alpine
+LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
 
 ARG NPMRC_ENCODED
 
