@@ -178,7 +178,7 @@ Full reference: [`packages/console-backend/.env.template`](packages/console-back
 | `BASE_DOMAIN` | Public domain used for CORS origin checks |
 | `SECRET_KEY` | Secret used to sign sessions — **change this in production** |
 | `ORCHESTRATOR_CLIENT_ID` | Keycloak client ID of the orchestrator (e.g. `orchestrator`) |
-| `ORCHESTRATOR_BASE_DOMAIN` | Host:port of the orchestrator, e.g. `orchestrator.example.com:10001` |
+| `ORCHESTRATOR_BASE_DOMAIN` | e.g. `orchestrator.nannos.mydomain.com` |
 | `POSTGRES_HOST` | PostgreSQL hostname |
 | `POSTGRES_PORT` | PostgreSQL port (default: `5432`) |
 | `POSTGRES_DB` | Database name |
@@ -273,7 +273,7 @@ These variables must be set **at image build time** (Vite bakes them into the bu
 | `VITE_API_BASE_URL` | URL of the console-backend API | `http://localhost:5001` |
 | `VITE_KEYCLOAK_BASE_URL` | Keycloak base URL | `https://login.p.nannos.rcplus.io` |
 | `VITE_KEYCLOAK_REALM` | Keycloak realm name | `nannos` |
-| `VITE_ORCHESTRATOR_BASE_DOMAIN` | Orchestrator host:port | `orchestrator.d.nannos.rcplus.io` |
+| `VITE_ORCHESTRATOR_BASE_DOMAIN` | Orchestrator host | `orchestrator.d.nannos.rcplus.io` |
 
 ---
 
