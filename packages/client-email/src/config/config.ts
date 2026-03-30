@@ -130,9 +130,9 @@ export async function getConfigFromEnv(): Promise<Config> {
   const postgresConfig = {
     host: process.env.POSTGRES_HOST,
     port: Number(process.env.POSTGRES_PORT) || 5432,
-    username: process.env.POSTGRES_USERNAME || 'postgres',
+    username: process.env.POSTGRES_USER || 'postgres',
     password: process.env.POSTGRES_PASSWORD || '',
-    database: process.env.POSTGRES_DATABASE || 'postgres',
+    database: process.env.POSTGRES_DB || 'postgres',
     useSsl: process.env.POSTGRES_USE_SSL === 'true',
     sslCa: process.env.POSTGRES_SSL_CA,
   };

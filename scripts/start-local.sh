@@ -425,7 +425,16 @@ MIGRATIONS_DIR="$ROOT_DIR/packages/orchestrator-agent/sqlmigrations"
 # Build the migrations image (same Dockerfile used in production)
 docker build -t "$MIGRATIONS_IMAGE" "$MIGRATIONS_DIR" --quiet
 
-# Run migrations against the local PostgreSQL container
+# Install extensions in public schema before migrations
+docker run --rm \
+  --network host \
+  -e PGPASSWORD=password \
+  "$MIGRATIONS_IMAGE" psql "postgresql://postgres:password@127.0.0.1:5432/playground" -c "
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+    CREATE EXTENSION IF NOT EXISTS vector;
+  "
+
+# Run migrations against the local PostgreSQL container (using public schema)
 docker run --rm \
   --network host \
   -e PGHOST=127.0.0.1 \
@@ -433,7 +442,7 @@ docker run --rm \
   -e PGUSER=postgres \
   -e PGPASSWORD=password \
   -e PGDATABASE=playground \
-  -e PGSCHEMA=playground \
+  -e PGSCHEMA=public \
   -e RAMBLER_SSLMODE=disable \
   "$MIGRATIONS_IMAGE"
 
@@ -441,7 +450,7 @@ ok "Database migrations applied"
 
 # Seed: make all users administrators for local dev
 docker compose exec -T postgres psql -U postgres -d playground -c \
-  "SET search_path TO playground; UPDATE users SET is_administrator = true WHERE is_administrator = false;" \
+  "UPDATE users SET is_administrator = true WHERE is_administrator = false;" \
   >/dev/null 2>&1 || true
 
 # ─── 6. Wait for Keycloak ────────────────────────────────────────
@@ -657,7 +666,7 @@ procs:
       POSTGRES_DB: "playground"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "playground"
+      POSTGRES_SCHEMA: "public"
       SCHEDULER_TICK_INTERVAL_SECONDS: "30"
       SCHEDULER_CLAIM_LIMIT: "10"
       AGENT_RUNNER_URL: "http://localhost:5005"
@@ -690,7 +699,7 @@ procs:
       POSTGRES_DB: "playground"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "playground"
+      POSTGRES_SCHEMA: "public"
       OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
       OPENAI_COMPATIBLE_MODEL: "$OPENAI_COMPATIBLE_MODEL"
       MCP_GATEWAY_URL: "$MCP_GATEWAY_URL"
@@ -758,7 +767,7 @@ procs:
       POSTGRES_DB: "playground"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "playground"
+      POSTGRES_SCHEMA: "public"
       OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
       OPENAI_COMPATIBLE_MODEL: "$OPENAI_COMPATIBLE_MODEL"
       MCP_GATEWAY_URL: "$MCP_GATEWAY_URL"

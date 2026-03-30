@@ -40,13 +40,8 @@ CREATE INDEX IF NOT EXISTS store_prefix_idx ON store USING btree (prefix text_pa
 CREATE INDEX IF NOT EXISTS idx_store_expires_at ON store (expires_at)
 WHERE expires_at IS NOT NULL;
 
--- Ensure pgvector extension exists (required for vector operations)
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
-        CREATE EXTENSION vector;
-    END IF;
-END $$;
+-- Note: pgvector extension is installed in the public schema at provisioning time
+-- (see rds-shared.yml). It is available via the user's search_path.
 
 -- Store vectors table for semantic search
 -- Note: The embedding column type (dimensions) and vector index will be created by

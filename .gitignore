@@ -328,3 +328,4 @@ pnpm-debug.log*
 .cache/
 .local-db-data
 alloy-infra-agents
+gitops
