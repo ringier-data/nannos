@@ -327,3 +327,4 @@ pnpm-debug.log*
 *.tmp
 .cache/
 .local-db-data
+alloy-infra-agents
