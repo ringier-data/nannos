@@ -45,7 +45,7 @@ just start-local
   </td>
 </tr>
 <tr>
-  <td valign="top">Tiny</td>
+  <td valign="top">Medium</td>
   <td valign="top">• Orchestrator</td>
   <td valign="top">
     + S3, DynamoDB (LangGraph Checkpointing)<br>
@@ -54,8 +54,8 @@ just start-local
   </td>
 </tr>
 <tr>
-  <td valign="top">Medium</td>
-  <td valign="top">• Orchestrator<br>• Console (Web admin app)</td>
+  <td valign="top">Full</td>
+  <td valign="top">• Orchestrator<br>• Agent Runner<br>• Console (Web admin app)</td>
   <td valign="top">
     + PostgreSQL pgcrypto extension<br>
     + Console OIDC Client<br>
@@ -63,10 +63,8 @@ just start-local
   </td>
 </tr>
 <tr>
-  <td valign="top">Full + Slack</td>
+  <td valign="top">+ Slack</td>
   <td valign="top">
-    • Orchestrator<br>
-    • Console (Web admin app)<br>
     • Slack Client<br>
     • Slack Client Admin GUI<br>
   </td>
@@ -75,10 +73,8 @@ just start-local
   </td>
 </tr>
 <tr>
-  <td valign="top">Full + Email</td>
+  <td valign="top">+ Email</td>
   <td valign="top">
-    • Orchestrator<br>
-    • Console (Web admin app)<br>
     • Email Client
   </td>
   <td valign="top">
