@@ -12,7 +12,7 @@ PGPORT="${PGPORT:-${POSTGRES_PORT:-${RAMBLER_PORT:-5432}}}"
 PGUSER="${PGUSER:-${POSTGRES_USER:-${RAMBLER_USER:-}}}"
 PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-${RAMBLER_PASSWORD:-}}}"
 PGDATABASE="${PGDATABASE:-${POSTGRES_DB:-${RAMBLER_DATABASE:-}}}"
-PGSCHEMA="${PGSCHEMA:-${POSTGRES_SCHEMA:-${RAMBLER_SCHEMA:-}}}"
+PGSCHEMA="${PGSCHEMA:-${POSTGRES_SCHEMA:-${RAMBLER_SCHEMA:-$PGUSER}}}"
 
 echo "Waiting for database at $PGHOST:$PGPORT to be ready..."
 MAX_RETRIES=20
@@ -26,20 +26,7 @@ while ! psql "postgresql://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$PGDATABASE" -c "
   echo "Database not ready, sleeping... (attempt $RETRY_COUNT/$MAX_RETRIES)"
   sleep 2
 done
-echo "Database is ready!"
-
-echo "Setting up schema..."
-psql -v ON_ERROR_STOP=1 \
--v schema="$PGSCHEMA" \
-"postgresql://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$PGDATABASE" <<EOF
-    CREATE SCHEMA IF NOT EXISTS :schema;
-    CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA :schema;
-    ALTER USER CURRENT_USER SET search_path=:'schema';
-EOF
-
-echo "Schema setup complete!"
-
-echo "Starting migration..."
+echo "Database is ready! Starting migration..."
 
 RAMBLER_HOST=$PGHOST \
 RAMBLER_PORT=$PGPORT \

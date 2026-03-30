@@ -18,9 +18,6 @@ export interface Config {
   readonly logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
   readonly slackAppConfig: {
     signingSecret: string;
-    clientId: string;
-    clientSecret: string;
-    stateSecret: string;
     appToken?: string; // Required for socket mode
     botToken?: string; // Optional: only used for zero-downtime Nannos seed migration
     socketMode: boolean;
@@ -99,14 +96,8 @@ export async function getConfigFromEnv(): Promise<Config> {
   if (!process.env.SLACK_SIGNING_SECRET) {
     throw new Error('Please provide SLACK_SIGNING_SECRET');
   }
-  if (!process.env.SLACK_CLIENT_ID) {
-    throw new Error('Please provide SLACK_CLIENT_ID');
-  }
-  if (!process.env.SLACK_CLIENT_SECRET) {
-    throw new Error('Please provide SLACK_CLIENT_SECRET');
-  }
-  if (!process.env.SLACK_STATE_SECRET) {
-    throw new Error('Please provide SLACK_STATE_SECRET');
+  if (!process.env.V2_COOKIE_SECRET) {
+    throw new Error('Please provide V2_COOKIE_SECRET');
   }
   const environment = (process.env.ENVIRONMENT as Config['environment']) || 'local';
 
@@ -158,9 +149,9 @@ export async function getConfigFromEnv(): Promise<Config> {
     ? {
         host: process.env.POSTGRES_HOST,
         port: Number(process.env.POSTGRES_PORT) || 5432,
-        username: process.env.POSTGRES_USERNAME || 'postgres',
+        username: process.env.POSTGRES_USER || 'postgres',
         password: process.env.POSTGRES_PASSWORD || '',
-        database: process.env.POSTGRES_DATABASE || 'postgres',
+        database: process.env.POSTGRES_DB || 'postgres',
         useSsl: process.env.POSTGRES_USE_SSL === 'true',
         sslCa: process.env.POSTGRES_SSL_CA,
       }
@@ -188,9 +179,6 @@ export async function getConfigFromEnv(): Promise<Config> {
     logLevel: (process.env.LOG_LEVEL as Config['logLevel']) || 'debug',
     slackAppConfig: {
       signingSecret: process.env.SLACK_SIGNING_SECRET!,
-      clientId: process.env.SLACK_CLIENT_ID!,
-      clientSecret: process.env.SLACK_CLIENT_SECRET!,
-      stateSecret: process.env.SLACK_STATE_SECRET!,
       appToken: process.env.SLACK_APP_TOKEN,
       botToken: slackBotToken,
       socketMode,
@@ -220,7 +208,7 @@ export async function getConfigFromEnv(): Promise<Config> {
       timeout: Number(process.env.A2A_SERVER_TIMEOUT) || 30000,
     },
     adminGroup: process.env.ADMIN_GROUP!,
-    v2CookieSecret: process.env.V2_COOKIE_SECRET || process.env.SLACK_STATE_SECRET!,
+    v2CookieSecret: process.env.V2_COOKIE_SECRET!,
     sessionTtlSeconds: Number(process.env.SESSION_TTL_SECONDS) || 86400,
   };
 }

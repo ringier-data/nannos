@@ -1,5 +1,7 @@
 ARG WORKDIR="/opt/app"
 
+FROM zhaowde/rambler:5.4.0-rag2 AS rambler-source
+
 # Build the backend
 # NOTE: ringier-a2a-sdk must be copied into playground-backend/ before building
 FROM docker.rcplus.io/python:3.13-slim AS backend-builder
@@ -31,11 +33,33 @@ ARG WORKDIR
 ARG API_PORT
 ENV API_PORT=${API_PORT}
 
+# Install postgresql-client (required by migrate.sh for psql)
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+
+# Copy rambler binary for running migrations
+COPY --from=rambler-source /rambler /usr/local/bin/rambler
+RUN chmod +x /usr/local/bin/rambler
+
 WORKDIR ${WORKDIR}
 COPY --from=backend-builder ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
 COPY --from=backend-builder ${WORKDIR} .
+
+# Copy migration files
+COPY sqlmigrations/ddl /migrations
+COPY sqlmigrations/migrate.sh ./migrate.sh
+RUN chmod +x ./migrate.sh
+
+# Rambler environment defaults
+ENV RAMBLER_DRIVER=postgresql
+ENV RAMBLER_PROTOCOL=tcp
+ENV RAMBLER_DIRECTORY=/migrations
+ENV RAMBLER_TABLE=migrations
+ENV RAMBLER_SSLMODE=require
+
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+
 # Expose the port the backend server runs on
 EXPOSE ${API_PORT}
-# The command to run the server.
-# Note: We must use asgi_app (not app) to include the Socket.IO ASGI wrapper
-CMD ["/bin/sh", "-c", "./.venv/bin/uvicorn app:asgi_app --host 0.0.0.0 --port ${API_PORT} --log-config log_conf.yml --no-access-log --no-use-colors"]
+
+ENTRYPOINT ["./entrypoint.sh"]
