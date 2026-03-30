@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator-agent
+spec:
+  template:
+    spec:
+      containers:
+      - name: orchestrator-agent
+        image: ghcr.io/ringier-data/nannos-orchestrator-agent:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console
+spec:
+  template:
+    spec:
+      containers:
+      - name: frontend
+        image: ghcr.io/ringier-data/nannos-console-frontend:latest
+      - name: backend
+        image: ghcr.io/ringier-data/nannos-console-backend:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-creator
+spec:
+  template:
+    spec:
+      containers:
+      - name: agent-creator
+        image: ghcr.io/ringier-data/nannos-agent-creator:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-runner
+spec:
+  template:
+    spec:
+      containers:
+      - name: agent-runner
+        image: ghcr.io/ringier-data/nannos-agent-runner:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-slack
+spec:
+  template:
+    spec:
+      containers:
+      - name: frontend
+        image: ghcr.io/ringier-data/nannos-client-slack-frontend:latest
+      - name: backend
+        image: ghcr.io/ringier-data/nannos-client-slack:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-email
+spec:
+  template:
+    spec:
+      containers:
+      - name: backend
+        image: ghcr.io/ringier-data/nannos-client-email:latest

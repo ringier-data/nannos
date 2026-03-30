@@ -86,6 +86,25 @@ just start-local
 
 ## External Dependencies
 
+### Model Provider
+
+The following environment variables should be set on orchestrator, and on any agent which A2A agent using agent-common as a base.
+
+| Provider | Configuration |
+| - | - |
+| Local/OpenAI Compatible API | OPENAI_COMPATIBLE_BASE_URL |
+| AWS Bedrock | AWS SDK compatible environment variables |
+| AzureAI | AZURE_OPENAI_API_KEY |
+| Google | GCP_KEY |
+
+### Tracing 
+
+You can enable tracing by setting
+* LANGSMITH_API_KEY
+* LANGSMITH_TRACING = true
+* LANGSMITH_ENDPOINT
+* LANGSMITH_PROJECT
+
 ### OIDC Issuer
 
 We recommend KeyCloak, as the Console has connector for managing users and groups in KeyCloak from within the Console frontend app.

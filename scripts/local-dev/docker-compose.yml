@@ -1,15 +1,32 @@
 services:
-  postgres:
+  postgres-console:
     image: pgvector/pgvector:pg16
-    container_name: nannos-local-postgres
+    container_name: nannos-local-postgres-console
     ports:
-      - "5432:5432"
+      - "5401:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: playground
+      POSTGRES_DB: console
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata-console:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  postgres-docstore:
+    image: pgvector/pgvector:pg16
+    container_name: nannos-local-postgres-docstore
+    ports:
+      - "5402:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: docstore
+    volumes:
+      - pgdata-docstore:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -36,4 +53,5 @@ services:
       start_period: 30s
 
 volumes:
-  pgdata:
+  pgdata-console:
+  pgdata-docstore:

@@ -1,0 +1,119 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: client-slack
+  labels:
+    app: client-slack
+    app.kubernetes.io/part-of: nannos
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-slack
+  labels:
+    app: client-slack
+    app.kubernetes.io/part-of: nannos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: client-slack
+  template:
+    metadata:
+      labels:
+        app: client-slack
+    spec:
+      serviceAccountName: client-slack
+      containers:
+      - name: frontend
+        ports:
+        - containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 60
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 1
+      - name: backend
+        ports:
+        - containerPort: 8081
+        - containerPort: 8082
+        env:
+        - name: "ENVIRONMENT"
+          value: "${ENV}"
+        - name: "BASE_DOMAIN"
+          value: "${BASE_DOMAIN}"
+        - name: "BASE_URL"
+          value: "https://slack.${BASE_DOMAIN}"
+        - name: "SLACK_APP_PORT"
+          value: "8081"
+        - name: "V2_APP_PORT"
+          value: "8082"
+        - name: "HTTP_IDLE_CONNECTION_KEEP_ALIVE_TIMEOUT"
+          value: "60"
+        - name: "STORAGE_PROVIDER"
+          value: "postgres"
+        - name: "POSTGRES_HOST"
+          value: "${POSTGRES_HOST}"
+        - name: "POSTGRES_PORT"
+          value: "5432"
+        - name: "POSTGRES_USER"
+          value: "slack_client"
+        - name: "POSTGRES_DB"
+          value: "nannos"
+        - name: "POSTGRES_USE_SSL"
+          value: "true"
+        - name: "OIDC_ISSUER_URL"
+          value: "https://login.my-issuer.com/realms/nannos"
+        - name: "OIDC_CLIENT_ID"
+          value: "email-client"
+        - name: "A2A_SERVER_URL"
+          value: "https://orchestrator.${BASE_DOMAIN}"
+        - name: "ADMIN_GROUP"
+          value: "nannos-admin"
+        envFrom:
+        - secretRef:
+            name: client-slack-secrets
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8081
+          initialDelaySeconds: 30
+          periodSeconds: 60
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8081
+          initialDelaySeconds: 10
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: client-slack
+  labels:
+    app: client-slack
+    app.kubernetes.io/part-of: nannos
+spec:
+  selector:
+    app: client-slack
+  ports:
+    - name: frontend
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: v1
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
+    - name: v2
+      port: 8082
+      targetPort: 8082
+      protocol: TCP

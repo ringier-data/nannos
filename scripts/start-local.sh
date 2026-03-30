@@ -172,7 +172,8 @@ printf "${CYAN}│${RESET}                                                      
 
 # Infrastructure
 printf "${CYAN}│${RESET}  Infrastructure:                                       ${CYAN}│${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL      ${DIM}(Docker, localhost:5432)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (console)   ${DIM}(Docker, localhost:5401)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (docstore)  ${DIM}(Docker, localhost:5402)${RESET}\n"
 if [[ "$_OIDC_MODE" == "local" ]]; then
   printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Keycloak        ${DIM}(Docker, localhost:8180)${RESET}\n"
 else
@@ -410,7 +411,10 @@ docker compose up -d
 
 # Wait for PostgreSQL
 log "Waiting for PostgreSQL..."
-until docker compose exec -T postgres pg_isready -U postgres >/dev/null 2>&1; do
+until docker compose exec -T postgres-console pg_isready -U postgres >/dev/null 2>&1; do
+  sleep 1
+done
+until docker compose exec -T postgres-docstore pg_isready -U postgres >/dev/null 2>&1; do
   sleep 1
 done
 ok "PostgreSQL is ready"
@@ -419,37 +423,55 @@ ok "PostgreSQL is ready"
 
 log "Running database migrations (Rambler)..."
 
-MIGRATIONS_IMAGE="nannos-migrations:local"
-MIGRATIONS_DIR="$ROOT_DIR/packages/orchestrator-agent/sqlmigrations"
+CONSOLE_MIGRATIONS_IMAGE="nannos-console-migrations:local"
+DOCSTORE_MIGRATIONS_IMAGE="nannos-docstore-migrations:local"
 
-# Build the migrations image (same Dockerfile used in production)
-docker build -t "$MIGRATIONS_IMAGE" "$MIGRATIONS_DIR" --quiet
+# Build both migration images
+docker build -t "$CONSOLE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/console-backend/sqlmigrations" --quiet
+docker build -t "$DOCSTORE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations" --quiet
 
-# Install extensions in public schema before migrations
+# Install pgvector extension on the docstore database
 docker run --rm \
   --network host \
+  --user 0 \
+  --entrypoint psql \
   -e PGPASSWORD=password \
-  "$MIGRATIONS_IMAGE" psql "postgresql://postgres:password@127.0.0.1:5432/playground" -c "
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+  "$DOCSTORE_MIGRATIONS_IMAGE" "postgresql://postgres:password@127.0.0.1:5402/docstore" -c "
     CREATE EXTENSION IF NOT EXISTS vector;
   "
 
-# Run migrations against the local PostgreSQL container (using public schema)
+# Run console-backend migrations (public schema on port 5401)
+log "Applying console-backend migrations (db: console, port: 5401)..."
 docker run --rm \
   --network host \
+  --user 0 \
   -e PGHOST=127.0.0.1 \
-  -e PGPORT=5432 \
+  -e PGPORT=5401 \
   -e PGUSER=postgres \
   -e PGPASSWORD=password \
-  -e PGDATABASE=playground \
+  -e PGDATABASE=console \
   -e PGSCHEMA=public \
   -e RAMBLER_SSLMODE=disable \
-  "$MIGRATIONS_IMAGE"
+  "$CONSOLE_MIGRATIONS_IMAGE"
+
+# Run orchestrator-agent migrations (public schema on port 5402)
+log "Applying orchestrator-agent migrations (db: docstore, port: 5402)..."
+docker run --rm \
+  --network host \
+  --user 0 \
+  -e PGHOST=127.0.0.1 \
+  -e PGPORT=5402 \
+  -e PGUSER=postgres \
+  -e PGPASSWORD=password \
+  -e PGDATABASE=docstore \
+  -e PGSCHEMA=public \
+  -e RAMBLER_SSLMODE=disable \
+  "$DOCSTORE_MIGRATIONS_IMAGE"
 
 ok "Database migrations applied"
 
 # Seed: make all users administrators for local dev
-docker compose exec -T postgres psql -U postgres -d playground -c \
+docker compose exec -T postgres-console psql -U postgres -d console -c \
   "UPDATE users SET is_administrator = true WHERE is_administrator = false;" \
   >/dev/null 2>&1 || true
 
@@ -610,7 +632,8 @@ cat <<'EOF'
     Agent Creator ..... http://localhost:8080
     Agent Runner ...... http://localhost:5005
     Keycloak .......... $_KC_BASE_URL
-    PostgreSQL ........ localhost:5432
+    PostgreSQL (console) . localhost:5401
+    PostgreSQL (docstore)  localhost:5402
 
   LLM Providers:
 ${_LLM_LINES}
@@ -647,7 +670,7 @@ procs:
     shell: "bash $_INFO_SCRIPT"
     stop: "SIGKILL"
 
-  backend:
+  console-backend:
     cwd: "$ROOT_DIR/packages/console-backend"
     shell: "uv run python -m uvicorn app:asgi_app --host 127.0.0.1 --port 5001 --reload"
     env:
@@ -662,8 +685,8 @@ procs:
       KEYCLOAK_ADMIN_CLIENT_SECRET: "$_OIDC_SECRET_ADMIN"
       KEYCLOAK_GROUP_NAME_PREFIX: "local-"
       POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "playground"
+      POSTGRES_PORT: "5401"
+      POSTGRES_DB: "console"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
@@ -695,8 +718,8 @@ procs:
       PLAYGROUND_BACKEND_URL: "http://localhost:5001"
       PLAYGROUND_FRONTEND_URL: "http://localhost:5173"
       POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "playground"
+      POSTGRES_PORT: "5402"
+      POSTGRES_DB: "docstore"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
@@ -763,8 +786,8 @@ procs:
       AGENT_BASE_URL: "http://localhost:5005"
       PLAYGROUND_BACKEND_URL: "http://localhost:5001"
       POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "playground"
+      POSTGRES_PORT: "5402"
+      POSTGRES_DB: "docstore"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"

@@ -1,0 +1,88 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-creator
+  labels:
+    app: agent-creator
+    app.kubernetes.io/part-of: nannos
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-creator
+  labels:
+    app: agent-creator
+    app.kubernetes.io/part-of: nannos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-creator
+  template:
+    metadata:
+      labels:
+        app: agent-creator
+    spec:
+      serviceAccountName: agent-creator
+      containers:
+      - name: agent-creator
+        ports:
+        - containerPort: 8080
+        env:
+        - name: API_PORT
+          value: "8080"
+        - name: LOG_MODE
+          value: "JSON"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: LOG_SET_EXCEPTHOOK
+          value: "1"
+        - name: AWS_REGION
+          value: "eu-central-1"
+        - name: OIDC_ISSUER
+          value: "https://login.my-issuer.com/realms/nannos"
+        - name: ORCHESTRATOR_CLIENT_ID
+          value: "orchestrator"
+        - name: AGENT_BASE_URL
+          value: "https://agent-creator.${BASE_DOMAIN}"
+        - name: OIDC_CLIENT_ID
+          value: "agent-creator"
+        - name: PLAYGROUND_BACKEND_URL
+          value: "https://console.${BASE_DOMAIN}"
+        - name: PLAYGROUND_FRONTEND_URL
+          value: "https://console.${BASE_DOMAIN}"
+        - name: MCP_GATEWAY_URL
+          value: "https://YOUR_ORG_ID.gatana.ai/mcp"
+        - name: MCP_GATEWAY_CLIENT_ID
+          value: "gatana"
+        envFrom:
+        - secretRef:
+            name: agent-creator-secrets
+        livenessProbe:
+          httpGet:
+            path: /.well-known/agent-card.json
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 60
+        readinessProbe:
+          httpGet:
+            path: /.well-known/agent-card.json
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-creator
+  labels:
+    app: agent-creator
+    app.kubernetes.io/part-of: nannos
+spec:
+  selector:
+    app: agent-creator
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
