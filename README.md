@@ -32,9 +32,6 @@ just start-local
 ---
 
 ## Deployment Scopes
-
-To run Nannos with the minimum scope (only orchestrator, no client or management interfaces), the following is required:
-
 <table>
 <tr><td><b>Scope</b></td><td><b>Components</b></td><td><b>External Dependencies</b></td></tr>
 <tr>
