@@ -41,7 +41,7 @@ just start-local
     • OIDC Issuer<br>
     • Orchestrator OIDC Client<br>
     • LLM Provider (local or remote)<br>
-    • PostgresSQL with pgvector installed (used for document semantic search)
+    • PostgresSQL (+pgvector)
   </td>
 </tr>
 <tr>
@@ -57,6 +57,7 @@ just start-local
   <td valign="top">Medium</td>
   <td valign="top">• Orchestrator<br>• Console (Web admin app)</td>
   <td valign="top">
+    + PostgreSQL pgcrypto extension<br>
     + Console OIDC Client<br>
     + KeyCloak Admin Credentials
   </td>
@@ -77,6 +78,23 @@ just start-local
   </td>
 </tr>
 </table>
+
+## External Dependencies
+
+### OIDC Issuer
+
+We recommend KeyCloak, as the Console has connector for managing users and groups in KeyCloak from within the Console frontend app.
+
+### PostgreSQL
+
+Full scope extensions required: pgcrypto and pgvector.
+
+The following components executes SQL DB migrations on start-up and we recommend to prepare an empty schema for each:
+* Orchestrator (suggested username `docstore` since its used for semantic search over documents)
+* Console Backend
+* Slack Client
+* Email Client
+
 
 ## Components
 ### Required
