@@ -95,6 +95,15 @@ The following components executes SQL DB migrations on start-up and we recommend
 * Slack Client
 * Email Client
 
+| Component | PG database/schema | Shared | Owner |
+| - | - | - |- |
+| Orchestrator | docstore | ✅ | ✅ |
+| Agent Runner | docstore | ✅ |  |
+| Any A2A Server based on agent-common | docstore | ✅ | |
+| Console | console | | ✅ |
+| Slack Client | slack client  | | ✅ |
+| Email Client | email client | | ✅ |
+
 
 ## Components
 ### Required
@@ -135,6 +144,11 @@ Full reference: [`packages/orchestrator-agent/`](packages/orchestrator-agent/)
 | `OIDC_ISSUER` | OIDC issuer URL |
 | `AGENT_BASE_URL` | Public URL of this service, used in the A2A agent card (default: `http://localhost:10001`) |
 | `PLAYGROUND_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
+| `POSTGRES_HOST` | PostgreSQL hostname |
+| `POSTGRES_DB` | PostgreSQL database |
+| `POSTGRES_USER` | docstore user |
+| `POSTGRES_PASSWORD` | Database password |
+| `POSTGRES_SCHEMA` | Schema name (required for migrations to work) |
 
 **LLM provider — provide credentials for at least one:**
 
@@ -143,6 +157,7 @@ Full reference: [`packages/orchestrator-agent/`](packages/orchestrator-agent/)
 | `OPENAI_COMPATIBLE_BASE_URL` | Any OpenAI-compatible server (Ollama, LM Studio, vLLM, etc.) |
 | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_BEDROCK_REGION` | Amazon Bedrock |
 | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` + `OPENAI_API_VERSION` | Azure OpenAI |
+
 
 ---
 
@@ -161,10 +176,10 @@ Full reference: [`packages/console-backend/.env.template`](packages/console-back
 | `ORCHESTRATOR_BASE_DOMAIN` | Host:port of the orchestrator, e.g. `orchestrator.example.com:10001` |
 | `POSTGRES_HOST` | PostgreSQL hostname |
 | `POSTGRES_PORT` | PostgreSQL port (default: `5432`) |
-| `POSTGRES_DB` | Database name (default: `playground`) |
-| `POSTGRES_USER` | Database user (default: `postgres`) |
+| `POSTGRES_DB` | Database name |
+| `POSTGRES_USER` | Database user |
 | `POSTGRES_PASSWORD` | Database password |
-| `POSTGRES_SCHEMA` | Schema name (default: `playground`) |
+| `POSTGRES_SCHEMA` | Schema name (required for migrations to work) |
 
 ---
 
@@ -198,9 +213,10 @@ Full reference: [`packages/agent-runner/.env.template`](packages/agent-runner/.e
 | `PLAYGROUND_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
 | `POSTGRES_HOST` | PostgreSQL hostname (for document store) |
 | `POSTGRES_PORT` | PostgreSQL port (default: `5432`) |
-| `POSTGRES_DB` | Database name (default: `playground`) |
-| `POSTGRES_USER` | Database user (default: `postgres`) |
+| `POSTGRES_DB` | PostgreSQL database |
+| `POSTGRES_USER` | docstore user |
 | `POSTGRES_PASSWORD` | Database password |
+| `POSTGRES_SCHEMA` | Schema name (required for migrations to work) |
 
 LLM provider credentials — same options as the orchestrator.
 
