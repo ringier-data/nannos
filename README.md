@@ -12,11 +12,11 @@ An enterprise-grade multi-agent AI platform built on the [Agent-to-Agent (A2A) p
             │ REST / WS          │ A2A              │ A2A
             ▼                   ▼                 ▼
 ┌───────────────────┐A2A ┌──────────────────────────────────────┐
-│  Console Backend  │◄─-│          Orchestrator Agent          │
-│  (API + Scheduler)│    │  (LangGraph — plans & delegates)    │
+│  Console Backend  │◄─--│          Orchestrator Agent          │
+│  (API + Scheduler)│    │  (LangGraph — plans & delegates)     │
 └───────────────────┘    └──────────────┬───────────────────────┘
                                         │ A2A    
-                              ┌─────────▼──┐  
+                              ┌─────────▼───┐  
                               │ Sub Agents  │   
                               └─────────────┘ 
 
@@ -24,14 +24,14 @@ An enterprise-grade multi-agent AI platform built on the [Agent-to-Agent (A2A) p
 
 ## Quick-Start Local
 
-`OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234 just start-local`
+```bash
+export OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234
+just start-local
+```
 
 ---
 
 ## Deployment Scopes
-
-To run Nannos with the minimum scope (only orchestrator, no client or management interfaces), the following is required:
-
 <table>
 <tr><td><b>Scope</b></td><td><b>Components</b></td><td><b>External Dependencies</b></td></tr>
 <tr>
@@ -41,14 +41,13 @@ To run Nannos with the minimum scope (only orchestrator, no client or management
     • OIDC Issuer<br>
     • Orchestrator OIDC Client<br>
     • LLM Provider (local or remote)<br>
-    • PostgresSQL with pgvector
+    • PostgresSQL with pgvector installed (used for document semantic search)
   </td>
 </tr>
 <tr>
   <td valign="top">Tiny</td>
   <td valign="top">• Orchestrator</td>
   <td valign="top">
-    + Postgres extension pgcrypto 
     + S3, DynamoDB (LangGraph Checkpointing)<br>
     + S3 (binary file storage)<br>
     + MCP Gateway (e.g. <a href="https://www.gatana.ai">Gatana</a>)
@@ -78,23 +77,6 @@ To run Nannos with the minimum scope (only orchestrator, no client or management
   </td>
 </tr>
 </table>
-
-
-## External Dependencies
-
-### OIDC Issuer
-
-We recommend KeyCloak, as the Console has connector for managing users and groups in KeyCloak from within the Console frontend app.
-
-### PostgreSQL
-
-Full scope extensions required: pgcrypto and pgvector.
-
-The following components executes SQL DB migrations on start-up and we recommend to prepare an empty schema for each:
-* Orchestrator (suggested username `docstore` since its used for semantic search over documents)
-* Console Backend
-* Slack Client
-* Email Client
 
 ## Components
 ### Required
