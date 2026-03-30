@@ -100,7 +100,7 @@ The following components executes SQL DB migrations on start-up and we recommend
 * Slack Client
 * Email Client
 
-| Component | PG database/schema | Shared | Owner |
+| Component | PG database/schema | Shared | Need Schema Owner |
 | - | - | - |- |
 | Orchestrator | docstore | ✅ | ✅ |
 | Agent Runner | docstore | ✅ |  |
