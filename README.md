@@ -24,7 +24,10 @@ An enterprise-grade multi-agent AI platform built on the [Agent-to-Agent (A2A) p
 
 ## Quick-Start Local
 
-`OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234 just start-local`
+```bash
+export OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234
+just start-local
+```
 
 ---
 
