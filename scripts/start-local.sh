@@ -581,7 +581,9 @@ just prepare-start
 popd
 
 # Generate the info script
-_INFO_SCRIPT=$(mktemp /tmp/nannos-info-XXXXXX.sh)
+_INFO_SCRIPT=$(mktemp /tmp/nannos-info-XXXXXX)
+mv "$_INFO_SCRIPT" "${_INFO_SCRIPT}.sh"
+_INFO_SCRIPT="${_INFO_SCRIPT}.sh"
 cat > "$_INFO_SCRIPT" <<INFOSCRIPT
 #!/usr/bin/env bash
 cat <<'EOF'
@@ -623,9 +625,10 @@ $_OPT_LINES}
     • Press Ctrl+C or 'q' in mprocs to stop everything
 
   ──────────────────────────────────────────────────────────
+  MPROCS CONFIG: $MPROCS_CFG
 
 EOF
-sleep infinity
+sleep 30d
 INFOSCRIPT
 chmod +x "$_INFO_SCRIPT"
 
