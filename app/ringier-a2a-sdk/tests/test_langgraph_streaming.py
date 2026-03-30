@@ -106,7 +106,8 @@ class TestStreamImplGraphNone:
         responses = await _collect(agent)
         assert len(responses) == 1
         assert responses[0].state == TaskState.failed
-        assert "failed to initialize" in responses[0].content
+        # Updated assertion to match new error message format
+        assert "unable to connect" in responses[0].content.lower()
 
 
 class TestStreamImplRegularTextStreaming:

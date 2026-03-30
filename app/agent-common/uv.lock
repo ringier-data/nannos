@@ -2256,18 +2256,25 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.11.0" },
     { name = "authlib", specifier = ">=1.6.5" },
     { name = "boto3", marker = "extra == 'langgraph'", specifier = ">=1.35.0" },
+    { name = "boto3", marker = "extra == 'langgraph-google'", specifier = ">=1.35.0" },
     { name = "cryptography", specifier = ">=43.0.0" },
     { name = "deepagents", marker = "extra == 'langgraph'", specifier = ">=0.2.0" },
+    { name = "deepagents", marker = "extra == 'langgraph-google'", specifier = ">=0.2.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", marker = "extra == 'langgraph'", specifier = ">=0.3.18" },
+    { name = "langchain", marker = "extra == 'langgraph-google'", specifier = ">=0.3.18" },
     { name = "langchain-aws", marker = "extra == 'langgraph'", specifier = ">=0.3.0" },
+    { name = "langchain-google-genai", marker = "extra == 'langgraph-google'", specifier = ">=0.1.0" },
     { name = "langchain-mcp-adapters", marker = "extra == 'langgraph'", specifier = ">=0.0.6" },
+    { name = "langchain-mcp-adapters", marker = "extra == 'langgraph-google'", specifier = ">=0.0.6" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.1.0" },
+    { name = "langgraph", marker = "extra == 'langgraph-google'", specifier = ">=1.1.0" },
     { name = "langgraph-checkpoint-aws", marker = "extra == 'langgraph'", specifier = ">=0.1.4" },
+    { name = "langgraph-checkpoint-aws", marker = "extra == 'langgraph-google'", specifier = ">=0.1.4" },
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "starlette", specifier = ">=0.46.2" },
 ]
-provides-extras = ["langgraph"]
+provides-extras = ["langgraph", "langgraph-google"]
 
 [package.metadata.requires-dev]
 dev = [

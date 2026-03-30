@@ -34,12 +34,15 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_mcp_adapters.callbacks import Callbacks
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphInterrupt
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
+from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 from ringier_a2a_sdk.utils.streaming import StreamBuffer, StructuredResponseStreamer, extract_text_from_content
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
@@ -286,60 +289,99 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         If config.mcp_tools is set, only those tools are returned (whitelist filtering).
         The discovered tools override orchestrator tools entirely when whitelist is specified.
 
+        Implements retry logic with exponential backoff for transient errors (502, 503, 504).
+
         Returns:
             List of discovered BaseTool instances (filtered by whitelist if specified)
 
         Raises:
             Exception: If MCP discovery fails (will result in failed state)
         """
+        import asyncio
+
         mcp_gateway_url = self.mcp_gateway_url
         mcp_gateway_client_id = self.mcp_gateway_client_id
 
         logger.info(f"Discovering MCP tools for {self.name} from MCP gateway at {mcp_gateway_url}")
 
-        try:
-            # Build connection headers - use token exchange if oauth2_client is available
-            headers: dict[str, str] = {}
+        # Retry parameters
+        max_retries = 3
+        initial_delay = 1.0
+        last_error = None
+        delay = initial_delay
 
-            if self.oauth2_client and self.user_token:
-                # Exchange user token for MCP gateway token (same flow as ToolDiscoveryService)
-                logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
-                mcp_gateway_token = await self.oauth2_client.exchange_token(
-                    subject_token=self.user_token,
-                    target_client_id=mcp_gateway_client_id,
-                    requested_scopes=["openid", "profile", "offline_access"],
-                )
-                headers["Authorization"] = f"Bearer {mcp_gateway_token}"
-                logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
-            else:
-                logger.warning(
-                    f"No OAuth2 client or user token available for {self.name}. "
-                    f"MCP discovery may fail if authentication is required."
-                )
+        for attempt in range(max_retries):
+            try:
+                # Build connection headers - use token exchange if oauth2_client is available
+                headers: dict[str, str] = {}
 
-            client = MultiServerMCPClient(
-                connections={
-                    mcp_gateway_client_id: StreamableHttpConnection(
-                        transport="streamable_http",
-                        url=mcp_gateway_url,
-                        headers=headers if headers else None,
+                if self.oauth2_client and self.user_token:
+                    # Exchange user token for MCP gateway token (same flow as ToolDiscoveryService)
+                    logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
+                    mcp_gateway_token = await self.oauth2_client.exchange_token(
+                        subject_token=self.user_token,
+                        target_client_id=mcp_gateway_client_id,
+                        requested_scopes=["openid", "profile", "offline_access"],
                     )
-                }
-            )
+                    headers["Authorization"] = f"Bearer {mcp_gateway_token}"
+                    logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
+                else:
+                    logger.warning(
+                        f"No OAuth2 client or user token available for {self.name}. "
+                        f"MCP discovery may fail if authentication is required."
+                    )
 
-            tools = await client.get_tools()
-            logger.info(f"Discovered {len(tools)} MCP tools for {self.name}")
+                client = MultiServerMCPClient(
+                    connections={
+                        mcp_gateway_client_id: StreamableHttpConnection(
+                            transport="streamable_http",
+                            url=mcp_gateway_url,
+                            headers=headers if headers else None,
+                        )
+                    },
+                    callbacks=Callbacks(on_progress=on_mcp_progress),
+                )
 
-            tools = [tool for tool in tools if tool.name in (self.config.mcp_tools or [])]
-            logger.info(f"Filtered to {len(tools)} tools based on whitelist for {self.name}")
+                tools = await client.get_tools()
+                logger.info(f"Discovered {len(tools)} MCP tools for {self.name}")
 
-            # Validate tool schemas to prevent OpenAI API errors
-            validated_tools = [_validate_tool_schema(tool) for tool in tools]
-            return validated_tools
+                tools = [tool for tool in tools if tool.name in (self.config.mcp_tools or [])]
+                logger.info(f"Filtered to {len(tools)} tools based on whitelist for {self.name}")
 
-        except Exception as e:
-            logger.error(f"Failed to discover MCP tools for {self.name}: {e}")
-            raise
+                # Validate tool schemas to prevent OpenAI API errors
+                validated_tools = [_validate_tool_schema(tool) for tool in tools]
+
+                if attempt > 0:
+                    logger.info(f"Successfully discovered MCP tools for {self.name} on attempt {attempt + 1}")
+                return validated_tools
+
+            except Exception as e:
+                last_error = e
+
+                # Check if this is a retryable error
+                is_retryable = is_retryable_mcp_error(e)
+
+                if not is_retryable or attempt >= max_retries - 1:
+                    # Non-retryable error or exhausted retries
+                    if is_retryable:
+                        error_msg = format_mcp_error(e)
+                        logger.error(
+                            f"Failed to discover MCP tools for {self.name} after {attempt + 1} attempts: {error_msg}"
+                        )
+                    else:
+                        logger.error(f"Non-retryable error discovering MCP tools for {self.name}: {e}")
+                    raise
+
+                # Retryable error - wait and retry
+                logger.warning(
+                    f"Transient error discovering MCP tools for {self.name} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+                delay *= 2  # Exponential backoff
+
+        # Should never reach here, but just in case
+        raise last_error or Exception(f"Failed to discover MCP tools for {self.name}")
 
     def _get_effective_tools(self) -> List[BaseTool]:
         """Get the effective tools for this agent.

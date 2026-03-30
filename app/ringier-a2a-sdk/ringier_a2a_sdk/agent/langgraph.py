@@ -21,6 +21,7 @@ from langchain.agents.structured_output import AutoStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
+from langchain_mcp_adapters.callbacks import Callbacks
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -28,6 +29,9 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
+
+from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
 from ..agent.base import BaseAgent
 from ..middleware.credential_injector import BaseCredentialInjector
@@ -125,6 +129,7 @@ class LangGraphAgent(BaseAgent):
         # MCP tools will be discovered lazily on first request
         self._mcp_tools: list[BaseTool] | None = None
         self._mcp_tools_lock = False
+        self._mcp_load_error: str | None = None  # Store MCP connection error for user-friendly messaging
         logger.info("MCP tool discovery will happen on first request")
 
         # Graph and MCP client
@@ -261,7 +266,14 @@ class LangGraphAgent(BaseAgent):
             logger.warning(f"Failed to enable cost tracking: {e}")
 
     async def _ensure_mcp_tools_loaded(self):
-        """Ensure MCP tools are discovered and loaded (lazy, on first request)."""
+        """Ensure MCP tools are discovered and loaded (lazy, on first request).
+
+        Gracefully handles MCP connection failures by setting self._graph = None
+        and storing the error message. This allows _stream_impl to provide a
+        helpful error response instead of raising an exception that stalls the request.
+
+        Implements retry logic with exponential backoff for transient errors (502, 503, 504).
+        """
         if self._mcp_tools is not None and self._graph is not None:
             return
 
@@ -278,18 +290,22 @@ class LangGraphAgent(BaseAgent):
             logger.info("Discovering MCP tools...")
 
             connections = await self._get_mcp_connections()
-            self._mcp_client = MultiServerMCPClient(connections=connections)  # type: ignore
+            callbacks = Callbacks(on_progress=on_mcp_progress)
+            self._mcp_client = MultiServerMCPClient(connections=connections, callbacks=callbacks)  # type: ignore
             interceptors = self._get_tool_interceptors()
 
             all_tools = []
             for server_name, connection in connections.items():
                 logger.info(f"Loading tools from MCP server: {server_name}")
-                tools = await load_mcp_tools(
-                    session=None,
+
+                # Retry transient failures with exponential backoff
+                tools = await self._load_mcp_tools_with_retry(
                     connection=connection,
-                    tool_interceptors=interceptors,
+                    interceptors=interceptors,
                     server_name=server_name,
+                    callbacks=callbacks,
                 )
+
                 tools = self._filter_tools(tools)
                 all_tools.extend(tools)
                 logger.info(f"Loaded {len(tools)} tools from {server_name}")
@@ -301,10 +317,89 @@ class LangGraphAgent(BaseAgent):
             logger.info("Graph created with MCP tools")
 
         except Exception as e:
-            logger.error(f"Failed to discover MCP tools: {e}", exc_info=True)
-            raise
+            # Gracefully handle MCP connection failures instead of re-raising.
+            # This prevents the request from stalling and allows _stream_impl
+            # to provide a user-friendly error message.
+            error_message = format_mcp_error(e)
+            logger.error(f"Failed to discover MCP tools: {error_message}", exc_info=True)
+
+            # Store error message for _stream_impl to use
+            self._mcp_load_error = error_message
+
+            # Leave self._graph and self._mcp_tools as None to signal failure
+            # _stream_impl will check for None and yield an error response
         finally:
             self._mcp_tools_lock = False
+
+    async def _load_mcp_tools_with_retry(
+        self,
+        connection: StreamableHttpConnection,
+        interceptors: list,
+        server_name: str,
+        max_retries: int = 3,
+        initial_delay: float = 1.0,
+        callbacks: Callbacks | None = None,
+    ) -> list[BaseTool]:
+        """Load MCP tools with exponential backoff retry for transient errors.
+
+        Retries on HTTP 502, 503, 504 errors with exponential backoff.
+        Non-retryable errors (4xx, connection refused, etc.) fail immediately.
+
+        Args:
+            connection: MCP server connection
+            interceptors: Tool interceptors for credential injection
+            server_name: Server name for logging
+            max_retries: Maximum number of retry attempts (default: 3)
+            initial_delay: Initial delay between retries in seconds (default: 1.0)
+            callbacks: Optional MCP callbacks (e.g. progress) to pass through to tool loading
+
+        Returns:
+            List of loaded MCP tools
+
+        Raises:
+            Exception: If all retries are exhausted or a non-retryable error occurs
+        """
+
+        last_error = None
+        delay = initial_delay
+
+        for attempt in range(max_retries):
+            try:
+                tools = await load_mcp_tools(
+                    session=None,
+                    connection=connection,
+                    tool_interceptors=interceptors,
+                    server_name=server_name,
+                    callbacks=callbacks,
+                )
+                if attempt > 0:
+                    logger.info(f"Successfully loaded MCP tools from {server_name} on attempt {attempt + 1}")
+                return tools
+
+            except Exception as e:
+                last_error = e
+
+                # Check if this is a retryable error
+                is_retryable = is_retryable_mcp_error(e)
+
+                if not is_retryable or attempt >= max_retries - 1:
+                    # Non-retryable error or exhausted retries
+                    if is_retryable:
+                        logger.error(f"Failed to load MCP tools from {server_name} after {attempt + 1} attempts: {e}")
+                    else:
+                        logger.error(f"Non-retryable error loading MCP tools from {server_name}: {e}")
+                    raise
+
+                # Retryable error - wait and retry
+                logger.warning(
+                    f"Transient error loading MCP tools from {server_name} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+                delay *= 2  # Exponential backoff
+
+        # Should never reach here, but just in case
+        raise last_error or Exception("Failed to load MCP tools")
 
     @staticmethod
     def _create_response_tool() -> BaseTool:
@@ -380,11 +475,19 @@ class LangGraphAgent(BaseAgent):
 
             # Verify graph was created
             if self._graph is None:
-                logger.error("Graph is None after _ensure_mcp_tools_loaded()")
+                # Use the stored error message if available, otherwise fall back to generic message
+                error_detail = getattr(self, "_mcp_load_error", None) or "Unknown initialization error"
+                logger.error(f"Graph is None after _ensure_mcp_tools_loaded(): {error_detail}")
+
+                # Provide user-friendly error message
                 yield AgentStreamResponse(
                     state=TaskState.failed,
-                    content="The agent failed to initialize properly. Please contact support or try again later.",
-                    metadata={"error": "graph_initialization_failed"},
+                    content=(
+                        f"I'm unable to connect to my tooling services at the moment. {error_detail}\n\n"
+                        "This is likely a temporary issue. Please try again in a few moments. "
+                        "If the problem persists, please contact support."
+                    ),
+                    metadata={"error": "mcp_connection_failed", "error_detail": error_detail},
                 )
                 return
 
