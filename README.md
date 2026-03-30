@@ -63,16 +63,25 @@ just start-local
   </td>
 </tr>
 <tr>
-  <td valign="top">Full</td>
+  <td valign="top">Full + Slack</td>
   <td valign="top">
     • Orchestrator<br>
     • Console (Web admin app)<br>
     • Slack Client<br>
     • Slack Client Admin GUI<br>
-    • Email Client
   </td>
   <td valign="top">
     + Slack Client OIDC Client<br>
+  </td>
+</tr>
+<tr>
+  <td valign="top">Full + Email</td>
+  <td valign="top">
+    • Orchestrator<br>
+    • Console (Web admin app)<br>
+    • Email Client
+  </td>
+  <td valign="top">
     + Email Client OIDC Client<br>
     + AWS SES
   </td>
