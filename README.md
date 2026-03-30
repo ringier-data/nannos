@@ -12,11 +12,11 @@ An enterprise-grade multi-agent AI platform built on the [Agent-to-Agent (A2A) p
             │ REST / WS          │ A2A              │ A2A
             ▼                   ▼                 ▼
 ┌───────────────────┐A2A ┌──────────────────────────────────────┐
-│  Console Backend  │◄─-│          Orchestrator Agent          │
-│  (API + Scheduler)│    │  (LangGraph — plans & delegates)    │
+│  Console Backend  │◄─--│          Orchestrator Agent          │
+│  (API + Scheduler)│    │  (LangGraph — plans & delegates)     │
 └───────────────────┘    └──────────────┬───────────────────────┘
                                         │ A2A    
-                              ┌─────────▼──┐  
+                              ┌─────────▼───┐  
                               │ Sub Agents  │   
                               └─────────────┘ 
 
