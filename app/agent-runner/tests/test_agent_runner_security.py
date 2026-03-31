@@ -11,6 +11,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from a2a.types import Message, Part, Role, TextPart
 
 
 @pytest.fixture
@@ -223,7 +224,11 @@ class TestWatchConditionNotMet:
         agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-1")
 
         responses = []
-        async for response in agent_runner._stream_impl("any query", user_config, task):
+        async for response in agent_runner._stream_impl(
+            [Message(role=Role.user, parts=[Part(root=TextPart(text="any query"))], message_id="msg-1")],
+            user_config,
+            task,
+        ):
             responses.append(response)
 
         # First response is the "working" status, second is condition_not_met
@@ -267,7 +272,11 @@ class TestWatchConditionNotMet:
         agent_runner._fetch_user_id_from_backend = AsyncMock(return_value="user-uuid-2")
 
         responses = []
-        async for response in agent_runner._stream_impl("", user_config, task):
+        async for response in agent_runner._stream_impl(
+            [Message(role=Role.user, parts=[Part(root=TextPart(text=""))], message_id="msg-2")],
+            user_config,
+            task,
+        ):
             responses.append(response)
 
         # Sub-agent was called

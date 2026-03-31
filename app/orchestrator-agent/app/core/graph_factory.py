@@ -16,14 +16,18 @@ Architecture:
 """
 
 import logging
+import uuid as _uuid
 from typing import Any, Optional
 
+from a2a.types import Message as A2AMessage
+from agent_common.a2a.client_runnable import A2AClientRunnable as _ClientRunnable  # no circular risk
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.cost_tracking_embeddings import CostTrackingBedrockEmbeddings
 from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
 from agent_common.core.model_factory import create_model
+from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
 from deepagents import create_deep_agent
@@ -53,6 +57,7 @@ from ..middleware import (
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
+from .steering_state import get_all_active_subagent_dispatches, get_orchestrator_pending_messages
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
@@ -375,16 +380,71 @@ class GraphFactory:
         storage_paths_middleware = StoragePathsInstructionMiddleware()
 
         # Outermost → innermost (for wrap_* hooks):
-        # DynamicToolDispatch[0] → StoragePaths → PromptCaching → UserPreferences
-        # → LoopDetection → Auth → Retry → A2A → Todo[8]
+        # DynamicToolDispatch[0] → StoragePaths → PromptCaching → Steering
+        # → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo[9]
         #
         # BedrockPromptCaching places cache point after all static content (system prompt + storage paths),
         # so that the cache is shared across all users. StoragePaths is included in the cache.
+        # Steering comes after caching so follow-up messages aren't cached.
         # LoopDetection comes before Auth/Retry to catch loops early.
+
+        async def _forward_to_active_subagents(context_id: str, messages: list) -> None:
+            """Forward steering messages to all active sub-agents.
+
+            When the orchestrator's SteeringMiddleware picks up follow-up
+            messages, they are forwarded to every in-progress sub-agent so
+            each sub-agent's own SteeringMiddleware can inject them.
+            Multiple sub-agents may run in parallel (LangGraph ToolNode uses
+            asyncio.gather for concurrent tool calls).
+            """
+            dispatches = get_all_active_subagent_dispatches(context_id)
+            if not dispatches:
+                return
+
+            for dispatch in dispatches:
+                runnable = dispatch.runnable
+                if not isinstance(runnable, _ClientRunnable):
+                    logger.debug(
+                        f"[STEERING] Active sub-agent '{dispatch.subagent_name}' is local, "
+                        "skipping A2A forwarding (local agents share the same steering queue)"
+                    )
+                    continue
+
+                if not dispatch.subagent_context_id:
+                    logger.warning(
+                        f"[STEERING] Active sub-agent '{dispatch.subagent_name}' has no context_id yet, "
+                        "cannot forward steering message"
+                    )
+                    continue
+
+                for msg in messages:
+                    if not msg.parts:
+                        continue
+
+                    # Forward all parts (text, files, data) — don't strip non-text content
+                    steering_msg = A2AMessage(
+                        role="user",
+                        parts=msg.parts,
+                        message_id=str(_uuid.uuid4()),
+                        context_id=dispatch.subagent_context_id,
+                        task_id=dispatch.subagent_task_id,
+                    )
+                    await runnable.send_steering_message(steering_msg)
+                    logger.info(
+                        f"[STEERING] Forwarded steering message to sub-agent "
+                        f"'{dispatch.subagent_name}' (context_id={dispatch.subagent_context_id})"
+                    )
+
+        steering_middleware = SteeringMiddleware(
+            get_pending_messages=get_orchestrator_pending_messages,
+            on_messages_received=_forward_to_active_subagents,
+        )
+
         return [
             dynamic_tool_middleware,
             storage_paths_middleware,
             BedrockPromptCachingMiddleware(),
+            steering_middleware,
             user_preferences_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,

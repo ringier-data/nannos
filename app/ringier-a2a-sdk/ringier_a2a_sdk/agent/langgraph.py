@@ -14,7 +14,7 @@ import re
 from abc import abstractmethod
 from collections.abc import AsyncIterable
 
-from a2a.types import Task, TaskState
+from a2a.types import Message, Task, TaskState
 from deepagents import create_deep_agent
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import AutoStrategy
@@ -35,8 +35,10 @@ from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
 from ..agent.base import BaseAgent
 from ..middleware.credential_injector import BaseCredentialInjector
+from ..middleware.steering import SteeringMiddleware
 from ..middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 from ..models import TODO_STATE_MAP, AgentStreamResponse, TodoItem, UserConfig
+from ..utils.a2a_part_conversion import a2a_parts_to_content
 from ..utils.streaming import StreamBuffer, StructuredResponseStreamer, extract_text_from_content
 
 logger = logging.getLogger(__name__)
@@ -194,20 +196,23 @@ class LangGraphAgent(BaseAgent):
     # --- Optional methods with defaults ---
 
     def _get_middleware(self) -> list[AgentMiddleware]:
-        """Return agent middleware with schema cleaning for MCP tools.
+        """Return agent middleware with schema cleaning and steering support.
 
-        Includes ToolSchemaCleaningMiddleware by default to clean MCP tool schemas
-        before binding to the model. This removes invalid enum values like "NULL"
-        that some models (e.g., Gemini) reject.
+        Includes:
+        - ToolSchemaCleaningMiddleware: cleans MCP tool schemas before binding
+        - SteeringMiddleware: injects pending user follow-up messages before each LLM call
 
         Provider-specific subclasses (Bedrock, Anthropic, Google) should call
-        super()._get_middleware() and extend the list to preserve schema cleaning.
+        super()._get_middleware() and extend the list to preserve these.
 
         Returns:
-            List of middleware: [ToolSchemaCleaningMiddleware]
+            List of middleware: [ToolSchemaCleaningMiddleware, SteeringMiddleware]
         """
 
-        return [ToolSchemaCleaningMiddleware()]
+        return [
+            ToolSchemaCleaningMiddleware(),
+            SteeringMiddleware(get_pending_messages=self.get_pending_messages),
+        ]
 
     def _get_tool_interceptors(self) -> list:
         """Return tool interceptors for credential injection. Default: empty."""
@@ -232,6 +237,21 @@ class LangGraphAgent(BaseAgent):
 
         logger.debug("No credential injector found in _get_tool_interceptors(), skipping header injection")
         return {}
+
+    async def _preprocess_input_messages(self, messages: list[HumanMessage]) -> list[HumanMessage]:
+        """Hook for provider-specific message preprocessing before graph execution.
+
+        Called after A2A parts are converted to LangChain HumanMessages but before
+        the messages are fed to the LangGraph graph. Override in subclasses to
+        transform content blocks (e.g., convert URL-based images to base64).
+
+        Args:
+            messages: List of HumanMessages with content blocks.
+
+        Returns:
+            Preprocessed list of HumanMessages (default: pass-through).
+        """
+        return messages
 
     def _filter_tools(self, tools: list[BaseTool]) -> list[BaseTool]:
         """Filter tools by query regex pattern."""
@@ -447,7 +467,9 @@ class LangGraphAgent(BaseAgent):
         await self.flush_cost_tracking()
         logger.info(f"{self.__class__.__name__} closed")
 
-    async def _stream_impl(self, query: str, user_config: UserConfig, task: Task) -> AsyncIterable[AgentStreamResponse]:
+    async def _stream_impl(
+        self, messages: list[Message], user_config: UserConfig, task: Task
+    ) -> AsyncIterable[AgentStreamResponse]:
         """Standard LangGraph streaming implementation with FinalResponseSchema extraction.
 
         The base stream() method has already handled:
@@ -462,7 +484,7 @@ class LangGraphAgent(BaseAgent):
         - Handles interrupts and errors
 
         Args:
-            query: The user's natural language query
+            messages: List of A2A Messages from the user (each may contain text, files, data)
             user_config: User configuration with access token
             task: The task context for the current interaction
 
@@ -521,8 +543,14 @@ class LangGraphAgent(BaseAgent):
                 scheduled_job_id=user_config.scheduled_job_id,
             )
 
-            # Convert query to messages format
-            input_messages = [HumanMessage(content=query)]
+            # Convert A2A messages to LangChain HumanMessages
+            input_messages = [
+                HumanMessage(content_blocks=a2a_parts_to_content(msg.parts or []))
+                for msg in messages
+            ]
+
+            # Allow provider-specific preprocessing (e.g., Bedrock URL→base64 image conversion)
+            input_messages = await self._preprocess_input_messages(input_messages)
 
             # Stream graph execution
             chunk_count = 0
@@ -811,12 +839,4 @@ class LangGraphAgent(BaseAgent):
                 content="I've been working on this task for a while and need to take a break. "
                 "I've made some progress, but the task requires more steps than I can complete in one go. "
                 "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",
-            )
-
-        except Exception as e:
-            logger.error(f"Error in {self.__class__.__name__}.stream: {e}", exc_info=True)
-            yield AgentStreamResponse(
-                state=TaskState.failed,
-                content=f"An error occurred while processing your request: {str(e)}",
-                metadata={"error": str(e)},
             )

@@ -23,6 +23,11 @@ Usage:
 # DO NOT import OrchestratorDeepAgent, AgentExecutor, or GraphFactory here
 # They create circular imports. Import them directly from their modules where needed.
 # DO NOT import from discovery here either - causes circular import via models
+#
+# Shared steering state (queues, active dispatch tracking) lives in
+# steering_state.py — a lightweight module with no heavy dependencies,
+# specifically designed to be imported from both executor.py and
+# graph_factory.py without creating circular chains.
 # Import model_factory utilities directly when needed
 
 from agent_common.core.model_factory import (

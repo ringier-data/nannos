@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from typing import Literal
@@ -8,20 +9,30 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types import (
     InternalError,
     InvalidParamsError,
+    Message,
     Part,
     Task,
     TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
     TextPart,
-    UnsupportedOperationError,
 )
 from a2a.utils import (
     new_agent_text_message,
     new_task,
 )
 from a2a.utils.errors import ServerError
+from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.models.base import ModelType
 from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
+from ringier_a2a_sdk.server.executor import (
+    MAX_STEERING_QUEUE_DEPTH,
+    MAX_STEERING_REINVOCATIONS,
+    ActiveStreamInfo,
+    _active_streams,
+    _active_streams_lock,
+)
 
 from app.models.responses import AgentStreamResponse
 
@@ -38,6 +49,13 @@ from .a2a_extensions import (
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
 from .registry import RegistryService, User
+from .steering_state import (
+    get_all_active_subagent_dispatches,
+    get_orchestrator_pending_messages,
+    get_steering_queue,
+    register_steering_queue,
+    remove_steering_queue,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -200,6 +218,79 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
+        context_id = task.context_id
+
+        # Extract caller identity early for steering authorization
+        caller_sub: str | None = None
+        if context.call_context and hasattr(context.call_context, "state"):
+            caller_sub = context.call_context.state.get("user_sub")
+        # Extract caller's channel ID from message metadata (for multi-user Slack conversations)
+        caller_channel_id: str | None = None
+        if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
+            caller_channel_id = context.message.metadata.get("slackChannelId")
+
+        # --- Continuous Interaction Turn: route to active stream if one exists ---
+        async with _active_streams_lock:
+            active = _active_streams.get(context_id)
+            if active is not None:
+                # Verify the caller belongs to this conversation.
+                # Channel (Slack): check caller's channel matches the stream's assistant_id.
+                # Personal: check caller's user_sub matches the stream owner.
+                # If scope is not yet set (race: stream just registered), allow through.
+                if active.scope == "channel":
+                    if active.assistant_id and caller_channel_id != active.assistant_id:
+                        logger.warning(
+                            f"[STEERING] Rejected steering for context_id={context_id}: "
+                            f"caller channel_id does not match stream assistant_id"
+                        )
+                        raise ServerError(error=InvalidParamsError())
+                elif active.scope == "personal":
+                    if active.owner_sub and caller_sub != active.owner_sub:
+                        logger.warning(
+                            f"[STEERING] Rejected steering for context_id={context_id}: "
+                            f"caller_sub={caller_sub} does not match stream owner"
+                        )
+                        raise ServerError(error=InvalidParamsError())
+                if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
+                    logger.warning(
+                        f"[STEERING] Queue full for context_id={context_id} "
+                        f"(depth={active.message_queue.qsize()}), rejecting"
+                    )
+                    raise ServerError(error=InvalidParamsError())
+                logger.info(
+                    f"[STEERING] Active stream found for context_id={context_id}, "
+                    f"queuing message for running orchestrator (queue depth: {active.message_queue.qsize() + 1})"
+                )
+                active.message_queue.put_nowait(context.message)
+                # Also put into orchestrator-local queue (read by SteeringMiddleware)
+                orch_queue = get_steering_queue(context_id)
+                if orch_queue is not None:
+                    orch_queue.put_nowait(context.message)
+                # Acknowledge-only: emit a status-update (NOT a raw Task object)
+                # so the SSE response has at least one event, then return.
+                # Using TaskStatusUpdateEvent avoids the "Task is already set"
+                # error on the client's ClientTaskManager when the event queue
+                # is a tapped child that also receives parent events.
+                await event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        task_id=task.id,
+                        context_id=task.context_id,
+                        status=TaskStatus(
+                            state=task.status.state,
+                            message=task.status.message,
+                        ),
+                        final=False,
+                    )
+                )
+                return
+
+        # No active stream — register ourselves and proceed with execution
+        stream_info = ActiveStreamInfo(context_id=context_id, task_id=task.id, owner_sub=caller_sub)
+        orch_queue: asyncio.Queue[Message] = asyncio.Queue()
+        async with _active_streams_lock:
+            _active_streams[context_id] = stream_info
+        register_steering_queue(context_id, orch_queue)
+
         # ZERO-TRUST: Extract verified user_sub and token from call_context (set by RequestContextBuilder)
         if context.call_context and hasattr(context.call_context, "state"):
             try:
@@ -273,6 +364,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Client may send 'slackUserId' (camelCase) or 'slack_user_id' (snake_case)
             slack_user_id = request_metadata.get("slackUserId")
             slack_channel_id = request_metadata.get("slackChannelId")  # for filesystem namespace isolation
+
+            # Update stream info with scope and assistant_id now that we have them
+            stream_info.scope = "channel" if slack_channel_id else "personal"
+            stream_info.assistant_id = slack_channel_id if slack_channel_id else str(user.id)
+
             if slack_user_id:
                 slack_user_handle = f"<@{slack_user_id}>"
             else:
@@ -448,34 +544,122 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 logger.debug("Initial activity log message emitted.")
 
             # Stable artifact ID for streaming content chunks (A2A artifact-append pattern)
-            streaming_artifact_id = str(uuid.uuid4())
-            first_chunk_sent = False  # Track if we've sent the initial artifact
+            steering_reinvocations = 0
 
-            async for item in self.agent.stream(message_parts, user_config, config=config, resume=resume_value):
-                # Skip costly graph.get_state() for transient streaming chunks
-                metadata = item.metadata or {}
-                if metadata.get("streaming_chunk"):
-                    is_final = True  # Doesn't matter for streaming chunks
-                else:
-                    current_state = graph.get_state(config)  # type: ignore
-                    if hasattr(current_state, "interrupts") and current_state.interrupts:
-                        is_final = False
+            while True:
+                streaming_artifact_id = str(uuid.uuid4())
+                first_chunk_sent = False  # Track if we've sent the initial artifact
+                deferred_terminal_item = None
+
+                async for item in self.agent.stream(message_parts, user_config, config=config, resume=resume_value):
+                    # Buffer the terminal completed item so we can check for unconsumed
+                    # steering messages before emitting it to the SSE stream.
+                    # Other terminal states are emitted immediately.
+                    if item.state == TaskState.completed:
+                        deferred_terminal_item = item
+                        continue
+
+                    # Skip costly graph.get_state() for transient streaming chunks
+                    metadata = item.metadata or {}
+                    if metadata.get("streaming_chunk"):
+                        is_final = True  # Doesn't matter for streaming chunks
                     else:
-                        is_final = True
+                        current_state = graph.get_state(config)  # type: ignore
+                        if hasattr(current_state, "interrupts") and current_state.interrupts:
+                            is_final = False
+                        else:
+                            is_final = True
 
-                # Pass first_chunk_sent flag and update it after each chunk
-                first_chunk_sent = await self._handle_stream_item(
-                    item,
-                    updater,
-                    task,
-                    is_final=is_final,
-                    streaming_artifact_id=streaming_artifact_id,
-                    first_chunk_sent=first_chunk_sent,
-                    active_extensions=requested_extensions,
+                    # Pass first_chunk_sent flag and update it after each chunk
+                    first_chunk_sent = await self._handle_stream_item(
+                        item,
+                        updater,
+                        task,
+                        is_final=is_final,
+                        streaming_artifact_id=streaming_artifact_id,
+                        first_chunk_sent=first_chunk_sent,
+                        active_extensions=requested_extensions,
+                    )
+
+                # Check for steering messages that arrived after the last abefore_model
+                if (
+                    deferred_terminal_item is not None
+                    and deferred_terminal_item.state == TaskState.completed
+                    and steering_reinvocations < MAX_STEERING_REINVOCATIONS
+                ):
+                    unconsumed = get_orchestrator_pending_messages(context_id)
+                    if unconsumed:
+                        # Build new message parts from the unconsumed steering messages
+                        new_parts: list[Part] = []
+                        for msg in unconsumed:
+                            if msg.parts:
+                                new_parts.extend(msg.parts)
+
+                        if new_parts:
+                            steering_reinvocations += 1
+                            message_parts = new_parts
+                            resume_value = None  # Not resuming — fresh turn
+                            logger.info(
+                                f"[STEERING] Re-invoking orchestrator with {len(unconsumed)} late steering "
+                                f"message(s) (reinvocation {steering_reinvocations}/{MAX_STEERING_REINVOCATIONS})"
+                            )
+                            continue  # Loop back for another stream round
+
+                # Emit the deferred terminal event
+                if deferred_terminal_item is not None:
+                    metadata = deferred_terminal_item.metadata or {}
+                    if metadata.get("streaming_chunk"):
+                        is_final = True
+                    else:
+                        current_state = graph.get_state(config)  # type: ignore
+                        if hasattr(current_state, "interrupts") and current_state.interrupts:
+                            is_final = False
+                        else:
+                            is_final = True
+                    await self._handle_stream_item(
+                        deferred_terminal_item,
+                        updater,
+                        task,
+                        is_final=is_final,
+                        streaming_artifact_id=streaming_artifact_id,
+                        first_chunk_sent=first_chunk_sent,
+                        active_extensions=requested_extensions,
+                    )
+                break  # Done — no re-invocation needed
+        except asyncio.CancelledError:
+            logger.info(f"Orchestrator execution cancelled for context_id={context_id}")
+            try:
+                await asyncio.shield(
+                    updater.update_status(
+                        TaskState.canceled,
+                        new_agent_text_message(
+                            "Agent execution was cancelled.",
+                            task.context_id,
+                            task.id,
+                        ),
+                    )
                 )
+            except (asyncio.CancelledError, Exception):
+                pass  # Best-effort: queue may already be closed
+            raise
         except Exception as e:
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}", exc_info=True)
             raise ServerError(error=InternalError()) from e
+        finally:
+            # Log unconsumed steering messages before cleanup.
+            # These arrive between the last abefore_model call and stream
+            # completion — they will be handled as the next conversation turn.
+            unconsumed = get_orchestrator_pending_messages(context_id)
+            if unconsumed:
+                logger.warning(
+                    f"[STEERING] {len(unconsumed)} unconsumed steering message(s) "
+                    f"for context_id={context_id} after execution finished. "
+                    f"They will be handled as the next conversation turn."
+                )
+            # Deregister active stream and clean up orchestrator steering queue
+            async with _active_streams_lock:
+                _active_streams.pop(context_id, None)
+            remove_steering_queue(context_id)
 
     async def _handle_stream_item(
         self,
@@ -715,4 +899,49 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         return False
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        raise ServerError(error=UnsupportedOperationError())
+        """Handle task cancellation with sub-agent propagation.
+
+        Propagates cancel to all active sub-agents (if any) via A2A tasks/cancel,
+        then emits a canceled status event.  DefaultRequestHandler.on_cancel_task()
+        subsequently cancels the producer_task asyncio.Task.
+        """
+        task_id = context.task_id or ""
+        context_id = context.context_id or ""
+        logger.info("Cancel requested for orchestrator task_id=%s context_id=%s", task_id, context_id)
+
+        # Propagate cancel to all active sub-agents (best-effort, in parallel)
+        dispatches = get_all_active_subagent_dispatches(context_id)
+        if dispatches:
+            cancel_coros = []
+            for dispatch in dispatches:
+                if dispatch.subagent_task_id and isinstance(dispatch.runnable, A2AClientRunnable):
+                    logger.info(
+                        "Propagating cancel to sub-agent %s (task_id=%s)",
+                        dispatch.subagent_name,
+                        dispatch.subagent_task_id,
+                    )
+                    cancel_coros.append(dispatch.runnable.cancel_task(dispatch.subagent_task_id))
+            if cancel_coros:
+                results = await asyncio.gather(*cancel_coros, return_exceptions=True)
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.warning(
+                            "Failed to propagate cancel to a sub-agent: %s",
+                            result,
+                        )
+
+        await event_queue.enqueue_event(
+            TaskStatusUpdateEvent(
+                task_id=task_id,
+                context_id=context_id,
+                status=TaskStatus(
+                    state=TaskState.canceled,
+                    message=new_agent_text_message(
+                        "Agent execution was cancelled.",
+                        context_id,
+                        task_id,
+                    ),
+                ),
+                final=True,
+            )
+        )

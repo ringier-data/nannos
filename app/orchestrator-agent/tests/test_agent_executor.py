@@ -32,6 +32,7 @@ class TestOrchestratorDeepAgentExecutor:
         context.message = Mock(spec=Message)
         context.message.role = "user"
         context.message.parts = [Part(root=TextPart(text="test query"))]
+        context.message.metadata = None
         context.message.task_id = None
         context.message.context_id = None
         context.call_context = Mock()
@@ -69,21 +70,22 @@ class TestOrchestratorDeepAgentExecutor:
 
         assert result is False
 
-    async def test_cancel_raises_unsupported_operation(self, dynamodb_table):
-        """Test that cancel raises UnsupportedOperationError."""
+    async def test_cancel_emits_canceled_event(self, dynamodb_table):
+        """Test that cancel emits a canceled status event."""
         executor = OrchestratorDeepAgentExecutor()
 
         context = Mock(spec=RequestContext)
-        event_queue = Mock(spec=EventQueue)
+        context.task_id = "task-123"
+        context.context_id = "ctx-456"
+        event_queue = AsyncMock(spec=EventQueue)
 
-        # Should raise UnsupportedOperationError
-        from a2a.utils.errors import ServerError
+        await executor.cancel(context, event_queue)
 
-        try:
-            await executor.cancel(context, event_queue)
-            assert False, "Should have raised ServerError"
-        except ServerError:
-            pass
+        # Verify a canceled event was enqueued
+        event_queue.enqueue_event.assert_called_once()
+        event = event_queue.enqueue_event.call_args[0][0]
+        assert event.status.state == TaskState.canceled
+        assert event.final is True
 
 
 class TestAgentExecutorStreamHandling:
@@ -170,7 +172,10 @@ class TestAgentExecutorStreamHandling:
         )
 
         result = await executor._handle_stream_item(
-            item, updater, task, is_final=True,
+            item,
+            updater,
+            task,
+            is_final=True,
             streaming_artifact_id="artifact-1",
             first_chunk_sent=True,
         )

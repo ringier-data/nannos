@@ -111,6 +111,47 @@ async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
     }
 ````
 
+## Continuous Interaction Turns (Steering)
+
+The executor supports sending follow-up messages to a running agent. Understanding the underlying A2A SDK queue mechanics is critical.
+
+### EventQueue Tap Semantics
+
+The A2A SDK's `EventQueue.tap()` creates a child queue registered in `parent._children`. When the parent calls `enqueue_event()`, the event is placed in the parent's `asyncio.Queue` AND fan-out copied to every child:
+
+```python
+# a2a/server/events/event_queue.py
+async def enqueue_event(self, event):
+    await self.queue.put(event)
+    for child in self._children:
+        await child.enqueue_event(event)  # independent copy
+```
+
+`QueueManager.create_or_tap()` is called for **every** `send_message` request. If a queue exists for the task_id, it taps (creates a child). This is designed for `resubscribe` — reconnecting observers to an in-progress stream.
+
+### Why This Matters for Steering
+
+Steering messages use the same `send_message` endpoint, so the SDK automatically creates a tapped child queue. The executor emits only one ack event (`TaskStatusUpdateEvent`) into the event queue, but since the child is tapped to the parent, all ongoing parent events (artifact chunks, status updates from the primary execution) also propagate into the child.
+
+Consumers must handle this:
+- **Draining all events** (like `A2AClientRunnable.send_steering_message`) is safe when using an independent HTTP/SSE connection — the child is transport-isolated
+- **Breaking after one event** (like playground-backend) is required when sharing the same SDK `Client`, to avoid leaked parent events hitting the shared `ClientTaskManager` ("Task is already set" error)
+
+Note: In practice the child stream is very short-lived — the executor returns immediately after the ack, causing `_run_event_stream` to close the child queue. Both `pass` and `break` are functionally equivalent; the difference is defensive.
+
+### Safety Properties
+
+- **No cross-queue interference**: Each `EventQueue` has its own `asyncio.Queue`. Consuming from a child never removes events from the parent
+- **ClientTaskManager collision**: The executor emits `TaskStatusUpdateEvent` (not a raw `Task`) for the ack to avoid "Task is already set" errors on clients that share a `Client` instance between primary and steering streams
+- **Backpressure**: Undrained child queues (maxsize=1024) can block `parent.enqueue_event` if they fill up. SSE connection teardown calls `close()` on the child, which makes future `enqueue_event` calls return immediately
+
+### Executor Implementation (`server/executor.py`)
+
+- Active streams are tracked in `_active_streams` (module-level dict, keyed by `context_id`)
+- `SteeringMiddleware` consumes pending messages from `ActiveStreamInfo.message_queue` before each LLM call
+- After completion, if unconsumed messages remain, the executor re-invokes the agent once (`MAX_STEERING_REINVOCATIONS=1`)
+- The `finally` block always deregisters the stream and clears the message queue
+
 ## Testing
 
 **Prefer the runTests MCP tool over terminal commands when running tests.**

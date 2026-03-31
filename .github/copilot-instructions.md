@@ -145,6 +145,35 @@ To ensure new A2A agents participate in distributed tracing:
 4. Add SSM permission to read LANGSMITH_API_KEY in the execution role
 5. Update `start-dev.sh` to fetch and set LANGSMITH_API_KEY for the new service
 
+## Continuous Interaction Turns (Steering)
+
+The system supports sending follow-up messages to an agent that is already processing a task. This is called "steering" and is a cross-cutting concern spanning the executor (ringier-a2a-sdk), client_runnable (agent-common), and playground-backend.
+
+### How It Works
+
+1. **Executor** (`ringier_a2a_sdk/server/executor.py`): When a `send_message` arrives for a `context_id` that already has an active stream, the executor queues the message into `ActiveStreamInfo.message_queue` and emits a single `TaskStatusUpdateEvent` as an acknowledgment. It does NOT start a second agent execution.
+2. **SteeringMiddleware** (`ringier_a2a_sdk/middleware/steering.py`): Injected into the LangGraph middleware stack, it consumes pending messages from the queue before each LLM call, injecting them as `HumanMessage`s into the conversation.
+3. **Re-invocation**: If steering messages arrive after the last `abefore_model` call but before completion, the executor re-invokes the agent once (`MAX_STEERING_REINVOCATIONS=1`) with the unconsumed messages.
+
+### A2A SDK Tap Semantics (Critical Subtlety)
+
+The A2A SDK's `QueueManager.create_or_tap()` is called for every `send_message` request. If a queue already exists for the task_id, it creates a **tapped child** via `EventQueue.tap()`. The child queue receives **all future events** from the parent via fan-out in `enqueue_event()`. This is designed for `resubscribe` (reconnecting to an ongoing stream), not steering.
+
+Steering piggybacks on `send_message`, so it gets a tapped child. The executor emits one ack event, but parent stream events (artifact chunks, status updates) also propagate into the child.
+
+### Consumer-Side Workarounds
+
+| Consumer | Pattern | Why |
+|----------|---------|-----|
+| `playground-backend` (`app.py`) | `break` after first event | Shares the same SDK client; consuming leaked parent events could trigger `ClientTaskManager` "Task is already set" errors |
+| `A2AClientRunnable.send_steering_message()` | `pass` to drain all | Makes an independent HTTP request with its own SSE connection; draining is safe because the child queue is transport-isolated |
+
+### Safety Properties
+
+- **No race condition on main queue**: `tap()` creates an independent `asyncio.Queue`; consuming from a child never removes events from the parent
+- **ClientTaskManager collision**: The executor emits `TaskStatusUpdateEvent` (not a raw `Task` object) for the ack specifically to avoid "Task is already set" errors when the child queue shares a client with the primary stream. The `break` is an additional safety layer against leaked parent events
+- **Backpressure risk**: If the child queue isn't closed promptly after `break`, its 1024-slot buffer could fill, blocking `parent.enqueue_event`. In practice, SSE teardown closes it quickly
+
 ## A2A Extensions Protocol
 
 The orchestrator emits structured streaming events via three custom A2A extensions. This is a cross-cutting concern spanning the orchestrator (emitter), playground-backend (proxy/filter), and playground-frontend (renderer).

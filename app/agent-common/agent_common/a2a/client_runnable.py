@@ -14,7 +14,6 @@ TODO: this module could be better aligned with A2A SDK types and patterns.
 """
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -30,6 +29,7 @@ from a2a.types import (
     Message,
     Task,
     TaskArtifactUpdateEvent,
+    TaskIdParams,
     TaskState,
     TextPart,
     TransportProtocol,
@@ -42,6 +42,7 @@ from a2a.types import (
 )
 from langchain_core.messages import AIMessage, ContentBlock
 from langsmith.run_helpers import get_current_run_tree
+from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
 from agent_common.a2a.authentication import (
     AuthenticationMethod,
@@ -144,15 +145,7 @@ class A2AClientRunnable(BaseA2ARunnable):
 
     def _extract_text_from_parts(self, parts: Sequence[A2APart]) -> str:
         """Extract text content from A2A parts."""
-        # TODO: what to do with files?
-        texts = []
-        for part in parts:
-            inner_part = part.root
-            if inner_part.kind == "text":
-                texts.append(inner_part.text)
-            elif inner_part.kind == "data":
-                texts.append(json.dumps(inner_part.data))
-        return "\n".join(texts) if texts else ""
+        return a2a_parts_to_content(parts, text_only=True)
 
     def _parse_auth_payload(self, task_status) -> Dict[str, Any]:
         """Parse authentication payload from task status following CIBA patterns."""
@@ -534,6 +527,49 @@ class A2AClientRunnable(BaseA2ARunnable):
         )
 
     # NOTE: _wrap_message_with_metadata is inherited from BaseA2ARunnable
+
+    async def send_steering_message(self, message: Message) -> None:
+        """Send a steering message to the sub-agent and consume the ack.
+
+        When the sub-agent has an active stream for the same context_id, its
+        executor queues the message and returns an immediate acknowledgment.
+        This method sends the message and drains the ack response.
+
+        Args:
+            message: A2A Message with context_id/task_id set to the active task.
+        """
+        client = await self._get_client()
+        logger.info(
+            f"[STEERING] Forwarding steering message to {self.name} "
+            f"(context_id={message.context_id}, task_id={message.task_id})"
+        )
+        try:
+            async for _ in client.send_message(message):
+                pass  # drain ack events
+        except Exception:
+            logger.warning(
+                f"[STEERING] Failed to forward steering message to {self.name}",
+                exc_info=True,
+            )
+
+    async def cancel_task(self, task_id: str) -> None:
+        """Send an A2A tasks/cancel request to the remote agent.
+
+        Best-effort: logs warnings on failure but never raises.
+
+        Args:
+            task_id: The A2A task ID to cancel.
+        """
+        try:
+            client = await self._get_client()
+            logger.info(f"Sending cancel_task to {self.name} (task_id={task_id})")
+            await client.cancel_task(TaskIdParams(id=task_id))
+            logger.info(f"cancel_task acknowledged by {self.name} (task_id={task_id})")
+        except Exception:
+            logger.warning(
+                f"Failed to cancel task on {self.name} (task_id={task_id})",
+                exc_info=True,
+            )
 
     async def astream(
         self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None

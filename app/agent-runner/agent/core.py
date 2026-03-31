@@ -28,7 +28,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from a2a.types import AgentCard, Task, TaskState
+from a2a.types import AgentCard, Message, Task, TaskState
 from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.config import A2AClientConfig
 from agent_common.a2a.factory import make_a2a_async_runnable
@@ -112,9 +112,15 @@ def _create_checkpointer() -> DynamoDBSaver:
     )
 
 
-def _extract_text_from_query(query: str) -> str:
-    """Return the query text (already extracted by executor's get_user_input())."""
-    return (query or "").strip()
+def _extract_text_from_message(message: Message) -> str:
+    """Extract text content from an A2A Message's parts."""
+    texts = []
+    for part in message.parts or []:
+        if hasattr(part, "root") and hasattr(part.root, "text"):
+            texts.append(part.root.text)
+        elif hasattr(part, "text"):
+            texts.append(part.text)
+    return "\n".join(texts).strip()
 
 
 def _extract_message_metadata(task: Task) -> dict[str, Any]:
@@ -316,7 +322,7 @@ class AgentRunner(BaseAgent):
 
     async def _stream_impl(
         self,
-        query: str,
+        messages: list[Message],
         user_config: UserConfig,
         task: Task,
     ) -> AsyncIterable[AgentStreamResponse]:
@@ -331,7 +337,7 @@ class AgentRunner(BaseAgent):
         to extract structured metadata (scheduler_status, agent_message, etc.).
 
         Args:
-            query: Prompt text extracted from the A2A message parts.
+            messages: List of A2A Messages from the user (each may contain text, files, data).
             user_config: Authenticated user context from JWT middleware.
             task: The A2A task with message history and metadata.
 
@@ -356,7 +362,9 @@ class AgentRunner(BaseAgent):
 
         # For tasks: query contains the prompt for the sub-agent
         # For watches: query contains the agent_message (what the agent delivers to user)
-        message_text = _extract_text_from_query(query)
+        # TODO: what about multi-modal inputs (files, data) in the message parts?
+        #       For now we only extract text from the messages.
+        message_text = "\n".join(_extract_text_from_message(m) for m in messages).strip()
         last_check_result: dict | None = None
         agent_message: str | None = None
 
@@ -486,6 +494,9 @@ class AgentRunner(BaseAgent):
             headers={"Authorization": f"Bearer {gatana_access_token}"},
             timeout=mcp_timeout,
             sse_read_timeout=mcp_timeout,
+            session_kwargs={
+                "read_timeout_seconds": mcp_timeout,
+            },
         )
 
         check_result: dict = {}
@@ -919,6 +930,9 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 headers={"Authorization": f"Bearer {gatana_access_token}"},
                 timeout=mcp_timeout,
                 sse_read_timeout=mcp_timeout,
+                session_kwargs={
+                    "read_timeout_seconds": mcp_timeout,
+                },
             )
             mcp_client = MultiServerMCPClient({"gateway": connection})
             async with mcp_client.session("gateway") as session:

@@ -67,6 +67,7 @@ from ringier_a2a_sdk.models import TodoItem
 from ringier_a2a_sdk.utils import create_runnable_config
 from ringier_a2a_sdk.utils.schema_cleaning import CleanupLevel, validate_and_clean_tool_dict
 
+from ..core.steering_state import ActiveSubagentDispatch, clear_active_subagent_dispatch, set_active_subagent_dispatch
 from ..models.config import GraphRuntimeContext
 
 logger = logging.getLogger(__name__)
@@ -674,8 +675,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             or plain content otherwise
         """
         input_modes = subagent.get("runnable").input_modes
-        if input_modes == ["text"]:
-            # Agent doesn't support files, send text only (optimization: skip filtering)
+        _TEXT_ONLY_MODES = {"text", "text/plain"}
+        if set(input_modes).issubset(_TEXT_ONLY_MODES):
+            # Agent only supports text, send text only (optimization: skip filtering)
             logger.debug(f"Subagent '{subagent.get('name', 'unknown')}' is not multimodal, sending text-only message")
             return HumanMessage(content=description)
 
@@ -1199,6 +1201,16 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             logger.info(f"[STREAMING] Yielding final item from astream_a2a_agent: {type(final_item).__name__}")
             yield final_item
 
+        # Register active sub-agent dispatch so the orchestrator's SteeringMiddleware
+        # can forward user follow-up messages to the in-progress sub-agent.
+        dispatch_info = ActiveSubagentDispatch(
+            subagent_name=subagent_type,
+            runnable=runnable,
+            orchestrator_context_id=orchestrator_conversation_id or "unknown",
+        )
+        if orchestrator_conversation_id:
+            set_active_subagent_dispatch(orchestrator_conversation_id, dispatch_info)
+
         try:
             # All runnables (both local and remote) now support astream
             final_result = None
@@ -1216,6 +1228,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 if isinstance(result, TaskUpdate):
                     logger.info("[STREAMING] Consumer got TaskUpdate, storing as final_result")
                     final_result = result
+                    # Update dispatch info with sub-agent's context_id/task_id for steering forwarding
+                    if result.data and dispatch_info:
+                        dispatch_info.subagent_context_id = result.data.context_id
+                        dispatch_info.subagent_task_id = result.data.task_id
                     # CRITICAL: Exit early on terminal state instead of waiting for all items
                     # This allows artifacts (which are emitted via stream_writer) to flow through
                     # the executor's stream incrementally instead of being buffered until now
@@ -1268,6 +1284,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 tool_call_id=tool_call_id,
                 status="error",
             )
+        finally:
+            # Clean up active sub-agent dispatch tracking
+            if orchestrator_conversation_id:
+                clear_active_subagent_dispatch(orchestrator_conversation_id, dispatch_info)
 
     def wrap_tool_call(
         self,

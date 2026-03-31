@@ -68,7 +68,7 @@ interface ChatProviderProps {
 // Helper to build unified timeline from thoughts and status history
 // Todos are kept in sticky widget only, not in timeline
 const buildTimeline = (
-  thoughts: Array<{ agent_name: string; content: string; complete?: boolean }> | undefined,
+  thoughts: Array<{ agent_name: string; content: string; complete?: boolean; startedAt?: Date }> | undefined,
   history: Array<{ timestamp: Date; message: string; source?: string }> | undefined,
   baseTimestamp: Date
 ): TimelineEvent[] => {
@@ -81,11 +81,12 @@ const buildTimeline = (
     });
   }
   
-  // Add thoughts (use base timestamp, mark start and end)
+  // Add thoughts (use their own startedAt timestamp when available)
   if (thoughts && thoughts.length > 0) {
     thoughts.forEach(thought => {
-      events.push({ type: 'thought_start', timestamp: baseTimestamp, agent_name: thought.agent_name });
-      events.push({ type: 'thought_end', timestamp: baseTimestamp, agent_name: thought.agent_name, content: thought.content, complete: thought.complete ?? true });
+      const ts = thought.startedAt || baseTimestamp;
+      events.push({ type: 'thought_start', timestamp: ts, agent_name: thought.agent_name });
+      events.push({ type: 'thought_end', timestamp: ts, agent_name: thought.agent_name, content: thought.content, complete: thought.complete ?? true });
     });
   }
   
@@ -213,11 +214,11 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [waitingMap, setWaitingMap] = useState<Map<string, boolean>>(new Map());
   const [streamingMap, setStreamingMap] = useState<Map<string, string>>(new Map());
   const [workingStepsMap, setWorkingStepsMap] = useState<Map<string, TodoItem[]>>(new Map());
-  const [subagentThoughtsMap, setSubagentThoughtsMap] = useState<Map<string, Array<{agent_name: string; content: string; complete: boolean}>>>(new Map());
+  const [subagentThoughtsMap, setSubagentThoughtsMap] = useState<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
   const [statusHistoryMap, setStatusHistoryMap] = useState<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
   const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
   const streamingMapRef = useRef<Map<string, string>>(new Map());
-  const subagentThoughtsMapRef = useRef<Map<string, Array<{agent_name: string; content: string; complete: boolean}>>>(new Map());
+  const subagentThoughtsMapRef = useRef<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
   const statusHistoryMapRef = useRef<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
@@ -323,6 +324,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         return;
       }
 
+      // Steering ack: the backend confirmed the follow-up was queued for the
+      // running agent. Nothing to render — the original stream is still active.
+      if ((data as any).steering) {
+        console.log('[STEERING] Follow-up message accepted for', resolvedConversationId);
+        return;
+      }
+
       // Save context_id
       if (data.contextId) {
         setContextIdsMap((prev) => {
@@ -383,13 +391,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
               const existingThoughts = subagentThoughtsMapRef.current.get(resolvedConversationId) || [];
               const lastThought = existingThoughts[existingThoughts.length - 1];
               
-              if (lastThought && lastThought.agent_name === agentName) {
-                // Append to existing thought from same agent
+              if (lastThought && lastThought.agent_name === agentName && !lastThought.complete) {
+                // Append to existing in-progress thought from same agent
                 lastThought.content += text;
               } else {
-                // New thought from different agent — mark all previous as complete
+                // New thought: different agent OR same agent re-invoked after completion
                 existingThoughts.forEach(t => { t.complete = true; });
-                existingThoughts.push({ agent_name: agentName, content: text, complete: false });
+                existingThoughts.push({ agent_name: agentName, content: text, complete: false, startedAt: new Date() });
               }
               
               subagentThoughtsMapRef.current.set(resolvedConversationId, existingThoughts);
@@ -434,6 +442,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             });
             statusHistoryMapRef.current.set(resolvedConversationId, history);
             setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+            // Mark any in-progress thoughts as complete — the orchestrator moved
+            // on to a new action so the previous sub-agent thinking is done.
+            const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+            if (thoughts?.some(t => !t.complete)) {
+              thoughts.forEach(t => { t.complete = true; });
+              setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+            }
             return; // Don't process as regular status update
           }
         }

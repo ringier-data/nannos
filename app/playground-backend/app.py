@@ -5,6 +5,7 @@ import os
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -23,6 +24,7 @@ from a2a.types import (
     Role,
     Task,
     TaskArtifactUpdateEvent,
+    TaskIdParams,
     TaskState,
     TaskStatusUpdateEvent,
     TextPart,
@@ -274,14 +276,84 @@ socket_notification_manager = SocketNotificationManager(sio)
 # Store in app.state for access by services
 app.state.socket_notification_manager = socket_notification_manager
 
-# Track active send_message tasks for cancellation: "{sid}:{context_id}" → asyncio.Task
-active_tasks: dict[str, asyncio.Task[Any]] = {}
+# Track active send_message tasks for cancellation: "{sid}:{context_id}" → ActiveTaskInfo
+
+
+@dataclass
+class ActiveTaskInfo:
+    """Tracks an active A2A streaming task."""
+
+    asyncio_task: asyncio.Task[Any]
+    a2a_client: Client | None = None
+    a2a_task_id: str | None = None
+
+
+active_tasks: dict[str, ActiveTaskInfo] = {}
 
 # Buffer for accumulating streaming artifact chunks per conversation.
 # Keyed by context_id. Chunks are assembled here and persisted as a
 # single message when the completion status arrives.
 # Intermediate output (with urn:nannos:a2a:intermediate-output:1.0 extensions) are NOT accumulated.
 _streaming_buffers: dict[str, str] = {}
+
+
+# ==============================================================================
+# Active Task Helpers
+# ==============================================================================
+
+
+def _extract_a2a_task_id(stream_result: ClientEvent | Message) -> str | None:
+    """Extract the A2A task_id from a stream event, if present."""
+    if isinstance(stream_result, tuple):
+        event = stream_result[1] if len(stream_result) > 1 and stream_result[1] else stream_result[0]
+    else:
+        event = stream_result
+
+    # TaskStatusUpdateEvent and TaskArtifactUpdateEvent have taskId
+    if isinstance(event, (TaskStatusUpdateEvent, TaskArtifactUpdateEvent, Message)):
+        return event.task_id
+
+    # Task objects have .id
+    return event.id
+
+
+async def _cancel_active_task(task_info: ActiveTaskInfo, key: str, reason: str) -> None:
+    """Cancel an active task via A2A protocol + asyncio cancellation.
+
+    Sends tasks/cancel to the orchestrator (best-effort) for clean shutdown,
+    then cancels the local asyncio task for immediate cleanup.
+    """
+    # Send A2A cancel_task if we have a task_id (best-effort, fire-and-forget)
+    if task_info.a2a_task_id and task_info.a2a_client:
+        try:
+            logger.info(f"Sending A2A cancel_task for key={key} task_id={task_info.a2a_task_id} ({reason})")
+            await task_info.a2a_client.cancel_task(TaskIdParams(id=task_info.a2a_task_id))
+        except Exception:
+            logger.warning(f"A2A cancel_task failed for key={key}", exc_info=True)
+
+    # Cancel local asyncio task for immediate UI feedback
+    if not task_info.asyncio_task.done():
+        task_info.asyncio_task.cancel()
+        logger.info(f"Cancelled asyncio task: key={key} ({reason})")
+
+
+async def _deferred_connection_cleanup(sid: str) -> None:
+    """Wait for all tasks of a disconnected socket to finish, then clean up the connection pool."""
+    prefix = f"{sid}:"
+    while True:
+        running = [
+            info.asyncio_task
+            for key, info in active_tasks.items()
+            if key.startswith(prefix) and not info.asyncio_task.done()
+        ]
+        if not running:
+            break
+        # Wait for any one task to complete, then re-check
+        await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+
+    # All tasks finished — safe to tear down the connection
+    await connection_pool.remove(sid)
+    logger.info(f"Deferred connection cleanup complete for {sid}")
 
 
 # ==============================================================================
@@ -686,14 +758,23 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     """Handle the 'disconnect' socket.io event with reconnection guidance."""
     logger.debug(f"Client disconnected: {sid} (reason: {reason})")
 
-    # Cancel any active tasks for this sid
+    # Do NOT cancel active agent tasks on disconnect.
+    # The user may reconnect (network glitch, page refresh) and results are
+    # persisted to DynamoDB regardless.  Explicit cancellation is handled by
+    # handle_cancel_task.
+    #
+    # If tasks are still running we must keep the connection pool entry alive —
+    # the httpx client backs the SSE stream the task is consuming.  We schedule
+    # deferred cleanup so the connection is removed once all tasks finish.
+    has_running_tasks = False
     prefix = f"{sid}:"
     for key in list(active_tasks.keys()):
         if key.startswith(prefix):
-            task = active_tasks.pop(key, None)
-            if task and not task.done():
-                task.cancel()
-                logger.info(f"Cancelled task on disconnect: key={key}")
+            task_info = active_tasks.get(key)
+            if task_info and not task_info.asyncio_task.done():
+                has_running_tasks = True
+            else:
+                active_tasks.pop(key, None)
 
     # Get socket session to  unregister from notification manager
     socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
@@ -703,8 +784,12 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     # Clean up socket session from DynamoDB
     await sio.app_instance.state.socket_session_service.destroy_session(sid)  # type: ignore[attr-defined]
 
-    # Clean up cached connections from memory
-    await connection_pool.remove(sid)
+    # Clean up cached connections — defer if tasks are still streaming
+    if has_running_tasks:
+        logger.info(f"Deferring connection cleanup for {sid} — tasks still running")
+        asyncio.create_task(_deferred_connection_cleanup(sid))
+    else:
+        await connection_pool.remove(sid)
 
 
 @sio.on(SocketEvents.INITIALIZE_CLIENT)  # type: ignore
@@ -964,6 +1049,7 @@ async def _send_message_to_agent(
     sid: str,
     message_id: str,
     sio: socketio.AsyncServer,
+    task_key: str | None = None,
 ) -> dict[str, Any] | None:
     """Send message to agent via A2A client and process stream response.
 
@@ -972,6 +1058,8 @@ async def _send_message_to_agent(
         message: Message to send
         sid: Socket.IO session ID
         message_id: Message ID
+        sio: Socket.IO server
+        task_key: Key in active_tasks to update with A2A task_id from stream
 
     Returns:
         Success response or error response if HTTP error occurs
@@ -981,10 +1069,21 @@ async def _send_message_to_agent(
 
         response_stream = a2a_client.send_message(message)
         stream_item_count = 0
+        a2a_task_id_captured = False
         async for stream_result in response_stream:
             stream_item_count += 1
             result_type = type(stream_result).__name__
             logger.info(f"[BACKEND_STREAM] Received item #{stream_item_count}: type={result_type}")
+
+            # Capture A2A task_id from the first event that carries one
+            if not a2a_task_id_captured and task_key:
+                extracted_task_id = _extract_a2a_task_id(stream_result)
+                if extracted_task_id:
+                    task_info = active_tasks.get(task_key)
+                    if task_info:
+                        task_info.a2a_task_id = extracted_task_id
+                        a2a_task_id_captured = True
+                        logger.info(f"[BACKEND_STREAM] Captured A2A task_id={extracted_task_id} for {task_key}")
 
             # Log artifact-update events specifically
             if isinstance(stream_result, tuple):
@@ -1005,6 +1104,67 @@ async def _send_message_to_agent(
         error_response = create_error_response(
             SocketError.MSG_SEND_FAILED,
             details={"reason": f"HTTP error during message send: {http_err}"},
+        )
+        error_response["id"] = message_id
+        await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+        return error_response
+
+
+async def _send_steering_message_to_agent(
+    a2a_client: Client | None,
+    message: Message,
+    sid: str,
+    message_id: str,
+    sio: socketio.AsyncServer,
+) -> dict[str, Any] | None:
+    """Send a steering message to an agent that is already processing.
+
+    When the orchestrator has an active stream for the same context_id, its
+    executor queues the message and returns an immediate acknowledgment.
+    We drain that ack stream and notify the frontend that the steering
+    message was accepted.
+
+    Args:
+        a2a_client: A2A client instance
+        message: Steering message (same context_id as active task)
+        sid: Socket.IO session ID
+        message_id: Message ID
+
+    Returns:
+        Success response or error response
+    """
+    try:
+        assert a2a_client is not None, "a2a_client must not be None"
+
+        logger.info(f"[STEERING] Sending steering message for context_id={message.context_id}, message_id={message_id}")
+
+        # Send the steering message — the executor will queue it and return
+        # a single ack event (TaskStatusUpdateEvent).  Break after the first
+        # event since the tapped child queue also receives parent events that
+        # we must NOT consume here (they belong to the original stream).
+        async for _ in a2a_client.send_message(message):
+            break
+
+        logger.info(f"[STEERING] Steering message accepted for context_id={message.context_id}")
+
+        # Notify the frontend that the steering message was received
+        await sio.emit(
+            SocketEvents.AGENT_RESPONSE,
+            {
+                "id": message_id,
+                "contextId": message.context_id,
+                "steering": True,
+                "status": {"state": "accepted"},
+            },
+            to=sid,
+        )
+        return create_success_response({"id": message_id, "steering": True})
+
+    except A2AClientHTTPError as http_err:
+        logger.error(f"[STEERING] Failed to send steering message: {http_err}", exc_info=True)
+        error_response = create_error_response(
+            SocketError.MSG_SEND_FAILED,
+            details={"reason": f"Steering message failed: {http_err}"},
         )
         error_response["id"] = message_id
         await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
@@ -1135,8 +1295,22 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         )
 
         task_key = f"{sid}:{context_id}"
-        send_task = asyncio.create_task(_send_message_to_agent(a2a_client, message, sid, message_id, sio))
-        active_tasks[task_key] = send_task
+
+        # Steering: if there's already an active task for this context_id,
+        # send as a steering message (continuous interaction turn) instead
+        # of starting a new full stream.
+        existing_task = active_tasks.get(task_key)
+        if existing_task is not None and not existing_task.asyncio_task.done():
+            logger.info(f"[STEERING] Active task detected for {task_key}, routing as steering message")
+            return await _send_steering_message_to_agent(a2a_client, message, sid, message_id, sio)
+
+        send_task = asyncio.create_task(
+            _send_message_to_agent(a2a_client, message, sid, message_id, sio, task_key=task_key)
+        )
+        active_tasks[task_key] = ActiveTaskInfo(
+            asyncio_task=send_task,
+            a2a_client=a2a_client,
+        )
         try:
             return await send_task
         except asyncio.CancelledError:
@@ -1222,28 +1396,17 @@ async def handle_cancel_task(sid: str, json_data: dict[str, Any]) -> dict[str, A
     if not conversation_id:
         return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Missing conversationId"})
 
-    # Look up context_id from conversation
-    socket_session: SocketSession = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
-    if not socket_session:
-        return create_error_response(SocketError.SESSION_NOT_FOUND)
+    # Look up the task by sid + conversationId (the same value used as
+    # context_id when the task was created in handle_send_message).
+    task_key = f"{sid}:{conversation_id}"
+    task_info = active_tasks.pop(task_key, None)
+    if task_info:
+        await _cancel_active_task(task_info, task_key, reason="user requested")
 
-    # Try cancelling by context_id (mapped from conversationId)
-    # The task key uses context_id which may differ from conversationId
-    # Try all active tasks for this sid
-    cancelled = False
-    prefix = f"{sid}:"
-    for key in list(active_tasks.keys()):
-        if key.startswith(prefix):
-            task = active_tasks.pop(key, None)
-            if task and not task.done():
-                task.cancel()
-                cancelled = True
-                logger.info(f"Cancelled active task: key={key}")
-
-    if not cancelled:
+    if not task_info:
         logger.info(f"No active task to cancel for sid={sid}, conversationId={conversation_id}")
 
-    return create_success_response({"cancelled": cancelled})
+    return create_success_response({"cancelled": task_info is not None})
 
 
 # ==============================================================================

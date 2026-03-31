@@ -1,10 +1,11 @@
 """Base agent interface for A2A protocol."""
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable
 
-from a2a.types import Task
+from a2a.types import Message, Task, TaskState
 
 from ..models import AgentStreamResponse, UserConfig
 from .cost_tracking_mixin import CostTrackingMixin
@@ -38,6 +39,42 @@ class BaseAgent(CostTrackingMixin, ABC):
         """Initialize base agent with cost tracking support."""
         super().__init__(*args, **kwargs)
         self._sub_agent_id = None  # Will be set from user_config on requests
+        # Per-context message queues for A2A Continuous Interaction Turns.
+        # Populated by the executor when an active stream is registered;
+        # consumed by SteeringMiddleware in the LangGraph before_model hook.
+        self._message_queues: dict[str, asyncio.Queue[Message]] = {}
+
+    # ---- Steering / Continuous Interaction Turn helpers ----
+
+    def set_message_queue(self, context_id: str, queue: asyncio.Queue[Message]) -> None:
+        """Register a message queue for a running stream's context_id.
+
+        Called by the executor when a new stream starts. The queue is shared
+        with the active stream registry so that concurrent requests can enqueue
+        messages for the running agent.
+        """
+        self._message_queues[context_id] = queue
+
+    def clear_message_queue(self, context_id: str) -> None:
+        """Remove the message queue when a stream finishes."""
+        self._message_queues.pop(context_id, None)
+
+    def get_pending_messages(self, context_id: str) -> list[Message]:
+        """Drain all pending steering messages for a context_id (non-blocking).
+
+        Returns an empty list if no messages are pending or the queue does
+        not exist.  Messages are returned in FIFO order.
+        """
+        queue = self._message_queues.get(context_id)
+        if queue is None or queue.empty():
+            return []
+        messages: list[Message] = []
+        while not queue.empty():
+            try:
+                messages.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return messages
 
     def _update_sub_agent_id_from_config(self, user_config: UserConfig) -> None:
         """Update sub_agent_id for cost attribution if provided by orchestrator.
@@ -83,8 +120,10 @@ class BaseAgent(CostTrackingMixin, ABC):
                 scheduled_job_id=user_config.scheduled_job_id,
             )
 
-    async def stream(self, query: str, user_config: UserConfig, task: Task) -> AsyncIterable[AgentStreamResponse]:
-        """Stream responses for a user query following the A2A protocol.
+    async def stream(
+        self, messages: list[Message], user_config: UserConfig, task: Task
+    ) -> AsyncIterable[AgentStreamResponse]:
+        """Stream responses for user messages following the A2A protocol.
 
         Template method that handles common setup before delegating to _stream_impl():
         1. Starts cost tracking worker if not already started (lazy initialization)
@@ -96,7 +135,7 @@ class BaseAgent(CostTrackingMixin, ABC):
         Subclasses may override _setup_request() for additional setup (e.g., MCP credentials).
 
         Args:
-            query: The user's natural language query
+            messages: List of A2A Messages from the user (each may contain text, files, data)
             user_config: User configuration including user_sub and access_token
             task: The task context for the current interaction
 
@@ -119,19 +158,41 @@ class BaseAgent(CostTrackingMixin, ABC):
             logger.debug(f"Set request credentials for user {user_config.user_sub}")
         # Delegate to agent-specific implementation
         # Note: sub_agent_id is available via current_sub_agent_id ContextVar for adding to LangGraph tags
-        async for response in self._stream_impl(query, user_config, task):
-            yield response
+        try:
+            async for response in self._stream_impl(messages, user_config, task):
+                yield response
+        except asyncio.CancelledError:
+            # CancelledError does NOT inherit from Exception — must be caught
+            # explicitly.  Emit a failed response so the caller (e.g. the
+            # orchestrator) receives a proper A2A terminal event instead of
+            # seeing the stream end silently.
+            logger.warning(f"Agent execution cancelled in {self.__class__.__name__}")
+            yield AgentStreamResponse(
+                state=TaskState.canceled,
+                content="The agent execution was cancelled.",
+            )
+            return
+        except Exception as e:
+            logger.error(f"Error in {self.__class__.__name__}.stream: {e}", exc_info=True)
+            yield AgentStreamResponse(
+                state=TaskState.failed,
+                content=f"An error occurred while processing your request: {str(e)}",
+                metadata={"error": str(e)},
+            )
+            return
         await self.report_usage(user_config, task)
 
     @abstractmethod
-    def _stream_impl(self, query: str, user_config: UserConfig, task: Task) -> AsyncIterable[AgentStreamResponse]:
+    def _stream_impl(
+        self, messages: list[Message], user_config: UserConfig, task: Task
+    ) -> AsyncIterable[AgentStreamResponse]:
         """Agent-specific streaming implementation.
 
         Subclasses implement this method with their specific logic.
         The base stream() method handles common setup before calling this.
 
         Args:
-            query: The user's natural language query
+            messages: List of A2A Messages from the user (each may contain text, files, data)
             user_config: User configuration including user_sub and access_token
             task: The task context for the current interaction
 

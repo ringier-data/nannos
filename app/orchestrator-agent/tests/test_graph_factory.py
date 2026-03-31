@@ -110,17 +110,20 @@ class TestMiddlewareStack:
 
         stack = factory._create_middleware_stack()
 
-        # Verify correct order (DynamicTool first, static content before cache point, user prefs after)
-        assert len(stack) == 9
+        # Verify correct order (DynamicTool first, static content before cache point,
+        # steering after cache, user prefs after steering)
+        assert len(stack) == 10
         assert isinstance(stack[0], DynamicToolDispatchMiddleware)
         assert isinstance(stack[1], StoragePathsInstructionMiddleware)
         assert isinstance(stack[2], BedrockPromptCachingMiddleware)
-        assert isinstance(stack[3], UserPreferencesMiddleware)
-        assert isinstance(stack[4], RepeatedToolCallMiddleware)
-        assert isinstance(stack[5], AuthErrorDetectionMiddleware)
-        assert isinstance(stack[6], ToolRetryMiddleware)
-        assert isinstance(stack[7], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[8], TodoStatusMiddleware)
+        # stack[3] = SteeringMiddleware (from ringier_a2a_sdk)
+        assert stack[3].__class__.__name__ == "SteeringMiddleware"
+        assert isinstance(stack[4], UserPreferencesMiddleware)
+        assert isinstance(stack[5], RepeatedToolCallMiddleware)
+        assert isinstance(stack[6], AuthErrorDetectionMiddleware)
+        assert isinstance(stack[7], ToolRetryMiddleware)
+        assert isinstance(stack[8], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[9], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory.DynamoDBSaver")
     def test_middleware_stack_dynamic_tool_dispatch_config(self, mock_dynamodb, mock_config):

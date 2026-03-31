@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from a2a.types import Task, TaskState
+from a2a.types import Message, Part, Role, Task, TaskState, TextPart
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import SecretStr
 
@@ -31,6 +31,14 @@ def _make_task(**kwargs):
     t.id = kwargs.get("id", "task-1")
     t.context_id = kwargs.get("context_id", "ctx-1")
     return t
+
+
+def _make_message(text: str = "hi") -> Message:
+    return Message(
+        role=Role.user,
+        parts=[Part(root=TextPart(text=text))],
+        message_id="msg-test",
+    )
 
 
 def _v2_messages_part(msg_chunk, meta=None):
@@ -84,8 +92,9 @@ async def _collect(agent, query="hi", user_config=None, task=None):
     """Collect all AgentStreamResponse objects from _stream_impl."""
     uc = user_config or _make_user_config()
     t = task or _make_task()
+    msg = _make_message(query)
     results = []
-    async for resp in agent._stream_impl(query, uc, t):
+    async for resp in agent._stream_impl([msg], uc, t):
         results.append(resp)
     return results
 
@@ -474,6 +483,7 @@ class TestStreamImplErrorHandling:
 
     @pytest.mark.asyncio
     async def test_exception_yields_failed(self):
+        """Generic exceptions are caught by BaseAgent.stream() and yield a failed response."""
         graph = MagicMock()
 
         async def failing_astream(*a, **kw):
@@ -484,7 +494,12 @@ class TestStreamImplErrorHandling:
         graph.with_config = MagicMock(return_value=graph)  # Mock with_config to return self
 
         agent = ConcreteLangGraphAgent(graph=graph)
-        responses = await _collect(agent)
+        # Call through stream() since error handling lives in the base class
+        uc = _make_user_config()
+        t = _make_task()
+        responses = []
+        async for resp in agent.stream([_make_message("hi")], uc, t):
+            responses.append(resp)
 
         assert len(responses) == 1
         assert responses[0].state == TaskState.failed

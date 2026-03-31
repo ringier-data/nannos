@@ -233,6 +233,7 @@ class NaonousBedrockAgent(LangGraphBedrockAgent, DynamoDBCheckpointerMixin):
     - Streaming conversation state persistence via DynamoDB
     - MCP tool access with dynamic credential injection
     - Configurable timeout for long-running operations (MCP_TIMEOUT_SECONDS)
+    - Multimodal input support (text + images)
 
     Configuration:
     - BEDROCK_MODEL_ID: Claude model ID (default: claude-sonnet-4-5)
@@ -246,6 +247,8 @@ class NaonousBedrockAgent(LangGraphBedrockAgent, DynamoDBCheckpointerMixin):
     - Shared DynamoDB checkpointer for conversation persistence
     - VPN-protected MCP server access
     """
+
+    SUPPORTED_CONTENT_TYPES = ["text", "text/plain", "image"]
 
     def __init__(self):
         """Initialize the Naonous Agent."""
@@ -276,7 +279,7 @@ class NaonousBedrockAgent(LangGraphBedrockAgent, DynamoDBCheckpointerMixin):
         # - Creative validation (validate_creatives_pre_forecast)
         # - GAM forecasting (get_availability)
         # - Budget allocation (line_item_budget_allocation_handler)
-        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "600"))  # Default: 10 minutes
+        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "60"))  # Default: 60 seconds (1 minute)
 
         return {
             "gatana": StreamableHttpConnection(
@@ -285,6 +288,9 @@ class NaonousBedrockAgent(LangGraphBedrockAgent, DynamoDBCheckpointerMixin):
                 headers=headers,
                 timeout=timedelta(seconds=mcp_timeout_seconds),  # HTTP timeout (handshake, etc.)
                 sse_read_timeout=timedelta(seconds=mcp_timeout_seconds),  # SSE event timeout
+                session_kwargs={
+                    "read_timeout_seconds": timedelta(seconds=mcp_timeout_seconds),
+                },
             )
         }
 
@@ -318,6 +324,8 @@ class NaonousAnthropicAgent(LangGraphAnthropicAgent, DynamoDBCheckpointerMixin):
     - MCP_GATEWAY_URL: URL to MCP gateway (required)
     """
 
+    SUPPORTED_CONTENT_TYPES = ["text", "text/plain", "image"]
+
     def __init__(self):
         """Initialize the Naonous Anthropic Agent."""
         self.mcp_gateway_url = os.environ["MCP_GATEWAY_URL"]
@@ -327,7 +335,7 @@ class NaonousAnthropicAgent(LangGraphAnthropicAgent, DynamoDBCheckpointerMixin):
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection for Naonous server."""
         headers = await self.get_headers()
-        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "600"))
+        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "60"))
         return {
             "gatana": StreamableHttpConnection(
                 transport="streamable_http",
@@ -361,6 +369,8 @@ class NaonousGoogleGenAIAgent(LangGraphGoogleGenAIAgent, DynamoDBCheckpointerMix
     Requires GCP_PROJECT_ID and optionally GCP_KEY, GCP_LOCATION, GCP_MODEL_ID, GCP_THINKING_LEVEL.
     """
 
+    SUPPORTED_CONTENT_TYPES = ["text", "text/plain", "image"]
+
     def __init__(self):
         """Initialize the Naonous Google Generative AI Agent."""
         self.mcp_gateway_url = os.environ["MCP_GATEWAY_URL"]
@@ -370,7 +380,7 @@ class NaonousGoogleGenAIAgent(LangGraphGoogleGenAIAgent, DynamoDBCheckpointerMix
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection (same configuration as NaonousBedrockAgent)."""
         headers = await self.get_headers()
-        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "600"))
+        mcp_timeout_seconds = int(os.getenv("MCP_TIMEOUT_SECONDS", "60"))
         return {
             "gatana": StreamableHttpConnection(
                 transport="streamable_http",

@@ -204,15 +204,21 @@ class TestBaseAgentExecutor:
             assert call_args[0][0] == TaskState.failed
 
     @pytest.mark.asyncio
-    async def test_cancel_raises_unsupported(self):
-        """Test that cancel operation raises UnsupportedOperationError."""
-        from a2a.utils.errors import ServerError
-
+    async def test_cancel_emits_canceled_event(self):
+        """Test that cancel emits a canceled TaskStatusUpdateEvent."""
         mock_agent = Mock()
         executor = BaseAgentExecutor(mock_agent)
 
         mock_context = Mock()
+        mock_context.task_id = "task-1"
+        mock_context.context_id = "ctx-1"
         mock_event_queue = AsyncMock()
 
-        with pytest.raises(ServerError):
-            await executor.cancel(mock_context, mock_event_queue)
+        await executor.cancel(mock_context, mock_event_queue)
+
+        mock_event_queue.enqueue_event.assert_called_once()
+        event = mock_event_queue.enqueue_event.call_args[0][0]
+        assert event.task_id == "task-1"
+        assert event.context_id == "ctx-1"
+        assert event.status.state == TaskState.canceled
+        assert event.final is True

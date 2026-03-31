@@ -176,9 +176,29 @@ export function MessageList() {
     return <EmptyState />;
   }
 
+  // When the agent is actively streaming (liveTimeline exists), steering messages
+  // (user messages sent while the agent is working) should render AFTER the live
+  // timeline.  The first trailing user message is the one that triggered the
+  // current agent turn — it stays before the timeline.  Only subsequent user
+  // messages (steering) are moved after it.
+  let mainMessages = messages;
+  let trailingUserMessages: Message[] = [];
+  if (liveTimeline.length > 0) {
+    let splitIdx = messages.length;
+    while (splitIdx > 0 && messages[splitIdx - 1].type === 'user') {
+      splitIdx--;
+    }
+    // splitIdx..end are all trailing user messages.
+    // Keep the first one (trigger) in mainMessages; the rest are steering.
+    if (splitIdx + 1 < messages.length) {
+      mainMessages = messages.slice(0, splitIdx + 1);
+      trailingUserMessages = messages.slice(splitIdx + 1);
+    }
+  }
+
   return (
     <div className="flex flex-col px-4 divide-y divide-border/50">
-      {messages.map((msg) => (
+      {mainMessages.map((msg) => (
         <div key={msg.id}>
           {/* Render unified timeline for chronological display of all events */}
           {msg.timeline && msg.timeline.length > 0 && (
@@ -192,6 +212,12 @@ export function MessageList() {
       {liveTimeline.length > 0 && (
         <UnifiedTimelineBlock timeline={liveTimeline} complete={false} />
       )}
+      {/* Steering messages sent while agent is streaming render after the timeline */}
+      {trailingUserMessages.map((msg) => (
+        <div key={msg.id}>
+          <MessageCard message={msg} />
+        </div>
+      ))}
       {streamingMessage && (
         <div className="flex gap-3 py-4">
           <Avatar className="shrink-0 h-8 w-8 bg-muted text-muted-foreground">

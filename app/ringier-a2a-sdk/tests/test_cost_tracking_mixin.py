@@ -16,7 +16,7 @@ class TestAgent(BaseAgent):
     async def close(self):
         pass
 
-    async def _stream_impl(self, query, user_config, task):
+    async def _stream_impl(self, messages, user_config, task):
         yield AgentStreamResponse(content="test", state=TaskState.completed)
 
 

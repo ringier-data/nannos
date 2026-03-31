@@ -1,9 +1,19 @@
-"""MCP progress callback for keeping Gatana connections alive.
+"""MCP progress callback for progressToken injection.
 
 Providing a progress callback causes the MCP SDK to include a progressToken
 in every tool-call request's ``_meta``, which signals the MCP gateway (Gatana)
 to keep the connection alive during long-running tool executions.
+
+Actual timeout protection is handled by the existing transport and session
+layers:
+
+* **Transport-level** — httpx SSE ``sse_read_timeout`` is a per-event idle
+  timeout that resets on every SSE event, including progress notifications.
+* **JSON-RPC level** — ``ClientSession(read_timeout_seconds=...)`` provides a
+  hard upper-bound via ``anyio.fail_after`` on the response wait.
 """
+
+from __future__ import annotations
 
 import logging
 

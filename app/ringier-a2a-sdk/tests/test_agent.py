@@ -1,11 +1,19 @@
 """Tests for agent base classes."""
 
 import pytest
-from a2a.types import TaskState
+from a2a.types import Message, Part, Role, TaskState, TextPart
 from pydantic import SecretStr
 
 from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
+
+
+def _make_message(text: str) -> Message:
+    return Message(
+        role=Role.user,
+        parts=[Part(root=TextPart(text=text))],
+        message_id="msg-test",
+    )
 
 
 class TestBaseAgent:
@@ -33,9 +41,10 @@ class TestBaseAgent:
             async def close(self):
                 self.closed = True
 
-            async def _stream_impl(self, query: str, user_config: UserConfig, task):
+            async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
                 yield AgentStreamResponse(state=TaskState.working, content="Processing...")
-                yield AgentStreamResponse(state=TaskState.completed, content=f"Result for: {query}")
+                text = messages[0].parts[0].root.text if messages and messages[0].parts else ""
+                yield AgentStreamResponse(state=TaskState.completed, content=f"Result for: {text}")
 
         # Create instance
         agent = ConcreteAgent()
@@ -52,7 +61,7 @@ class TestBaseAgent:
         task.context_id = "ctx-1"
 
         responses = []
-        async for response in agent.stream("test query", user_config, task):
+        async for response in agent.stream([_make_message("test query")], user_config, task):
             responses.append(response)
 
         assert len(responses) == 2
@@ -69,7 +78,7 @@ class TestBaseAgent:
         """Test that BaseAgent requires close() to be implemented."""
 
         class IncompleteAgent(BaseAgent):
-            async def _stream_impl(self, query: str, user_config: UserConfig, task):
+            async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
                 yield AgentStreamResponse(state=TaskState.completed, content="Done")
 
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
@@ -94,7 +103,7 @@ class TestBaseAgent:
             async def close(self):
                 pass
 
-            async def _stream_impl(self, query: str, user_config: UserConfig, task):
+            async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
                 # Capture context variables during stream execution
                 self.captured_user_sub = get_request_user_sub()
                 self.captured_token = get_request_access_token()
@@ -118,7 +127,7 @@ class TestBaseAgent:
 
         # Stream should set context variables
         responses = []
-        async for response in agent.stream("test query", user_config, task):
+        async for response in agent.stream([_make_message("test query")], user_config, task):
             responses.append(response)
 
         # Verify context variables were set during stream execution
@@ -141,7 +150,7 @@ class TestBaseAgent:
             async def close(self):
                 pass
 
-            async def _stream_impl(self, query: str, user_config: UserConfig, task):
+            async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
                 # Use convenience function to get both at once
                 self.captured_credentials = get_request_credentials()
 
@@ -157,7 +166,7 @@ class TestBaseAgent:
         task.id = "task-2"
         task.context_id = "ctx-2"
 
-        async for _ in agent.stream("test", user_config, task):
+        async for _ in agent.stream([_make_message("test")], user_config, task):
             pass
 
         # Verify tuple unpacking works
@@ -180,7 +189,7 @@ class TestBaseAgent:
             async def close(self):
                 pass
 
-            async def _stream_impl(self, query: str, user_config: UserConfig, task):
+            async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
                 # Capture credentials at start
                 user_sub, token = get_request_credentials()
 
@@ -216,7 +225,7 @@ class TestBaseAgent:
         # Run two streams concurrently
         async def run_stream(user_config, task, expected_user, expected_token):
             responses = []
-            async for response in agent.stream("test", user_config, task):
+            async for response in agent.stream([_make_message("test")], user_config, task):
                 responses.append(response)
 
             # Verify the response contains the correct credentials
@@ -251,7 +260,7 @@ class TestBaseAgent:
             async def close(self):
                 pass
 
-            async def _stream_impl(self, query: str, user_config: UserConfig, task):
+            async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
                 self.captured_credentials = get_request_credentials()
 
                 yield AgentStreamResponse(state=TaskState.completed, content="Done")
@@ -265,7 +274,7 @@ class TestBaseAgent:
         task.id = "task-1"
         task.context_id = "ctx-1"
 
-        async for _ in agent.stream("test", user_config, task):
+        async for _ in agent.stream([_make_message("test")], user_config, task):
             pass
 
         # User sub should be set, but token should be None

@@ -9,8 +9,8 @@ naonous_mcp_url: 'https://naonous.{{ domain_prefix }}alloy.rcplus.io/mcp'
 
 # MCP Client Configuration
 # Timeout for MCP operations (in seconds) - applies to BOTH HTTP and SSE timeouts
-# Default: 600 seconds (10 minutes) for heavy operations like campaign_proposal
-mcp_timeout_seconds: 600
+# Default: 60 seconds (1 minute) for heavy operations like campaign_proposal
+mcp_timeout_seconds: 60
 
 cost_tracking_batch_size: 10
 cost_tracking_flush_interval: 30  # seconds

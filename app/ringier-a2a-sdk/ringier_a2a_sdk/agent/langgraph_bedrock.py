@@ -8,10 +8,16 @@ import logging
 import os
 
 import boto3
+import httpx
 from botocore.config import Config as BotoConfig
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import (
+    HumanMessage,
+    ImageContentBlock,
+    TextContentBlock,
+)
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
@@ -189,6 +195,81 @@ class LangGraphBedrockAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
             List of middleware: [BedrockPromptCachingMiddleware, ToolSchemaCleaningMiddleware]
         """
         return [BedrockPromptCachingMiddleware()] + super()._get_middleware()
+
+    async def _preprocess_input_messages(self, messages: list[HumanMessage]) -> list[HumanMessage]:
+        """Convert URL-based images to inline base64 for Bedrock Converse API.
+
+        Bedrock's Converse API requires images as inline base64 data, not URLs.
+        This downloads images from pre-signed S3 URLs and converts them to base64
+        before passing to the graph.
+        """
+        import base64 as b64
+
+        processed = []
+        for msg in messages:
+            # TODO: looks that just HumanMessage.content_blocks has proper typing.
+            #       Unfortunately, just HumanMessage.content is guaranteed to be always set,
+            #       so we here we use HumanMessage.content as the getter and discriminate based on the
+            #       attributes of the dict instead of from the type.
+            content = msg.content
+            if not isinstance(content, list):
+                processed.append(msg)
+                continue
+
+            needs_conversion = any(
+                isinstance(b, dict) and b.get("type") == "image" and "url" in b and "base64" not in b for b in content
+            )
+            if not needs_conversion:
+                processed.append(msg)
+                continue
+
+            new_blocks = []
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "image"
+                    and "url" in block
+                    and "base64" not in block
+                ):
+                    url = block["url"]
+                    mime_type = block.get("mime_type", "image/png")
+                    filename = url.split("/")[-1].split("?")[0] if url else "unknown"
+                    try:
+                        async with httpx.AsyncClient(follow_redirects=True) as client:
+                            resp = await client.get(url, timeout=60.0)
+                            resp.raise_for_status()
+                            b64_data = b64.b64encode(resp.content).decode("utf-8")
+                        # Bedrock only sees the base64 pixels; include URL as text
+                        # so the LLM can reference it in tool call arguments.
+                        new_blocks.append(
+                            TextContentBlock(
+                                type="text",
+                                text=f"[Attached image: {filename}, URL: {url}]",
+                            )
+                        )
+                        new_blocks.append(
+                            ImageContentBlock(
+                                type="image",
+                                base64=b64_data,
+                                mime_type=mime_type,
+                            )
+                        )
+                        logger.info(f"Converted URL image to inline base64 ({len(b64_data)} chars)")
+                    except Exception:
+                        logger.warning(
+                            "Failed to download image from URL, converting to text description", exc_info=True
+                        )
+                        new_blocks.append(
+                            TextContentBlock(
+                                type="text",
+                                text=f"[Image: {filename} ({mime_type}), URL: {url}] (could not load from URL)",
+                            )
+                        )
+                else:
+                    new_blocks.append(block)
+
+            processed.append(HumanMessage(content=new_blocks))
+        return processed
 
     def _create_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
         """Create LangGraph with thinking-aware response format.

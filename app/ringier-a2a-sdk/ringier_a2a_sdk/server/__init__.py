@@ -1,6 +1,10 @@
 """Server utilities for A2A applications."""
 
 from .context_builder import AuthRequestContextBuilder
-from .executor import BaseAgentExecutor
+from .executor import ActiveStreamInfo, BaseAgentExecutor
 
-__all__ = ["AuthRequestContextBuilder", "BaseAgentExecutor"]
+__all__ = [
+    "AuthRequestContextBuilder",
+    "BaseAgentExecutor",
+    "ActiveStreamInfo",
+]

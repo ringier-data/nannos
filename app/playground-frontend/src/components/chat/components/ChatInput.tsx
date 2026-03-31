@@ -1,15 +1,24 @@
 import { useState, useRef, useEffect, type KeyboardEvent, type ChangeEvent } from 'react';
-import { Send, AlertTriangle, Mic, X, Paperclip, Square } from 'lucide-react';
+import { Send, AlertTriangle, Mic, X, Paperclip, Square, ChevronUp, ArrowRight, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { useChat } from '../contexts';
 import { useAuth } from '@/contexts/AuthContext';
 import { AudioRecorder } from './AudioRecorder';
 import { toast } from 'sonner';
 import type { UploadedFileInfo, UploadedFileResponse } from '@/api/generated';
+
+/** The three ways to send a message while the agent is processing. */
+type SendMode = 'steer' | 'queue' | 'stop-and-send';
 
 interface PendingFile {
   id: string;
@@ -31,6 +40,7 @@ export function ChatInput() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounterRef = useRef(0);
+  const [sendMode, setSendMode] = useState<SendMode>('steer');
 
   const canSend = isConnected && (value.trim().length > 0 || pendingFiles.length > 0) && !isUploading;
 
@@ -228,10 +238,42 @@ export function ChatInput() {
     return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
   };
 
+  const handleStopAndSend = async () => {
+    if (!canSend) return;
+    interruptTask();
+    // Small delay so the cancellation propagates before the new message
+    await new Promise((r) => setTimeout(r, 50));
+    await handleSend();
+  };
+
+  /** Dispatch based on the current send mode while the agent is processing. */
+  const handleWaitingSend = async () => {
+    switch (sendMode) {
+      case 'stop-and-send':
+        return handleStopAndSend();
+      case 'queue':
+      case 'steer':
+      default:
+        // Both steer and queue use the same send path — the backend
+        // detects the active task and routes as a steering message.
+        return handleSend();
+    }
+  };
+
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      if (isWaiting) {
+        if (e.altKey) {
+          // ⌥Enter always steers regardless of current mode
+          handleSend();
+        } else {
+          // Enter uses the selected send mode
+          handleWaitingSend();
+        }
+      } else {
+        handleSend();
+      }
     }
   };
 
@@ -363,9 +405,11 @@ export function ChatInput() {
             placeholder={
               isUploading
                 ? 'Uploading...'
-                : isConnected
-                ? 'Type your message... (paste images or drag & drop files)'
-                : 'Connect to an agent to start chatting...'
+                : !isConnected
+                ? 'Connect to an agent to start chatting...'
+                : isWaiting
+                ? 'Send a follow-up message to steer the agent...'
+                : 'Type your message... (paste images or drag & drop files)'
             }
             disabled={!isConnected || isUploading}
             rows={2}
@@ -373,16 +417,70 @@ export function ChatInput() {
             data-testid="input-message"
           />
           {isWaiting ? (
-            <Button
-              onClick={interruptTask}
-              size="icon"
-              variant="destructive"
-              className="flex-shrink-0 h-auto p-3"
-              data-testid="button-stop"
-              aria-label="Stop generation"
-            >
-              <Square className="w-4 h-4 fill-current" />
-            </Button>
+            <div className="flex flex-shrink-0">
+              {/* Primary action button (current send mode) */}
+              <Button
+                onClick={handleWaitingSend}
+                disabled={!canSend}
+                className="rounded-r-none h-auto p-3"
+                data-testid="button-send"
+                aria-label={
+                  sendMode === 'steer'
+                    ? 'Steer with message'
+                    : sendMode === 'queue'
+                    ? 'Add to queue'
+                    : 'Stop and send'
+                }
+              >
+                {sendMode === 'steer' && <Send className="w-4 h-4" />}
+                {sendMode === 'queue' && <Plus className="w-4 h-4" />}
+                {sendMode === 'stop-and-send' && <ArrowRight className="w-4 h-4" />}
+              </Button>
+
+              {/* Mode selector dropdown */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    className="rounded-l-none border-l border-primary-foreground/20 h-auto px-1.5"
+                    aria-label="Choose send mode"
+                    data-testid="button-send-mode"
+                  >
+                    <ChevronUp className="w-3 h-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" side="top" className="w-56">
+                  <DropdownMenuItem onClick={() => setSendMode('stop-and-send')}>
+                    <ArrowRight className="w-4 h-4" />
+                    <span className="flex-1">Stop and Send</span>
+                    {sendMode === 'stop-and-send' && <span className="text-xs text-primary">●</span>}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setSendMode('steer')}>
+                    <Send className="w-4 h-4" />
+                    <span className="flex-1">Steer with Message</span>
+                    <kbd className="ml-auto text-xs text-muted-foreground">⌥↵</kbd>
+                    {sendMode === 'steer' && <span className="text-xs text-primary ml-1">●</span>}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setSendMode('queue')}>
+                    <Plus className="w-4 h-4" />
+                    <span className="flex-1">Add to Queue</span>
+                    <kbd className="ml-auto text-xs text-muted-foreground">↵</kbd>
+                    {sendMode === 'queue' && <span className="text-xs text-primary ml-1">●</span>}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {/* Stop button — always available during processing */}
+              <Button
+                onClick={interruptTask}
+                size="icon"
+                variant="destructive"
+                className="flex-shrink-0 h-auto p-3 ml-1"
+                data-testid="button-stop"
+                aria-label="Stop generation"
+              >
+                <Square className="w-4 h-4 fill-current" />
+              </Button>
+            </div>
           ) : (
             <Button
               onClick={handleSend}
