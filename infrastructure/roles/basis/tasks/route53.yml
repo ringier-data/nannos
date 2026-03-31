@@ -1,0 +1,33 @@
+---
+- name: 'set cloudformation template'
+  set_fact:
+    cloudformation_template: '{{ role_path }}/files/cf-route53.yml'
+
+- name: 'deploy route53'
+  include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-route53'
+    template: '{{ cloudformation_template }}'
+
+- name: 'gather Route53 stack outputs'
+  ringier.aws_cicd.gather_stack_outputs:
+    stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-route53'
+  register: r_route53_stack
+
+- name: 'create a wildcard certificate for the base domain'
+  include_role:
+    name: 'ringier.aws_cicd.create_acm_ssl_certificate'
+  vars:
+    domain_name: '{{ base_domain_new }}'
+    export_id: 'domain-new-wildcard'
+    route53_zone_id: '{{ r_route53_stack.outputs.PublicHostedZoneId }}'
+
+- name: 'create a wildcard certificate for the nannos.ringier.ch domain'
+  include_role:
+    name: 'ringier.aws_cicd.create_acm_ssl_certificate'
+  vars:
+    domain_name: '{{ base_domain_ringier_nannos }}'
+    export_id: 'domain-nannos-ringier-wildcard'
+    route53_zone_id: '{{ r_route53_stack.outputs.RingierNannosHostedZoneId }}'
+

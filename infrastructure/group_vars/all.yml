@@ -1,4 +1,6 @@
 ---
+base_domain_new: '{{ domain_prefix_new }}nannos.ai'
+base_domain_ringier_nannos: '{{ domain_prefix_new }}nannos.ringier.ch'
 
 ssmkey_openai_api_key: '/{{ project_id }}/openai-api-key-chatgpt-4o'
 openai_api_key: !vault |

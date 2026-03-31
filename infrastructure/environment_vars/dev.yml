@@ -1,5 +1,6 @@
 ---
 domain_prefix: 'd.'
+domain_prefix_new: 'd.'
 langsmith_tracing: true
 log_level: 'DEBUG'
 langsmith_project: dev-nannos-agent-framework

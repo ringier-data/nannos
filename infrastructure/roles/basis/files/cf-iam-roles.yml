@@ -1,0 +1,471 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Nannos - EKS Pod Identity IAM roles for application workloads (v{{ project_version }})'
+
+
+Resources:
+
+  # ------------------------------------------- Orchestrator Agent Pod IAM Role ------------------------------------------- #
+  OrchestratorAgentPodRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-pod-role'
+      Description: 'IAM role for Orchestrator Agent pod in EKS (via Pod Identity)'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'pods.eks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:TagSession'
+      Policies:
+        - PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-pod-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+              - Sid: 'S3CheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:PutObjectTagging'
+                  - 's3:GetBucketLifecycleConfiguration'
+                  - 's3:PutBucketLifecycleConfiguration'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+              - Sid: 'S3FilesAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+              - Sid: 'BedrockInvokeModel'
+                Effect: 'Allow'
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+              - Sid: 'MarketplaceModelAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'aws-marketplace:ViewSubscriptions'
+                  - 'aws-marketplace:Subscribe'
+                Resource: '*'
+              - Sid: 'KmsEncryptDecrypt'
+                Effect: 'Allow'
+                Action:
+                  - 'kms:DescribeKey'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:Decrypt'
+                  - 'kms:Encrypt'
+                Resource:
+                  - !ImportValue '{{ project_id }}-sensitive-data-kms-key-arn'
+              - Sid: 'GetVaultSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_vault_prefix }}*'
+      Tags:
+        - {Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-orchestrator-pod-role'}
+        - {Key: 'Project', Value: '{{ project_id }}'}
+        - {Key: 'Environment', Value: '{{ env }}'}
+        - {Key: 'Version', Value: 'v{{ project_version }}'}
+        - {Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  OrchestratorAgentPodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !ImportValue '{{ project_id }}-eks-cluster-name'
+      Namespace: 'nannos'
+      ServiceAccount: 'orchestrator-agent'
+      RoleArn: !GetAtt OrchestratorAgentPodRole.Arn
+
+  # ------------------------------------------- Agent Runner Pod IAM Role ------------------------------------------- #
+  AgentRunnerPodRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-pod-role'
+      Description: 'IAM role for Agent Runner pod in EKS (via Pod Identity)'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'pods.eks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:TagSession'
+      Policies:
+        - PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-pod-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+              - Sid: 'S3CheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:PutObjectTagging'
+                  - 's3:GetBucketLifecycleConfiguration'
+                  - 's3:PutBucketLifecycleConfiguration'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+              - Sid: 'S3DocumentStoreAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+              - Sid: 'BedrockInvokeModel'
+                Effect: 'Allow'
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+      Tags:
+        - {Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-runner-pod-role'}
+        - {Key: 'Project', Value: '{{ project_id }}'}
+        - {Key: 'Environment', Value: '{{ env }}'}
+        - {Key: 'Version', Value: 'v{{ project_version }}'}
+        - {Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  AgentRunnerPodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !ImportValue '{{ project_id }}-eks-cluster-name'
+      Namespace: 'nannos'
+      ServiceAccount: 'agent-runner'
+      RoleArn: !GetAtt AgentRunnerPodRole.Arn
+
+  # ------------------------------------------- Alloy Agent Pod IAM Role ------------------------------------------- #
+  AlloyAgentPodRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent-pod-role'
+      Description: 'IAM role for Alloy Agent pod in EKS (via Pod Identity)'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'pods.eks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:TagSession'
+      Policies:
+        - PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent-pod-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+              - Sid: 'S3CheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:PutObjectTagging'
+                  - 's3:GetBucketLifecycleConfiguration'
+                  - 's3:PutBucketLifecycleConfiguration'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+              - Sid: 'BedrockInvokeModel'
+                Effect: 'Allow'
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+      Tags:
+        - {Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-alloy-agent-pod-role'}
+        - {Key: 'Project', Value: '{{ project_id }}'}
+        - {Key: 'Environment', Value: '{{ env }}'}
+        - {Key: 'Version', Value: 'v{{ project_version }}'}
+        - {Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  AlloyAgentPodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !ImportValue '{{ project_id }}-eks-cluster-name'
+      Namespace: 'nannos'
+      ServiceAccount: 'alloy-agent'
+      RoleArn: !GetAtt AlloyAgentPodRole.Arn
+
+  # ------------------------------------------- Agent Creator Pod IAM Role ------------------------------------------- #
+  AgentCreatorPodRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-creator-pod-role'
+      Description: 'IAM role for Agent Creator pod in EKS (via Pod Identity)'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'pods.eks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:TagSession'
+      Policies:
+        - PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-creator-pod-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBCheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-langgraph-checkpoints-table-arn'
+              - Sid: 'S3CheckpointsAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:PutObjectTagging'
+                  - 's3:GetBucketLifecycleConfiguration'
+                  - 's3:PutBucketLifecycleConfiguration'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-orchestrator-checkpoints-bucket-arn'
+              - Sid: 'BedrockInvokeModel'
+                Effect: 'Allow'
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+      Tags:
+        - {Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-agent-creator-pod-role'}
+        - {Key: 'Project', Value: '{{ project_id }}'}
+        - {Key: 'Environment', Value: '{{ env }}'}
+        - {Key: 'Version', Value: 'v{{ project_version }}'}
+        - {Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  AgentCreatorPodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !ImportValue '{{ project_id }}-eks-cluster-name'
+      Namespace: 'nannos'
+      ServiceAccount: 'agent-creator'
+      RoleArn: !GetAtt AgentCreatorPodRole.Arn
+
+  # ------------------------------------------- Console (Playground) Pod IAM Role ------------------------------------------- #
+  ConsolePodRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: '{{ env }}-{{ project_id }}-{{ software_component }}-console-pod-role'
+      Description: 'IAM role for Console (Playground/ChatUI) pod in EKS (via Pod Identity)'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'pods.eks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+              - 'sts:TagSession'
+      Policies:
+        - PolicyName: '{{ env }}-{{ project_id }}-{{ software_component }}-console-pod-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'DynamoDBSessionsTableAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-sessions-table-arn'
+              - Sid: 'DynamoDBConversationsTableAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-conversations-table-arn'
+              - Sid: 'DynamoDBMessagesTableAccess'
+                Effect: 'Allow'
+                Action:
+                  - 'dynamodb:Query'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:BatchGetItem'
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DescribeTable'
+                Resource:
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-chat-ui-messages-table-arn'
+              - Sid: 'S3FilesFullAccess'
+                Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub
+                    - '${BucketArn}/*'
+                    - BucketArn: !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+                  - !ImportValue '{{ project_id }}-{{ software_component }}-files-bucket-arn'
+              - Sid: 'ReadWriteVaultSecrets'
+                Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                  - 'ssm:PutParameter'
+                  - 'ssm:AddTagsToResource'
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter{{ ssmkey_vault_prefix }}*'
+              - Sid: 'KmsEncryptDecrypt'
+                Effect: 'Allow'
+                Action:
+                  - 'kms:DescribeKey'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:Decrypt'
+                  - 'kms:Encrypt'
+                Resource:
+                  - !ImportValue '{{ project_id }}-sensitive-data-kms-key-arn'
+      Tags:
+        - {Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-console-pod-role'}
+        - {Key: 'Project', Value: '{{ project_id }}'}
+        - {Key: 'Environment', Value: '{{ env }}'}
+        - {Key: 'Version', Value: 'v{{ project_version }}'}
+        - {Key: 'Repository', Value: '{{ git_info.repo_name }}'}
+
+  ConsolePodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !ImportValue '{{ project_id }}-eks-cluster-name'
+      Namespace: 'nannos'
+      ServiceAccount: 'console'
+      RoleArn: !GetAtt ConsolePodRole.Arn
+
+
+Outputs:
+
+  OrchestratorAgentPodRoleArn:
+    Description: 'ARN of the IAM role for Orchestrator Agent pod'
+    Value: !GetAtt OrchestratorAgentPodRole.Arn
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-orchestrator-pod-role-arn'
+
+  AgentRunnerPodRoleArn:
+    Description: 'ARN of the IAM role for Agent Runner pod'
+    Value: !GetAtt AgentRunnerPodRole.Arn
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-agent-runner-pod-role-arn'
+
+  AlloyAgentPodRoleArn:
+    Description: 'ARN of the IAM role for Alloy Agent pod'
+    Value: !GetAtt AlloyAgentPodRole.Arn
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-alloy-agent-pod-role-arn'
+
+  AgentCreatorPodRoleArn:
+    Description: 'ARN of the IAM role for Agent Creator pod'
+    Value: !GetAtt AgentCreatorPodRole.Arn
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-agent-creator-pod-role-arn'
+
+  ConsolePodRoleArn:
+    Description: 'ARN of the IAM role for Console (Playground) pod'
+    Value: !GetAtt ConsolePodRole.Arn
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-console-pod-role-arn'

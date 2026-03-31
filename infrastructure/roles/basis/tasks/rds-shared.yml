@@ -1,0 +1,107 @@
+---
+# ====================== SSM: Postgres Master Username ===================
+
+- name: Upload Nannos RDS master username
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: "changed"
+    name: "{{ ssmkey_rds_master_username }}"
+    description: "The username for the RDS master user"
+    string_type: "String"
+    value: "{{ rds_master_username }}"
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{software_component}}-rds-master-username-ssmparam'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
+
+# ====================== SSM: Postgres Master Password ===================
+
+- name: Check if Nannos RDS master password exists in SSM
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    master_password: "{{ lookup('amazon.aws.aws_ssm', ssmkey_rds_master_password, decrypt=true, region=aws_region, on_missing='skip') }}"
+
+- set_fact:
+    generate_new: "{{ master_password == '' }}"
+
+- name: Generate random password
+  when: generate_new
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    master_password: "{{ lookup('password', '/dev/null length=60 chars=ascii_letters') }}"
+
+- name: Upload Nannos RDS password to SSM
+  when: generate_new
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: "never"
+    name: "{{ ssmkey_rds_master_password }}"
+    description: "The password for the Nannos RDS master user"
+    string_type: "SecureString"
+    key_id: "alias/gov-rcplus-devops-secrets"
+    value: "{{ master_password }}"
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{software_component}}-rds-master-password-ssmparam'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
+
+# ====================== Deploy Cloudformation ===================
+
+- set_fact:
+    template_filename: '{{ role_path }}/files/cf-rds-shared.yml'
+    rds_stack_name: '{{ env }}-{{ project_id }}-{{ software_component }}-rds-shared'
+
+- include_role:
+    name: 'ringier.aws_cicd.run_cloudformation'
+  vars:
+    stack_name: '{{ rds_stack_name }}'
+    template: '{{ template_filename }}'
+    skip_version_tag: false
+
+# ======================  Prepare DDL  ===================
+
+- name: Build postgresql-client Docker image
+  shell: 'docker build -t psql -f {{ playbook_dir }}/../ops-ci-shared/misc/docker/Dockerfile.psql-client .'
+
+- name: 'gather RDS stack outputs'
+  ringier.aws_cicd.gather_stack_outputs:
+    stack_name: '{{ rds_stack_name }}'
+  register: rds_stack
+
+- name: Get facts
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    rds_endpoint: "{{ rds_stack['outputs']['RdsInstanceEndpointAddress'] }}"
+    rds_username: "{{ lookup('aws_ssm', ssmkey_rds_master_username) }}"
+    rds_password: "{{ lookup('aws_ssm', ssmkey_rds_master_password, decrypt=True) }}"
+
+# ====================== Install pgvector and pgcrypto extensions ===================
+
+- name: Install pgvector and pgcrypto extensions in public schema
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
+      CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
+# ====================== Create users+schemas ===================
+
+- set_fact:
+    usernames:
+    - docstore
+    - console
+    - slack_client
+    - email_client
+    - googlechat_client
+
+- name: Create service users and schemas
+  include_tasks: rds-shared-create-user.yml
+  loop: "{{ usernames }}"
+  loop_control:
+    loop_var: svc_username
+

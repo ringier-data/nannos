@@ -1,0 +1,346 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Alloy - Nannos Shared RDS PostgreSQL (v{{ project_version }})'
+
+Conditions:
+  IsProd:
+    !Equals ['{{ env }}', 'prod']
+
+Resources:
+
+
+#---------------------------------------------------------------------------------------------- #
+# ----------------------------------------  RDS  ---------------------------------------------- #
+#---------------------------------------------------------------------------------------------- #
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Nannos Shared RDS security group
+      SecurityGroupIngress:
+        - {IpProtocol: 'tcp', FromPort: '{{ rds_port }}', ToPort: '{{ rds_port }}', CidrIp: !ImportValue '{{ project_id }}-vpc-cidr4', Description: 'Local VPC (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ rds_port }}', ToPort: '{{ rds_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpc-cidr6', Description: 'Local VPC (IPv6)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ rds_port }}', ToPort: '{{ rds_port }}', CidrIp: !ImportValue '{{ project_id }}-vpn-cidr4', Description: 'VPN (IPv4)'}
+        - {IpProtocol: 'tcp', FromPort: '{{ rds_port }}', ToPort: '{{ rds_port }}', CidrIpv6: !ImportValue '{{ project_id }}-vpn-cidr6', Description: 'VPN (IPv6)'}
+      VpcId: !ImportValue '{{ project_id }}-vpc-id-v2'
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-rds-sg' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+# ------------------------------------------- KMS Key ------------------------------------------- #
+
+  RDSEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Key for encrypting Nannos Shared RDS
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:*
+            Resource: '*'
+          - Sid: Allow RDS to use the key for encryption
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: rds.eu-central-1.amazonaws.com
+          - Sid: Allow AWS Backup to use the key from backup account
+            Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::443370680803:role/aws-service-role/backup.amazonaws.com/AWSServiceRoleForBackup
+            Action:
+              - kms:CreateGrant
+              - kms:RetireGrant
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              Bool:
+                kms:GrantIsForAWSResource: true
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-rds-key' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+# ------------------------------------------- RDS Instance ------------------------------------------- #
+
+  SubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: "Subnet group for Shared Nannos RDS"
+      SubnetIds:
+#{% for az_postfix in ['1a', '1b', '1c'] %}
+#
+        - !ImportValue '{{ project_id }}-subnet-dual-pri{{ az_postfix }}'
+#{% endfor %}
+#
+      Tags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-rds-shared' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  RDSInstance:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBInstanceIdentifier: '{{ env }}-{{ project_id }}-{{ software_component }}-shared'
+      AllocatedStorage: '{{ rds_storage_size }}'
+      MaxAllocatedStorage: '{{ rds_storage_size * 2 }}' # Storage auto-scale
+      AllowMajorVersionUpgrade: false # WARNING: CloudFormation will update immediately. Update in RDS AWS mgmt console to schedule and then update version in template
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: '{{ rds_backup_retention_in_days }}'
+      CopyTagsToSnapshot: Yes
+      CACertificateIdentifier: 'rds-ca-rsa2048-g1'
+      DBInstanceClass: '{{ rds_instance_class }}'
+      DBName: '{{ rds_db_name }}'
+      DBSubnetGroupName: !Ref SubnetGroup
+      DeleteAutomatedBackups: No
+      DeletionProtection: !If [IsProd, Yes, No]
+      EnablePerformanceInsights: Yes
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      DBParameterGroupName: !Ref RDSParameterGroup18
+      Engine: "postgres"
+      EngineVersion: '18'
+      KmsKeyId: !Ref RDSEncryptionKey
+      MasterUsername: '{{ rds_master_username }}'
+      MasterUserPassword: "{{ '{{' }}resolve:ssm-secure:{{ssmkey_rds_master_password}}:1{{ '}}' }}"
+      MultiAZ: !If [IsProd, Yes, No]
+      PerformanceInsightsRetentionPeriod: 7
+      PreferredMaintenanceWindow: '{{ preferred_maintenance_window }}'
+      Port: '{{ rds_port }}'
+      PubliclyAccessible: No
+      StorageEncrypted: Yes
+      StorageType: 'gp2'
+      VPCSecurityGroups:
+        - !Ref SecurityGroup
+      Tags:
+        - { Key: Name, Value: '{{ env }}-{{ project_id }}-{{ software_component }}-shared' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+  RDSParameterGroup18:
+    Type: AWS::RDS::DBParameterGroup
+    Properties: 
+      Description: Nannos Shared RDS Postgres18 parameter group
+      Family: postgres18
+      Parameters: 
+        # ddl logs all data definition statements, such as CREATE, ALTER, and DROP
+        # statements. mod logs all ddl statements, plus data-modifying statements such
+        # as INSERT, UPDATE, DELETE, TRUNCATE, and COPY FROM. PREPARE, EXECUTE, and
+        # EXPLAIN ANALYZE statements are also logged if their contained command is of
+        # an appropriate type
+        log_statement: mod
+        log_error_verbosity: terse # dont log details of the query -> contains PII
+        log_min_duration_statement: 100 # Log all statements taking longer than 100ms
+      Tags: 
+        - { Key: Name, Value: '{{ env }}-{{ project_id }}-rds-{{ software_component }}-shared-paramgroup' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+
+# ------------------------------------------- Alarming ------------------------------------------- #
+
+  ReadIOPSAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - Triggered when ReadIOPS is higher than 300 for 5 minutes"
+      MetricName: ReadIOPS
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: GreaterThanThreshold
+      Statistic: Minimum
+      Threshold: 300
+      Period: 300
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+
+  LowEBSIOBalanceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - Triggered when EBSIOBalance% is lower than 50% for 5 minutes"
+      MetricName: EBSIOBalance%
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: LessThanThreshold
+      Statistic: Minimum
+      Threshold: 50
+      Period: 300
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+
+  LowEBSByteBalanceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - Triggered when EBSByteBalance% is lower than 50% for 5 minutes"
+      MetricName: EBSByteBalance%
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: LessThanThreshold
+      Statistic: Minimum
+      Threshold: 50
+      Period: 300
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+
+  LowBurstBalanceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - Triggered when (EBS I/O) BurstBalance is lower than 90% for 5 minutes"
+      MetricName: BurstBalance
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: LessThanThreshold
+      Statistic: Minimum
+      Threshold: 90
+      Period: 300
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+
+  ReadLatencyHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - p90 ReadLatency is higher than {{ rds_alarm_read_latency }} for 60 minutes"
+      MetricName: ReadLatency
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: GreaterThanThreshold
+      ExtendedStatistic: p90
+      Threshold: '{{ rds_alarm_read_latency }}'
+      Period: 3600
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+
+  WriteLatencyHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - p90 WriteLatency is higher than {{rds_alarm_write_latency}} for 60 minutes"
+      MetricName: WriteLatency
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: GreaterThanThreshold
+      ExtendedStatistic: p90
+      Threshold: '{{ rds_alarm_write_latency }}'
+      Period: 3600
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+
+  CPUUtilizationHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - average CPUUtilization is higher than 90% for 60 minutes"
+      MetricName: CPUUtilization
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: GreaterThanThreshold
+      Statistic: Average
+      Threshold: 90
+      Period: 3600
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+
+  FreeableMemoryLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - FreeableMemory is lower than {{ rds_alarm_freeable_memory_in_mb }}MB for 60 minutes"
+      MetricName: FreeableMemory
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: LessThanThreshold
+      Statistic: Minimum
+      Threshold: {{ (rds_alarm_freeable_memory_in_mb | int) * 1e6 }} # 200MB
+      Period: 3600
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+
+  FreeStorageSpaceLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - FreeStorageSpace is lower than 100MB for 60 minutes"
+      MetricName: FreeStorageSpace
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: LessThanThreshold
+      Statistic: Minimum
+      Threshold: 1e6 # 100MB
+      Period: 3600
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+
+{% if rds_instance_class.startswith('db.t') %}
+  CPUSurplusCreditBalanceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Nannos Shared RDS - Triggered when CPUSurplusCreditBalance is higher than 0"
+      MetricName: CPUSurplusCreditBalance
+      Namespace: "AWS/RDS"
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      ComparisonOperator: GreaterThanThreshold
+      Statistic: Sum
+      Threshold: 0
+      Period: 300
+      EvaluationPeriods: 1
+      TreatMissingData: breaching
+{% endif %}
+
+
+# ------------------------------------------- Outputs ------------------------------------------- #
+
+Outputs:
+
+  RdsInstanceEndpointAddress:
+    Description: The endpoint address of the Nannos Shared RDS instance
+    Value: !GetAtt 'RDSInstance.Endpoint.Address'
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-shared-rds-endpoint-address'
+
+  RdsInstanceSecurityGroup:
+    Description: The security group ID for the Nannos Shared RDS instance
+    Value: !Ref SecurityGroup
+    Export:
+      Name: '{{ project_id }}-{{ software_component }}-shared-rds-sg'

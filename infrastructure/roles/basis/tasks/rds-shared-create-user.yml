@@ -1,0 +1,94 @@
+---
+# Per-user provisioning for the shared RDS instance.
+# Called from rds-shared.yml with loop_var: svc_username
+
+- set_fact:
+    _secret_name: "/{{ project_id }}/{{ software_component }}/rds-{{ svc_username }}-password"
+
+# ── 1. Check SSM Parameter Store for existing password ──
+
+- name: "{{ svc_username }} | Look up existing password in SSM"
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    _existing_password: "{{ lookup('amazon.aws.aws_ssm', _secret_name, decrypt=true, region=aws_region, on_missing='skip') }}"
+
+- name: "{{ svc_username }} | Use existing password"
+  when: _existing_password != ''
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    _svc_password: "{{ _existing_password }}"
+
+# ── 2. Generate password if not found ──
+
+- name: "{{ svc_username }} | Generate random password"
+  when: _existing_password == ''
+  no_log: '{{ ansible_verbosity < 3 }}'
+  set_fact:
+    _svc_password: "{{ lookup('password', '/dev/null length=60 chars=ascii_letters,digits') }}"
+
+# ── 3. Store password in SSM Parameter Store ──
+
+- name: "{{ svc_username }} | Store password in SSM"
+  when: _existing_password == ''
+  no_log: '{{ ansible_verbosity < 3 }}'
+  ringier.aws_cicd.ssm_parameter:
+    overwrite_value: "never"
+    name: "{{ _secret_name }}"
+    description: "RDS password for {{ svc_username }}"
+    string_type: "SecureString"
+    key_id: "alias/gov-rcplus-devops-secrets"
+    value: "{{ _svc_password }}"
+    tags:
+      Name: '{{ env }}-{{ project_id }}-{{ software_component }}-rds-{{ svc_username }}-password'
+      Project: '{{ project_id }}'
+      Environment: '{{ env }}'
+      Repository: '{{ git_info.repo_name }}'
+      Version: '{{ project_version }}'
+
+# ── 4. Create database user if not exists ──
+
+- name: "{{ svc_username }} | Create database user"
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      DO $$
+      BEGIN
+        CREATE ROLE {{ svc_username }} WITH LOGIN PASSWORD '{{ _svc_password }}';
+      EXCEPTION WHEN duplicate_object THEN
+        ALTER ROLE {{ svc_username }} WITH PASSWORD '{{ _svc_password }}';
+      END
+      $$;
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
+# ── 5. Create schema if not exists, owned by user ──
+
+- name: "{{ svc_username }} | Grant role to master user (required by PG15+)"
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      GRANT {{ svc_username }} TO {{ rds_username }}
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
+- name: "{{ svc_username }} | Create schema"
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      CREATE SCHEMA IF NOT EXISTS {{ svc_username }} AUTHORIZATION {{ svc_username }}
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'
+
+# ── 6. Set search_path for user ──
+
+- name: "{{ svc_username }} | Set search_path"
+  no_log: '{{ ansible_verbosity < 3 }}'
+  command: >-
+    docker run --rm -e PGPASSWORD psql -c "
+      ALTER USER {{ svc_username }} SET search_path = '{{ svc_username }}', 'public'
+    " postgresql://{{ rds_username }}@{{ rds_endpoint }}:{{ rds_port }}/{{ rds_db_name }}
+  environment:
+    PGPASSWORD: '{{ rds_password }}'

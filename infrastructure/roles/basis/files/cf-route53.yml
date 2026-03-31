@@ -1,0 +1,50 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'RC+/Nannos - Route53 (v{{ project_version }})'
+
+Resources:
+
+  PublicHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: 'The public zone of RC+/Nannos v2 ({{ base_domain_new }})'
+      HostedZoneTags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-route53-public-zone-new-' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+      Name: '{{ base_domain_new }}'
+
+  RingierNannosHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: 'The public zone of RC+/Nannos v2 ({{ base_domain_ringier_nannos }})'
+      HostedZoneTags:
+        - { Key: 'Name', Value: '{{ env }}-{{ project_id }}-route53-public-zone-ringier-nannos' }
+        - { Key: 'Project', Value: '{{ project_id }}' }
+        - { Key: 'Environment', Value: '{{ env }}' }
+        - { Key: 'Version', Value: 'v{{ project_version }}' }
+        - { Key: 'Repository', Value: '{{ git_info.repo_name }}' }
+      Name: '{{ base_domain_ringier_nannos }}'
+
+
+Outputs:
+
+  DomainName:
+    Description: 'Domain name'
+    Value: '{{ base_domain_new }}'
+
+  PublicHostedZoneId:
+    Description: 'Id of the public hosted zone'
+    Value: !Ref PublicHostedZone
+    Export:
+      Name: '{{ project_id }}-public-hosted-zone-new-id'
+
+  RingierNannosHostedZoneId:
+    Description: 'Id of the public hosted zone'
+    Value: !Ref RingierNannosHostedZone
+    Export:
+      Name: '{{ project_id }}-public-hosted-zone-ringier-nannos-id'

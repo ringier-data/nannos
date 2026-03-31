@@ -1,5 +1,6 @@
 ---
 domain_prefix: 'p.'
+domain_prefix_new: ''
 langsmith_tracing: true
 log_level: 'INFO'
 langsmith_project: prod-nannos-agent-framework

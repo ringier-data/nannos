@@ -220,7 +220,6 @@ Resources:
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
             - { Name: 'AGENT_BASE_URL', Value: 'https://{{ orchestrator_agent_fqdn }}' }
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
-            - { Name: 'PLAYGROUND_FRONTEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
             - { Name: 'MCP_GATEWAY_URL', Value: '{{ mcp_gateway_url }}' }
             - { Name: 'MCP_GATEWAY_CLIENT_ID', Value: '{{ mcp_gateway_client_id }}' }
             - { Name: 'A2A_TIMEOUT_CONNECT', Value: '{{ a2a_timeout_connect }}' }
@@ -228,43 +227,43 @@ Resources:
             - { Name: 'A2A_TIMEOUT_WRITE', Value: '{{ a2a_timeout_write }}' }
             - { Name: 'A2A_TIMEOUT_POOL', Value: '{{ a2a_timeout_pool }}' }
             - {
-                Name: 'POSTGRES_HOST',
+                Name: POSTGRES_HOST,
                 Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",
               }
-            - { Name: 'POSTGRES_PORT', Value: '{{ rds_port }}' }
-            - { Name: 'POSTGRES_DB', Value: '{{ rds_db_name }}' }
-            - { Name: 'POSTGRES_USER', Value: 'orchestrator_docstore' }
-            - { Name: 'POSTGRES_SCHEMA', Value: '{{ rds_schema }}' }
-            - { Name: 'POSTGRES_USE_SSL', Value: 'true' }
-            - { Name: 'POSTGRES_VERIFY_SSL', Value: 'true' }
+            - { Name: POSTGRES_PORT, Value: "{{ rds_port }}" }
+            - { Name: POSTGRES_DB, Value: "{{ rds_db_name }}" }
+            - { Name: POSTGRES_USER, Value: "orchestrator_docstore" }
+            - { Name: POSTGRES_SCHEMA, Value: "{{ rds_schema }}" }
+            - { Name: POSTGRES_USE_SSL, Value: "true" }
+            - { Name: POSTGRES_VERIFY_SSL, Value: "true" }
             - { Name: 'DOCUMENT_STORE_S3_BUCKET', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-files' }
             - { Name: 'BUDGET_ENABLED', Value: 'true' }
             - { Name: 'BUDGET_MONTHLY_TOKEN_LIMIT', Value: '{{ budget_monthly_token_limit }}' }
             - { Name: 'BUDGET_CHECK_INTERVAL_SECONDS', Value: '300' }
             - { Name: 'BUDGET_WARNING_THRESHOLDS', Value: '0.80,0.90,0.95' }
-            - { Name: 'BEDROCK_MODEL_ID', Value: '{{ bedrock_model_id }}' }
-            - { Name: 'BEDROCK_READ_TIMEOUT', Value: '{{ bedrock_read_timeout }}' }
-            - { Name: 'BEDROCK_CONNECT_TIMEOUT', Value: '{{ bedrock_connect_timeout }}' }
-            - { Name: 'BEDROCK_MAX_RETRY_ATTEMPTS', Value: '{{ bedrock_max_retry_attempts }}' }
-            - { Name: 'BEDROCK_RETRY_MODE', Value: '{{ bedrock_retry_mode }}' }
-            - { Name: 'CHECKPOINT_DYNAMODB_TABLE_NAME', Value: '{{ checkpoint_dynamodb_table_name }}' }
-            - { Name: 'CHECKPOINT_S3_BUCKET_NAME', Value: '{{ checkpoint_s3_bucket_name }}' }
-            - { Name: 'SSM_VAULT_PREFIX', Value: '{{ ssmkey_vault_prefix }}' }
-            - { Name: 'KMS_VAULT_KEY_ID', Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
-            - { Name: 'MAX_RECURSION_LIMIT', Value: '{{ max_recursion_limit }}' }
-            - { Name: 'GCP_PROJECT_ID', Value: '{{ gcp_project_id }}' }
-            - { Name: 'GCP_LOCATION', Value: '{{ gcp_location }}' }
-            - { Name: 'GOOGLE_GENAI_USE_VERTEXAI', Value: 'true' }
-            - { Name: 'ORCHESTRATOR_ENABLE_THINKING', Value: '{{ orchestrator_enable_thinking | default("false") | string | lower }}' }
-            - { Name: 'ORCHESTRATOR_THINKING_LEVEL', Value: '{{ orchestrator_thinking_level | default("low") }}' }
+            - { Name: "BEDROCK_MODEL_ID", Value: '{{ bedrock_model_id }}' }
+            - { Name: "BEDROCK_READ_TIMEOUT", Value: '{{ bedrock_read_timeout }}' }
+            - { Name: "BEDROCK_CONNECT_TIMEOUT", Value: '{{ bedrock_connect_timeout }}' }
+            - { Name: "BEDROCK_MAX_RETRY_ATTEMPTS", Value: '{{ bedrock_max_retry_attempts }}' }
+            - { Name: "BEDROCK_RETRY_MODE", Value: '{{ bedrock_retry_mode }}' }
+            - { Name: "CHECKPOINT_DYNAMODB_TABLE_NAME", Value: '{{ checkpoint_dynamodb_table_name }}' }
+            - { Name: "CHECKPOINT_S3_BUCKET_NAME", Value: '{{ checkpoint_s3_bucket_name }}' }
+            - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
+            - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
+            - { Name: "MAX_RECURSION_LIMIT", Value: '{{ max_recursion_limit }}' }
+            - { Name: "GCP_PROJECT_ID", Value: '{{ gcp_project_id }}' }
+            - { Name: "GCP_LOCATION", Value: '{{ gcp_location }}' }
+            - { Name: "GOOGLE_GENAI_USE_VERTEXAI", Value: 'true' }
+            - { Name: "ORCHESTRATOR_ENABLE_THINKING", Value: '{{ orchestrator_enable_thinking | default("false") | string | lower }}' }
+            - { Name: "ORCHESTRATOR_THINKING_LEVEL", Value: '{{ orchestrator_thinking_level | default("low") }}' }
           Secrets:
             - { Name: 'AZURE_OPENAI_API_KEY', ValueFrom: '{{ ssmkey_openai_api_key }}' }
             - { Name: 'LANGSMITH_API_KEY', ValueFrom: '{{ ssmkey_langsmith_api_key }}' }
             - { Name: 'OIDC_CLIENT_SECRET', ValueFrom: '{{ ssmkey_orchestrator_oidc_client_secret }}' }
             - { Name: 'POSTGRES_PASSWORD', ValueFrom: '{{ ssmkey_rds_docstore_password }}' }
-            - { Name: 'GCP_KEY', ValueFrom: '{{ ssmkey_gcp_key }}' }
+            - { Name: "GCP_KEY", ValueFrom: '{{ ssmkey_gcp_key }}' }
             - {
-                Name: 'POSTGRES_SSL_CA',
+                Name: "POSTGRES_SSL_CA",
                 ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/{{ project_id }}/rds-ca",
               }
           LogConfiguration:

@@ -1,5 +1,6 @@
 ---
 domain_prefix: 's.'
+domain_prefix_new: 's.'
 langsmith_tracing: true
 log_level: 'INFO'
 langsmith_project: stg-nannos-agent-framework

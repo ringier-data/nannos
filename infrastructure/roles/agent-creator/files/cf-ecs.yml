@@ -160,13 +160,13 @@ Resources:
             - { Name: 'LANGSMITH_TRACING', Value: '{{ langsmith_tracing | string | lower }}' }
             - { Name: 'LANGSMITH_ENDPOINT', Value: '{{ langsmith_endpoint }}' }
             - { Name: 'LANGSMITH_PROJECT', Value: '{{ langsmith_project }}' }
-            - { Name: 'CHECKPOINT_DYNAMODB_TABLE_NAME', Value: '{{ checkpoint_dynamodb_table_name }}' }
-            - { Name: 'CHECKPOINT_S3_BUCKET_NAME', Value: '{{ checkpoint_s3_bucket_name }}' }
-            - { Name: 'BEDROCK_MODEL_ID', Value: '{{ bedrock_model_id }}' }
-            - { Name: 'BEDROCK_READ_TIMEOUT', Value: '{{ bedrock_read_timeout }}' }
-            - { Name: 'BEDROCK_CONNECT_TIMEOUT', Value: '{{ bedrock_connect_timeout }}' }
-            - { Name: 'BEDROCK_MAX_RETRY_ATTEMPTS', Value: '{{ bedrock_max_retry_attempts }}' }
-            - { Name: 'BEDROCK_RETRY_MODE', Value: '{{ bedrock_retry_mode }}' }
+            - { Name: "CHECKPOINT_DYNAMODB_TABLE_NAME", Value: '{{ checkpoint_dynamodb_table_name }}' }
+            - { Name: "CHECKPOINT_S3_BUCKET_NAME", Value: '{{ checkpoint_s3_bucket_name }}' }
+            - { Name: "BEDROCK_MODEL_ID", Value: '{{ bedrock_model_id }}' }
+            - { Name: "BEDROCK_READ_TIMEOUT", Value: '{{ bedrock_read_timeout }}' }
+            - { Name: "BEDROCK_CONNECT_TIMEOUT", Value: '{{ bedrock_connect_timeout }}' }
+            - { Name: "BEDROCK_MAX_RETRY_ATTEMPTS", Value: '{{ bedrock_max_retry_attempts }}' }
+            - { Name: "BEDROCK_RETRY_MODE", Value: '{{ bedrock_retry_mode }}' }
             - { Name: 'PLAYGROUND_BACKEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
             - { Name: 'PLAYGROUND_FRONTEND_URL', Value: 'https://{{ chat_ui_fqdn }}' }
             - { Name: 'MCP_GATEWAY_URL', Value: '{{ mcp_gateway_url }}' }

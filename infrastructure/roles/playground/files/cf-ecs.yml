@@ -202,31 +202,27 @@ Resources:
             - { Name: "OIDC_ISSUER", Value: '{{ oidc_issuer }}' }
             - { Name: "BASE_DOMAIN", Value: '{{ chat_ui_fqdn }}' }
             - { Name: "ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
+            - { Name: "VITE_ORCHESTRATOR_BASE_DOMAIN", Value: '{{ orchestrator_agent_fqdn }}' }
             - { Name: "ORCHESTRATOR_CLIENT_ID", Value: '{{ orchestrator_oidc_client_id }}' }
             - {
-                Name: "POSTGRES_HOST",
+                Name: POSTGRES_HOST,
                 Value: !ImportValue "{{ project_id }}-{{ software_component }}-rds-endpoint-address",
               }
-            - { Name: "POSTGRES_PORT", Value: "{{ rds_port }}" }
-            - { Name: "POSTGRES_DB", Value: "{{ rds_db_name }}" }
-            - { Name: "POSTGRES_USER", Value: "{{ rds_service_username }}" }
-            - { Name: "POSTGRES_SCHEMA", Value: "{{ rds_schema }}" }
-            - { Name: "POSTGRES_USE_SSL", Value: "true" }
-            - { Name: "POSTGRES_VERIFY_SSL", Value: "true" }
+            - { Name: POSTGRES_PORT, Value: "{{ rds_port }}" }
+            - { Name: POSTGRES_DB, Value: "{{ rds_db_name }}" }
+            - { Name: POSTGRES_USER, Value: "{{ rds_service_username }}" }
+            - { Name: POSTGRES_SCHEMA, Value: "{{ rds_schema }}" }
+            - { Name: POSTGRES_USE_SSL, Value: "true" }
+            - { Name: POSTGRES_VERIFY_SSL, Value: "true" }
             - { Name: "SSM_VAULT_PREFIX", Value: '{{ ssmkey_vault_prefix }}' }
             - { Name: "KMS_VAULT_KEY_ID", Value: !ImportValue '{{ project_id }}-sensitive-data-kms-key-alias' }
             - { Name: "MCP_GATEWAY_URL", Value: '{{ mcp_gateway_url }}' }
             - { Name: "MCP_GATEWAY_CLIENT_ID", Value: '{{ mcp_gateway_client_id }}' }
             - { Name: "KEYCLOAK_ADMIN_CLIENT_ID", Value: '{{ keycloak_admin_client_id }}' }
             - { Name: "KEYCLOAK_GROUP_NAME_PREFIX", Value: '{{ keycloak_group_name_prefix }}' }
-            - { Name: "FILES_S3_BUCKET", Value: '{{ env }}-{{ project_id }}-{{ software_component }}-files' }
+            - { Name: 'FILES_S3_BUCKET', Value: '{{ env }}-{{ project_id }}-{{ software_component }}-files' }
             - { Name: "FILES_PRESIGNED_TTL_SECONDS", Value: "3600" }
             - { Name: "FILES_S3_PREFIX", Value: "" }
-            - { Name: "AGENT_RUNNER_URL", Value: "https://{{ agent_runner_fqdn }}" }
-            - { Name: "SCHEDULER_CLAIM_LIMIT", Value: "10" }
-            - { Name: "SCHEDULER_TICK_INTERVAL_SECONDS", Value: "30" }
-            - { Name: "AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH", Value: '{{ auto_approve_max_system_prompt_length }}' }
-            - { Name: "AUTO_APPROVE_MAX_MCP_TOOLS_COUNT", Value: '{{ auto_approve_max_mcp_tools_count }}' }
           Secrets:
             - { Name: "OIDC_CLIENT_SECRET", ValueFrom: '{{ ssmkey_agent_console_oidc_client_secret }}' }
             - { Name: "SECRET_KEY", ValueFrom: '{{ ssmkey_chat_ui_secret_key }}' }
