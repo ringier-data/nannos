@@ -287,10 +287,12 @@ class NaonousBedrockAgent(LangGraphBedrockAgent, DynamoDBCheckpointerMixin):
                 url=f"{self.mcp_gateway_url}?includeOnlyServerSlugs=naonous-riad,naonous-smg",
                 headers=headers,
                 timeout=timedelta(seconds=mcp_timeout_seconds),  # HTTP timeout (handshake, etc.)
-                sse_read_timeout=timedelta(seconds=mcp_timeout_seconds),  # SSE event timeout
-                session_kwargs={
-                    "read_timeout_seconds": timedelta(seconds=mcp_timeout_seconds),
-                },
+                sse_read_timeout=timedelta(seconds=mcp_timeout_seconds),  # SSE idle timeout, resets on every event (incl. progress)
+                # Note: do NOT set session_kwargs["read_timeout_seconds"] here.
+                # That is an anyio.fail_after absolute deadline that does NOT reset on progress
+                # notifications. The sse_read_timeout handles keeping the connection alive;
+                # adding read_timeout_seconds would cancel long-running tool calls after
+                # mcp_timeout_seconds regardless of ongoing progress events.
             )
         }
 

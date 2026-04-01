@@ -544,10 +544,7 @@ class LangGraphAgent(BaseAgent):
             )
 
             # Convert A2A messages to LangChain HumanMessages
-            input_messages = [
-                HumanMessage(content_blocks=a2a_parts_to_content(msg.parts or []))
-                for msg in messages
-            ]
+            input_messages = [HumanMessage(content_blocks=a2a_parts_to_content(msg.parts or [])) for msg in messages]
 
             # Allow provider-specific preprocessing (e.g., Bedrock URL→base64 image conversion)
             input_messages = await self._preprocess_input_messages(input_messages)
@@ -568,7 +565,6 @@ class LangGraphAgent(BaseAgent):
             ):
                 chunk_count += 1
                 part_type = part["type"]
-                logger.debug(f"Graph event #{chunk_count}: type={part_type}")
 
                 if part_type == "messages":
                     # Token-level streaming from LLM

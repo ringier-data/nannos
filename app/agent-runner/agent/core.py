@@ -494,9 +494,6 @@ class AgentRunner(BaseAgent):
             headers={"Authorization": f"Bearer {gatana_access_token}"},
             timeout=mcp_timeout,
             sse_read_timeout=mcp_timeout,
-            session_kwargs={
-                "read_timeout_seconds": mcp_timeout,
-            },
         )
 
         check_result: dict = {}
@@ -930,9 +927,9 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 headers={"Authorization": f"Bearer {gatana_access_token}"},
                 timeout=mcp_timeout,
                 sse_read_timeout=mcp_timeout,
-                session_kwargs={
-                    "read_timeout_seconds": mcp_timeout,
-                },
+                # session_kwargs={
+                #     "read_timeout_seconds": mcp_timeout,
+                # },
             )
             mcp_client = MultiServerMCPClient({"gateway": connection})
             async with mcp_client.session("gateway") as session:

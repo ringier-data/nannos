@@ -9,8 +9,11 @@ layers:
 
 * **Transport-level** — httpx SSE ``sse_read_timeout`` is a per-event idle
   timeout that resets on every SSE event, including progress notifications.
-* **JSON-RPC level** — ``ClientSession(read_timeout_seconds=...)`` provides a
-  hard upper-bound via ``anyio.fail_after`` on the response wait.
+  This is the correct mechanism for long-running tool calls.
+* **JSON-RPC level** — ``ClientSession(read_timeout_seconds=...)`` is an
+  absolute ``anyio.fail_after`` deadline that does NOT reset on progress events.
+  Do NOT set this to the same value as ``sse_read_timeout`` — it will cancel
+  long-running operations regardless of ongoing progress notifications.
 """
 
 from __future__ import annotations

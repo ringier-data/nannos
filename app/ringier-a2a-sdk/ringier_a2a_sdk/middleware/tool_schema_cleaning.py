@@ -178,6 +178,12 @@ class ToolSchemaCleaningMiddleware(AgentMiddleware):
                     logger.error(f"Failed to convert BaseTool '{tool.name}' at index {i}: {e}")
                     continue
             elif isinstance(tool, dict):
+                # Skip Bedrock-specific constructs like cachePoint (for prompt caching)
+                if "cachePoint" in tool:
+                    logger.debug(f"Passing through Bedrock cachePoint at index {i}")
+                    cleaned_tools.append(tool)
+                    continue
+                
                 # Already in dict format, just clean
                 try:
                     tool_dict = validate_and_clean_tool_dict(tool, level)
