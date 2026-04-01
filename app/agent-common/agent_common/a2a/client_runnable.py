@@ -24,6 +24,7 @@ import httpx
 from a2a.client import Client, ClientConfig, ClientFactory
 from a2a.types import (
     AgentCard,
+    DataPart,
     FilePart,
     FileWithUri,
     Message,
@@ -40,7 +41,7 @@ from a2a.types import (
 from a2a.types import (
     Role as A2ARole,
 )
-from langchain_core.messages import AIMessage, ContentBlock
+from langchain_core.messages import AIMessage, ContentBlock, HumanMessage
 from langsmith.run_helpers import get_current_run_tree
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
@@ -424,9 +425,8 @@ class A2AClientRunnable(BaseA2ARunnable):
     ) -> tuple[str, list[ContentBlock]]:
         """Extract text content and file ContentBlocks from the last message.
 
-        When the dispatch middleware builds a HumanMessage with content_blocks
-        (for file passthrough), `message.content` is a list of typed dicts.
-        This method splits them into a text string and file blocks.
+        Preserves block order by iterating through content once instead of
+        grouping by type. Returns text parts concatenated and file blocks in order.
 
         Args:
             input_data: Validated sub-agent input
@@ -444,9 +444,10 @@ class A2AClientRunnable(BaseA2ARunnable):
         if isinstance(raw_content, str):
             return raw_content, []
 
-        # content_blocks present — content is a list of dicts
+        # Iterate through content preserving order
         text_parts: list[str] = []
         file_blocks: list[ContentBlock] = []
+
         for block in raw_content:
             if isinstance(block, dict):
                 block_type = block.get("type", "")
@@ -480,25 +481,27 @@ class A2AClientRunnable(BaseA2ARunnable):
         file_with_uri = FileWithUri(uri=url, mime_type=mime_type)
         return A2APart(root=FilePart(file=file_with_uri))
 
-    def _create_a2a_message(
+    def _from_human_messages_to_a2a(
         self,
-        content: str,
+        human_messages: List[HumanMessage],
         context_id: Optional[str],
         task_id: Optional[str],
-        file_blocks: Optional[list[ContentBlock]] = None,
         scheduled_job_id: Optional[int] = None,
     ) -> Message:
-        """Create an A2A message with proper metadata.
+        """Transform a list of LangChain HumanMessages to a single A2A Message.
+
+        Processes all messages in order, aggregating their parts into a single
+        A2A message while preserving content block order. This enables multi-turn
+        conversations to be sent as a complete message thread.
 
         Args:
-            content: Text message content
+            human_messages: List of LangChain HumanMessage objects
             context_id: Optional context ID for multi-turn conversations
             task_id: Optional task ID for continuing existing tasks
-            file_blocks: Optional ContentBlocks to forward as A2A FileParts
             scheduled_job_id: Optional scheduled job ID for cost attribution
 
         Returns:
-            Constructed A2A Message
+            Constructed A2A Message aggregating parts from all HumanMessages
         """
         message_metadata: Dict[str, Any] = {
             "source": "Orchestrator",
@@ -507,19 +510,54 @@ class A2AClientRunnable(BaseA2ARunnable):
         if scheduled_job_id is not None:
             message_metadata["scheduled_job_id"] = scheduled_job_id
 
-        parts: list[A2APart] = [A2APart(root=TextPart(text=content, metadata=message_metadata))]
+        all_parts: list[A2APart] = []
 
-        # Convert ContentBlocks to A2A FileParts for deterministic file forwarding
-        if file_blocks:
-            for block in file_blocks:
-                file_part = self._content_block_to_file_part(block)
-                if file_part:
-                    parts.append(file_part)
-            logger.debug(f"A2A message includes {len(parts) - 1} FilePart(s) for file passthrough")
+        # Process each message in order, aggregating parts while preserving order
+        for human_message in human_messages:
+            # Handle content_blocks if present (structured input)
+            if hasattr(human_message, "content") and isinstance(human_message.content, list):
+                for block in human_message.content:
+                    if isinstance(block, dict):
+                        block_type = block.get("type", "")
+
+                        if block_type == "text":
+                            # Text block -> TextPart
+                            text = block.get("text", "")
+                            if text:
+                                all_parts.append(A2APart(root=TextPart(text=text, metadata=message_metadata)))
+
+                        elif block_type == "non_standard":
+                            # JSON block (non_standard) -> DataPart
+                            value = block.get("value", {})
+                            if isinstance(value, dict) and value.get("media_type") == "application/json":
+                                json_data = value.get("data", {})
+                                all_parts.append(
+                                    A2APart(
+                                        root=DataPart(
+                                            data=json_data,
+                                            metadata={"media_type": "application/json", **message_metadata},
+                                        )
+                                    )
+                                )
+
+                        elif block_type in ("image", "audio", "video", "file"):
+                            # File block -> FilePart
+                            file_part = self._content_block_to_file_part(block)
+                            if file_part:
+                                all_parts.append(file_part)
+                        else:
+                            logger.warning(f"Unsupported content block type: {block_type}. Skipping block.")
+            else:
+                # Plain text content
+                content = (
+                    human_message.content if isinstance(human_message.content, str) else str(human_message.content)
+                )
+                if content:
+                    all_parts.append(A2APart(root=TextPart(text=content, metadata=message_metadata)))
 
         return Message(
             role=A2ARole.user,
-            parts=parts,
+            parts=all_parts,
             message_id=str(uuid.uuid4()),
             context_id=context_id,
             task_id=task_id,
@@ -598,13 +636,17 @@ class A2AClientRunnable(BaseA2ARunnable):
             # Get client and prepare message
             client = await self._get_client()
             input_data_validated = SubAgentInput.model_validate(input_data)
-            content, file_blocks = self._extract_content_and_file_blocks(input_data_validated)
+
+            # Transform all HumanMessages to a single A2A Message
             context_id, task_id = self._extract_tracking_ids(input_data_validated)
-            a2a_message = self._create_a2a_message(
-                content,
+
+            if not input_data_validated.messages:
+                raise ValueError("No messages in input")
+
+            a2a_message = self._from_human_messages_to_a2a(
+                input_data_validated.messages,
                 context_id,
                 task_id,
-                file_blocks=file_blocks,
                 scheduled_job_id=input_data_validated.scheduled_job_id,
             )
 

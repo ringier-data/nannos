@@ -407,7 +407,8 @@ class TestA2AClientRunnableMessageCreation:
         context_id = "ctx-123"
         task_id = "task-456"
 
-        result = a2a_client_runnable._create_a2a_message(content, context_id, task_id)
+        human_message = HumanMessage(content=content)
+        result = a2a_client_runnable._from_human_messages_to_a2a([human_message], context_id, task_id)
 
         assert isinstance(result, Message)
         assert result.role == A2ARole.user
@@ -421,7 +422,8 @@ class TestA2AClientRunnableMessageCreation:
         """Test creating A2A message without tracking IDs."""
         content = "Test message"
 
-        result = a2a_client_runnable._create_a2a_message(content, None, None)
+        human_message = HumanMessage(content=content)
+        result = a2a_client_runnable._from_human_messages_to_a2a([human_message], None, None)
 
         assert isinstance(result, Message)
         assert result.context_id is None

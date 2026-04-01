@@ -32,9 +32,11 @@ import json
 import logging
 import textwrap
 from collections.abc import Awaitable, Callable
-from typing import Any, AsyncIterable, Optional, cast
+from typing import Any, AsyncIterable, Optional, TypedDict, cast
 
 from a2a.types import TaskState
+from agent_common.a2a.base import LocalA2ARunnable
+from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.a2a.stream_events import (
     TERMINAL_STATES,
     ActivityLogMeta,
@@ -45,6 +47,8 @@ from agent_common.a2a.stream_events import (
     TaskUpdate,
     WorkPlanMeta,
 )
+from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
+from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
 from agent_common.core.model_factory import create_model
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -55,6 +59,7 @@ from langchain.agents.middleware.types import (
 )
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import AIMessage, ContentBlock, HumanMessage, TextContentBlock, ToolMessage
+from langchain_core.messages.content import NonStandardContentBlock
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
@@ -67,10 +72,43 @@ from ringier_a2a_sdk.models import TodoItem
 from ringier_a2a_sdk.utils import create_runnable_config
 from ringier_a2a_sdk.utils.schema_cleaning import CleanupLevel, validate_and_clean_tool_dict
 
+from app.agents.file_analyzer import FileAnalyzerRunnable
+from app.agents.gp_agent import GPAgentRunnable
+from app.agents.task_scheduler import TaskSchedulerRunnable
+
 from ..core.steering_state import ActiveSubagentDispatch, clear_active_subagent_dispatch, set_active_subagent_dispatch
 from ..models.config import GraphRuntimeContext
 
 logger = logging.getLogger(__name__)
+
+
+class A2ACompiledSubAgent(TypedDict):
+    """A pre-compiled agent spec.
+
+    !!! note
+
+        The runnable's state schema must include a 'messages' key.
+
+        This is required for the subagent to communicate results back to the main agent.
+
+    When the subagent completes, the final message in the 'messages' list will be
+    extracted and returned as a `ToolMessage` to the parent agent.
+    """
+
+    name: str
+    description: str
+    runnable: A2AClientRunnable
+
+
+OrchestratorSupportedRunnables = (
+    A2AClientRunnable
+    | LocalA2ARunnable
+    | DynamicLocalAgentRunnable
+    | FoundryLocalAgentRunnable
+    | FileAnalyzerRunnable
+    | GPAgentRunnable
+    | TaskSchedulerRunnable
+)
 
 
 class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]):
@@ -653,11 +691,48 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             )
             return file_blocks  # Fallback to all files on error
 
+    @staticmethod
+    def _validate_json_input_for_agent(
+        description: str, input_modes: list[str], subagent_type: str
+    ) -> str | dict[str, Any]:
+        """Validate JSON input for agents requiring application/json input.
+
+        Args:
+            description: Task description from tool call
+            input_modes: List of supported input modes for the agent
+            subagent_type: Name of the subagent (for error messages)
+
+        Returns:
+            Validated description (str or dict depending on input_modes)
+
+        Raises:
+            ValueError: If agent requires JSON but description is not JSON-serializable
+        """
+        if "application/json" not in input_modes:
+            # Agent doesn't require JSON, return as-is
+            return description
+
+        # If description is string, try to parse it as JSON
+        try:
+            return json.loads(description)
+        except json.JSONDecodeError as e:
+            # if agent supports also text input, we can still pass the description as text and let the agent handle it
+            if set(input_modes).intersection({"text", "text/plain"}):
+                logger.warning(
+                    f"Sub-agent '{subagent_type}' supports both JSON and text input, but description is not valid JSON: {e}. "
+                    f"Passing description as text for the agent to handle."
+                )
+                return description
+            raise ValueError(
+                f"Sub-agent '{subagent_type}' requires JSON input (application/json), "
+                f"but description is not valid JSON: {e}"
+            )
+
     async def _build_subagent_human_message(
         self,
-        description: str,
+        description: str | dict[str, Any],
         user_context: GraphRuntimeContext,
-        subagent: Any,
+        subagent: A2ACompiledSubAgent,
     ) -> HumanMessage:
         """Build a HumanMessage for sub-agent dispatch with intelligent file filtering.
 
@@ -665,28 +740,61 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         avoiding wasteful forwarding of all files to all sub-agents. Optimizes by
         skipping filtering entirely for non-multimodal agents.
 
+        For JSON-input agents (with 'application/json' in input_modes), wraps the
+        description dict in a NonStandardContentBlock for structured data handling.
+
         Args:
-            description: Task description from the LLM's tool call
+            description: Task description from the LLM's tool call (str or dict for JSON agents)
             user_context: Runtime context with pending_file_blocks
-            subagent: CompiledSubAgent dict with is_multimodal metadata
+            subagent: A2ACompiledSubAgent with is_multimodal metadata
 
         Returns:
-            HumanMessage with filtered content_blocks if relevant files exist,
-            or plain content otherwise
+            HumanMessage with appropriate content blocks for the agent's input modes
         """
-        input_modes = subagent.get("runnable").input_modes
+        input_modes = subagent["runnable"].input_modes
+        subagent_name = subagent["name"]
         _TEXT_ONLY_MODES = {"text", "text/plain"}
+
+        # Check if agent requires JSON input
+        requires_json_input = "application/json" in input_modes
+
+        if requires_json_input and isinstance(description, dict):
+            # Agent requires JSON input and description is already a dict - handle structured data
+            logger.debug(f"Subagent '{subagent_name}' requires JSON input, constructing JSON block")
+
+            # Create JSON content block (NonStandardContentBlock for provider-specific JSON)
+            json_block: NonStandardContentBlock = {
+                "type": "non_standard",
+                "value": {
+                    "media_type": "application/json",
+                    "data": description,
+                },
+            }
+
+            # Create text block explaining the JSON input
+            all_blocks: list[ContentBlock] = [json_block]
+
+            logger.debug(f"Building JSON HumanMessage with structured data for agent '{subagent_name}'")
+            return HumanMessage(content_blocks=all_blocks)
+
+        # For text-only or non-JSON agents, use text content
+        # Convert description dict to string if needed
+        if isinstance(description, dict):
+            description_text = json.dumps(description, indent=2)
+        else:
+            description_text = description
+
         if set(input_modes).issubset(_TEXT_ONLY_MODES):
             # Agent only supports text, send text only (optimization: skip filtering)
-            logger.debug(f"Subagent '{subagent.get('name', 'unknown')}' is not multimodal, sending text-only message")
-            return HumanMessage(content=description)
+            logger.debug(f"Subagent '{subagent_name}' is not multimodal, sending text-only message")
+            return HumanMessage(content=description_text)
 
         # Subagent is multimodal - check if we have files to forward
         if not user_context.pending_file_blocks:
-            return HumanMessage(content=description)
+            return HumanMessage(content=description_text)
 
         filtered_files = await self._filter_files_with_llm(
-            description,
+            description_text,
             list(user_context.pending_file_blocks),
         )
 
@@ -706,10 +814,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     "type": "text",
                     "text": f"Url: {url}, File: {filename}, Type: {block_type}, MIME: {mime_type}",
                 }
-                description += f"\n\n{description_block['text']}"
+                description_text += f"\n\n{description_block['text']}"
 
         if filtered_files:
-            text_block: TextContentBlock = {"type": "text", "text": description}
+            text_block: TextContentBlock = {"type": "text", "text": description_text}
             all_blocks: list[ContentBlock] = [text_block] + filtered_files
             logger.debug(
                 f"Building sub-agent HumanMessage with {len(filtered_files)} "
@@ -719,7 +827,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         else:
             # No relevant files after filtering, send text only
             logger.debug("No relevant files after filtering, sending text-only message")
-            return HumanMessage(content=description)
+            return HumanMessage(content=description_text)
 
     # =========================================================================
     # Model Call Interception - Dynamic Tool Binding
@@ -1019,10 +1127,23 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         logger.debug(f"DynamicToolDispatchMiddleware: Dispatching task to subagent '{subagent_type}'")
 
         # Get the runnable from CompiledSubAgent
-        runnable = subagent.get("runnable")
+        runnable: OrchestratorSupportedRunnables | None = subagent.get("runnable")
         if runnable is None:
             return ToolMessage(
                 content=f"Error: Subagent '{subagent_type}' has no runnable",
+                name="task",
+                tool_call_id=tool_call_id,
+                status="error",
+            )
+
+        # Validate JSON input for agents requiring JSON
+        try:
+            input_modes = runnable.input_modes
+            description = self._validate_json_input_for_agent(description, input_modes, subagent_type)
+        except ValueError as e:
+            # add runnable.description and pyndatic examples to the error message for easier debugging
+            return ToolMessage(
+                content=f"JSON validation error for subagent '{subagent_type}': {e}. The agent description is: {runnable.description}",
                 name="task",
                 tool_call_id=tool_call_id,
                 status="error",
