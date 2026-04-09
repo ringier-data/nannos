@@ -7,21 +7,15 @@ import { Router } from '@koa/router';
 import { registerV2Routes } from './routes/v2routes.js';
 import { BotInstallationsController } from './controllers/BotInstallationsController.js';
 import { ConfigController } from './controllers/ConfigController.js';
-import { AuthController } from './controllers/AuthController.js';
 import { OpenApiRouter } from './routes/openApiRouter.js';
 import { openApiUiMiddleware } from './middlewares/openApiUiMiddleware.js';
-import { createAuthMiddleware } from './middlewares/authMiddleware.js';
 import { Logger } from './utils/logger.js';
-import { OIDCClient } from './services/oidcClient.js';
 import type { StorageProvider } from './storage/StorageProvider.js';
 
-export const getV2App = (config: Config, storage: StorageProvider, oidcClient: OIDCClient): Koa => {
+export const getV2App = (config: Config, storage: StorageProvider): Koa => {
   const isDevOrLocal = config.isDev() || config.isLocal();
   const isStg = config.isStg();
   const app = new Koa();
-
-  // Enable signed cookies
-  app.keys = [config.v2CookieSecret];
 
   app.use(async (ctx, next) => {
     // health endpoint
@@ -74,19 +68,8 @@ export const getV2App = (config: Config, storage: StorageProvider, oidcClient: O
     })
   );
 
-  // Auth middleware — protects all routes except public paths
-  app.use(createAuthMiddleware(config, storage.adminSession, oidcClient));
-
   const router = new Router();
   const openApiRouter = new OpenApiRouter(router);
-
-  // Auth routes (login/callback/logout) — registered before API routes
-  const authController = new AuthController(config, storage.adminSession, oidcClient);
-  router.get('/api/v2/auth/login', (ctx) => authController.getLogin(ctx));
-  router.get('/api/v2/auth/callback', (ctx) => authController.getLoginCallback(ctx));
-  router.get('/api/v2/auth/me', (ctx) => authController.getMe(ctx));
-  router.get('/api/v2/auth/logout', (ctx) => authController.logout(ctx));
-  router.get('/api/v2/auth/logout-callback', (ctx) => authController.logoutCallback(ctx));
 
   const installationsController = new BotInstallationsController(storage.botInstallation);
 

@@ -3,7 +3,7 @@ import { Logger } from './logger.js';
 import type { IInFlightTaskStore, InFlightTask, IContextStore } from '../storage/types.js';
 import { A2AClientService } from '../services/a2aClientService.js';
 import { UserAuthService } from '../services/userAuthService.js';
-import { isTerminatedState, postOrUpdateMessage, formatStatusMessage } from './taskResponseHandler.js';
+import { handleTask } from './taskResponseHandler.js';
 
 const logger = Logger.getLogger('taskRecovery');
 
@@ -36,52 +36,34 @@ async function recoverTask(
     // Poll A2A for task status
     const response = await a2aClientService.getTaskStatus(taskId, accessToken);
 
-    if (!response.success) {
-      logger.info(`Failed to get status for task ${taskId}: ${response.error}`);
-      // Task may have expired on A2A side - clean up
+    if ('error' in response) {
+      logger.warn({ taskId, error: response.error }, `Failed to get status for task ${taskId}: ${response.error}`);
       await inFlightTaskStore.delete(taskId);
-
-      // Notify user that recovery failed
-      try {
-        await slackClient.chat.postMessage({
-          channel: channelId,
-          thread_ts: threadTs,
-          text: '⚠️ Sorry, I lost track of your previous request during a restart. Please try again.',
-        });
-      } catch (e) {
-        logger.debug(`Failed to notify user about recovery failure: ${e}`);
-      }
       return false;
     }
 
-    logger.info(`Task ${taskId} status: ${response.state}`);
+    // Build and post response message
+    const result = await handleTask({
+      task: response.result,
+      slackClient,
+      messageContext: {
+        channelId,
+        threadTs,
+        messageTs,
+        statusMessageTs,
+      },
+    });
 
-    if (isTerminatedState(response.state)) {
-      // Task is complete - post result to Slack
-      const isSuccess = response.state === 'completed';
-
-      // Build and post response message
-      const message = response.message || (isSuccess ? 'Request completed!' : 'Task finished.');
-      const fullMessage = formatStatusMessage(response.state, message);
-
-      // Update or post message using centralized handler
-      await postOrUpdateMessage(slackClient, channelId, threadTs, fullMessage, statusMessageTs);
-
-      // Store context ID and last processed timestamp for conversation continuity
-      if (response.contextId) {
-        await contextStore.set(contextKey, response.contextId, messageTs);
-      }
-
-      // Clean up - delete the in-flight task record
-      await inFlightTaskStore.delete(taskId);
-
-      logger.info(`Successfully recovered task ${taskId}`);
-      return true;
-    } else {
-      // Task is active or interrupted - leave it for webhook
-      logger.info(`Task ${taskId} is in state '${response.state}', leaving for webhook`);
-      return false;
+    // Store context ID and last processed timestamp for conversation continuity
+    if (result.messageTs) {
+      await contextStore.set(contextKey, response.result.contextId, messageTs);
     }
+
+    // Clean up - delete the in-flight task record
+    await inFlightTaskStore.delete(taskId);
+
+    logger.info(`Successfully recovered task ${taskId}`);
+    return true;
   } catch (error) {
     logger.error(error, `Error recovering task ${taskId}: ${error}`);
     return false;
@@ -98,7 +80,7 @@ export async function recoverOrphanedTasks(
   userAuthService: UserAuthService,
   slackClient: WebClient,
   contextStore: IContextStore,
-  minAgeMs: number = 2 * 60 * 1000 // Default: 2 minutes
+  minAgeMs: number = 10 * 60 * 1000 // Default: 10 minutes
 ): Promise<{ recovered: number; failed: number; inProgress: number }> {
   logger.info('Starting orphaned task recovery...');
 

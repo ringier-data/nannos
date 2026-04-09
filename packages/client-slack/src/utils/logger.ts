@@ -2,9 +2,11 @@
 import { LoggerOptions, pino } from 'pino';
 import { Logger as SlackLogger, LogLevel } from '@slack/bolt';
 
+type PinoLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+
 const loggers: Map<string, Logger> = new Map();
 
-export class Logger implements SlackLogger {
+export class Logger {
   private readonly logger;
   private name?: string = undefined;
 
@@ -36,6 +38,13 @@ export class Logger implements SlackLogger {
     this.logger.useLevelLabels = true;
   }
 
+  public trace(...msg: any[]): void {
+    if (Array.isArray(msg)) {
+      msg = msg[0];
+    }
+    this.logger.trace(msg);
+  }
+
   public debug(...msg: any[]): void {
     if (Array.isArray(msg)) {
       msg = msg[0];
@@ -64,26 +73,12 @@ export class Logger implements SlackLogger {
     this.logger.error(msg);
   }
 
-  /**
-   * Map the Slack LogLevel to pino log level
-   */
-  public setLevel(level: LogLevel): void {
-    this.logger.level = Object.values(LogLevel).includes(level) ? level : 'error';
+  public setLevel(level: PinoLevel | string): void {
+    this.logger.level = level;
   }
 
-  /**
-   * Map the pino log level to Slack LogLevel
-   */
-  public getLevel(): LogLevel {
-    const levelMapping: { [key: string]: LogLevel } = {
-      fatal: LogLevel.ERROR,
-      error: LogLevel.ERROR,
-      warn: LogLevel.WARN,
-      info: LogLevel.INFO,
-      debug: LogLevel.DEBUG,
-      trace: LogLevel.DEBUG,
-    };
-    return levelMapping[this.logger.level];
+  public getLevel(): string {
+    return this.logger.level;
   }
 
   public setName(name: string): void {
@@ -96,9 +91,57 @@ export class Logger implements SlackLogger {
       if (name) {
         logger.setName(name);
       }
-      logger.setLevel((process.env.LOG_LEVEL as LogLevel) || 'debug');
+      logger.setLevel(process.env.LOG_LEVEL || 'debug');
       loggers.set(name || 'default', logger);
     }
     return loggers.get(name || 'default')!;
+  }
+}
+
+/**
+ * Slack-compatible logger that wraps a pino Logger
+ * and maps between Slack LogLevel and pino log levels.
+ */
+export class SlackBoltLogger implements SlackLogger {
+  private readonly pinoLogger: Logger;
+
+  constructor(name: string) {
+    this.pinoLogger = Logger.getLogger(name);
+  }
+
+  debug(...msg: any[]): void {
+    this.pinoLogger.debug(...msg);
+  }
+
+  info(...msg: any[]): void {
+    this.pinoLogger.info(...msg);
+  }
+
+  warn(...msg: any[]): void {
+    this.pinoLogger.warn(...msg);
+  }
+
+  error(...msg: any[]): void {
+    this.pinoLogger.error(...msg);
+  }
+
+  setLevel(level: LogLevel): void {
+    this.pinoLogger.setLevel(level);
+  }
+
+  getLevel(): LogLevel {
+    const levelMapping: Record<string, LogLevel> = {
+      fatal: LogLevel.ERROR,
+      error: LogLevel.ERROR,
+      warn: LogLevel.WARN,
+      info: LogLevel.INFO,
+      debug: LogLevel.DEBUG,
+      trace: LogLevel.DEBUG,
+    };
+    return levelMapping[this.pinoLogger.getLevel()] ?? LogLevel.DEBUG;
+  }
+
+  setName(name: string): void {
+    this.pinoLogger.setName(name);
   }
 }

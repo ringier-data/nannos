@@ -165,7 +165,7 @@ export async function getConfigFromEnv(): Promise<Config> {
       },
     },
     ses: {
-      fromEmail: process.env.SES_FROM_EMAIL || 'local@d.nannos.rcplus.io',
+      fromEmail: process.env.SES_FROM_EMAIL || 'local@d.nannos.ringier.ch',
       region: process.env.SES_REGION || process.env.AWS_REGION || 'eu-central-1',
       inboundS3Bucket:
         process.env.SES_INBOUND_S3_BUCKET || process.env.FILES_S3_BUCKET || 'dev-nannos-infrastructure-agents-files',

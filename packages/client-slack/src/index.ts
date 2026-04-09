@@ -5,15 +5,14 @@ import { startSlackApp } from './slackApp.js';
 import { Logger } from './utils/logger.js';
 import { getV2App } from './v2App.js';
 import { createStorageProvider } from './storage/index.js';
-import { OIDCClient } from './services/oidcClient.js';
 
 async function main() {
   const config = await getConfigFromEnv();
   const logger = Logger.getLogger('main');
+  logger.info('Starting application');
 
   const storage = await createStorageProvider(config.storage);
-  const oidcClient = new OIDCClient(config);
-  const v2App = getV2App(config, storage, oidcClient);
+  const v2App = getV2App(config, storage);
   const server = v2App.listen(config.v2AppPort, () => {
     logger.info(`Server is running on port ${config.v2AppPort}`);
   });

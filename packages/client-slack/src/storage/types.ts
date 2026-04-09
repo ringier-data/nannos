@@ -153,6 +153,7 @@ export interface IInFlightTaskStore {
   delete(taskId: string): Promise<void>;
   getByUser(teamId: string, userId: string): Promise<InFlightTask[]>;
   getAll(minAgeMs?: number): Promise<InFlightTask[]>;
+  touch(taskId: string): Promise<void>;
 }
 
 /**

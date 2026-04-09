@@ -112,9 +112,12 @@ export class AuthController {
 
     // Check group membership
     if (!groups.includes(this.config.adminGroup)) {
-      this.logger.warn(`User ${sub} (${email}) denied access: not in group ${this.config.adminGroup}`
+      this.logger.warn(`User ${sub} (${email}) denied access: not in group ${this.config.adminGroup}`);
+      return this.redirectToError(
+        ctx,
+        'access_denied',
+        `You are not a member of the required admin group "${this.config.adminGroup}". Your groups are: ${groups.join(', ')}.`
       );
-      return this.redirectToError(ctx, 'access_denied', 'You are not a member of the required admin group.');
     }
 
     // Create session

@@ -3,7 +3,7 @@ import { defineConfig } from "@hey-api/openapi-ts"
 module.exports = defineConfig({
   input:
     process.env.OVERRIDE_OPENAPI_URL ||
-    `https://a2a-slack.d.nannos.rcplus.io/api/v2/openapi.json`,
+    `https://a2a-slack.d.nannos.ringier.ch/api/v2/openapi.json`,
   output: "./src/api/generated",
   plugins: [
     {

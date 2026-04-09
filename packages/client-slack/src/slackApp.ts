@@ -1,7 +1,7 @@
 import { App, LogLevel } from '@slack/bolt';
 import { WebClient } from '@slack/web-api';
 import { Config } from './config/config.js';
-import { Logger } from './utils/logger.js';
+import { Logger, SlackBoltLogger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
 import { OIDCClient } from './services/oidcClient.js';
 import { UserAuthService } from './services/userAuthService.js';
@@ -10,8 +10,6 @@ import { FileStorageService } from './services/fileStorageService.js';
 import { registerListeners } from './listeners/index.js';
 import { handleOAuthCallback, generateCallbackHTML } from './utils/oauthCallback.js';
 import { processPendingRequest } from './utils/processPendingRequest.js';
-import { handleA2AWebhook, handleA2AStatusUpdate, A2AWebhookPayload } from './utils/a2aWebhookHandler.js';
-import { isTerminatedState } from './utils/taskResponseHandler.js';
 import { recoverOrphanedTasks } from './utils/taskRecovery.js';
 import { MultiTenantHTTPReceiver } from './receivers/MultiTenantHTTPReceiver.js';
 import { ParamsIncomingMessage } from '@slack/bolt/dist/receivers/ParamsIncomingMessage.js';
@@ -187,36 +185,8 @@ export async function startSlackApp(config: Config) {
       {
         path: '/api/v1/a2a/callback',
         method: 'POST' as const,
-        handler: async (req: ParamsIncomingMessage, res: ServerResponse) => {
-          try {
-            let body = '';
-            for await (const chunk of req) {
-              body += chunk;
-            }
-
-            if (!body) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: false, message: 'Empty request body' }));
-              return;
-            }
-
-            const payload: A2AWebhookPayload = JSON.parse(body);
-            logger.info(`Received A2A webhook callback for task ${payload.taskId}`);
-
-            if (isTerminatedState(payload.state)) {
-              const result = await handleA2AWebhook(payload, app.client, storage.inFlightTask, storage.context);
-              res.writeHead(result.success ? 200 : 500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify(result));
-            } else {
-              await handleA2AStatusUpdate(payload, app.client, storage.inFlightTask);
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: true, message: 'Status update processed' }));
-            }
-          } catch (error) {
-            logger.error(error, `A2A webhook error: ${error}`);
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, message: 'Internal server error' }));
-          }
+        handler: async (_req: ParamsIncomingMessage, _res: ServerResponse) => {
+          logger.warn('Received request on /api/v1/a2a/callback — NOT IMPLEMENTED YET');
         },
       },
     ];
@@ -234,7 +204,7 @@ export async function startSlackApp(config: Config) {
       : undefined;
 
     const app = new App({
-      logger: Logger.getLogger('SlackApp'),
+      logger: new SlackBoltLogger('SlackApp'),
       port: config.slackAppPort,
       authorize: async (_source, body) => {
         const appId = (body as any)?.api_app_id as string | undefined;
@@ -264,7 +234,7 @@ export async function startSlackApp(config: Config) {
     });
 
     // Set log level
-    logger.setLevel(config.logLevel as any);
+    logger.setLevel(config.logLevel);
 
     // Initialize services
     logger.info('Initializing services...');

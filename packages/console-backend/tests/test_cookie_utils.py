@@ -81,11 +81,11 @@ class TestExtractCookieAttributes:
     def test_extract_cookie_with_all_attributes(self) -> None:
         """Test extracting cookie with all attributes."""
         attrs = extract_cookie_attributes(
-            "orchestrator_session=jwt123; Max-Age=900; Domain=.nannos.rcplus.io; Path=/api; Secure; HttpOnly; SameSite=Lax",
+            "orchestrator_session=jwt123; Max-Age=900; Domain=.nannos.ringier.ch; Path=/api; Secure; HttpOnly; SameSite=Lax",
             "orchestrator_session",
         )
         assert attrs["value"] == "orchestrator_session=jwt123"
-        assert attrs["domain"] == ".nannos.rcplus.io"
+        assert attrs["domain"] == ".nannos.ringier.ch"
         assert attrs["max_age"] == 900
         assert attrs["path"] == "/api"
         assert attrs["secure"] is True
@@ -109,11 +109,11 @@ class TestExtractCookieAttributes:
         # Simulate actual orchestrator cookie
         cookie_header = (
             "orchestrator_session=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9; "
-            "Max-Age=900; Domain=.nannos.rcplus.io; Path=/; Secure; HttpOnly; SameSite=Lax"
+            "Max-Age=900; Domain=.nannos.ringier.ch; Path=/; Secure; HttpOnly; SameSite=Lax"
         )
         attrs = extract_cookie_attributes(cookie_header, "orchestrator_session")
         assert "orchestrator_session=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" in attrs["value"]
-        assert attrs["domain"] == ".nannos.rcplus.io"
+        assert attrs["domain"] == ".nannos.ringier.ch"
         assert attrs["max_age"] == 900
         assert attrs["secure"] is True
         assert attrs["httponly"] is True
@@ -153,11 +153,11 @@ class TestFindCookieInHeaders:
         """Test finding orchestrator_session among multiple cookies."""
         headers = [
             "session=user123; Path=/",
-            "orchestrator_session=jwt456; Max-Age=900; Domain=.nannos.rcplus.io",
+            "orchestrator_session=jwt456; Max-Age=900; Domain=.nannos.ringier.ch",
             "csrf=token789; Path=/",
         ]
         found = find_cookie_in_headers(headers, "orchestrator_session")
-        assert found == "orchestrator_session=jwt456; Max-Age=900; Domain=.nannos.rcplus.io"
+        assert found == "orchestrator_session=jwt456; Max-Age=900; Domain=.nannos.ringier.ch"
 
     def test_find_cookie_partial_name_match(self) -> None:
         """Test that partial name matches don't return false positives."""
@@ -200,12 +200,12 @@ class TestValidateCookieDomain:
 
     def test_validate_orchestrator_domain(self) -> None:
         """Test validation for orchestrator domain scenarios."""
-        # Orchestrator cookie with .nannos.rcplus.io should work for api.nannos.rcplus.io
-        assert validate_cookie_domain(".nannos.rcplus.io", "api.nannos.rcplus.io") is True
-        assert validate_cookie_domain(".nannos.rcplus.io", "orchestrator.nannos.rcplus.io") is True
+        # Orchestrator cookie with .nannos.ringier.ch should work for api.nannos.ringier.ch
+        assert validate_cookie_domain(".nannos.ringier.ch", "api.nannos.ringier.ch") is True
+        assert validate_cookie_domain(".nannos.ringier.ch", "orchestrator.nannos.ringier.ch") is True
 
         # But not for different domain
-        assert validate_cookie_domain(".nannos.rcplus.io", "example.com") is False
+        assert validate_cookie_domain(".nannos.ringier.ch", "example.com") is False
 
     def test_validate_localhost(self) -> None:
         """Test validation for localhost scenarios."""

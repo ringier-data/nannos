@@ -110,7 +110,7 @@ def generate_test_jwt(rsa_key_pair):
         now = datetime.now(timezone.utc)
 
         default_claims = {
-            "iss": issuer or "https://login.p.nannos.rcplus.io/realms/nannos",
+            "iss": issuer or "https://login.nannos.ringier.ch/realms/nannos",
             "sub": "service-account-orchestrator",
             "azp": azp or "orchestrator",
             "aud": audience or ["foundry-jira-ticket-agent"],

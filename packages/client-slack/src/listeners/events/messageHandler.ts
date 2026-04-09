@@ -8,11 +8,13 @@ import {
   hasProcessableFiles,
 } from '../../utils/fileUtils.js';
 import { UserAuthService } from '../../services/userAuthService.js';
-import { A2AClientService, A2ARequest, A2AResponse } from '../../services/a2aClientService.js';
+import { A2AClientService, A2ASlackBasedRequest } from '../../services/a2aClientService.js';
+import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, ContextRecord } from '../../storage/types.js';
-import { handleTaskResponse, handleStreamStatusUpdate, handleError } from '../../utils/taskResponseHandler.js';
+import { handleTask, handleError } from '../../utils/taskResponseHandler.js';
 import _ from 'lodash';
+import { getSpinnerVerb } from '../../utils/spinnerVerbs.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -473,7 +475,7 @@ async function sendAuthorizationRequired(
  */
 export async function handleIncomingMessage(msg: NormalizedMessage, deps: HandlerDependencies): Promise<void> {
   const logger = Logger.getLogger('handleIncomingMessage');
-  const { userId, teamId, channelId, messageTs, threadTs, rawText, files: eventFiles, source, client } = msg;
+  const { userId, teamId, channelId, messageTs, threadTs, rawText, files: eventFiles, source, client, appId } = msg;
   const {
     userAuthService,
     a2aClientService,
@@ -487,8 +489,27 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     isLocalMode,
   } = deps;
 
+  let statusMessageTs: string | undefined;
   try {
     logger.info(`${source} from user ${userId} in channel ${channelId}`);
+
+    // Post an immediate "Working..." message so the user sees responsiveness
+    // before the A2A server sends its first status-update event.
+    const statusMessages = {
+      thinking: `🧠 ${getSpinnerVerb() || 'Working'}...`,
+      activity: '',
+      todos: '',
+    };
+    try {
+      const immediateStatus = await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: statusMessages.thinking,
+      });
+      statusMessageTs = immediateStatus.ts;
+    } catch (err) {
+      logger.debug(`Failed to post immediate status message: ${err}`);
+    }
 
     // Resolve <@USERID> mentions to @DisplayName (no-op for DMs without mentions)
     const cleanText = (await resolveMentions(rawText, client)).trim();
@@ -550,19 +571,6 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       });
       await sendAuthorizationRequired(client, channelId, userId, teamId, threadTs, messageTs, userAuthService);
       return;
-    }
-
-    // ---- Clean up orphaned in-flight tasks for this thread ----
-    const existingTasks = await inFlightTaskStore.getByUser(teamId, userId);
-    const threadTasks = existingTasks.filter((t) => t.threadTs === threadTs);
-    if (threadTasks.length > 0) {
-      logger.info(
-        `Found ${threadTasks.length} existing in-flight task(s) for user ${userId} in thread ${threadTs}, cleaning up`
-      );
-      for (const task of threadTasks) {
-        await inFlightTaskStore.delete(task.taskId);
-        logger.debug(`Deleted orphaned task ${task.taskId}`);
-      }
     }
 
     // ---- Get orchestrator access token ----
@@ -689,7 +697,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     }
 
     // ---- Build & send A2A request via streaming ----
-    const a2aRequest: A2ARequest = {
+    const a2aRequest: A2ASlackBasedRequest = {
       userId,
       teamId,
       channelId,
@@ -709,79 +717,105 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       webhookToken: isLocalMode ? undefined : webhookToken,
     };
 
-    let statusMessageTs: string | undefined;
-    let response: A2AResponse;
-
     logger.info('Sending message via streaming');
 
-    // Post an immediate "Working..." message so the user sees responsiveness
-    // before the A2A server sends its first status-update event.
+    let accumulatedTask: Task | null = null;
     try {
-      const immediateStatus = await client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: '⏳ Working...',
-      });
-      statusMessageTs = immediateStatus.ts;
-    } catch (err) {
-      logger.debug(`Failed to post immediate status message: ${err}`);
-    }
+      for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
+        logger.debug(`Stream event: ${_.get(event, 'kind')}`);
+        logger.trace(event, `Stream event details:`);
 
-    // Track the placeholder message ts so the first status-update edits it in-place
-    let placeholderTs = statusMessageTs;
+        if (event.kind === 'task') {
+          // according to spec this is the first message...
+          const task = event as Task;
+          accumulatedTask = task;
 
-    response = await a2aClientService.sendMessageStream(a2aRequest, accessToken, async (event) => {
-      if (event.kind === 'status-update') {
-        logger.debug(
-          `Stream status-update: taskId=${event.taskId}, state=${event.state}, message=${event.message || '(none)'}`
-        );
-
-        // If the placeholder is still showing, edit it in-place with the real status
-        if (placeholderTs && event.message) {
-          const statusText = `⏳ ${event.message}`;
-          try {
-            await client.chat.update({
-              channel: channelId,
-              ts: placeholderTs,
-              text: statusText,
-            });
-            statusMessageTs = placeholderTs;
-          } catch (err) {
-            logger.debug(`Failed to update placeholder status message: ${err}`);
-          }
-          placeholderTs = undefined;
-        } else {
-          statusMessageTs = await handleStreamStatusUpdate(
-            client,
+          await inFlightTaskStore.save({
+            taskId: accumulatedTask.id,
+            visitorId: inFlightTaskStore.buildVisitorId(teamId, userId),
+            userId,
+            teamId,
             channelId,
             threadTs,
-            event.state,
-            event.message,
-            statusMessageTs
-          );
+            messageTs,
+            statusMessageTs,
+            contextKey,
+            webhookToken,
+            source,
+            appId,
+            createdAt: Date.now(),
+          });
+
+          // Store context ID if we got one
+          await contextStore.set(contextKey, accumulatedTask.contextId ?? '', messageTs);
+        } else if (event.kind === 'message') {
+          const message = event as Message;
+          logger.debug({ taskId: message.taskId, message }, `Stream message received. Doing nothing.`);
+        } else if (!accumulatedTask) {
+          logger.debug(`Received ${_.get(event, 'kind')} before task. Bug in this app or A2A server? Ignoring.`);
+        } else if (event.kind === 'status-update') {
+          const statusEvent = event as TaskStatusUpdateEvent;
+
+          // Update final response state
+          accumulatedTask.status = statusEvent.status;
+
+          if (event.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {
+            const workPlan = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
+              todos: Array<{
+                name: string; // Required: task description
+                state: 'submitted' | 'working' | 'completed' | 'failed'; // Required: current state
+                source?: string; // Optional: agent that owns this todo
+                target?: string; // Optional: resource ID being operated on
+              }>;
+            };
+            statusMessages.todos = workPlan.todos
+              .map(
+                (x) =>
+                  `• ${x.state === 'completed' ? '✅' : x.state === 'working' ? '⏳' : x.state === 'failed' ? '❌' : '🔜'} ${x.name}${x.source ? ` (agent ${x.source})` : ''}${x.target ? ` [${x.target}]` : ''}`
+              )
+              .join('\n');
+          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
+            statusMessages.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+          } else {
+            logger.debug(`Received status update without recognized extensions. Not updating status message details.`);
+          }
+          const newStatustMessage = `${statusMessages.thinking}${statusMessages.activity ? ` [${statusMessages.activity}]` : ''}${statusMessages.todos ? `\n${statusMessages.todos}` : ''}`;
+          if (statusMessageTs) {
+            await client.chat.update({
+              channel: channelId,
+              ts: statusMessageTs,
+              markdown_text: newStatustMessage,
+            });
+          }
+        } else if (event.kind === 'artifact-update') {
+          if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
+          accumulatedTask.artifacts.push(event.artifact);
+        } else {
+          logger.debug({ taskId: accumulatedTask?.id }, `Unknown stream event: ${_.get(event, 'kind')}`);
         }
-      } else if (event.kind === 'task-created') {
-        logger.debug(
-          `Stream task-created: taskId=${event.task.taskId}, state=${event.task.state}, contextId=${event.task.contextId}`
-        );
-      } else if (event.kind === 'artifact-update') {
-        logger.debug(
-          `Stream artifact-update: taskId=${event.taskId}, artifactId=${event.artifact.artifactId}, parts=${event.artifact.parts.length}`
-        );
-      } else if (event.kind === 'completed') {
-        logger.debug(
-          `Stream completed: state=${event.response.state}, taskId=${event.response.taskId}, message=${event.response.message || '(none)'}`
-        );
-      } else if (event.kind === 'error') {
-        logger.error(`Stream error: ${event.error}`);
-      } else {
-        logger.debug(`Stream event: ${_.get(event, 'kind')}`);
+
+        if (accumulatedTask) {
+          await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
+            logger.error(err, `Failed to update in-flight task timestamp for task ${accumulatedTask?.id}: ${err}`);
+          });
+        }
+        logger.debug({ taskId: accumulatedTask?.id }, `Current state: ${accumulatedTask?.status?.state}`);
       }
-    });
+    } catch (error) {
+      logger.error(error, `A2A stream error: ${error}`);
+    }
+
+    // Build the final response
+    if (!accumulatedTask) {
+      logger.error(
+        `No task information received from A2A server. Silently failing without sending a response to the user.`
+      );
+      return;
+    }
 
     // ---- Handle the response ----
-    const result = await handleTaskResponse({
-      response,
+    const result = await handleTask({
+      task: accumulatedTask,
       slackClient: client,
       messageContext: {
         channelId,
@@ -789,21 +823,26 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         messageTs,
         statusMessageTs,
       },
-      contextKey,
-      contextStore,
-      inFlightTaskStore,
-      webhookToken,
-      source,
-      userId,
-      teamId,
-      appId: msg.appId,
     });
-
-    if (result.handled) {
-      logger.info(`Successfully processed ${source} for user ${userId}`);
+    if (result.messageTs) {
+      contextStore.set(contextKey, accumulatedTask?.contextId, result.messageTs).catch((err) => {
+        logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
+      });
     }
   } catch (error) {
     logger.error(error, `Error handling ${source}: ${error}`);
     await handleError(client, channelId, threadTs, messageTs);
+  } finally {
+    // Clean up thinking message if it still exists (e.g. if A2A server didn't send any status updates or final response)
+    if (statusMessageTs) {
+      try {
+        await client.chat.delete({
+          channel: channelId,
+          ts: statusMessageTs,
+        });
+      } catch (err) {
+        logger.trace(err, `Failed to delete thinking message: ${err}`);
+      }
+    }
   }
 }

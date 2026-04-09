@@ -24,7 +24,7 @@ import {
 import type { ParamsIncomingMessage } from '@slack/bolt/dist/receivers/ParamsIncomingMessage.js';
 import { match } from 'path-to-regexp';
 import type { IBotInstallationStore } from '../storage/types.js';
-import { Logger } from '../utils/logger.js';
+import { Logger, SlackBoltLogger } from '../utils/logger.js';
 
 /**
  * Custom HTTP receiver that verifies Slack request signatures on a per-app basis.
@@ -45,6 +45,7 @@ export class MultiTenantHTTPReceiver implements Receiver {
   private readonly port: number;
   private readonly routes: ReceiverRoutes;
   private readonly logger = Logger.getLogger(MultiTenantHTTPReceiver.name);
+  private readonly slackLogger = new SlackBoltLogger(MultiTenantHTTPReceiver.name);
 
   constructor(options: {
     botInstallationStore: IBotInstallationStore;
@@ -125,7 +126,7 @@ export class MultiTenantHTTPReceiver implements Receiver {
     // Not found
     defaultDispatchErrorHandler({
       error: new Error(`Unhandled HTTP request (${method}) made to ${path}`),
-      logger: this.logger,
+      logger: this.slackLogger,
       request: req,
       response: res,
     });
@@ -223,7 +224,7 @@ export class MultiTenantHTTPReceiver implements Receiver {
       }
 
       const ack = new HTTPResponseAck({
-        logger: this.logger,
+        logger: this.slackLogger,
         processBeforeResponse: false,
         unhandledRequestHandler: defaultUnhandledRequestHandler,
         httpRequest: bufferedReq,
@@ -246,7 +247,7 @@ export class MultiTenantHTTPReceiver implements Receiver {
       } catch (error) {
         const acknowledgedByHandler = await defaultProcessEventErrorHandler({
           error: error as Error,
-          logger: this.logger,
+          logger: this.slackLogger,
           request: req,
           response: res,
           storedResponse: ack.storedResponse,

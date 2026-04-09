@@ -321,6 +321,34 @@ build-dev pkg:
     TAG="v${VERSION}-next.{{ build_ts }}"
     just tag="$TAG" push=true build-pkg "{{ pkg }}"
 
+# Map package name → k8s deployment name
+[private]
+pkg-deploy pkg:
+    #!/usr/bin/env bash
+    case "{{ pkg }}" in
+      console-backend|console-frontend) echo "console" ;;
+      client-slack|client-slack-frontend) echo "client-slack" ;;
+      *) echo "{{ pkg }}" ;;
+    esac
+
+# Builds, pushes a dev image, then triggers Flux to deploy it and waits for rollout
+deploy-dev pkg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RESET='\033[0m'
+
+    just build-dev "{{ pkg }}"
+
+    FLUX_NAME="nannos-{{ pkg }}"
+    flux -n nannos reconcile image repository "$FLUX_NAME"
+    flux -n nannos reconcile image policy "$FLUX_NAME"
+    flux reconcile kustomization nannos-app --with-source
+
+    DEPLOY=$(just pkg-deploy "{{ pkg }}")
+    printf "${CYAN}⏳ Waiting for deployment/%s rollout...${RESET}\n" "$DEPLOY"
+    kubectl -n nannos rollout status "deployment/$DEPLOY" --timeout=300s
+    printf "${GREEN}✅ deployment/%s rolled out successfully${RESET}\n" "$DEPLOY"
+
 # ─── Local Database ───────────────────────────────────────────────
 
 LOCAL_DB_PORT := "4700"

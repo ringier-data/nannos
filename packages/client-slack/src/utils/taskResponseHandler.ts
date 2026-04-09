@@ -1,20 +1,14 @@
 import { WebClient } from '@slack/web-api';
 import { Logger } from './logger.js';
-import { base64ToBuffer, getExtensionFromMimeType } from './fileUtils.js';
-import { A2AResponse, A2AArtifact } from '../services/a2aClientService.js';
-import type { IContextStore, IInFlightTaskStore, InFlightTask } from '../storage/types.js';
+import _ from 'lodash';
+import { Artifact, DataPart, FileWithBytes, FileWithUri, Task } from '@a2a-js/sdk';
 
 const logger = Logger.getLogger('taskResponseHandler');
 
 /**
- * Task state type alias for clarity
- */
-export type TaskState = A2AResponse['state'];
-
-/**
  * Get emoji for task state
  */
-export function getStateEmoji(state?: TaskState): string {
+export function getStateEmoji(state?: Task['status']['state']): string {
   switch (state) {
     case 'completed':
       return '✅';
@@ -38,7 +32,7 @@ export function getStateEmoji(state?: TaskState): string {
 /**
  * Get default message for task state
  */
-export function getStateMessage(state?: TaskState): string {
+export function getStateMessage(state?: Task['status']['state']): string {
   switch (state) {
     case 'completed':
       return 'Request completed!';
@@ -65,7 +59,7 @@ export function getStateMessage(state?: TaskState): string {
  * Check if state is a terminated state (no more updates expected)
  * Terminal states: completed, failed, rejected, canceled
  */
-export function isTerminatedState(state?: TaskState): boolean {
+export function isTerminatedState(state?: Task['status']['state']): boolean {
   return ['completed', 'failed', 'rejected', 'canceled'].includes(state || '');
 }
 
@@ -73,7 +67,7 @@ export function isTerminatedState(state?: TaskState): boolean {
  * Check if state is an interrupted state (paused, awaiting user action)
  * Interrupted states: input-required, auth-required
  */
-export function isInterruptedState(state?: TaskState): boolean {
+export function isInterruptedState(state?: Task['status']['state']): boolean {
   return ['input-required', 'auth-required'].includes(state || '');
 }
 
@@ -81,23 +75,8 @@ export function isInterruptedState(state?: TaskState): boolean {
  * Check if state has a user-facing message that should be displayed immediately
  * This includes terminated states plus interrupted states waiting for user action
  */
-export function shouldDisplayMessage(state?: TaskState): boolean {
+export function isInterruptedOrTerminated(state?: Task['status']['state']): boolean {
   return ['completed', 'failed', 'rejected', 'canceled', 'input-required', 'auth-required'].includes(state || '');
-}
-
-/**
- * Format a status message with emoji
- */
-export function formatStatusMessage(state?: TaskState, message?: string, includeEmojiForCompleted = false): string {
-  const emoji = getStateEmoji(state);
-  const text = message || getStateMessage(state);
-
-  // For completed state, only prepend emoji if explicitly requested
-  if (state === 'completed' && !includeEmojiForCompleted) {
-    return text;
-  }
-
-  return `${emoji} ${text}`;
 }
 
 /**
@@ -114,17 +93,9 @@ export interface SlackMessageContext {
  * Parameters for handling task response
  */
 export interface HandleTaskResponseParams {
-  response: A2AResponse;
+  task: Task;
   slackClient: WebClient;
   messageContext: SlackMessageContext;
-  contextKey: string;
-  contextStore: IContextStore;
-  inFlightTaskStore?: IInFlightTaskStore;
-  webhookToken?: string;
-  source: 'app_mention' | 'direct_message';
-  userId: string;
-  teamId: string;
-  appId?: string;
 }
 
 /**
@@ -136,7 +107,54 @@ export interface HandleTaskResponseResult {
 }
 
 /**
- * Post or update a status message
+ * Check if an error is a Slack `msg_too_long` platform error.
+ */
+function isMsgTooLongError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    _.get(err, 'code') === 'slack_webapi_platform_error' &&
+    _.get(err, 'data.error') === 'msg_too_long'
+  );
+}
+
+/**
+ * Fallback: upload text as a snippet file when it exceeds Slack's message limit.
+ */
+async function uploadTextAsSnippet(
+  slackClient: WebClient,
+  channelId: string,
+  threadTs: string,
+  text: string
+): Promise<string | undefined> {
+  try {
+    await slackClient.filesUploadV2({
+      channel_id: channelId,
+      thread_ts: threadTs,
+      content: text,
+      filename: 'response.md',
+      title: 'Response',
+      initial_comment: '📄 The response was too long for a Slack message, so it has been uploaded as a file.',
+    });
+    logger.info('Uploaded long message as text snippet');
+    return undefined;
+  } catch (uploadErr) {
+    logger.error(uploadErr, `Failed to upload text as snippet: ${uploadErr}`);
+    return undefined;
+  }
+}
+
+export async function postMessage(
+  slackClient: WebClient,
+  channelId: string,
+  threadTs: string,
+  text: string
+): Promise<string | undefined> {
+  return postOrUpdateMessage(slackClient, channelId, threadTs, text, undefined);
+}
+/**
+ * Post or update a status message.
+ * Falls back to uploading a text snippet if the message exceeds Slack's size limit.
  */
 export async function postOrUpdateMessage(
   slackClient: WebClient,
@@ -150,61 +168,73 @@ export async function postOrUpdateMessage(
       await slackClient.chat.update({
         channel: channelId,
         ts: existingTs,
-        text,
+        markdown_text: text,
       });
       return existingTs;
     } else {
       const result = await slackClient.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
-        text,
+        markdown_text: text,
       });
       return result.ts;
     }
   } catch (err) {
+    if (isMsgTooLongError(err)) {
+      logger.info('Message too long for Slack, uploading as text snippet');
+      // If we had a status message, try to update it with a short note
+      if (existingTs) {
+        await slackClient.chat
+          .update({
+            channel: channelId,
+            ts: existingTs,
+            text: '📄 Response uploaded as a file (too long for a message).',
+          })
+          .catch(() => {});
+      }
+      return uploadTextAsSnippet(slackClient, channelId, threadTs, text);
+    }
     logger.debug({ err, text }, `Failed to post/update message: ${err}`);
     return existingTs;
   }
 }
 
 /**
- * Collected file artifact ready for upload
- */
-export interface FileArtifact {
-  data: Buffer;
-  filename: string;
-  mimeType: string;
-}
-
-/**
  * Extract text content and file artifacts from A2A artifacts
  */
-export function processArtifacts(artifacts?: A2AArtifact[]): {
+export function processArtifacts(artifacts?: Artifact[]): {
   textParts: string[];
-  fileArtifacts: FileArtifact[];
+  filesWithBytes: FileWithBytes[];
+  filesWithUri: FileWithUri[];
+  dataParts: DataPart[];
 } {
   const textParts: string[] = [];
-  const fileArtifacts: FileArtifact[] = [];
+  const filesWithBytes: FileWithBytes[] = [];
+  const filesWithUri: FileWithUri[] = [];
+  const dataParts: DataPart[] = [];
 
-  if (!artifacts?.length) {
-    return { textParts, fileArtifacts };
-  }
-
-  for (const artifact of artifacts) {
-    for (const part of artifact.parts) {
-      if (part.kind === 'text' && part.text) {
-        textParts.push(part.text);
-      } else if ((part.kind === 'data' || part.kind === 'file') && part.data && part.mimeType) {
-        const buffer = base64ToBuffer(part.data);
-        const extension = getExtensionFromMimeType(part.mimeType);
-        const filename = part.name || artifact.name || `artifact-${artifact.artifactId}.${extension}`;
-        fileArtifacts.push({ data: buffer, filename, mimeType: part.mimeType });
-        logger.info(`Collected file artifact: ${filename} (${part.mimeType}, ${buffer.length} bytes)`);
+  if (artifacts) {
+    for (const artifact of artifacts) {
+      for (const part of artifact.parts) {
+        if (part.kind === 'text') {
+          textParts.push(part.text);
+        } else if (part.kind === 'file') {
+          if ('bytes' in part.file && part.file.bytes) {
+            filesWithBytes.push(part.file);
+          } else if ('uri' in part.file && part.file.uri) {
+            filesWithUri.push(part.file);
+          } else {
+            logger.warn(`Unsupported kind in artifact ${artifact.artifactId}: ${part.kind}`);
+          }
+        } else if (part.kind === 'data') {
+          dataParts.push(part);
+        } else {
+          logger.warn(`Unsupported part kind: ${_.get(part, 'kind')}`);
+        }
       }
     }
   }
-
-  return { textParts, fileArtifacts };
+  return { textParts, filesWithBytes, filesWithUri, dataParts };
 }
 
 /**
@@ -214,30 +244,30 @@ export async function uploadFileArtifacts(
   slackClient: WebClient,
   channelId: string,
   threadTs: string,
-  fileArtifacts: FileArtifact[]
+  files: Array<FileWithBytes>
 ): Promise<void> {
-  if (fileArtifacts.length === 0) return;
+  if (files.length === 0) return;
 
-  logger.info(`Uploading ${fileArtifacts.length} file artifact(s) to Slack`);
+  logger.info(`Uploading ${files.length} file artifact(s) to Slack`);
 
-  for (const file of fileArtifacts) {
+  for (const file of files) {
     try {
       await slackClient.filesUploadV2({
         channel_id: channelId,
         thread_ts: threadTs,
-        file: file.data,
-        filename: file.filename,
-        initial_comment: `📎 ${file.filename}`,
+        file: Buffer.from(file.bytes, 'base64'),
+        filename: file.name,
+        initial_comment: file.name,
       });
-      logger.info(`Successfully uploaded file artifact: ${file.filename}`);
+      logger.debug(`Successfully uploaded file artifact: ${file.name}`);
     } catch (uploadError) {
-      logger.error(uploadError, `Failed to upload file artifact ${file.filename}: ${uploadError}`);
+      logger.error(uploadError, `Failed to upload file artifact ${file.name}: ${uploadError}`);
       // Notify user that file upload failed
       await slackClient.chat
         .postMessage({
           channel: channelId,
           thread_ts: threadTs,
-          text: `⚠️ Failed to upload file: ${file.filename}`,
+          text: `⚠️ Failed to upload file: ${file.name}`,
         })
         .catch(() => {});
     }
@@ -246,151 +276,44 @@ export async function uploadFileArtifacts(
 
 /**
  * Handle a complete task response - posts messages and uploads artifacts
- * This is the main entry point for handling any A2A response uniformly
+ * This is the main entry point for A2A Task -> Slack
  */
-export async function handleTaskResponse(params: HandleTaskResponseParams): Promise<HandleTaskResponseResult> {
-  const {
-    response,
-    slackClient,
-    messageContext,
-    contextKey,
-    contextStore,
-    inFlightTaskStore,
-    webhookToken,
-    source,
-    userId,
-    teamId,
-    appId,
-  } = params;
+export async function handleTask(params: HandleTaskResponseParams): Promise<{ messageTs: string | undefined }> {
+  const { task, slackClient, messageContext } = params;
 
-  const { channelId, threadTs, messageTs } = messageContext;
-  let { statusMessageTs } = messageContext;
+  const { channelId, threadTs, messageTs, statusMessageTs } = messageContext;
 
   // Check if we should display a message (final or input-required states)
-  if (shouldDisplayMessage(response.state)) {
-    logger.info(`Handling displayable response: taskId=${response.taskId}, state=${response.state}`);
-
-    // Store context ID and last processed timestamp for conversation continuity
-    if (response.contextId) {
-      await contextStore.set(contextKey, response.contextId, messageTs);
-    }
-
-    // Process artifacts for completed tasks
-    let message = response.message || getStateMessage(response.state);
-    const { textParts, fileArtifacts } = processArtifacts(response.artifacts);
-
-    // If we have text artifacts, use them as the message
-    if (textParts.length > 0) {
-      message = textParts.join('\n\n');
-    }
-
-    // Add error info if present
-    if (response.error) {
-      message = `${message}\n\nError: ${response.error}`;
-    }
-
-    // Format the final message
-    const displayMessage = formatStatusMessage(response.state, message);
-
-    // Update or post the message
-    statusMessageTs = await postOrUpdateMessage(slackClient, channelId, threadTs, displayMessage, statusMessageTs);
-
-    // Upload file artifacts
-    await uploadFileArtifacts(slackClient, channelId, threadTs, fileArtifacts);
-
-    // For non-terminated states that need user input, store task for potential webhook callback
-    if (!isTerminatedState(response.state) && response.taskId && inFlightTaskStore) {
-      logger.info(`Task ${response.taskId} awaiting user input (state: ${response.state}), storing for webhook`);
-      await inFlightTaskStore.save({
-        taskId: response.taskId,
-        visitorId: inFlightTaskStore.buildVisitorId(teamId, userId),
-        userId,
-        teamId,
-        channelId,
-        threadTs,
-        messageTs,
-        statusMessageTs,
-        contextKey,
-        webhookToken,
-        source,
-        appId,
-        createdAt: Date.now(),
-      });
-    }
-
-    return { statusMessageTs, handled: true };
+  if (!isInterruptedOrTerminated(task.status.state)) {
+    logger.info({ taskId: task.id }, `Task state is still processing, will not post new message: ${task.status.state}`);
+    return { messageTs: undefined };
   }
 
-  // Task still in progress - store for webhook callback without displaying message yet
-  if (response.taskId && inFlightTaskStore) {
-    logger.info(`Task ${response.taskId} still working (state: ${response.state}), storing for webhook callback`);
+  // Process artifacts for completed tasks
+  const parts = processArtifacts(task.artifacts);
 
-    await inFlightTaskStore.save({
-      taskId: response.taskId,
-      visitorId: inFlightTaskStore.buildVisitorId(teamId, userId),
-      userId,
-      teamId,
-      channelId,
-      threadTs,
-      messageTs,
-      statusMessageTs,
-      contextKey,
-      webhookToken,
-      source,
-      appId,
-      createdAt: Date.now(),
-    });
-
-    // Store context ID if we got one
-    if (response.contextId) {
-      await contextStore.set(contextKey, response.contextId, messageTs);
-    }
-
-    return { statusMessageTs, handled: true };
+  // If we have text artifacts, use them as the message
+  let message = '';
+  if (parts.textParts.length > 0) {
+    message = parts.textParts.join('');
   }
 
-  // Immediate failure with no task ID
-  if (!response.success) {
-    logger.error(`A2A request failed: ${response.error}`);
-
-    const errorMessage = `❌ ${response.error || 'Failed to process your request.'}`;
-    statusMessageTs = await postOrUpdateMessage(slackClient, channelId, threadTs, errorMessage, statusMessageTs);
-
-    return { statusMessageTs, handled: true };
+  const urls = parts.filesWithUri.map((file) => file.uri);
+  if (urls.length > 0) {
+    message += `\n\nAttached files:\n${urls.join('\n')}`;
   }
 
-  return { statusMessageTs, handled: false };
-}
-
-/**
- * Handle streaming status update events
- * Posts a new message for each status update to preserve history
- */
-export async function handleStreamStatusUpdate(
-  slackClient: WebClient,
-  channelId: string,
-  threadTs: string,
-  state: TaskState,
-  message?: string,
-  existingStatusTs?: string
-): Promise<string | undefined> {
-  if (!message) return existingStatusTs;
-
-  const statusText = formatStatusMessage(state, message, true);
-
-  // Always post a new message to preserve history (don't update existing)
-  try {
-    const result = await slackClient.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: statusText,
-    });
-
-    return result.ts;
-  } catch (error) {
-    logger.debug(`Failed to post status message: ${error}`);
-    return existingStatusTs;
+  message = message.trim();
+  // Update or post the message
+  let postedMessageTs: string | undefined;
+  if (message) {
+    postedMessageTs = await postMessage(slackClient, channelId, threadTs, message);
   }
+
+  // Upload file artifacts
+  await uploadFileArtifacts(slackClient, channelId, threadTs, parts.filesWithBytes);
+
+  return { messageTs: postedMessageTs || statusMessageTs || messageTs };
 }
 
 /**
@@ -421,114 +344,4 @@ export async function handleError(
       text: `❌ ${errorMessage}`,
     })
     .catch((err) => logger.error(err, `Failed to send error message: ${err}`));
-}
-
-/**
- * Handle webhook callback from A2A server
- * This processes the final result from an async task
- */
-export async function handleWebhookCallback(
-  payload: {
-    taskId: string;
-    contextId?: string;
-    state: TaskState;
-    message?: string;
-    artifacts?: A2AArtifact[];
-    error?: string;
-    token?: string;
-  },
-  task: InFlightTask,
-  slackClient: WebClient,
-  contextStore: IContextStore,
-  inFlightTaskStore: IInFlightTaskStore
-): Promise<{ success: boolean; message: string }> {
-  const { taskId } = payload;
-
-  logger.info(`Processing webhook callback for task ${taskId}`);
-
-  // Validate webhook token if we stored one
-  if (task.webhookToken && payload.token !== task.webhookToken) {
-    logger.warn(`Invalid webhook token for task ${taskId}. Expected: ${task.webhookToken}, Got: ${payload.token}`);
-    return { success: false, message: 'Invalid webhook token' };
-  }
-
-  try {
-    // Process artifacts
-    let message = payload.message || getStateMessage(payload.state);
-    const { textParts, fileArtifacts } = processArtifacts(payload.artifacts);
-
-    if (textParts.length > 0) {
-      message = textParts.join('\n\n');
-    }
-
-    if (payload.error) {
-      message = `${message}\n\nError: ${payload.error}`;
-    }
-
-    const fullMessage = formatStatusMessage(payload.state, message);
-
-    // Update or post message
-    await postOrUpdateMessage(slackClient, task.channelId, task.threadTs, fullMessage, task.statusMessageTs);
-
-    // Upload file artifacts
-    await uploadFileArtifacts(slackClient, task.channelId, task.threadTs, fileArtifacts);
-
-    // Store context ID for conversation continuity
-    if (payload.contextId) {
-      await contextStore.set(task.contextKey, payload.contextId, task.messageTs);
-    }
-
-    // Clean up - delete the in-flight task record
-    await inFlightTaskStore.delete(taskId);
-
-    logger.info(`Successfully processed webhook callback for task ${taskId}`);
-    return { success: true, message: 'Webhook processed successfully' };
-  } catch (error) {
-    logger.error(error, `Error processing webhook for task ${taskId}: ${error}`);
-
-    // Try to notify user of error
-    try {
-      await slackClient.chat.postMessage({
-        channel: task.channelId,
-        thread_ts: task.threadTs,
-        text: '❌ An error occurred while processing the response. Please try again.',
-      });
-    } catch (e) {
-      // Ignore notification errors
-    }
-
-    return { success: false, message: `Error processing webhook: ${error}` };
-  }
-}
-
-/**
- * Handle status update from webhook (intermediate updates)
- * Posts new messages to preserve history
- */
-export async function handleWebhookStatusUpdate(
-  payload: { taskId: string; state: TaskState; message?: string },
-  task: InFlightTask,
-  slackClient: WebClient,
-  inFlightTaskStore: IInFlightTaskStore
-): Promise<void> {
-  const { taskId, state, message } = payload;
-
-  logger.debug(`Processing status update for task ${taskId}: ${state}`);
-
-  const statusMessage = formatStatusMessage(state, message, true);
-
-  try {
-    // Always post a new message to preserve history
-    const result = await slackClient.chat.postMessage({
-      channel: task.channelId,
-      thread_ts: task.threadTs,
-      text: statusMessage,
-    });
-
-    if (result.ts) {
-      await inFlightTaskStore.updateStatusMessageTs(taskId, result.ts);
-    }
-  } catch (error) {
-    logger.debug(`Failed to post Slack status message: ${error}`);
-  }
 }

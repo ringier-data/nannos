@@ -20,6 +20,7 @@ export interface InFlightTask {
   source: 'app_mention' | 'direct_message';
   appId?: string; // Slack App ID that received the message (for multi-bot token routing)
   createdAt: number;
+  lastActivityAt: Date;
   ttl: number; // Unix timestamp (seconds) for cleanup - kept for interface compatibility
 }
 
@@ -163,29 +164,35 @@ export class PgInFlightTaskStore {
   }
 
   /**
-   * Get all in-flight tasks (for startup recovery)
-   * Optionally filter by age to avoid racing with webhooks in progress
-   * @param minAgeMs - Only return tasks older than this many milliseconds (default: 2 minutes)
+   * Get all in-flight tasks
+   * @param minAgeMs - Only return tasks with no activity in the last many milliseconds (default: 10 minutes)
    */
-  async getAll(minAgeMs: number = 2 * 60 * 1000): Promise<InFlightTask[]> {
+  async getAll(minAgeMs: number = 10 * 60 * 1000): Promise<InFlightTask[]> {
     const cutoffTime = new Date(Date.now() - minAgeMs);
 
     try {
       const result = await this.pool.query(SQL`
         SELECT task_id, visitor_id, user_id, team_id, channel_id,
                thread_ts, message_ts, status_message_ts, context_key,
-               webhook_token, source, app_id, created_at, expires_at
+               webhook_token, source, app_id, created_at, expires_at, last_activity_at
         FROM inflight_tasks
-        WHERE created_at < ${cutoffTime}
+        WHERE last_activity_at < ${cutoffTime}
       `);
 
       const tasks = result.rows.map((row) => this.rowToTask(row));
-      this.logger.info(`Found ${tasks.length} orphaned in-flight tasks older than ${minAgeMs / 1000}s`);
       return tasks;
     } catch (error) {
       this.logger.error(error, `Failed to scan in-flight tasks: ${error}`);
       return [];
     }
+  }
+
+  async touch(taskId: string): Promise<void> {
+    await this.pool.query(SQL`
+        UPDATE inflight_tasks
+        SET last_activity_at = now()
+        WHERE task_id = ${taskId}
+      `);
   }
 
   /**
@@ -205,6 +212,7 @@ export class PgInFlightTaskStore {
       webhookToken: row.webhook_token,
       source: row.source,
       appId: row.app_id ?? undefined,
+      lastActivityAt: new Date(row.last_activity_at),
       createdAt: new Date(row.created_at).getTime(),
       ttl: Math.floor(new Date(row.expires_at).getTime() / 1000),
     };

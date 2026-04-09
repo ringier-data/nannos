@@ -75,7 +75,7 @@ class CostTrackingMixin:
         to construct a new one. Exactly one of the two must be provided.
 
         Args:
-            backend_url: Backend API URL (e.g., "https://chat.nannos.rcplus.io/").
+            backend_url: Backend API URL (e.g., "https://console.nannos.ringier.ch/").
                 Used to create a new CostLogger. Mutually exclusive with cost_logger.
             cost_logger: Existing CostLogger instance to use directly.
                 Mutually exclusive with backend_url.
