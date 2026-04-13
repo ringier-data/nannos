@@ -93,9 +93,6 @@ export async function getConfigFromEnv(): Promise<Config> {
   if (!process.env.ENVIRONMENT) {
     throw new Error('Please provide ENVIRONMENT');
   }
-  if (!process.env.SLACK_SIGNING_SECRET) {
-    throw new Error('Please provide SLACK_SIGNING_SECRET');
-  }
   if (!process.env.V2_COOKIE_SECRET) {
     throw new Error('Please provide V2_COOKIE_SECRET');
   }

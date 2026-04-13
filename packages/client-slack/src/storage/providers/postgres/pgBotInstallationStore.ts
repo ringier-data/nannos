@@ -10,10 +10,6 @@ import type { BotInstallation, IBotInstallationStore } from '../../types.js';
  *
  * NOTE: Multiple bots may share the same team_id (workspace). All runtime routing
  * uses app_id, extracted from api_app_id in the Slack request body.
- *
- * NOTE: All registered Slack Apps MUST be configured with the same signing secret
- * (SLACK_SIGNING_SECRET env var) for Bolt's built-in signature verification to work.
- * If per-app signing secrets are required in future, a custom HTTPReceiver is needed.
  */
 export class PgBotInstallationStore implements IBotInstallationStore {
   private readonly pool: Pool;

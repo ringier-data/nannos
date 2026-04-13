@@ -335,9 +335,28 @@ pkg-deploy pkg:
 deploy-dev pkg:
     #!/usr/bin/env bash
     set -euo pipefail
-    CYAN='\033[1;36m' GREEN='\033[1;32m' RESET='\033[0m'
+    CYAN='\033[1;36m' GREEN='\033[1;32m' DIM='\033[2m' RED='\033[1;31m' RESET='\033[0m'
 
-    just build-dev "{{ pkg }}"
+    source scripts/release-helpers.sh
+    VERSION="$(get_package_version "{{ pkg }}")"
+    TAG="v${VERSION}-next.{{ build_ts }}"
+    IMAGE=$(just pkg-image "{{ pkg }}")
+
+    # Build & push with the computed tag
+    just tag="$TAG" push=true build-pkg "{{ pkg }}"
+
+    # Wait for the tag to be visible in the registry before triggering Flux
+    printf "${CYAN}⏳ Waiting for %s:%s to be available in registry...${RESET}" "$IMAGE" "$TAG"
+    for i in $(seq 1 30); do
+      if docker manifest inspect "${IMAGE}:${TAG}" > /dev/null 2>&1; then
+        printf "${GREEN} ✓${RESET}\n"
+        break
+      fi
+      if [[ $i -eq 30 ]]; then
+        printf "\n${RED}❌ Tag %s not visible in registry after 30s. Proceeding anyway...${RESET}\n" "$TAG"
+      fi
+      sleep 1
+    done
 
     FLUX_NAME="nannos-{{ pkg }}"
     flux reconcile image repository "$FLUX_NAME"
