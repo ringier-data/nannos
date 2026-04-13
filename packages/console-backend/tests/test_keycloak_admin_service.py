@@ -27,7 +27,7 @@ class TestKeycloakAdminServiceInit:
     def test_init_with_valid_issuer(self, mock_keycloak_admin):
         """Test service initializes correctly with valid issuer URL."""
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -35,14 +35,14 @@ class TestKeycloakAdminServiceInit:
         )
 
         assert service.realm == "nannos"
-        assert service.server_url == "https://login.nannos.ringier.ch"
+        assert service.server_url == "https://login.p.nannos.rcplus.io"
         assert service.oidc_client_id == "agent-console"
 
     def test_init_with_invalid_issuer(self, mock_keycloak_admin):
         """Test service raises error with invalid issuer format."""
         with pytest.raises(ValueError, match="Invalid OIDC issuer URL format"):
             KeycloakAdminService(
-                issuer="https://login.nannos.ringier.ch/invalid",
+                issuer="https://login.p.nannos.rcplus.io/invalid",
                 admin_client_id="nannos-admin",
                 admin_client_secret="secret",
                 oidc_client_id="agent-console",
@@ -56,7 +56,7 @@ class TestKeycloakAdminServiceInit:
 
             with pytest.raises(KeycloakSyncError, match="Failed to initialize Keycloak Admin client"):
                 KeycloakAdminService(
-                    issuer="https://login.nannos.ringier.ch/realms/nannos",
+                    issuer="https://login.p.nannos.rcplus.io/realms/nannos",
                     admin_client_id="nannos-admin",
                     admin_client_secret="secret",
                     oidc_client_id="agent-console",
@@ -78,7 +78,7 @@ class TestEnsureGroupMapperConfigured:
         mock_keycloak_admin.a_get_mappers_from_client = AsyncMock(return_value=[])
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -108,7 +108,7 @@ class TestEnsureGroupMapperConfigured:
         )
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -127,7 +127,7 @@ class TestEnsureGroupMapperConfigured:
         mock_keycloak_admin.a_get_clients = AsyncMock(return_value=[{"id": "other-id", "clientId": "other-client"}])
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -145,7 +145,7 @@ class TestEnsureGroupMapperConfigured:
         mock_keycloak_admin.a_get_clients.side_effect = KeycloakError("Permission denied", response_code=403)
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -166,7 +166,7 @@ class TestCreateGroup:
         mock_keycloak_admin.a_create_group = AsyncMock(return_value="kc-group-id-123")
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -187,7 +187,7 @@ class TestCreateGroup:
         mock_keycloak_admin.a_create_group = AsyncMock(return_value="kc-group-id-456")
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -207,7 +207,7 @@ class TestCreateGroup:
         mock_keycloak_admin.a_create_group.side_effect = KeycloakError("Group already exists", response_code=409)
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -226,7 +226,7 @@ class TestUpdateGroup:
         """Test updates group name and description."""
         mock_keycloak_admin.a_update_group = AsyncMock()
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -246,7 +246,7 @@ class TestUpdateGroup:
         """Test clears description when None is provided."""
         mock_keycloak_admin.a_update_group = AsyncMock()
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -264,7 +264,7 @@ class TestUpdateGroup:
         mock_keycloak_admin.a_update_group.side_effect = KeycloakError("Group not found", response_code=404)
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -283,7 +283,7 @@ class TestDeleteGroup:
         """Test deletes group from Keycloak."""
         mock_keycloak_admin.a_delete_group = AsyncMock()
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -300,7 +300,7 @@ class TestDeleteGroup:
         mock_keycloak_admin.a_delete_group.side_effect = KeycloakError("Group not found", response_code=404)
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -319,7 +319,7 @@ class TestAddUserToGroup:
         """Test adds user to group."""
         mock_keycloak_admin.a_group_user_add = AsyncMock()
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -336,7 +336,7 @@ class TestAddUserToGroup:
         mock_keycloak_admin.a_group_user_add.side_effect = KeycloakError("User not found", response_code=404)
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -355,7 +355,7 @@ class TestRemoveUserFromGroup:
         """Test removes user from group."""
         mock_keycloak_admin.a_group_user_remove = AsyncMock()
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -372,7 +372,7 @@ class TestRemoveUserFromGroup:
         mock_keycloak_admin.a_group_user_remove.side_effect = KeycloakError("User not in group", response_code=404)
 
         service = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",

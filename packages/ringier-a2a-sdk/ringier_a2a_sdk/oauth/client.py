@@ -55,7 +55,7 @@ class OidcOAuth2Client(BaseOAuth2Client):
         client = OidcOAuth2Client(
             client_id="my-service",
             client_secret="secret",
-            issuer=os.getenv("OIDC_ISSUER")  # e.g., "https://login.nannos.ringier.ch/realms/nannos"
+            issuer=os.getenv("OIDC_ISSUER")  # e.g., "https://login.p.nannos.rcplus.io/realms/nannos"
         )
 
         # Client credentials
@@ -86,7 +86,7 @@ class OidcOAuth2Client(BaseOAuth2Client):
         Args:
             client_id: Service's OAuth2 client ID
             client_secret: Service's client secret
-            issuer: OIDC issuer URL (e.g., https://login.nannos.ringier.ch/realms/nannos)
+            issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
             token_leeway: Seconds before expiry to consider token expired (default: 600)
         """
         super().__init__(client_id, client_secret, issuer)

@@ -236,7 +236,7 @@ release-pkg pkg bump="":
 
 # ─── Docker Build & Push ──────────────────────────────────────────
 
-# Build Docker images for all buildable packages (optionally push)
+# Build Docker images for all buildable packages (optionally push: just push=true build)
 build:
     #!/usr/bin/env bash
     set -euo pipefail

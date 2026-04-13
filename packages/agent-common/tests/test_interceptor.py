@@ -96,7 +96,7 @@ class TestTokenExchange:
                 "test-oidc": MockSecuritySchemeWrapper(
                     MockSecurityScheme(
                         scheme_type="openIdConnect",
-                        open_id_connect_url="https://login.nannos.ringier.ch/realms/nannos/.well-known/openid-configuration",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
                     )
                 )
             },
@@ -104,7 +104,7 @@ class TestTokenExchange:
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.exchange_token = AsyncMock(return_value="orchestrator-token")
-        mock_oauth_client.issuer = "https://login.nannos.ringier.ch/realms/nannos"
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
 
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
@@ -141,7 +141,7 @@ class TestTokenExchange:
                 "agent-creator": MockSecuritySchemeWrapper(
                     MockSecurityScheme(
                         scheme_type="openIdConnect",
-                        open_id_connect_url="https://login.nannos.ringier.ch/realms/nannos/.well-known/openid-configuration",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
                     )
                 )
             },
@@ -149,7 +149,7 @@ class TestTokenExchange:
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.exchange_token = AsyncMock(return_value="agent-creator-token")
-        mock_oauth_client.issuer = "https://login.nannos.ringier.ch/realms/nannos"
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
             oauth2_client=mock_oauth_client,
@@ -186,7 +186,7 @@ class TestTokenExchange:
                 "oidc": MockSecuritySchemeWrapper(
                     MockSecurityScheme(
                         scheme_type="openIdConnect",
-                        open_id_connect_url="https://login.nannos.ringier.ch/realms/nannos/.well-known/openid-configuration",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
                     )
                 )
             },
@@ -194,7 +194,7 @@ class TestTokenExchange:
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.exchange_token = AsyncMock(side_effect=["orchestrator-token-1", "agent-creator-token-1"])
-        mock_oauth_client.issuer = "https://login.nannos.ringier.ch/realms/nannos"
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
 
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
@@ -234,7 +234,7 @@ class TestTokenExchange:
                 "agent-creator": MockSecuritySchemeWrapper(
                     MockSecurityScheme(
                         scheme_type="openIdConnect",
-                        open_id_connect_url="https://login.nannos.ringier.ch/realms/nannos/.well-known/openid-configuration",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
                     )
                 )
             },
@@ -266,7 +266,7 @@ class TestSubAgentIdHeader:
                 "test-oidc": MockSecuritySchemeWrapper(
                     MockSecurityScheme(
                         scheme_type="openIdConnect",
-                        open_id_connect_url="https://login.nannos.ringier.ch/realms/nannos/.well-known/openid-configuration",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
                     )
                 )
             },
@@ -274,7 +274,7 @@ class TestSubAgentIdHeader:
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.exchange_token = AsyncMock(return_value="exchanged-token")
-        mock_oauth_client.issuer = "https://login.nannos.ringier.ch/realms/nannos"
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
 
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
@@ -308,7 +308,7 @@ class TestSubAgentIdHeader:
                 "test-oidc": MockSecuritySchemeWrapper(
                     MockSecurityScheme(
                         scheme_type="openIdConnect",
-                        open_id_connect_url="https://login.nannos.ringier.ch/realms/nannos/.well-known/openid-configuration",
+                        open_id_connect_url="https://login.p.nannos.rcplus.io/realms/nannos/.well-known/openid-configuration",
                     )
                 )
             },
@@ -316,7 +316,7 @@ class TestSubAgentIdHeader:
 
         mock_oauth_client = AsyncMock()
         mock_oauth_client.exchange_token = AsyncMock(return_value="exchanged-token")
-        mock_oauth_client.issuer = "https://login.nannos.ringier.ch/realms/nannos"
+        mock_oauth_client.issuer = "https://login.p.nannos.rcplus.io/realms/nannos"
         interceptor = SmartTokenInterceptor(
             user_token="user-token",
             oauth2_client=mock_oauth_client,

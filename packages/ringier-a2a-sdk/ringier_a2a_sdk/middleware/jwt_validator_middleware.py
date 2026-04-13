@@ -26,7 +26,7 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
     optionally audience claims. No network call to userinfo endpoint needed.
 
     Configuration:
-    - issuer: OIDC issuer URL (e.g., https://login.nannos.ringier.ch/realms/nannos)
+    - issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
     - expected_azp: Expected authorized party (optional)
     - expected_aud: Expected audience claim (optional)
     """
@@ -52,7 +52,7 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
 
         Args:
             app: The ASGI application
-            issuer: OIDC issuer URL (e.g., https://login.nannos.ringier.ch/realms/nannos)
+            issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
             expected_azp: Expected authorized party claim (optional)
             expected_aud: Expected audience claim (optional, not validated if None)
             additional_public_paths: Extra paths to skip authentication for (optional)

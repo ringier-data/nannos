@@ -68,7 +68,7 @@ env = [
   # OIDC Authentication
   "OIDC_CLIENT_SECRET=test-client-secret",
   "OIDC_CLIENT_ID=agent-console",
-  "OIDC_ISSUER=https://login.nannos.ringier.ch/realms/nannos",
+  "OIDC_ISSUER=https://login.p.nannos.rcplus.io/realms/nannos",
   # DynamoDB Configuration
   "AWS_REGION=eu-central-1",
   "DYNAMODB_USERS_TABLE=test-nannos-infrastructure-agents-users",

@@ -21,7 +21,7 @@ Required Keycloak Configuration:
 
 Usage:
     service = KeycloakAdminService(
-        issuer=os.environ["OIDC_ISSUER"],  # e.g., "https://login.nannos.ringier.ch/realms/nannos"
+        issuer=os.environ["OIDC_ISSUER"],  # e.g., "https://login.p.nannos.rcplus.io/realms/nannos"
         admin_client_id="nannos-admin",
         admin_client_secret="secret",
         oidc_client_id="agent-console"
@@ -69,7 +69,7 @@ class KeycloakAdminService:
         """Initialize Keycloak Admin client.
 
         Args:
-            issuer: OIDC issuer URL (e.g., https://login.nannos.ringier.ch/realms/nannos)
+            issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
             admin_client_id: Client ID with admin permissions (e.g., nannos-admin)
             admin_client_secret: Client secret for admin client
             oidc_client_id: OIDC client ID to configure group mapper on (e.g., agent-console)
@@ -97,7 +97,7 @@ class KeycloakAdminService:
     def _extract_realm_from_issuer(self, issuer_url: str) -> str:
         """Extract realm name from OIDC issuer URL.
 
-        Example: https://login.nannos.ringier.ch/realms/nannos → nannos
+        Example: https://login.p.nannos.rcplus.io/realms/nannos → nannos
         """
         parsed = urlparse(issuer_url)
         path_parts = parsed.path.split("/")
@@ -114,7 +114,7 @@ class KeycloakAdminService:
     def _extract_server_url_from_issuer(self, issuer_url: str) -> str:
         """Extract Keycloak server base URL from issuer.
 
-        Example: https://login.nannos.ringier.ch/realms/nannos → https://login.nannos.ringier.ch
+        Example: https://login.p.nannos.rcplus.io/realms/nannos → https://login.p.nannos.rcplus.io
         """
         parsed = urlparse(issuer_url)
         return f"{parsed.scheme}://{parsed.netloc}"

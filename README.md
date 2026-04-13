@@ -290,7 +290,7 @@ These variables must be set **at image build time** (Vite bakes them into the bu
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `VITE_API_BASE_URL` | URL of the console-backend API | `http://localhost:5001` |
-| `VITE_KEYCLOAK_BASE_URL` | Keycloak base URL | `https://login.nannos.ringier.ch` |
+| `VITE_KEYCLOAK_BASE_URL` | Keycloak base URL | `https://login.p.nannos.rcplus.io` |
 | `VITE_KEYCLOAK_REALM` | Keycloak realm name | `nannos` |
 | `VITE_ORCHESTRATOR_BASE_DOMAIN` | Orchestrator host | `orchestrator.d.nannos.ringier.ch` |
 

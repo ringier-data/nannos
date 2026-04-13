@@ -45,7 +45,7 @@ class BaseOAuth2Client:
         Args:
             client_id: OAuth2 client ID
             client_secret: OAuth2 client secret
-            issuer: OIDC issuer URL (e.g., https://login.nannos.ringier.ch/realms/nannos)
+            issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
         """
         self.client_id = client_id
         self.client_secret = client_secret

@@ -17,7 +17,7 @@ async def test_prefix_isolation_different_environments():
 
         # Local creates "local-sales"
         service_local = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -27,7 +27,7 @@ async def test_prefix_isolation_different_environments():
 
         # Dev creates "dev-sales"
         service_dev = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -37,7 +37,7 @@ async def test_prefix_isolation_different_environments():
 
         # Stg creates "stg-sales"
         service_stg = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",
@@ -47,7 +47,7 @@ async def test_prefix_isolation_different_environments():
 
         # Prod creates "sales"
         service_prod = KeycloakAdminService(
-            issuer="https://login.nannos.ringier.ch/realms/nannos",
+            issuer="https://login.p.nannos.rcplus.io/realms/nannos",
             admin_client_id="nannos-admin",
             admin_client_secret="secret",
             oidc_client_id="agent-console",

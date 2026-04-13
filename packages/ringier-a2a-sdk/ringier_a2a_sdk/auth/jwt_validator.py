@@ -69,7 +69,7 @@ class JWKSFetcher:
         Initialize JWKS fetcher.
 
         Args:
-            issuer: The OIDC issuer URL (e.g., https://login.nannos.ringier.ch/realms/nannos)
+            issuer: The OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
             cache_ttl: Cache TTL in seconds for JWKS keys
         """
         self.issuer = issuer.rstrip("/")
