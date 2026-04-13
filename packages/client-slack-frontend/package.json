@@ -1,7 +1,7 @@
 {
   "name": "nannos-slack-app-fe",
   "private": true,
-  "version": "1.9.2",
+  "version": "1.9.3",
   "type": "module",
   "scripts": {
     "gen-sdk": "rm -rf ./src/api/generated && openapi-ts && npm run format",
