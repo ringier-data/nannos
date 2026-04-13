@@ -167,7 +167,7 @@ export async function startSlackApp(config: Config) {
                     await app.client.chat.postMessage({
                       token: notifyToken,
                       channel: dmResult.channel.id,
-                      text: '✅ Authorization successful! You can now use A2A features.',
+                      text: '✅ Authorization successful! You can now start to use the Slack bot.',
                     });
                   }
                 } catch (error) {

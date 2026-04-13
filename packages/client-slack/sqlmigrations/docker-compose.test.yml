@@ -8,9 +8,9 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: testdb
     ports:
-      - "5433:5432"
+      - '5433:5432'
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d testdb"]
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d testdb']
       interval: 2s
       timeout: 5s
       retries: 10

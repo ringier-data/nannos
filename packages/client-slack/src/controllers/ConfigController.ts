@@ -73,7 +73,7 @@ export class ConfigController {
   private readonly baseDomain: string;
 
   constructor(config: Config) {
-    // Extract domain from baseUrl (e.g. "https://a2a-slack.d.nannos.ringier.ch" -> "a2a-slack.d.nannos.ringier.ch")
+    // Extract domain from baseUrl (e.g. "https://a2a-slack.d.nannos.rcplus.io" -> "a2a-slack.d.nannos.rcplus.io")
     this.baseDomain = new URL(config.baseUrl).hostname;
   }
 

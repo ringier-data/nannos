@@ -11,11 +11,15 @@ import { OpenApiRouter } from './routes/openApiRouter.js';
 import { openApiUiMiddleware } from './middlewares/openApiUiMiddleware.js';
 import { Logger } from './utils/logger.js';
 import type { StorageProvider } from './storage/StorageProvider.js';
+import { OIDCClient } from './services/oidcClient.js';
+import { AuthController } from './controllers/AuthController.js';
+import { createAuthMiddleware } from './middlewares/authMiddleware.js';
 
-export const getV2App = (config: Config, storage: StorageProvider): Koa => {
+export const getV2App = (config: Config, storage: StorageProvider, oidcClient: OIDCClient): Koa => {
   const isDevOrLocal = config.isDev() || config.isLocal();
   const isStg = config.isStg();
   const app = new Koa();
+  app.keys = [config.v2CookieSecret];
 
   app.use(async (ctx, next) => {
     // health endpoint
@@ -59,6 +63,8 @@ export const getV2App = (config: Config, storage: StorageProvider): Koa => {
       },
     })
   );
+
+  app.use(createAuthMiddleware(config, storage.adminSession, oidcClient));
   app.use(
     koaBody({
       patchNode: true,
@@ -72,6 +78,14 @@ export const getV2App = (config: Config, storage: StorageProvider): Koa => {
   const openApiRouter = new OpenApiRouter(router);
 
   const installationsController = new BotInstallationsController(storage.botInstallation);
+
+  // Auth routes (login/callback/logout) — registered before API routes
+  const authController = new AuthController(config, storage.adminSession, oidcClient);
+  router.get('/api/v2/auth/login', (ctx) => authController.getLogin(ctx));
+  router.get('/api/v2/auth/callback', (ctx) => authController.getLoginCallback(ctx));
+  router.get('/api/v2/auth/me', (ctx) => authController.getMe(ctx));
+  router.get('/api/v2/auth/logout', (ctx) => authController.logout(ctx));
+  router.get('/api/v2/auth/logout-callback', (ctx) => authController.logoutCallback(ctx));
 
   registerV2Routes(openApiRouter, installationsController, new ConfigController(config));
 

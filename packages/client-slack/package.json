@@ -1,6 +1,6 @@
 {
   "name": "rcplus-alloy-a2a-slack-client",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "RC+/Alloy A2A Slack Client ",
   "type": "module",
   "exports": "./dist/src/index.js",
@@ -9,7 +9,7 @@
   "license": "SEE LICENSE IN LICENSE",
   "readmeFilename": "README.md",
   "dependencies": {
-    "@a2a-js/sdk": "^0.3.5",
+    "@a2a-js/sdk": "^0.3.13",
     "@aws-sdk/client-s3": "^3.940.0",
     "@aws-sdk/client-secrets-manager": "^3.662.0",
     "@aws-sdk/client-ssm": "^3.662.0",

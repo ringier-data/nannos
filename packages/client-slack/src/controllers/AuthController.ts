@@ -116,7 +116,7 @@ export class AuthController {
       return this.redirectToError(
         ctx,
         'access_denied',
-        `You are not a member of the required admin group "${this.config.adminGroup}". Your groups are: ${groups.join(', ')}.`
+        'You are not a member of the required admin group. Your groups: ' + groups.join(', ')
       );
     }
 

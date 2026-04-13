@@ -60,7 +60,7 @@ export async function handleOAuthCallback(
     logger.info(`Successfully authorized user ${userId}`);
     return {
       success: true,
-      message: 'Authorization successful! You can now use A2A features.',
+      message: 'Authorization successful! You can now start to use the Slack bot.',
       userId,
       teamId,
     };

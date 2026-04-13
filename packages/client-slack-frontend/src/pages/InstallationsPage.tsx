@@ -73,9 +73,7 @@ export function InstallationsPage() {
           <Link to="/installations/new">Add Installation</Link>
         </Button>
       </div>
-
       {error && <p className="text-sm text-red-500">{error}</p>}
-
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading...</p>
       ) : installations.length === 0 ? (
@@ -140,7 +138,6 @@ export function InstallationsPage() {
           </TableBody>
         </Table>
       )}
-
       <Dialog
         open={!!deleteTarget}
         onOpenChange={(open) => !open && setDeleteTarget(null)}

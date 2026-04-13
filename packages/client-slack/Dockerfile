@@ -6,12 +6,13 @@ ARG NPMRC_ENCODED
 
 WORKDIR /app
 
-ADD package.json package-lock.json tsconfig.json ./
-COPY . .
+COPY package.json package-lock.json tsconfig.json ./
 
 RUN echo $NPMRC_ENCODED | base64 -d > ~/.npmrc \
     && npm ci --no-color --audit=false \
     && npm --no-color run build
+
+COPY src ./src
 
 
 FROM node:24-alpine
