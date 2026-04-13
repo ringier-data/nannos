@@ -1,6 +1,6 @@
 [project]
 name = "agent-runner"
-version = "0.9.1"
+version = "0.9.2"
 description = "Internal execution service for scheduled automated sub-agent jobs"
 requires-python = ">=3.12"
 dependencies = [

@@ -9,10 +9,9 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.json ./
 
 RUN echo $NPMRC_ENCODED | base64 -d > ~/.npmrc \
-    && npm ci --no-color --audit=false \
-    && npm --no-color run build
-
+    && npm ci --no-color --audit=false
 COPY src ./src
+RUN npm --no-color run build
 
 
 FROM node:24-alpine
