@@ -340,8 +340,8 @@ deploy-dev pkg:
     just build-dev "{{ pkg }}"
 
     FLUX_NAME="nannos-{{ pkg }}"
-    flux -n nannos reconcile image repository "$FLUX_NAME"
-    flux -n nannos reconcile image policy "$FLUX_NAME"
+    flux reconcile image repository "$FLUX_NAME"
+    flux reconcile image policy "$FLUX_NAME"
     flux reconcile kustomization nannos-app --with-source
 
     DEPLOY=$(just pkg-deploy "{{ pkg }}")
