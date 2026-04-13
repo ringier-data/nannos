@@ -255,17 +255,15 @@ All variables below are **required** — there are no fallback defaults.
 | Variable | Description |
 |----------|-------------|
 | `ENVIRONMENT` | Deployment environment: `local`, `dev`, `stg`, or `prod` |
-| `SLACK_SIGNING_SECRET` | Slack app signing secret |
-| `SLACK_CLIENT_ID` | Slack OAuth client ID |
-| `SLACK_CLIENT_SECRET` | Slack OAuth client secret |
-| `SLACK_STATE_SECRET` | OAuth state secret (any random string) |
-| `SLACK_APP_TOKEN` | App-level token (`xapp-…`) for Socket Mode |
 | `OIDC_ISSUER_URL` | OIDC issuer URL |
 | `OIDC_CLIENT_ID` | Keycloak client ID for this service |
 | `OIDC_CLIENT_SECRET` | Client secret |
 | `A2A_SERVER_URL` | Full URL of the orchestrator A2A endpoint, e.g. `https://orchestrator.example.com/api` |
 | `ADMIN_GROUP` | Keycloak group name that grants admin access |
 | `POSTGRES_HOST` | PostgreSQL hostname |
+| `POSTGRES_PASSWORD` | Postgres password |
+| `POSTGRES_USER` | Postgres user |
+| `POSTGRES_DB` | Postgres database |
 
 ---
 
