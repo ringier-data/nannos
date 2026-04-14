@@ -1,4 +1,12 @@
-                                 Apache License
+The following features are not allowed to be used without a paid license to Ringier AG:
+* Palantir Integration
+* SSO Integration
+* Deep Agents
+* Agent Runner
+
+----
+
+Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
 
