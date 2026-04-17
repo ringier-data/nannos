@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 import pytest
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from langchain.agents.middleware import ToolRetryMiddleware
+from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 
 from app.core.graph_factory import GraphFactory
 from app.middleware import (
@@ -114,16 +115,20 @@ class TestMiddlewareStack:
 
         stack = factory._create_middleware_stack()
 
-        # Verify correct order (DynamicTool must be first)
-        assert len(stack) == 8
+        # Verify correct order (DynamicTool first, static content before cache point,
+        # steering after cache, user prefs after steering)
+        assert len(stack) == 10
         assert isinstance(stack[0], DynamicToolDispatchMiddleware)
-        assert isinstance(stack[1], UserPreferencesMiddleware)
-        assert isinstance(stack[2], StoragePathsInstructionMiddleware)
-        assert isinstance(stack[3], RepeatedToolCallMiddleware)
-        assert isinstance(stack[4], AuthErrorDetectionMiddleware)
-        assert isinstance(stack[5], ToolRetryMiddleware)
-        assert isinstance(stack[6], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[7], TodoStatusMiddleware)
+        assert isinstance(stack[1], StoragePathsInstructionMiddleware)
+        assert isinstance(stack[2], BedrockPromptCachingMiddleware)
+        # stack[3] = SteeringMiddleware (from ringier_a2a_sdk)
+        assert stack[3].__class__.__name__ == "SteeringMiddleware"
+        assert isinstance(stack[4], UserPreferencesMiddleware)
+        assert isinstance(stack[5], RepeatedToolCallMiddleware)
+        assert isinstance(stack[6], AuthErrorDetectionMiddleware)
+        assert isinstance(stack[7], ToolRetryMiddleware)
+        assert isinstance(stack[8], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[9], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph_checkpoint_aws.DynamoDBSaver")

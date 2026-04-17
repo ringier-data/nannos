@@ -12,3 +12,7 @@ When implementing new features or refactoring existing code, consider if these i
 ## Repository Overview
 
 This is a monorepo containing multiple services and libraries for the Nannos project. See `/packages` for each individual package.
+
+## Skills
+
+- **add-package** (`.github/skills/add-package/SKILL.md`): Checklist and procedure for adding a new package to the monorepo — covers directory setup, release-helpers.sh, justfile, and optional k8s manifests.

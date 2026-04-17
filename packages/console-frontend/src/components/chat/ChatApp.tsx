@@ -15,27 +15,53 @@ import {
   TaskPanel,
   SettingsModal,
 } from './components';
+import { WorkingBlock } from './components/WorkingBlock';
 
 export function ChatApp() {
   const { isAdmin } = useAuth();
   const { agentInfo } = useSocket();
-  const { messages, activeConversationId } = useChat();
+  const { messages, activeConversationId, liveWorkingSteps, isWaiting } = useChat();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isTaskPanelCollapsed, setIsTaskPanelCollapsed] = useState(true);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   const agentName = agentInfo?.name || agentInfo?.title || 'A2A Assistant';
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll to bottom when messages change or new content is generated
   useEffect(() => {
-    if (scrollAreaRef.current) {
-      // ScrollArea's viewport is the first child with data-radix-scroll-area-viewport
-      const viewport = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
-      if (viewport) {
-        viewport.scrollTop = viewport.scrollHeight;
+    const scrollToBottom = () => {
+      if (scrollAreaRef.current) {
+        // ScrollArea's viewport is the first child with data-radix-scroll-area-viewport
+        const viewport = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
+        if (viewport) {
+          viewport.scrollTop = viewport.scrollHeight;
+        }
       }
-    }
-  }, [messages]);
+    };
+
+    // Scroll immediately when dependencies change
+    scrollToBottom();
+
+    // Also observe DOM mutations to catch streaming updates
+    const messageList = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    if (!messageList) return;
+
+    const observer = new MutationObserver(() => {
+      // Scroll when content is added/modified
+      if (isWaiting) {
+        scrollToBottom();
+      }
+    });
+
+    observer.observe(messageList, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      characterDataOldValue: false,
+    });
+
+    return () => observer.disconnect();
+  }, [messages, isWaiting, liveWorkingSteps]);
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-background text-foreground">
@@ -134,6 +160,13 @@ export function ChatApp() {
         <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
           <MessageList />
         </ScrollArea>
+
+        {/* Sticky live todos — shown above the input only while a response is in-flight */}
+        {liveWorkingSteps.length > 0 && (
+          <div className="px-4 py-2 border-t border-border bg-muted/20">
+            <WorkingBlock steps={liveWorkingSteps} complete={!isWaiting} />
+          </div>
+        )}
 
         {/* Chat Input */}
         <ChatInput />

@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/utils';
 
 interface MarkdownProps {
@@ -22,8 +23,14 @@ export function Markdown({ children, className, inverted = false }: MarkdownProp
         'prose prose-sm max-w-none',
         inverted ? 'prose-invert' : 'dark:prose-invert',
         // Headings
-        'prose-headings:font-semibold prose-headings:mt-2 prose-headings:mb-1',
-        'prose-h1:text-lg prose-h2:text-base prose-h3:text-sm',
+        'prose-headings:font-semibold prose-headings:mt-4 prose-headings:mb-2',
+        'prose-h1:text-xl prose-h2:text-lg prose-h3:text-base',
+        'prose-h1:border-b prose-h1:border-border prose-h1:pb-1',
+        // Tables
+        'prose-table:my-2 prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5',
+        inverted
+          ? 'prose-th:border-white/20 prose-td:border-white/20'
+          : 'prose-th:border-border prose-td:border-border',
         // Paragraphs
         'prose-p:my-1 prose-p:leading-relaxed',
         // Lists
@@ -37,7 +44,12 @@ export function Markdown({ children, className, inverted = false }: MarkdownProp
         '[&_pre]:!bg-zinc-900 [&_pre]:!text-zinc-100 [&_pre]:rounded-md [&_pre]:p-3 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:leading-relaxed',
         '[&_pre_code]:!text-zinc-100 [&_pre_code]:text-xs [&_pre_code]:font-mono [&_pre_code]:bg-transparent [&_pre_code]:p-0',
         // Horizontal rule
-        'prose-hr:my-2',
+        'prose-hr:my-4',
+        // Blockquotes
+        'prose-blockquote:my-2 prose-blockquote:border-l-2',
+        inverted ? 'prose-blockquote:border-white/30' : 'prose-blockquote:border-border',
+        // Strong
+        'prose-strong:font-semibold',
         // Links - make them stand out with color, underline, and hover effects
         inverted
           ? '[&_a]:!text-blue-300 [&_a]:!underline hover:[&_a]:!text-blue-200'
@@ -46,7 +58,7 @@ export function Markdown({ children, className, inverted = false }: MarkdownProp
         className
       )}
     >
-      <ReactMarkdown>{children}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
     </div>
   );
 }

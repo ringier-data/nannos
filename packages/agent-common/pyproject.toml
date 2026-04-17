@@ -5,13 +5,13 @@ description = "Shared library for sub-agent creation, model factory, middleware 
 requires-python = ">=3.12"
 dependencies = [
     # A2A protocol
-    "a2a-sdk[http-server]>=0.3.9",
+    "a2a-sdk[http-server]>=0.3.25,<1.0.0",
     # LangChain core
     "langchain>=1.0.0",
     "langchain-core>=0.3.0",
-    "langchain-aws>=1.1.0",
+    "langchain-aws>=1.4.3",
     # LangGraph
-    "langgraph>=0.2.0",
+    "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
     # DeepAgents
     "deepagents>=0.4.5,<0.5.0",

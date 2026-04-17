@@ -49,6 +49,7 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import BaseTool
+from langgraph.constants import TAG_NOSTREAM
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
@@ -262,7 +263,8 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
                 [
                     {"role": "system", "content": system_prompt},
                     last_user_message,
-                ]
+                ],
+                config={"tags": [TAG_NOSTREAM]},
             )
 
             selected_slugs = set(response.servers) | {"base"}  # always keep base
@@ -342,7 +344,8 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
                 [
                     {"role": "system", "content": system_prompt},
                     last_user_message,
-                ]
+                ],
+                config={"tags": [TAG_NOSTREAM]},
             )
 
             # Filter tools to selected ones (preserve order from LLM)

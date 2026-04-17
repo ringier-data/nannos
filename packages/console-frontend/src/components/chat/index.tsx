@@ -10,9 +10,15 @@ interface ChatAppWrapperProps {
   playgroundMode?: PlaygroundMode;
 }
 
+interface ChatAppContentProps {
+  /** Playground mode configuration */
+  playgroundMode?: PlaygroundMode;
+}
+
 /**
  * Main entry point for the Chat application.
  * Wraps the ChatApp with all necessary providers.
+ * Use when SocketProvider is NOT already in the component tree.
  */
 export function ChatAppWrapper({ socketPath, customHeaders, playgroundMode }: ChatAppWrapperProps) {
   return (
@@ -21,6 +27,18 @@ export function ChatAppWrapper({ socketPath, customHeaders, playgroundMode }: Ch
         <ChatApp />
       </ChatProvider>
     </SocketProvider>
+  );
+}
+
+/**
+ * Chat application content without Socket provider.
+ * Use when SocketProvider is already provided by a parent layout (e.g., DashboardLayout).
+ */
+export function ChatAppContent({ playgroundMode }: ChatAppContentProps) {
+  return (
+    <ChatProvider playgroundMode={playgroundMode}>
+      <ChatApp />
+    </ChatProvider>
   );
 }
 

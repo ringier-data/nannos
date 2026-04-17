@@ -23,6 +23,10 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
+from .stream_events import (
+    TaskResponseData,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,8 +118,21 @@ def get_response_format(
             return None
         else:
             return AutoStrategy(schema=SubAgentResponseSchema)
+    elif model_class == "ChatGoogleGenerativeAI":
+        # Gemini models: use explicit SubAgentResponseSchema tool instead of AutoStrategy
+        # because Gemini outputs structured JSON in content text rather than via tool_call_chunks,
+        # causing raw JSON to be streamed to the client
+        tools.append(
+            StructuredTool.from_function(
+                func=lambda **kwargs: SubAgentResponseSchema(**kwargs),
+                name="SubAgentResponseSchema",
+                description="ALWAYS use this tool to format your final response to the user.",
+                args_schema=SubAgentResponseSchema,
+                return_direct=True,
+            )
+        )
+        return None
     else:
-        # Gemini and others
         return AutoStrategy(schema=SubAgentResponseSchema)
 
 
@@ -140,7 +157,7 @@ class StructuredResponseMixin:
         result: Dict[str, Any],
         context_id: Optional[str],
         task_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> "TaskResponseData":
         """Translate LangGraph agent result to A2A protocol format.
 
         The agent uses SubAgentResponseSchema for structured output, so we
@@ -210,7 +227,7 @@ class StructuredResponseMixin:
         schema: SubAgentResponseSchema,
         context_id: Optional[str],
         task_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> "TaskResponseData":
         """Build A2A response from SubAgentResponseSchema.
 
         Args:
@@ -219,7 +236,7 @@ class StructuredResponseMixin:
             task_id: Optional task ID for this invocation
 
         Returns:
-            Dict with 'messages' and A2A metadata
+            TaskResponseData with typed lifecycle fields
         """
         if schema.task_state == "completed":
             return self._build_success_response(schema.message, context_id=context_id, task_id=task_id)  # type: ignore[attr-defined]

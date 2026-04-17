@@ -30,12 +30,12 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+from agent_common.a2a.stream_events import TaskResponseData
 from agent_common.a2a.structured_response import (
     StructuredResponseMixin,
 )
 from agent_common.models.base import ModelType
 from deepagents import CompiledSubAgent
-from langchain_core.messages import HumanMessage
 from ringier_a2a_sdk.cost_tracking import CostLogger
 
 logger = logging.getLogger(__name__)
@@ -225,6 +225,10 @@ class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
     @property
     def input_modes(self) -> list[str]:
         """Task scheduler only needs text input."""
+        return self.get_supported_input_modes()
+
+    def get_supported_input_modes(self) -> list[str]:
+        """Task scheduler only needs text input."""
         return ["text"]
 
     def get_checkpoint_ns(self, input_data: SubAgentInput) -> str:
@@ -235,32 +239,7 @@ class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
         """Return identifier for cost tracking."""
         return "task-scheduler"
 
-    def _extract_message_content(self, input_data: SubAgentInput) -> str:
-        """Extract text content from the input message.
-
-        Args:
-            input_data: Sub-agent input with task description
-
-        Returns:
-            Text content from the message
-        """
-        message = input_data.messages[0]
-        if hasattr(message, "content"):
-            content = message.content
-            if isinstance(content, str):
-                return content
-            elif isinstance(content, list):
-                # Extract text from content blocks
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif hasattr(block, "text"):
-                        text_parts.append(block.text)  # type: ignore[attr-defined]
-                return " ".join(text_parts)
-        return str(message)
-
-    async def _process(self, input_data: SubAgentInput, config: Dict[str, Any]) -> Dict[str, Any]:
+    async def _process(self, input_data: SubAgentInput, config: Dict[str, Any]) -> TaskResponseData:
         """Process a task scheduling request.
 
         Args:
@@ -270,12 +249,8 @@ class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
         Returns:
             Dict with result from the LangGraph execution
         """
-        # Extract user's request
-        content = self._extract_message_content(input_data)
-        logger.info(f"Task scheduler invoked: {content[:100]}...")
-
-        # Build HumanMessage
-        message = HumanMessage(content=content)
+        # Extract user's request (common pattern from base class)
+        human_message = await self._prepare_human_message_input(input_data)
 
         # Config is already extended by ainvoke with checkpoint isolation and cost tracking
         logger.info(f"[COST TRACKING] Invoking task-scheduler with tags: {config.get('tags', [])}")
@@ -285,7 +260,7 @@ class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # - context: User-specific tools, preferences, and sub-agents
         graph = self._graph_provider()
         result = await graph.ainvoke(
-            {"messages": [message]},
+            {"messages": [human_message]},
             config=config,  # Infrastructure: checkpointing, tracking, metadata
             context=self._user_context,  # Runtime data: tools, preferences
         )
@@ -314,7 +289,7 @@ class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # SubAgentResponseSchema from structured_response or tool call messages
         translated = self._translate_agent_result(result, context_id, task_id)
         logger.debug(
-            f"[TASK-SCHEDULER] Translated result state: {translated.get('state')}, is_complete: {translated.get('is_complete')}"
+            f"[TASK-SCHEDULER] Translated result state: {translated.state}, is_complete: {translated.is_complete}"
         )
         return translated
 

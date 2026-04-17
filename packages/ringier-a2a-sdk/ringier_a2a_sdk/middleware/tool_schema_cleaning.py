@@ -19,7 +19,7 @@ Progressive Retry Strategy:
 - On INVALID_ARGUMENT error, retry with AGGRESSIVE (+ format/min/max/array constraints)
 - Log which level succeeds to track patterns (usually succeeds at MODERATE for 80+ tools)
 
-See agent_common/utils.py (Tool Schema Cleaning section) for detailed explanation.
+Schema cleaning utilities are in agent_common (imported below).
 """
 
 import logging
@@ -29,11 +29,11 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelCallResult, 
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from agent_common.utils import CleanupLevel, validate_and_clean_tool_dict
+from ..utils.schema_cleaning import CleanupLevel, validate_and_clean_tool_dict
 
 logger = logging.getLogger(__name__)
 
-# Lazy import for ChatGoogleGenerativeAIError to avoid requiring google deps
+# Lazy import for Gemini error to avoid requiring google deps
 _ChatGoogleGenerativeAIError: type | None = None
 
 
@@ -116,12 +116,20 @@ class ToolSchemaCleaningMiddleware(AgentMiddleware):
                 result = await handler(request.override(tools=cast(list[BaseTool | dict], cleaned_tools)))
                 return result
             except Exception as e:
-                # Check if it's a Gemini INVALID_ARGUMENT error
+                # Check if it's a Gemini INVALID_ARGUMENT error related to schema validation.
+                # Matches errors like:
+                # - "INVALID_ARGUMENT" + "schema" (Parse errors)
+                # - "constraint" + "states" (too many constraint states)
+                # - "ParseError" (schema parsing with invalid enum values)
+                error_str = str(e).lower()
                 is_schema_error = (
                     gemini_error_cls is not None
                     and isinstance(e, gemini_error_cls)
-                    and "INVALID_ARGUMENT" in str(e)
-                    and "schema" in str(e).lower()
+                    and (
+                        ("INVALID_ARGUMENT" in str(e) and ("schema" in error_str or "constraint" in error_str))
+                        or "constraint" in error_str
+                        or "parseerror" in error_str
+                    )
                 )
 
                 if is_schema_error and level != CleanupLevel.AGGRESSIVE:
@@ -151,22 +159,45 @@ class ToolSchemaCleaningMiddleware(AgentMiddleware):
         Returns:
             List of cleaned tool dicts
         """
+
         cleaned_tools = []
 
-        for tool in tools:
+        for i, tool in enumerate(tools):
+            if tool is None:
+                logger.warning(f"Skipping tool at index {i}: tool is None")
+                continue
+
             if isinstance(tool, BaseTool):
                 # Convert to dict (creates a copy, doesn't modify original)
-                tool_dict = convert_to_openai_tool(tool)
-                # Clean the dict schema for Gemini
-                tool_dict = validate_and_clean_tool_dict(tool_dict, level)
-                cleaned_tools.append(tool_dict)
+                try:
+                    tool_dict = convert_to_openai_tool(tool)
+                    # Clean the dict schema for Gemini
+                    tool_dict = validate_and_clean_tool_dict(tool_dict, level)
+                    cleaned_tools.append(tool_dict)
+                except Exception as e:
+                    logger.error(f"Failed to convert BaseTool '{tool.name}' at index {i}: {e}")
+                    continue
             elif isinstance(tool, dict):
+                # Skip Bedrock-specific constructs like cachePoint (for prompt caching)
+                if "cachePoint" in tool:
+                    logger.debug(f"Passing through Bedrock cachePoint at index {i}")
+                    cleaned_tools.append(tool)
+                    continue
+                
                 # Already in dict format, just clean
-                tool_dict = validate_and_clean_tool_dict(tool, level)
-                cleaned_tools.append(tool_dict)
+                try:
+                    tool_dict = validate_and_clean_tool_dict(tool, level)
+                    if tool_dict:  # Only add if validation succeeded
+                        cleaned_tools.append(tool_dict)
+                    else:
+                        logger.warning(f"Skipping tool at index {i}: validation returned empty dict")
+                except Exception as e:
+                    logger.error(f"Failed to clean tool dict at index {i}: {e}")
+                    continue
             else:
-                # Unknown format, pass through
-                cleaned_tools.append(tool)
+                # Unknown format - log and skip instead of passing through
+                logger.warning(f"Skipping tool at index {i}: unexpected type {type(tool).__name__}")
+                continue
 
         return cleaned_tools
 

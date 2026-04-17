@@ -32,6 +32,7 @@ class TestOrchestratorDeepAgentExecutor:
         context.message = Mock(spec=Message)
         context.message.role = "user"
         context.message.parts = [Part(root=TextPart(text="test query"))]
+        context.message.metadata = None
         context.message.task_id = None
         context.message.context_id = None
         context.call_context = Mock()
@@ -69,21 +70,22 @@ class TestOrchestratorDeepAgentExecutor:
 
         assert result is False
 
-    async def test_cancel_raises_unsupported_operation(self, dynamodb_table):
-        """Test that cancel raises UnsupportedOperationError."""
+    async def test_cancel_emits_canceled_event(self, dynamodb_table):
+        """Test that cancel emits a canceled status event."""
         executor = OrchestratorDeepAgentExecutor()
 
         context = Mock(spec=RequestContext)
-        event_queue = Mock(spec=EventQueue)
+        context.task_id = "task-123"
+        context.context_id = "ctx-456"
+        event_queue = AsyncMock(spec=EventQueue)
 
-        # Should raise UnsupportedOperationError
-        from a2a.utils.errors import ServerError
+        await executor.cancel(context, event_queue)
 
-        try:
-            await executor.cancel(context, event_queue)
-            assert False, "Should have raised ServerError"
-        except ServerError:
-            pass
+        # Verify a canceled event was enqueued
+        event_queue.enqueue_event.assert_called_once()
+        event = event_queue.enqueue_event.call_args[0][0]
+        assert event.status.state == TaskState.canceled
+        assert event.final is True
 
 
 class TestAgentExecutorStreamHandling:
@@ -110,13 +112,14 @@ class TestAgentExecutorStreamHandling:
             content="Processing...",
         )
 
-        await executor._handle_stream_item(item, updater, task, is_final=False)
+        await executor._handle_stream_item(
+            item, updater, task, is_final=False, streaming_artifact_id="test-artifact-id"
+        )
 
         # Verify update_status was called
         updater.update_status.assert_called_once()
         call_args = updater.update_status.call_args
         assert call_args[0][0] == TaskState.working
-        assert call_args[1]["final"] is False
 
     async def test_handle_stream_item_completed_state(self, dynamodb_table):
         """Test handling completed state stream items."""
@@ -128,6 +131,7 @@ class TestAgentExecutorStreamHandling:
         updater = Mock()
         updater.add_artifact = AsyncMock()
         updater.complete = AsyncMock()
+        updater.update_status = AsyncMock()
 
         # Mock task
         task = Mock()
@@ -140,11 +144,60 @@ class TestAgentExecutorStreamHandling:
             content="Task completed successfully",
         )
 
-        await executor._handle_stream_item(item, updater, task, is_final=True)
+        await executor._handle_stream_item(item, updater, task, is_final=True, streaming_artifact_id="test-artifact-id")
 
-        # Verify add_artifact and complete were called
+        # Non-streaming completion: update_status with completed state and content
+        updater.update_status.assert_called_once()
+
+    async def test_handle_stream_item_streaming_completion(self, dynamodb_table):
+        """Test that streaming completion sends empty last chunk and clean status (no content duplication)."""
+        from app.models.responses import AgentStreamResponse
+
+        executor = OrchestratorDeepAgentExecutor()
+
+        # Mock updater
+        updater = Mock()
+        updater.add_artifact = AsyncMock()
+        updater.update_status = AsyncMock()
+
+        # Mock task
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        # Completed item after streaming (first_chunk_sent=True)
+        item = AgentStreamResponse(
+            state=TaskState.completed,
+            content="Full response content",
+        )
+
+        result = await executor._handle_stream_item(
+            item,
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-1",
+            first_chunk_sent=True,
+        )
+
+        # Last artifact chunk should be empty (just stream close signal)
         updater.add_artifact.assert_called_once()
-        updater.complete.assert_called_once()
+        artifact_call = updater.add_artifact.call_args
+        assert artifact_call[1]["last_chunk"] is True
+        assert artifact_call[1]["append"] is True
+        # Check the text part is empty
+        parts = artifact_call[0][0]
+        assert parts[0].root.text == ""
+
+        # Completion status should have NO content message (backend handles persistence)
+        updater.update_status.assert_called_once()
+        status_call = updater.update_status.call_args
+        assert status_call[0][0] == TaskState.completed
+        # Second positional arg (message) should not be provided — defaults to None
+        assert len(status_call[0]) == 1
+
+        # first_chunk_sent should still be True
+        assert result is True
 
     async def test_handle_stream_item_failed_state(self, dynamodb_table):
         """Test handling failed state stream items."""
@@ -167,7 +220,7 @@ class TestAgentExecutorStreamHandling:
             content="An error occurred during execution",
         )
 
-        await executor._handle_stream_item(item, updater, task, is_final=True)
+        await executor._handle_stream_item(item, updater, task, is_final=True, streaming_artifact_id="test-artifact-id")
 
         # Verify update_status was called
         updater.update_status.assert_called_once()
@@ -194,7 +247,9 @@ class TestAgentExecutorStreamHandling:
             "Authentication needed", "https://auth.example.com", "need-credentials"
         )
 
-        await executor._handle_stream_item(item, updater, task, is_final=False)
+        await executor._handle_stream_item(
+            item, updater, task, is_final=False, streaming_artifact_id="test-artifact-id"
+        )
 
         # Verify update_status was called
         updater.update_status.assert_called_once()

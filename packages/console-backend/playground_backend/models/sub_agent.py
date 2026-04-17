@@ -184,7 +184,15 @@ class SubAgent(BaseModel):
         from_attributes = True
 
 
-ModelName = Literal["gpt-4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"]
+ModelName = Literal[
+    "gpt-4o",
+    "gpt-4o-mini",
+    "claude-sonnet-4.5",
+    "claude-sonnet-4.6",
+    "claude-haiku-4-5",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+]
 
 
 class SubAgentCreate(BaseModel):
@@ -196,9 +204,7 @@ class SubAgentCreate(BaseModel):
     is_public: bool = False  # If true, accessible to all users without group permissions
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: ModelName | None = (
-        None  # LLM model: 'gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', 'claude-haiku-4-5'
-    )
+    model: ModelName | None = None
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] | None = None  # MCP tool names enabled for this version

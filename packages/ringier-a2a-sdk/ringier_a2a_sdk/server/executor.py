@@ -1,7 +1,17 @@
-"""Base agent executor for A2A protocol."""
+"""Base agent executor for A2A protocol.
 
+Supports A2A Continuous Interaction Turns: when a second request arrives for
+a context_id that already has an active stream, the new message is queued for
+the running agent instead of starting a second execution.  The caller receives
+an immediate acknowledgment (current task status).
+"""
+
+import asyncio
 import logging
+import time
+import uuid
 from abc import ABC
+from dataclasses import dataclass, field
 from typing import Any
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -10,10 +20,12 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types import (
     InternalError,
     InvalidParamsError,
+    Message,
     Part,
     TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
     TextPart,
-    UnsupportedOperationError,
 )
 from a2a.utils import (
     new_agent_text_message,
@@ -25,6 +37,36 @@ from ..models import UserConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Maximum number of pending steering messages per active stream
+MAX_STEERING_QUEUE_DEPTH = 5
+
+# Maximum number of times the executor will re-invoke the agent to process
+# steering messages that arrived after the last abefore_model call.
+MAX_STEERING_REINVOCATIONS = 1
+
+
+@dataclass
+class ActiveStreamInfo:
+    """Tracks an active agent execution stream for a given context_id.
+
+    Used by the executor to detect concurrent requests and route
+    additional messages to the running agent's steering queue.
+    """
+
+    context_id: str
+    task_id: str
+    owner_sub: str | None = None
+    assistant_id: str | None = None
+    scope: str | None = None  # "personal" or "channel"
+    message_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    started_at: float = field(default_factory=time.time)
+
+
+# Module-level registry of active streams, keyed by context_id.
+# Access is safe from a single asyncio event loop (no threading lock needed).
+_active_streams: dict[str, ActiveStreamInfo] = {}
+_active_streams_lock = asyncio.Lock()
 
 
 class BaseAgentExecutor(AgentExecutor, ABC):
@@ -52,6 +94,13 @@ class BaseAgentExecutor(AgentExecutor, ABC):
     ) -> None:
         """Execute the agent task.
 
+        Supports A2A Continuous Interaction Turns:
+        - If this context_id already has an active stream, the new message is
+          queued for the running agent and the current task status is returned
+          immediately (acknowledge-only, no new SSE stream).
+        - If no active stream exists, execution proceeds normally and registers
+          itself in the active stream registry.
+
         Authentication:
         - User identity is validated by JWTValidatorMiddleware before this method is called
         - Only authenticated requests with valid JWTs can reach this point
@@ -74,16 +123,22 @@ class BaseAgentExecutor(AgentExecutor, ABC):
         if error:
             raise ServerError(error=InvalidParamsError())
 
-        query = context.get_user_input()
+        message = context.message
+        if not message:
+            logger.error("No message found in request context")
+            raise ServerError(error=InvalidParamsError())
         task = context.current_task
-        logger.debug(f"Starting execution for query: {query}")
+        logger.debug(f"Starting execution for query: {context.get_user_input()}")
         logger.debug(f"Current task: {task}")
         if not task:
             task = new_task(context.message)  # type: ignore
             await event_queue.enqueue_event(task)
-        updater = TaskUpdater(event_queue, task.id, task.context_id)
 
-        # ZERO-TRUST: Extract verified user_sub from call_context (set by AuthRequestContextBuilder)
+        context_id = task.context_id
+
+        # ZERO-TRUST: Extract verified user identity from call_context (set by AuthRequestContextBuilder).
+        # This runs BEFORE steering so that (a) unauthenticated requests fail hard even on
+        # the steering path, and (b) we can use the verified user_sub for owner checks.
         if context.call_context and hasattr(context.call_context, "state"):
             try:
                 user_sub = context.call_context.state["user_sub"]
@@ -101,6 +156,57 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             raise ServerError(error=InvalidParamsError())
 
         logger.info(f"[ZERO-TRUST] Executing with verified user_sub: {user_sub}, sub_agent_id: {sub_agent_id}")
+
+        # --- Continuous Interaction Turn: route to active stream if one exists ---
+        async with _active_streams_lock:
+            active = _active_streams.get(context_id)
+            if active is not None:
+                # Verify the caller is the same user who started the stream
+                if active.owner_sub and user_sub != active.owner_sub:
+                    logger.warning(
+                        f"[STEERING] Rejected steering for context_id={context_id}: "
+                        f"caller_sub={user_sub} does not match stream owner"
+                    )
+                    raise ServerError(error=InvalidParamsError())
+                if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
+                    logger.warning(
+                        f"[STEERING] Queue full for context_id={context_id} "
+                        f"(depth={active.message_queue.qsize()}), rejecting"
+                    )
+                    raise ServerError(error=InvalidParamsError())
+                logger.info(
+                    f"[STEERING] Active stream found for context_id={context_id}, "
+                    f"queuing message for running agent (queue depth: {active.message_queue.qsize() + 1})"
+                )
+                active.message_queue.put_nowait(context.message)
+                # Acknowledge-only: emit a status-update (NOT a raw Task object)
+                # so the SSE response has at least one event, then return.
+                # Using TaskStatusUpdateEvent avoids the "Task is already set"
+                # error on the client's ClientTaskManager when the event queue
+                # is a tapped child that also receives parent events.
+                await event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        task_id=task.id,
+                        context_id=task.context_id,
+                        status=TaskStatus(
+                            state=task.status.state,
+                            message=task.status.message,
+                        ),
+                        final=False,
+                    )
+                )
+                return
+
+        # No active stream — register ourselves and proceed with execution
+        stream_info = ActiveStreamInfo(context_id=context_id, task_id=task.id, owner_sub=user_sub)
+        async with _active_streams_lock:
+            _active_streams[context_id] = stream_info
+
+        # Share the message queue reference with the agent so SteeringMiddleware
+        # can consume pending messages during graph execution.
+        self.agent.set_message_queue(context_id, stream_info.message_queue)
+
+        updater = TaskUpdater(event_queue, task.id, task.context_id)
 
         # Extract optional scheduler overrides from message metadata (set by agent-runner)
         scheduled_job_id_from_meta: int | None = None
@@ -124,8 +230,73 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 sub_agent_id=sub_agent_id,  # For cost tracking attribution
                 scheduled_job_id=scheduled_job_id_from_meta,  # For scheduled-job cost attribution
             )
-            async for item in self.agent.stream(query, user_config, task):
-                await self._handle_stream_item(item, updater, task)
+            steering_reinvocations = 0
+            messages: list[Message] = [message]
+
+            while True:
+                streaming_artifact_id = str(uuid.uuid4())
+                first_chunk_sent = False  # Track if we've sent the initial main artifact
+                first_intermediate_chunk_sent = False  # Track if we've sent the initial intermediate artifact
+                deferred_terminal_item = None
+
+                async for item in self.agent.stream(messages, user_config, task):
+                    # Buffer the terminal completed item so we can check for unconsumed
+                    # steering messages before emitting it.  Other terminal states
+                    # (failed, input_required, auth_required) are emitted immediately
+                    # since re-invocation only makes sense after successful completion.
+                    if item.state == TaskState.completed:
+                        deferred_terminal_item = item
+                        continue
+                    first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
+                        item, updater, task, streaming_artifact_id, first_chunk_sent, first_intermediate_chunk_sent
+                    )
+
+                # Check for steering messages that arrived after the last abefore_model
+                if (
+                    deferred_terminal_item is not None
+                    and deferred_terminal_item.state == TaskState.completed
+                    and steering_reinvocations < MAX_STEERING_REINVOCATIONS
+                ):
+                    try:
+                        unconsumed = self.agent.get_pending_messages(context_id)
+                        if unconsumed and isinstance(unconsumed, list) and len(unconsumed) > 0:
+                            steering_reinvocations += 1
+                            messages = unconsumed  # will be processed in the next stream round
+                            logger.info(
+                                f"[STEERING] Re-invoking agent with {len(unconsumed)} late steering "
+                                f"message(s) (reinvocation {steering_reinvocations}/{MAX_STEERING_REINVOCATIONS})"
+                            )
+                            continue  # Loop back for another stream round
+                    except Exception:
+                        pass  # Best-effort; proceed to emit terminal event
+
+                # Emit the deferred terminal event (or no terminal if stream ended without one)
+                if deferred_terminal_item is not None:
+                    await self._handle_stream_item(
+                        deferred_terminal_item,
+                        updater,
+                        task,
+                        streaming_artifact_id,
+                        first_chunk_sent,
+                        first_intermediate_chunk_sent,
+                    )
+                break  # Done — no re-invocation needed
+        except asyncio.CancelledError:
+            logger.info(f"Agent execution cancelled for context_id={context_id}")
+            try:
+                await asyncio.shield(
+                    updater.update_status(
+                        TaskState.canceled,
+                        new_agent_text_message(
+                            "Agent execution was cancelled.",
+                            task.context_id,
+                            task.id,
+                        ),
+                    )
+                )
+            except (asyncio.CancelledError, Exception):
+                pass  # Best-effort: queue may already be closed
+            raise
         except Exception as e:
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}")
 
@@ -141,7 +312,6 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                         task.context_id,
                         task.id,
                     ),
-                    final=True,
                 )
                 logger.info(f"Emitted TaskState.failed to orchestrator: {error_message}")
             except Exception as emit_error:
@@ -149,18 +319,87 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 logger.error(f"Failed to emit TaskState.failed: {emit_error}")
 
             raise ServerError(error=InternalError()) from e
+        finally:
+            # Log unconsumed steering messages before cleanup.
+            # These arrive between the last abefore_model call and stream
+            # completion — they will be picked up as a normal next turn.
+            try:
+                unconsumed = self.agent.get_pending_messages(context_id)
+                if unconsumed:
+                    logger.warning(
+                        f"[STEERING] {len(unconsumed)} unconsumed steering message(s) "
+                        f"for context_id={context_id} after execution finished. "
+                        f"They will be handled as the next conversation turn."
+                    )
+            except Exception:
+                pass  # Best-effort; don't mask the original result
+            # Deregister active stream and clean up agent's message queue
+            async with _active_streams_lock:
+                _active_streams.pop(context_id, None)
+            self.agent.clear_message_queue(context_id)
 
-    async def _handle_stream_item(self, item, updater, task) -> None:
+    async def _handle_stream_item(
+        self,
+        item,
+        updater,
+        task,
+        streaming_artifact_id: str,
+        first_chunk_sent: bool = False,
+        first_intermediate_chunk_sent: bool = False,
+    ) -> tuple[bool, bool]:
         """Handle a stream item from the agent and update the task accordingly.
+
+        Streaming chunks (metadata.streaming_chunk=True) are emitted as
+        TaskArtifactUpdateEvents with append=True, following the A2A protocol's
+        recommended pattern for incremental content delivery.
+        Status updates and terminal events use TaskStatusUpdateEvents.
 
         Args:
             item: AgentStreamResponse object from agent
             updater: TaskUpdater for sending updates
             task: Current task being processed
+            streaming_artifact_id: Stable artifact ID for streaming chunks
+            first_chunk_sent: Whether we've already sent the first main content chunk
+            first_intermediate_chunk_sent: Whether we've already sent the first intermediate output chunk
+
+        Returns:
+            Tuple of (first_chunk_sent, first_intermediate_chunk_sent) flags
         """
         # item is an AgentStreamResponse object
         state = item.state
         content = item.content
+        metadata = item.metadata or {}
+
+        # --- Streaming content chunks → artifact-append ---
+        if state == TaskState.working and metadata.get("streaming_chunk"):
+            is_intermediate = metadata.get("intermediate_output", False)
+
+            # Intermediate-output chunks (thinking/reasoning) go into a SEPARATE
+            # artifact stream so they don't mix with the main response artifact.
+            # Matches the orchestrator's executor pattern.
+            if is_intermediate:
+                effective_artifact_id = streaming_artifact_id + "-thought"
+            else:
+                effective_artifact_id = streaming_artifact_id
+
+            # First chunk creates the artifact (append=False), subsequent chunks append (append=True)
+            # Use separate tracking for intermediate output vs main content
+            if is_intermediate:
+                append = first_intermediate_chunk_sent
+            else:
+                append = first_chunk_sent
+
+            await updater.add_artifact(
+                [Part(root=TextPart(text=content))],
+                artifact_id=effective_artifact_id,
+                append=append,  # False for first chunk, True for subsequent
+                last_chunk=False,
+                metadata={"streaming_chunk": True},
+            )
+            # Update the appropriate tracking flag
+            if is_intermediate:
+                return (first_chunk_sent, True)  # Mark intermediate chunk sent
+            return (True, first_intermediate_chunk_sent)  # Mark main chunk sent
 
         # Handle different A2A task states
         if state == TaskState.working:
@@ -173,11 +412,11 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=False,  # Not final - keep the task open
+                metadata=metadata or None,
             )
 
         elif state == TaskState.failed:
-            # Handle failure state
+            # Handle failure state (terminal state - stream will close)
             await updater.update_status(
                 TaskState.failed,
                 new_agent_text_message(
@@ -185,7 +424,6 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=True,
             )
 
         elif state == TaskState.input_required:
@@ -197,7 +435,6 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=False,
             )
 
         elif state == TaskState.auth_required:
@@ -209,16 +446,31 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     task.context_id,
                     task.id,
                 ),
-                final=False,
             )
 
         elif state == TaskState.completed:
             # Task completed successfully
-            await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
-                name="agent_result",
+            # If we've been streaming chunks, don't create a new artifact - content already streamed
+            # Just complete the task; the streaming artifact contains all the content
+            if not first_chunk_sent:
+                # Only create artifact if we haven't been streaming
+                await updater.add_artifact(
+                    [Part(root=TextPart(text=content))],
+                    name="agent_result",
+                )
+            # Always include final content in completion message so downstream
+            # consumers (e.g. orchestrator) can extract the full response from
+            # task.status.message even when content was streamed via artifacts.
+            # TODO: is this duplication necessary, or can we rely on the artifact content alone for completed tasks?
+            await updater.complete(
+                message=new_agent_text_message(
+                    content,
+                    task.context_id,
+                    task.id,
+                )
+                if content
+                else None,
             )
-            await updater.complete()
 
         else:
             # Unknown state - log warning and treat as completed
@@ -228,6 +480,9 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 name="agent_result",
             )
             await updater.complete()
+
+        # Return flags unchanged for non-streaming paths
+        return (first_chunk_sent, first_intermediate_chunk_sent)
 
     def _validate_request(self, context: RequestContext) -> bool:
         """Validate the request context.
@@ -243,11 +498,30 @@ class BaseAgentExecutor(AgentExecutor, ABC):
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Handle task cancellation.
 
-        Args:
-            context: Request context
-            event_queue: Event queue
+        Emits a canceled status event so that DefaultRequestHandler.on_cancel_task()
+        can complete the protocol flow.  The handler then cancels the producer_task
+        asyncio.Task, which propagates CancelledError through the agent's stream.
 
-        Raises:
-            ServerError: Always raises as cancellation is not supported
+        Args:
+            context: Request context (must have task_id and context_id)
+            event_queue: Event queue for publishing the cancel acknowledgment
         """
-        raise ServerError(error=UnsupportedOperationError())
+        task_id = context.task_id or ""
+        context_id = context.context_id or ""
+        logger.info("Cancel requested for task_id=%s context_id=%s", task_id, context_id)
+
+        await event_queue.enqueue_event(
+            TaskStatusUpdateEvent(
+                task_id=task_id,
+                context_id=context_id,
+                status=TaskStatus(
+                    state=TaskState.canceled,
+                    message=new_agent_text_message(
+                        "Agent execution was cancelled.",
+                        context_id,
+                        task_id,
+                    ),
+                ),
+                final=True,
+            )
+        )

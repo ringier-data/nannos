@@ -4,7 +4,7 @@ This module tests the workarounds for LangChain/Gemini schema validation issues
 where tools with None values are rejected by Gemini's strict validation.
 
 Progressive Cleanup Strategy Tests:
-- MINIMAL: Remove None values only (documented requirement)
+- MINIMAL: Remove None values + unwrap anyOf nullable (Pydantic Optional) patterns
 - MODERATE: Also remove ALL enums (global state space limit)
 - AGGRESSIVE: Also remove format/min/max/array constraints
 
@@ -13,8 +13,9 @@ at model-binding time. These tests cover the low-level cleaning utilities used b
 the middleware.
 """
 
-from app.utils import (
+from ringier_a2a_sdk.utils.schema_cleaning import (
     CleanupLevel,
+    clean_schema_node,
     clean_schema_properties,
     validate_and_clean_tool_dict,
 )
@@ -65,8 +66,12 @@ class TestCleanSchemaProperties:
         assert "none_default" not in cleaned
         assert "another_valid" in cleaned
 
-    def test_remove_props_containing_none(self):
-        """Test that properties containing None values are removed."""
+    def test_remove_none_subfields_within_property(self):
+        """None-valued fields inside a property schema are stripped; the property itself is kept.
+
+        Old behaviour removed the whole property — new behaviour is more precise:
+        strip the invalid field and preserve the property if a valid schema remains.
+        """
         properties = {
             "valid_prop": {"type": "string", "description": "Valid"},
             "prop_with_none": {"type": "string", "runtime": None},
@@ -76,7 +81,10 @@ class TestCleanSchemaProperties:
         cleaned = clean_schema_properties(properties)
 
         assert "valid_prop" in cleaned
-        assert "prop_with_none" not in cleaned
+        # Property is kept — only the None-valued 'runtime' field is stripped
+        assert "prop_with_none" in cleaned
+        assert cleaned["prop_with_none"] == {"type": "string"}
+        assert "runtime" not in cleaned["prop_with_none"]
         assert "another_valid" in cleaned
 
     def test_recursive_cleaning_nested_properties(self):
@@ -240,6 +248,60 @@ class TestValidateAndCleanToolDict:
         assert "valid_prop" in required
         assert "none_prop" not in required
         assert len(required) == 1
+
+    def test_missing_name_field_returns_none(self):
+        """Test that tools missing the required 'name' field return None."""
+        tool_dict = {
+            "function": {
+                # Missing "name" field
+                "description": "Test",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict)
+
+        assert result is None
+
+    def test_empty_name_field_returns_none(self):
+        """Test that tools with empty name field return None."""
+        tool_dict = {
+            "function": {
+                "name": "",  # Empty name
+                "description": "Test",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict)
+
+        assert result is None
+
+    def test_invalid_name_type_returns_none(self):
+        """Test that tools with non-string name return None."""
+        tool_dict = {
+            "function": {
+                "name": 12345,  # Invalid type
+                "description": "Test",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict)
+
+        assert result is None
 
 
 class TestCleanupLevels:
@@ -669,3 +731,250 @@ class TestRealWorldScenarios:
 
         # Verify we still have 85 valid tools
         assert len(cleaned_tools) == 85
+
+
+class TestAnyOfNullableUnwrapping:
+    """Tests for anyOf nullable unwrapping — Pydantic v2 Optional[X] patterns.
+
+    Gemini's gRPC type enum does not include NULL, so anyOf entries with
+    {type: "null"} must be eliminated at ALL cleanup levels.
+    See error: 'Invalid enum value NULL for enum type ...v1beta1.Type'
+    """
+
+    # --- clean_schema_node direct tests ---
+
+    def test_optional_string_unwraps_to_string(self):
+        """anyOf: [string, null] should become just string."""
+        node = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+        result = clean_schema_node(node)
+        assert result == {"type": "string"}
+
+    def test_optional_string_null_first_unwraps(self):
+        """anyOf: [null, string] (null first) should also unwrap correctly."""
+        node = {"anyOf": [{"type": "null"}, {"type": "string"}]}
+        result = clean_schema_node(node)
+        assert result == {"type": "string"}
+
+    def test_optional_integer_unwraps(self):
+        """anyOf: [integer, null] should become just integer."""
+        node = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+        result = clean_schema_node(node)
+        assert result == {"type": "integer"}
+
+    def test_default_null_dropped_after_unwrap(self):
+        """default: null should be dropped when unwrapping Optional."""
+        node = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        }
+        result = clean_schema_node(node)
+        assert result.get("type") == "string"
+        assert "default" not in result
+
+    def test_metadata_preserved_after_unwrap(self):
+        """title and description from outer node survive unwrapping."""
+        node = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "title": "Campaign ID",
+            "description": "The campaign identifier",
+            "default": None,
+        }
+        result = clean_schema_node(node)
+        assert result["type"] == "string"
+        assert result["title"] == "Campaign ID"
+        assert result["description"] == "The campaign identifier"
+        assert "default" not in result
+        assert "anyOf" not in result
+
+    def test_optional_array_unwraps(self):
+        """anyOf: [array_schema, null] should become just array_schema."""
+        node = {
+            "anyOf": [
+                {"type": "array", "items": {"type": "string"}},
+                {"type": "null"},
+            ]
+        }
+        result = clean_schema_node(node)
+        assert result["type"] == "array"
+        assert result["items"] == {"type": "string"}
+        assert "anyOf" not in result
+
+    def test_optional_object_unwraps(self):
+        """anyOf: [object_schema, null] should become just object_schema."""
+        node = {
+            "anyOf": [
+                {"type": "object", "properties": {"name": {"type": "string"}}},
+                {"type": "null"},
+            ]
+        }
+        result = clean_schema_node(node)
+        assert result["type"] == "object"
+        assert "properties" in result
+        assert "anyOf" not in result
+
+    def test_multi_variant_anyof_drops_null_keeps_rest(self):
+        """anyOf: [string, integer, null] keeps non-null variants in anyOf."""
+        node = {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}]}
+        result = clean_schema_node(node)
+        assert "anyOf" in result
+        assert len(result["anyOf"]) == 2
+        assert not any(s.get("type") == "null" for s in result["anyOf"])
+
+    def test_all_null_anyof_drops_keyword(self):
+        """Degenerate anyOf with only null entries: anyOf keyword is removed."""
+        node = {"anyOf": [{"type": "null"}, {"type": "null"}]}
+        result = clean_schema_node(node)
+        assert "anyOf" not in result
+
+    # --- Integration: optional fields inside properties ---
+
+    def test_optional_property_in_object(self):
+        """Optional field inside a properties dict is unwrapped."""
+        properties = {
+            "id": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "title": "Id",
+                "default": None,
+            },
+            "name": {"type": "string"},
+        }
+        cleaned = clean_schema_properties(properties)
+        assert cleaned["id"]["type"] == "string"
+        assert "anyOf" not in cleaned["id"]
+        assert "default" not in cleaned["id"]
+        assert cleaned["name"]["type"] == "string"
+
+    def test_optional_property_inside_array_items(self):
+        """Optional field nested inside array items is unwrapped."""
+        properties = {
+            "themes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "default": None,
+                        },
+                        "label": {"type": "string"},
+                    },
+                },
+            }
+        }
+        cleaned = clean_schema_properties(properties)
+        item_props = cleaned["themes"]["items"]["properties"]
+        assert item_props["id"]["type"] == "string"
+        assert "anyOf" not in item_props["id"]
+        assert item_props["label"]["type"] == "string"
+
+    def test_optional_array_property(self):
+        """Optional array field (anyOf: [array, null]) nested in object is unwrapped."""
+        properties = {
+            "campaign_config": {
+                "type": "object",
+                "properties": {
+                    "themes": {
+                        "anyOf": [
+                            {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                                            "default": None,
+                                        }
+                                    },
+                                },
+                            },
+                            {"type": "null"},
+                        ],
+                        "default": None,
+                    }
+                },
+            }
+        }
+        cleaned = clean_schema_properties(properties)
+
+        # themes should be unwrapped to array
+        themes = cleaned["campaign_config"]["properties"]["themes"]
+        assert themes["type"] == "array"
+        assert "anyOf" not in themes
+        assert "default" not in themes
+
+        # id inside items should also be unwrapped
+        id_schema = themes["items"]["properties"]["id"]
+        assert id_schema["type"] == "string"
+        assert "anyOf" not in id_schema
+
+    def test_exact_error_path_from_gemini(self):
+        """Reproduce the exact schema path from the Gemini ParseError.
+
+        Path: properties[campaign_config].properties[themes]
+              .anyOf[0].items.properties[id].anyOf[1].type == 'null'
+        """
+        # This is the exact structure that caused the Gemini error
+        tool_dict = {
+            "function": {
+                "name": "create_campaign",
+                "description": "Create a campaign",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "campaign_config": {
+                            "type": "object",
+                            "properties": {
+                                "themes": {
+                                    "anyOf": [
+                                        {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "id": {
+                                                        "anyOf": [
+                                                            {"type": "string"},
+                                                            {"type": "null"},  # ← causes Gemini ParseError
+                                                        ],
+                                                        "default": None,
+                                                    },
+                                                    "name": {"type": "string"},
+                                                },
+                                            },
+                                        },
+                                        {"type": "null"},  # ← causes Gemini ParseError
+                                    ],
+                                    "default": None,
+                                }
+                            },
+                        }
+                    },
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict, level=CleanupLevel.MINIMAL)
+        config = result["function"]["parameters"]["properties"]["campaign_config"]
+        themes = config["properties"]["themes"]
+
+        # themes must be unwrapped to array (no anyOf)
+        assert themes["type"] == "array", f"themes should be array, got: {themes}"
+        assert "anyOf" not in themes
+        assert "default" not in themes
+
+        # id inside items must be unwrapped to string
+        id_schema = themes["items"]["properties"]["id"]
+        assert id_schema["type"] == "string", f"id should be string, got: {id_schema}"
+        assert "anyOf" not in id_schema
+
+    def test_anyof_unwrap_applied_at_all_levels(self):
+        """anyOf null unwrapping must happen at MINIMAL, MODERATE, and AGGRESSIVE."""
+        node = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "title": "Field",
+        }
+        for level in CleanupLevel:
+            result = clean_schema_node(node, level=level)
+            assert result["type"] == "string", f"Failed at level {level}"
+            assert "anyOf" not in result, f"anyOf not removed at level {level}"

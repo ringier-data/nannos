@@ -7,12 +7,12 @@ and follow the A2A protocol specification exactly.
 Also includes configuration models for dynamic local sub-agents.
 """
 
-import json
 from typing import Annotated, Any, Dict, Literal, Optional, Union
 
 from a2a.types import Message, Task, TaskState
 from langchain.messages import AIMessage
 from pydantic import BaseModel, Discriminator, Field
+from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
 from agent_common.models.base import ThinkingLevel
 
@@ -33,9 +33,9 @@ class BaseLocalSubAgentConfig(BaseModel):
         min_length=1,
     )
     # TODO: the agent-console doesn't support to specify input modalities per sub-agent yet, but we add this in the config for future support
-    input_modes: list[str] = Field(
-        default_factory=lambda: ["text"],
-        description="Optional list of input modalities supported by this agent (e.g., ['text', 'image']). If None, inherits from orchestrator agent.",
+    input_modes: list[str] | None = Field(
+        default=None,
+        description="Optional list of input modalities supported by this agent (e.g., ['text', 'image']). If None, derived from the model's capabilities.",
     )
 
 
@@ -185,17 +185,7 @@ class A2ATaskResponse(BaseModel):
     def extract_text_from_status(self) -> str:
         """Extract text content from A2A task status message."""
         if self.task.status.message and self.task.status.message.parts:
-            return self._extract_text_from_parts(self.task.status.message.parts)
-        return ""
-
-    def _extract_text_from_parts(self, parts) -> str:
-        """Extract text content from A2A Message parts."""
-        for part in parts:
-            inner_part = part.root
-            if inner_part.kind == "text":
-                return inner_part.text
-            elif inner_part.kind == "data":
-                return json.dumps(inner_part.data)
+            return a2a_parts_to_content(self.task.status.message.parts, text_only=True)
         return ""
 
 
@@ -208,10 +198,4 @@ class A2AMessageResponse(BaseModel):
 
     def extract_text_content(self) -> str:
         """Extract text content from A2A Message parts."""
-        for part in self.message.parts:
-            inner_part = part.root
-            if inner_part.kind == "text":
-                return inner_part.text
-            elif inner_part.kind == "data":
-                return json.dumps(inner_part.data)
-        return ""
+        return a2a_parts_to_content(self.message.parts, text_only=True)

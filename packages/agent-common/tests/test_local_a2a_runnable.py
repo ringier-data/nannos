@@ -10,12 +10,14 @@ Covers:
 - get_checkpointer(): default returns None
 """
 
-import pytest
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
-from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+import pytest  # noqa: F401 — used as pytest test discovery marker
 from langchain_core.messages import HumanMessage
+
+from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+from agent_common.a2a.stream_events import TaskResponseData
 
 
 class StubLocalAgent(LocalA2ARunnable):
@@ -25,8 +27,7 @@ class StubLocalAgent(LocalA2ARunnable):
     def name(self) -> str:
         return "stub-agent"
 
-    @property
-    def input_modes(self) -> List[str]:
+    def get_supported_input_modes(self) -> List[str]:
         return ["text"]
 
     @property
@@ -43,8 +44,9 @@ class StubLocalAgent(LocalA2ARunnable):
         self,
         input_data: SubAgentInput,
         config: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> TaskResponseData:
         return self._build_success_response("ok")
+
 
 def _make_input(context_id: str = "ctx-123") -> SubAgentInput:
     return SubAgentInput(
@@ -67,7 +69,6 @@ def _base_config(**extra) -> Dict[str, Any]:
 
 
 class TestExtendConfigForCheckpointIsolation:
-
     def setup_method(self):
         self.agent = StubLocalAgent()
 
@@ -148,7 +149,6 @@ class TestExtendConfigForCheckpointIsolation:
 
 
 class TestExtendConfigForSubagent:
-
     def setup_method(self):
         self.agent = StubLocalAgent()
 
@@ -242,8 +242,8 @@ class TestExtendConfigForSubagent:
         assert "sub_agent:parent-agent" in result["tags"]
         assert "sub_agent:child-agent" in result["tags"]
 
-class TestGetThreadId:
 
+class TestGetThreadId:
     def setup_method(self):
         self.agent = StubLocalAgent()
         self.input_data = _make_input(context_id="ctx-abc")
@@ -265,7 +265,6 @@ class TestGetThreadId:
 
 
 class TestGetCheckpointer:
-
     def setup_method(self):
         self.agent = StubLocalAgent()
         self.input_data = _make_input()
@@ -274,3 +273,37 @@ class TestGetCheckpointer:
         """Default implementation returns None (inherit parent checkpointer)."""
         result = self.agent.get_checkpointer(self.input_data)
         assert result is None
+
+
+class TestEnsureSupportedBlockTypes:
+    """Tests for BaseA2ARunnable._ensure_supported_block_types URL/mime rendering."""
+
+    def setup_method(self):
+        self.agent = StubLocalAgent()
+
+    def test_unsupported_block_with_url_and_mime(self):
+        blocks = [{"type": "image", "url": "https://example.com/photo.jpg", "mime_type": "image/jpeg"}]
+        result = StubLocalAgent._ensure_supported_block_types(blocks, supported_modes=["text"])
+        assert len(result) == 1
+        assert result[0]["type"] == "text"
+        assert "[IMAGE (image/jpeg): https://example.com/photo.jpg]" == result[0]["text"]
+
+    def test_unsupported_block_with_url_no_mime(self):
+        blocks = [{"type": "audio", "url": "https://example.com/clip.mp3"}]
+        result = StubLocalAgent._ensure_supported_block_types(blocks, supported_modes=["text"])
+        assert result[0]["text"] == "[AUDIO: https://example.com/clip.mp3]"
+
+    def test_unsupported_block_without_url(self):
+        blocks = [{"type": "video"}]
+        result = StubLocalAgent._ensure_supported_block_types(blocks, supported_modes=["text"])
+        assert result[0]["text"] == "[VIDEO content (not supported by this agent)]"
+
+    def test_supported_block_passes_through(self):
+        blocks = [{"type": "image", "url": "https://example.com/photo.jpg"}]
+        result = StubLocalAgent._ensure_supported_block_types(blocks, supported_modes=["text", "image"])
+        assert result == blocks
+
+    def test_none_supported_modes_allows_all(self):
+        blocks = [{"type": "audio", "url": "https://example.com/clip.mp3"}]
+        result = StubLocalAgent._ensure_supported_block_types(blocks, supported_modes=None)
+        assert result == blocks

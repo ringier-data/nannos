@@ -15,6 +15,7 @@ class SocketEvents:
     # Messaging
     SEND_MESSAGE = "send_message"
     AGENT_RESPONSE = "agent_response"
+    CANCEL_TASK = "cancel_task"
 
     # Debugging
     DEBUG_LOG = "debug_log"

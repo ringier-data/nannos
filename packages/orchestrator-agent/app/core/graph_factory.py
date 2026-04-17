@@ -17,19 +17,24 @@ Architecture:
 
 import logging
 import os
+import uuid as _uuid
 from typing import Any, Optional
 
+from a2a.types import Message as A2AMessage
+from agent_common.a2a.client_runnable import A2AClientRunnable as _ClientRunnable
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
 from agent_common.core.model_factory import create_model, _has_aws_credentials
+from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
+from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -49,6 +54,7 @@ from ..middleware import (
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
+from .steering_state import get_all_active_subagent_dispatches, get_orchestrator_pending_messages
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
@@ -396,10 +402,26 @@ class GraphFactory:
     def _create_middleware_stack(self) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
+        Middleware Execution Order (LangChain convention):
+          - before_* hooks: First to last (list order)
+          - after_*  hooks: Last to first (reverse order)
+          - wrap_*   hooks: Nested — first middleware in the list wraps all
+            others (outermost).  For ``awrap_tool_call`` the call path is:
+                [0] → [1] → … → [N] → ToolNode handler
+            So [0] can short-circuit before any later middleware sees the call.
+
+        IMPORTANT: ``DynamicToolDispatchMiddleware`` is deliberately first ([0])
+        because it short-circuits the ``task`` tool for A2A sub-agent dispatch.
+        Being outermost means inner middlewares (Auth, Retry, …) never see the
+        ``task`` tool call — they only see the ToolMessage result if it was
+        returned.  This is why ``AuthErrorDetectionMiddleware`` cannot intercept
+        A2A 401 errors via ``interrupt()``.
+
         Returns:
-            Complete middleware stack with DynamicToolDispatchMiddleware first
+            Ordered middleware list (first = outermost for wrap hooks).
         """
-        # DynamicToolDispatchMiddleware must be first to intercept model calls
+        # DynamicToolDispatchMiddleware must be first (outermost) to intercept
+        # tool calls and short-circuit sub-agent dispatch before inner middlewares.
         # Add Static tools directly to the graph (not via middleware) in case you want
         # FinalResponseSchema's return_direct=True to be respected by the model
         dynamic_tool_middleware = DynamicToolDispatchMiddleware(
@@ -414,14 +436,73 @@ class GraphFactory:
         # StoragePathsInstructionMiddleware adds filesystem storage paths documentation
         storage_paths_middleware = StoragePathsInstructionMiddleware()
 
-        # Order: DynamicToolDispatch → UserPreferences → StoragePaths → LoopDetection → Auth → Retry → A2A → Todo
-        # UserPreferences comes early to modify system prompt before other middleware
-        # StoragePaths comes after UserPreferences to ensure storage instructions are included
-        # LoopDetection comes before Auth/Retry to catch loops early
+        # Outermost → innermost (for wrap_* hooks):
+        # DynamicToolDispatch[0] → StoragePaths → PromptCaching → Steering
+        # → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo[9]
+        #
+        # BedrockPromptCaching places cache point after all static content (system prompt + storage paths),
+        # so that the cache is shared across all users. StoragePaths is included in the cache.
+        # Steering comes after caching so follow-up messages aren't cached.
+        # LoopDetection comes before Auth/Retry to catch loops early.
+
+        async def _forward_to_active_subagents(context_id: str, messages: list) -> None:
+            """Forward steering messages to all active sub-agents.
+
+            When the orchestrator's SteeringMiddleware picks up follow-up
+            messages, they are forwarded to every in-progress sub-agent so
+            each sub-agent's own SteeringMiddleware can inject them.
+            Multiple sub-agents may run in parallel (LangGraph ToolNode uses
+            asyncio.gather for concurrent tool calls).
+            """
+            dispatches = get_all_active_subagent_dispatches(context_id)
+            if not dispatches:
+                return
+
+            for dispatch in dispatches:
+                runnable = dispatch.runnable
+                if not isinstance(runnable, _ClientRunnable):
+                    logger.debug(
+                        f"[STEERING] Active sub-agent '{dispatch.subagent_name}' is local, "
+                        "skipping A2A forwarding (local agents share the same steering queue)"
+                    )
+                    continue
+
+                if not dispatch.subagent_context_id:
+                    logger.warning(
+                        f"[STEERING] Active sub-agent '{dispatch.subagent_name}' has no context_id yet, "
+                        "cannot forward steering message"
+                    )
+                    continue
+
+                for msg in messages:
+                    if not msg.parts:
+                        continue
+
+                    # Forward all parts (text, files, data) — don't strip non-text content
+                    steering_msg = A2AMessage(
+                        role="user",
+                        parts=msg.parts,
+                        message_id=str(_uuid.uuid4()),
+                        context_id=dispatch.subagent_context_id,
+                        task_id=dispatch.subagent_task_id,
+                    )
+                    await runnable.send_steering_message(steering_msg)
+                    logger.info(
+                        f"[STEERING] Forwarded steering message to sub-agent "
+                        f"'{dispatch.subagent_name}' (context_id={dispatch.subagent_context_id})"
+                    )
+
+        steering_middleware = SteeringMiddleware(
+            get_pending_messages=get_orchestrator_pending_messages,
+            on_messages_received=_forward_to_active_subagents,
+        )
+
         return [
             dynamic_tool_middleware,
-            user_preferences_middleware,
             storage_paths_middleware,
+            BedrockPromptCachingMiddleware(),
+            steering_middleware,
+            user_preferences_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,
             self._retry_middleware,
@@ -433,7 +514,8 @@ class GraphFactory:
         """Get static tools for the given model type.
 
         Returns:
-            List of static tools (cached)
+            List of static tools (cached). When with_response_tool=True, returns a
+            new list with FinalResponseSchema appended (does not pollute the cache).
         """
         if not self._static_tools_cache:
             static_tools: list[BaseTool] = []
@@ -447,23 +529,23 @@ class GraphFactory:
 
             # Add copy_file tool for efficient file copying without LLM context loading
             static_tools.append(create_copy_file_tool(self.backend_factory))
-            # if bedrock and thinking is enabled we need to add the final response tool to handle structured output
-            if with_response_tool:
-                static_tools.append(
-                    StructuredTool.from_function(
-                        func=lambda **kwargs: FinalResponseSchema(**kwargs),
-                        name="FinalResponseSchema",
-                        description="ALWAYS use this tool to format your final response to the user.",
-                        args_schema=FinalResponseSchema,
-                        return_direct=True,  # Ensure the model's output is returned directly without additional parsing
-                    )
-                )
 
             self._static_tools_cache = static_tools
-        else:
-            static_tools = self._static_tools_cache
 
-        return static_tools
+        # Return a copy with FinalResponseSchema appended if needed,
+        # to avoid polluting the shared cache for other models
+        if with_response_tool:
+            return list(self._static_tools_cache) + [
+                StructuredTool.from_function(
+                    func=lambda **kwargs: FinalResponseSchema(**kwargs),
+                    name="FinalResponseSchema",
+                    description="ALWAYS use this tool to format your final response to the user.",
+                    args_schema=FinalResponseSchema,
+                    return_direct=True,
+                )
+            ]
+
+        return self._static_tools_cache
 
     def _create_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
         """Create a graph for the given model type.
@@ -475,17 +557,6 @@ class GraphFactory:
             CompiledStateGraph: The newly created graph
         """
         model = self._get_or_create_model(model_type, thinking_level)
-
-        # Bind built-in tools for Gemini models
-        # Google Search and Code Execution are always enabled for Gemini
-        if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
-            logger.info("Binding built-in tools to Gemini model: google_search, code_execution")
-            model = model.bind_tools(
-                [
-                    {"google_search": {}},
-                    {"code_execution": {}},
-                ]
-            )
 
         # Ensure store is initialized before creating graph (required for longterm memory)
         # Access the store property to trigger lazy initialization (may be None if not configured)
@@ -509,8 +580,12 @@ class GraphFactory:
         backend = self.backend_factory
 
         # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
-        # Use AutoStrategy for Bedrock without extended thinking and Gemini models (more efficient, handles structured output natively)
-        # For bedrock models with extended thinking use None and add FinalResponseSchema to static tools
+        # Use AutoStrategy for Bedrock without extended thinking (efficient, handles structured output natively)
+        # For Bedrock with extended thinking and Gemini models: use response_format=None and add
+        # FinalResponseSchema as an explicit static tool. Gemini's AutoStrategy resolves to ToolStrategy
+        # but the model embeds the structured JSON in text content instead of tool_call_chunks,
+        # causing raw JSON to be streamed to the client. The explicit tool approach ensures proper
+        # tool_call_chunks streaming detection.
         requires_response_tool = False
         if model_type in ("gpt-4o", "gpt-4o-mini", "local"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
@@ -522,10 +597,22 @@ class GraphFactory:
                 requires_response_tool = True
             else:
                 response_format = AutoStrategy(schema=FinalResponseSchema)
+        elif model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+            # Gemini models: use explicit FinalResponseSchema tool instead of AutoStrategy/ToolStrategy
+            # because Gemini outputs structured JSON in content text rather than via tool_call_chunks
+            response_format = None
+            requires_response_tool = True
         else:
             response_format = AutoStrategy(schema=FinalResponseSchema)
         middleware = self._create_middleware_stack()
         static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
+
+        # Add Google built-in tools for Gemini models
+        # These are passed via the tools parameter so create_deep_agent can bind them
+        # (bind_tools on the model directly returns a RunnableBinding which isn't a BaseChatModel)
+        if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+            logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
+            static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 
         system_prompt = self.config.SYSTEM_INSTRUCTION_SHORT if os.environ.get('USE_SHORT_PROMPTS') == 'true' and self.config.SYSTEM_INSTRUCTION_SHORT else self.config.SYSTEM_INSTRUCTION
         compiled_graph = create_deep_agent(
@@ -577,6 +664,7 @@ class GraphFactory:
         - Uses FilesystemMiddleware + IndexingStoreBackend for semantic indexing of files
         - Uses SummarizationMiddleware to handle large context windows
         - Uses AnthropicPromptCachingMiddleware for prompt caching on Anthropic models
+        - Uses BedrockPromptCachingMiddleware for prompt caching on Bedrock models
         - Uses PatchToolCallsMiddleware to normalise tool call format
 
         Middleware ordering (first = outermost wrapper):
@@ -587,8 +675,9 @@ class GraphFactory:
            for Gemini compatibility, but does NOT inject from tool_registry. Resolves
            dynamic (MCP) tools via request.override(tool=...) so the full inner chain
            executes for every tool call — no middleware inside it is bypassed.
-        3-8. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
-           AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware,
+        3-9. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
+           AnthropicPromptCachingMiddleware, BedrockPromptCachingMiddleware,
+           PatchToolCallsMiddleware,
            ToolRetryMiddleware, RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware.
 
         Args:
@@ -706,8 +795,9 @@ class GraphFactory:
         Middleware ordering (first = outermost wrapper):
         1. DynamicToolDispatchMiddleware: Injects scheduler/playground tools from SYSTEM_TOOLS,
            handles tool execution for MCP tools
-        2-7. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
-           AnthropicPromptCachingMiddleware, PatchToolCallsMiddleware,
+        2-8. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
+           AnthropicPromptCachingMiddleware, BedrockPromptCachingMiddleware,
+           PatchToolCallsMiddleware,
            ToolRetryMiddleware, RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware
 
         Args:

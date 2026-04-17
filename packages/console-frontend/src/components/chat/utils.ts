@@ -272,13 +272,20 @@ export function convertMarkdownToHtml(markdown: string): string {
 
 /**
  * Extract text from message parts array
+ * Handles A2A Part structure: { root: { text: "..." } } or legacy { text: "..." }
  */
-export function extractPartTexts(parts: Array<{ text?: string } | string> | undefined | null): string[] {
+export function extractPartTexts(parts: Array<{ root?: { text?: string }; text?: string } | string> | undefined | null): string[] {
   if (!Array.isArray(parts)) return [];
   return parts.map((part) => {
+    // Handle A2A Part structure: { root: { text: "..." } }
+    if (part && typeof part === 'object' && 'root' in part && part.root && typeof part.root.text === 'string') {
+      return part.root.text;
+    }
+    // Handle legacy structure: { text: "..." }
     if (part && typeof (part as { text?: string }).text === 'string') {
       return (part as { text?: string }).text!;
     }
+    // Handle plain string
     if (typeof part === 'string') {
       return part;
     }
@@ -290,7 +297,13 @@ export function extractPartTexts(parts: Array<{ text?: string } | string> | unde
  * Check if message parts should be displayed
  */
 export function shouldDisplayMessageParts(parts: Array<{ text?: string }> | undefined | null): boolean {
-  return Array.isArray(parts) && parts.length > 0;
+  if (!Array.isArray(parts) || parts.length === 0) {
+    return false;
+  }
+  
+  // Check if any part has non-empty text content
+  const texts = extractPartTexts(parts);
+  return texts.some(text => text && text.trim().length > 0);
 }
 
 /**

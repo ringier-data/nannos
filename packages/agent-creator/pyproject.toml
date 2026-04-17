@@ -6,13 +6,13 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     # Core A2A
-    "a2a-sdk[http-server]>=0.3.9",
+    "a2a-sdk[http-server]>=0.3.25,<1.0.0",
     "uvicorn>=0.38.0",
     "click>=8.1.8",
     # DeepAgents and LangChain
     "deepagents>=0.4.5,<0.5.0",
     "langchain>=1.0.0",
-    "langchain-aws>=1.1.0",
+    "langchain-aws>=1.4.3",
     # Checkpointing
     "langgraph-checkpoint-aws>=1.0.1",
     "aiodynamo>=24.7",

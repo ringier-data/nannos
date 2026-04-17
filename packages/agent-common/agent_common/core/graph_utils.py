@@ -36,17 +36,18 @@ from deepagents.middleware.summarization import compute_summarization_defaults
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostLogger
+from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
-from agent_common.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ def build_common_middleware_stack(
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
-    Creates seven middlewares that every agent should run beneath its
+    Creates middlewares that every agent should run beneath its
     tool-selection / dispatch layer:
 
     1. ``FilesystemMiddleware`` - virtual file-system backed by *backend*.
@@ -139,13 +140,16 @@ def build_common_middleware_stack(
     3. ``AnthropicPromptCachingMiddleware`` - enables Anthropic prompt caching;
        silently ignored for non-Anthropic models
        (``unsupported_model_behavior="ignore"``).
-    4. ``PatchToolCallsMiddleware`` - normalises tool-call format across
-       providers (Bedrock, OpenAI, Gemini, …).
-    5. ``ToolRetryMiddleware`` - retries failed tool calls with exponential
+    4. ``BedrockPromptCachingMiddleware`` - enables Bedrock prompt caching;
+       silently ignored for non-Bedrock models
+       (``unsupported_model_behavior="ignore"``).
+    6. ``PatchToolCallsMiddleware`` - normalises tool-call format across
+       providers (Bedrock, OpenAI, Gemini, \u2026).
+    7. ``ToolRetryMiddleware`` - retries failed tool calls with exponential
        back-off (max 5 retries, factor 2.0).
-    6. ``RepeatedToolCallMiddleware`` - detects and breaks tool-call loops
+    8. ``RepeatedToolCallMiddleware`` - detects and breaks tool-call loops
        (max 5 identical calls within a window of 10).
-    7. ``ToolSchemaCleaningMiddleware`` - cleans tool schemas at model-binding
+    9. ``ToolSchemaCleaningMiddleware`` - cleans tool schemas at model-binding
        time for Gemini compatibility.
 
     Args:
@@ -184,6 +188,7 @@ def build_common_middleware_stack(
                 truncate_args_settings=summarization_defaults["truncate_args_settings"],
             ),
             AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+            BedrockPromptCachingMiddleware(unsupported_model_behavior="ignore"),
             PatchToolCallsMiddleware(),
             ToolRetryMiddleware(
                 max_retries=5,

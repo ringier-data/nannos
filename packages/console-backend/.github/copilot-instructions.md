@@ -158,6 +158,27 @@ Available in `AuditAction` enum:
 2. Create database migration in `infrastructure/roles/basis/files/ddl/scripts/`
 3. Use `ALTER TYPE` to add enum value (PostgreSQL doesn't support removing enum values)
 
+## A2A Extension Event Processing
+
+The playground-backend proxies A2A events from the orchestrator to the frontend via Socket.IO. It classifies events by their extension markers and applies filtering logic.
+
+### Event Filtering in `_process_a2a_response()` (app.py)
+
+- **Work-plan events** (`message.extensions` contains `work-plan:1.0`): Forwarded to frontend via Socket.IO but NOT persisted to the database
+- **Activity-log events** (`message.extensions` contains `activity-log:1.0`): Forwarded to frontend, persisted for history reconstruction
+- **Intermediate-output artifacts** (`artifact.extensions` contains `intermediate-output:1.0`): Forwarded to frontend but NOT accumulated into `_streaming_buffers` (the main response buffer)
+- **Main response artifacts** (no intermediate-output extension, `append=true`): Accumulated into `_streaming_buffers` for final message assembly
+- **Terminal status-only events** (completed/failed with no message content): Skipped for persistence
+
+### Persistence Rules
+
+Only save to database when ALL of these are true:
+- Not a work-plan event
+- Not an artifact append (streaming chunk)
+- Not a terminal-status-only signal
+
+Activity-log events ARE persisted so the frontend can reconstruct timelines from `raw_payload` when loading message history.
+
 ## Database Migrations
 
 - Migrations use Rambler and are located in `infrastructure/roles/basis/files/ddl/scripts/`
@@ -392,6 +413,10 @@ has_access = await user_group_service.check_resource_permission(
 - **`check_resource_permission()`**: Check access to specific resources (sub-agents, secrets)
 
 ## Critical Design Decisions
+
+### Steering Message Consumption Pattern (app.py)
+
+When sending a steering message via `_send_steering_message_to_agent()`, the code uses `break` after the first event from `a2a_client.send_message()` — NOT `pass` to drain. The playground-backend shares the same A2A SDK `Client` instance between the primary stream (`_send_message_to_agent`) and steering. The A2A SDK's `EventQueue.tap()` creates a child queue that receives all parent events. If leaked parent events containing raw `Task` objects were consumed through the shared `Client`, its `ClientTaskManager` would raise "Task is already set" errors. The `break` takes only the ack event and lets SSE teardown close the child queue. Note: consuming from the child never removes events from the parent queue (they're independent `asyncio.Queue` instances). See the root copilot instructions "Continuous Interaction Turns" section for the full mechanism.
 
 ### Repository Pattern with Automatic Audit Logging (repositories/base.py)
 

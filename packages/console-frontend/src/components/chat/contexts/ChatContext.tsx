@@ -1,6 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import type { AgentResponseData, Conversation, Message, Settings, Task, TaskHistoryEntry } from '../types';
+import { toast } from 'sonner';
+import type { AgentResponseData, Conversation, Message, Settings, Task, TaskHistoryEntry, TodoItem, TimelineEvent } from '../types';
+import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT } from '../types';
 import { useSocket } from './SocketContext';
 import { useSessionId } from '../hooks/useLocalStorage';
 import { extractPartTexts, generateUUID, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
@@ -29,11 +32,18 @@ interface ChatContextType {
   isLoadingConversations: boolean;
   isLoadingMessages: boolean;
   isConnected: boolean;
+  isWaiting: boolean;
+  streamingMessage: string | null;
+  liveWorkingSteps: TodoItem[];
+  liveSubagentThoughts: Array<{agent_name: string; content: string; complete: boolean}>;
+  liveStatusHistory: Array<{timestamp: Date; message: string}>;
+  liveTimeline: TimelineEvent[];
 
   // Actions
   createConversation: () => void;
   selectConversation: (id: string) => void;
   sendMessage: (content: string, files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>) => void;
+  interruptTask: () => void;
   updateSettings: (settings: Settings) => Promise<boolean>;
   loadConversations: () => Promise<void>;
 }
@@ -56,9 +66,138 @@ interface ChatProviderProps {
   playgroundMode?: PlaygroundMode;
 }
 
+// Helper to build unified timeline from thoughts and status history
+// Todos are kept in sticky widget only, not in timeline
+const buildTimeline = (
+  thoughts: Array<{ agent_name: string; content: string; complete?: boolean; startedAt?: Date }> | undefined,
+  history: Array<{ timestamp: Date; message: string; source?: string }> | undefined,
+  baseTimestamp: Date
+): TimelineEvent[] => {
+  const events: TimelineEvent[] = [];
+  
+  // Add status history items (they have individual timestamps)
+  if (history && history.length > 0) {
+    history.forEach(item => {
+      events.push({ type: 'status', timestamp: item.timestamp, message: item.message, ...(item.source && { source: item.source }) });
+    });
+  }
+  
+  // Add thoughts (use their own startedAt timestamp when available)
+  if (thoughts && thoughts.length > 0) {
+    thoughts.forEach(thought => {
+      const ts = thought.startedAt || baseTimestamp;
+      events.push({ type: 'thought_start', timestamp: ts, agent_name: thought.agent_name });
+      events.push({ type: 'thought_end', timestamp: ts, agent_name: thought.agent_name, content: thought.content, complete: thought.complete ?? true });
+    });
+  }
+  
+  // Sort chronologically
+  return events.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+};
+
+// Helper to reconstruct timeline from saved message data
+const reconstructTimelineFromMessage = (msg: Record<string, unknown>): TimelineEvent[] => {
+  const events: TimelineEvent[] = [];
+  const timestamp = msg.created_at ? new Date(msg.created_at as string) : new Date();
+  
+  // Parse raw_payload if available (contains full response_data)
+  let responseData: Record<string, unknown> | null = null;
+  if (typeof msg.raw_payload === 'string' && msg.raw_payload) {
+    try {
+      responseData = JSON.parse(msg.raw_payload);
+    } catch (e) {
+      console.warn('Failed to parse raw_payload:', e);
+    }
+  }
+  
+  const metadata = (msg.metadata || (responseData?.metadata)) as Record<string, unknown> | undefined;
+  const kind = (msg.kind || responseData?.kind) as string | undefined;
+  
+  // Extract activity-log events (status message with activity-log extension)
+  const statusObj = responseData?.status as Record<string, unknown> | undefined;
+  const statusMsg = statusObj?.message as Record<string, unknown> | undefined;
+  const messageExtensions = (statusMsg?.extensions || []) as string[];
+  if (messageExtensions.includes(ACTIVITY_LOG_EXT)) {
+    // Try to get message from status object or from parts
+    let message = '';
+    let source: string | undefined;
+    
+    if (responseData) {
+      const status = responseData.status as Record<string, unknown> | undefined;
+      if (status?.message) {
+        // status.message can be either a string or a nested Message object with parts
+        if (typeof status.message === 'string') {
+          message = status.message;
+        } else if (typeof status.message === 'object' && status.message !== null) {
+          // Extract text from nested message parts
+          const nestedParts = (status.message as Record<string, unknown>).parts as Array<{ kind?: string; text?: string }> | undefined;
+          if (nestedParts && Array.isArray(nestedParts)) {
+            message = nestedParts.map(p => p.text || '').join(' ').trim();
+          }
+        }
+      }
+      // Extract source from status message metadata (for sub-agent attribution)
+      const msgMetadata = statusMsg?.metadata as Record<string, unknown> | undefined;
+      if (msgMetadata?.source && typeof msgMetadata.source === 'string') {
+        source = msgMetadata.source;
+      } else if (metadata?.source && typeof metadata.source === 'string') {
+        source = metadata.source;
+      }
+    }
+    
+    if (!message) {
+      // Fallback: extract from parts
+      const parts = msg.parts as Array<{ kind?: string; text?: string }> | undefined;
+      if (parts && parts.length > 0) {
+        message = parts.map(p => p.text || '').join(' ').trim();
+      }
+    }
+    
+    if (message) {
+      events.push({ type: 'status', timestamp, message, ...(source && { source }) });
+    }
+  }
+  
+  // Extract intermediate output (sub-agent thoughts) via artifact extensions
+  if (kind === 'artifact-update' && responseData) {
+    const artifact = responseData.artifact as Record<string, unknown> | undefined;
+    const artifactExtensions = (artifact?.extensions || []) as string[];
+    const artifactMetadata = artifact?.metadata as Record<string, unknown> | undefined;
+    
+    if (artifactExtensions.includes(INTERMEDIATE_OUTPUT_EXT)) {
+      const agentName = (artifactMetadata?.agent_name || 'sub-agent') as string;
+
+      // Extract thought content from artifact parts
+      let content = '';
+      const parts = artifact?.parts as Array<{ kind?: string; text?: string }> | undefined;
+      if (parts && parts.length > 0) {
+        content = parts.map(p => p.text || '').join('').trim();
+      }
+
+      if (content) {
+        events.push({ type: 'thought_end', timestamp, agent_name: agentName, content, complete: true });
+      }
+    }
+  }
+  
+  return events;
+};
+
 export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const sessionId = useSessionId();
-  const { isConnected, isSocketReady, initializeClient, sendMessage: socketSendMessage, onAgentResponse } = useSocket();
+  const location = useLocation();
+  const locationRef = useRef(location);
+  const navigate = useNavigate();
+  const navigateRef = useRef(navigate);
+  const { isConnected, isSocketReady, initializeClient, sendMessage: socketSendMessage, cancelTask, onAgentResponse } = useSocket();
+
+  // Keep refs in sync for use inside event handler closures
+  useEffect(() => {
+    locationRef.current = location;
+  }, [location]);
+  useEffect(() => {
+    navigateRef.current = navigate;
+  }, [navigate]);
 
   // Load user settings to use as defaults
   const { data: userSettingsData } = useQuery({
@@ -73,6 +212,15 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [messagesMap, setMessagesMap] = useState<Map<string, Message[]>>(new Map());
   const [tasksMap, setTasksMap] = useState<Map<string, Task[]>>(new Map());
   const [contextIdsMap, setContextIdsMap] = useState<Map<string, string>>(new Map());
+  const [waitingMap, setWaitingMap] = useState<Map<string, boolean>>(new Map());
+  const [streamingMap, setStreamingMap] = useState<Map<string, string>>(new Map());
+  const [workingStepsMap, setWorkingStepsMap] = useState<Map<string, TodoItem[]>>(new Map());
+  const [subagentThoughtsMap, setSubagentThoughtsMap] = useState<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
+  const [statusHistoryMap, setStatusHistoryMap] = useState<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
+  const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
+  const streamingMapRef = useRef<Map<string, string>>(new Map());
+  const subagentThoughtsMapRef = useRef<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
+  const statusHistoryMapRef = useRef<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   // Settings are ephemeral and not persisted to localStorage
@@ -81,10 +229,27 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const messageCounterRef = useRef(0);
   const taskCounterRef = useRef(0);
   const playgroundModeRef = useRef(playgroundMode);
+  const activeConversationIdRef = useRef(activeConversationId);
+  const pendingMessagesRef = useRef<Map<string, string>>(new Map()); // messageId → conversationId
+
+  // Keep ref in sync
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   // Derived state
   const messages = activeConversationId ? messagesMap.get(activeConversationId) || [] : [];
   const tasks = activeConversationId ? tasksMap.get(activeConversationId) || [] : [];
+  const isWaiting = activeConversationId ? waitingMap.get(activeConversationId) === true : false;
+  const streamingMessage = activeConversationId ? streamingMap.get(activeConversationId) ?? null : null;
+  const liveWorkingSteps = activeConversationId ? workingStepsMap.get(activeConversationId) || [] : [];
+  const liveSubagentThoughts = activeConversationId ? subagentThoughtsMap.get(activeConversationId) || [] : [];
+  const liveStatusHistory = activeConversationId ? statusHistoryMap.get(activeConversationId) || [] : [];
+  
+  // Build live unified timeline during streaming (maintains chronological order)
+  const liveTimeline = activeConversationId 
+    ? buildTimeline(liveSubagentThoughts, liveStatusHistory, new Date())
+    : [];
 
   // Helper to add a message
   const addMessage = useCallback((conversationId: string, message: Message) => {
@@ -93,6 +258,29 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       const existing = newMap.get(conversationId) || [];
       newMap.set(conversationId, [...existing, message]);
       return newMap;
+    });
+  }, []);
+
+  // Helper to show toast notification for new agent messages
+  // Only shows when user is NOT actively viewing the conversation
+  const showMessageToast = useCallback((conversationId: string, content: string) => {
+    if (!content.trim()) return;
+    const isOnChatPage = locationRef.current.pathname === '/app/chat';
+    const isViewingThisConversation = activeConversationIdRef.current === conversationId;
+    if (isOnChatPage && isViewingThisConversation) return;
+
+    const preview = content.slice(0, 60) + (content.length > 60 ? '...' : '');
+    const convId = conversationId;
+    toast.info('New message', {
+      description: preview,
+      duration: 5000,
+      action: {
+        label: 'View',
+        onClick: () => {
+          setActiveConversationId(convId);
+          navigateRef.current('/app/chat');
+        },
+      },
     });
   }, []);
 
@@ -121,8 +309,26 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   // Handle agent responses
   useEffect(() => {
     const unsubscribe = onAgentResponse((data: AgentResponseData) => {
-      if (!activeConversationId) {
-        console.warn('Received response but no active conversation');
+      // Debug: log all incoming events
+      if (data.role === 'agent' && data.kind === 'status-update') {
+        console.log('[SOCKET EVENT] status-update:', data);
+      }
+      
+      // Route to the correct conversation using contextId, pending message lookup, or active conversation
+      const resolvedConversationId =
+        data.contextId ??
+        (data.id ? pendingMessagesRef.current.get(data.id) : undefined) ??
+        activeConversationIdRef.current;
+
+      if (!resolvedConversationId) {
+        console.warn('Received response but no conversation could be resolved');
+        return;
+      }
+
+      // Steering ack: the backend confirmed the follow-up was queued for the
+      // running agent. Nothing to render — the original stream is still active.
+      if ((data as any).steering) {
+        console.log('[STEERING] Follow-up message accepted for', resolvedConversationId);
         return;
       }
 
@@ -130,9 +336,133 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       if (data.contextId) {
         setContextIdsMap((prev) => {
           const newMap = new Map(prev);
-          newMap.set(activeConversationId, data.contextId!);
+          newMap.set(resolvedConversationId, data.contextId!);
           return newMap;
         });
+      }
+
+      // Handle work-plan (todo snapshot) — detect via extensions on status.message
+      const statusMessage = data.status?.message;
+      const statusExtensions = (statusMessage?.extensions || []) as string[];
+      if (statusExtensions.includes(WORK_PLAN_EXT) && Array.isArray(statusMessage?.parts)) {
+        // Extract todos from DataPart (part with kind === 'data')
+        const dataPart = statusMessage.parts.find((p: any) => p.kind === 'data' || p.data);
+        const todosData = dataPart?.data as Record<string, unknown> | undefined;
+        const incomingTodos = (todosData?.todos || []) as TodoItem[];
+        if (incomingTodos.length > 0) {
+        const wsMap = workingStepsMapRef.current;
+        const existing = wsMap.get(resolvedConversationId) || [];
+
+        // Determine which source(s) this snapshot covers
+        const incomingSources = new Set(incomingTodos.map((t) => t.source || ''));
+
+        // Keep existing todos from OTHER sources
+        const retained = existing.filter((t) => !incomingSources.has(t.source || ''));
+
+        // Merge: orchestrator todos (no source) first, then sub-agent groups
+        const merged = [...retained, ...incomingTodos];
+        merged.sort((a, b) => {
+          const aSource = a.source || '';
+          const bSource = b.source || '';
+          if (!aSource && bSource) return -1;
+          if (aSource && !bSource) return 1;
+          return aSource.localeCompare(bSource);
+        });
+
+        wsMap.set(resolvedConversationId, merged);
+        setWorkingStepsMap(new Map(wsMap));
+        return;
+        }
+      }
+
+      // Handle streaming artifact chunks (A2A artifact-append pattern)
+      if (data.kind === 'artifact-update' && data.artifact?.parts) {
+        const parts = data.artifact.parts;
+        if (Array.isArray(parts)) {
+          const text = extractPartTexts(parts).join('');
+          if (text) {
+            // Classify artifact via extensions array (A2A 1.0.0)
+            const artifactExtensions = ((data.artifact as any)?.extensions || []) as string[];
+            const artifactMetadata = (data.artifact as any)?.metadata || {};
+            const isIntermediateOutput = artifactExtensions.includes(INTERMEDIATE_OUTPUT_EXT);
+            const agentName = (artifactMetadata.agent_name as string) || 'sub-agent';
+            
+            if (isIntermediateOutput) {
+              // Accumulate sub-agent thoughts separately
+              const existingThoughts = subagentThoughtsMapRef.current.get(resolvedConversationId) || [];
+              const lastThought = existingThoughts[existingThoughts.length - 1];
+              
+              if (lastThought && lastThought.agent_name === agentName && !lastThought.complete) {
+                // Append to existing in-progress thought from same agent
+                lastThought.content += text;
+              } else {
+                // New thought: different agent OR same agent re-invoked after completion
+                existingThoughts.forEach(t => { t.complete = true; });
+                existingThoughts.push({ agent_name: agentName, content: text, complete: false, startedAt: new Date() });
+              }
+              
+              subagentThoughtsMapRef.current.set(resolvedConversationId, existingThoughts);
+              setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current)); // Trigger re-render
+            } else {
+              // Orchestrator's final response chunks — thinking is done for all agents
+              const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+              if (thoughts?.some(t => !t.complete)) {
+                thoughts.forEach(t => { t.complete = true; });
+                setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+              }
+              const existing = streamingMapRef.current.get(resolvedConversationId) || '';
+              streamingMapRef.current.set(resolvedConversationId, existing + text);
+              setStreamingMap(new Map(streamingMapRef.current));
+            }
+          }
+        }
+        // Don't finalize here - let the completion status handler finalize the stream
+        return;
+      }
+
+      // Capture activity-log events for linear display (similar to VSCode Copilot chat)
+      // Detected via extensions on status.message (A2A 1.0.0)
+      if (data.kind === 'status-update') {
+        const statusMsg = data.status?.message;
+        const exts = ((statusMsg as any)?.extensions || []) as string[];
+        if (exts.includes(ACTIVITY_LOG_EXT)) {
+        // Extract text from message parts (status.message.parts)
+        if (statusMsg && Array.isArray(statusMsg.parts)) {
+          const text = extractPartTexts(statusMsg.parts).join('');
+          
+          if (text && text.trim()) {
+            // Extract source attribution from message metadata (sub-agent name)
+            const msgMetadata = (statusMsg as any)?.metadata as Record<string, unknown> | undefined;
+            const source = msgMetadata?.source && typeof msgMetadata.source === 'string' ? msgMetadata.source : undefined;
+            // This is an activity-log event (tool call, delegation) - add to history
+            const history = statusHistoryMapRef.current.get(resolvedConversationId) || [];
+            history.push({
+              timestamp: new Date(),
+              message: text,
+              ...(source && { source })
+            });
+            statusHistoryMapRef.current.set(resolvedConversationId, history);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+            // Mark any in-progress thoughts as complete — the orchestrator moved
+            // on to a new action so the previous sub-agent thinking is done.
+            const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+            if (thoughts?.some(t => !t.complete)) {
+              thoughts.forEach(t => { t.complete = true; });
+              setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+            }
+            return; // Don't process as regular status update
+          }
+        }
+        }
+      }
+
+      // Clear streaming buffer only on final message responses (not status updates)
+      // Status updates can happen during streaming, so we shouldn't clear the buffer
+      if (data.role === 'agent' && Array.isArray(data.parts) && shouldDisplayMessageParts(data.parts)) {
+        if (streamingMapRef.current.has(resolvedConversationId)) {
+          streamingMapRef.current.delete(resolvedConversationId);
+          setStreamingMap(new Map(streamingMapRef.current));
+        }
       }
 
       // Handle error
@@ -140,13 +470,18 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         messageCounterRef.current++;
         const errorMsg: Message = {
           id: `msg-${messageCounterRef.current}`,
-          conversationId: activeConversationId,
+          conversationId: resolvedConversationId,
           type: 'agent',
           content: `Error: ${data.error}`,
           timestamp: new Date(),
         };
-        addMessage(activeConversationId, errorMsg);
-        updateConversation(activeConversationId, { lastMessage: errorMsg.content });
+        addMessage(resolvedConversationId, errorMsg);
+        updateConversation(resolvedConversationId, { lastMessage: errorMsg.content });
+        // Clean up pending message tracking
+        if (data.id) pendingMessagesRef.current.delete(data.id);
+        setWaitingMap((prev) => { const m = new Map(prev); m.delete(resolvedConversationId); return m; });
+        workingStepsMapRef.current.delete(resolvedConversationId);
+        setWorkingStepsMap(new Map(workingStepsMapRef.current));
         return;
       }
 
@@ -154,50 +489,140 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       if (data.role === 'agent' && Array.isArray(data.parts)) {
         if (shouldDisplayMessageParts(data.parts)) {
           const text = extractPartTexts(data.parts).join('\n');
+          const steps = workingStepsMapRef.current.get(resolvedConversationId);
           messageCounterRef.current++;
+          const timestamp = new Date();
           const agentMsg: Message = {
             id: `msg-${messageCounterRef.current}`,
-            conversationId: activeConversationId,
+            conversationId: resolvedConversationId,
             type: 'agent',
             content: text,
-            timestamp: new Date(),
+            timestamp,
+            ...(steps && steps.length > 0 && { workingSteps: steps }),
+            timeline: buildTimeline(undefined, undefined, timestamp),
           };
-          addMessage(activeConversationId, agentMsg);
-          updateConversation(activeConversationId, {
+          addMessage(resolvedConversationId, agentMsg);
+          updateConversation(resolvedConversationId, {
             lastMessage: text.slice(0, 50),
             timestamp: new Date(),
           });
+          // Keep working steps visible in sticky widget (don't delete)
+          // Clear waiting state and pending message tracking
+          if (data.id) pendingMessagesRef.current.delete(data.id);
+          setWaitingMap((prev) => { const m = new Map(prev); m.delete(resolvedConversationId); return m; });
         }
         return;
       }
 
       // Handle task status update
       if (data.status) {
-        // Extract nested message if present
-        const nestedMsg = data.status.message;
-        if (nestedMsg && Array.isArray(nestedMsg.parts) && shouldDisplayMessageParts(nestedMsg.parts)) {
-          const text = extractPartTexts(nestedMsg.parts).join('\n');
-          messageCounterRef.current++;
-          const agentMsg: Message = {
-            id: `msg-${messageCounterRef.current}`,
-            conversationId: activeConversationId,
-            type: 'agent',
-            content: text,
-            timestamp: new Date(),
+        const normalizedStatus = getTaskState(data.status?.state);
+
+        // Finalize streaming message when task completes or fails
+        let finalizedFromStream = false;
+        if (normalizedStatus === 'completed' || normalizedStatus === 'failed' || normalizedStatus === 'canceled') {
+          const streamedText = streamingMapRef.current.get(resolvedConversationId);
+          const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+          // Mark all thoughts as complete — task is done
+          if (thoughts) thoughts.forEach(t => { t.complete = true; });
+          const steps = workingStepsMapRef.current.get(resolvedConversationId);
+          const history = statusHistoryMapRef.current.get(resolvedConversationId);
+
+          const finalizeMessage = (content: string) => {
+            messageCounterRef.current++;
+            const timestamp = new Date();
+            const agentMsg: Message = {
+              id: `msg-${messageCounterRef.current}`,
+              conversationId: resolvedConversationId,
+              type: 'agent',
+              content,
+              timestamp,
+              ...(steps && steps.length > 0 && { workingSteps: steps }),
+              ...(thoughts && thoughts.length > 0 && { subagentThoughts: thoughts }),
+              ...(history && history.length > 0 && { statusHistory: history }),
+              timeline: buildTimeline(thoughts, history, timestamp),
+            };
+            addMessage(resolvedConversationId, agentMsg);
+            updateConversation(resolvedConversationId, {
+              lastMessage: content.slice(0, 50),
+              timestamp: new Date(),
+            });
+            // Keep todos visible in sticky widget (don't delete workingStepsMapRef)
+            // Clear only thoughts and history
+            subagentThoughtsMapRef.current.delete(resolvedConversationId);
+            setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+            statusHistoryMapRef.current.delete(resolvedConversationId);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+
+            showMessageToast(resolvedConversationId, content);
           };
-          addMessage(activeConversationId, agentMsg);
-          updateConversation(activeConversationId, {
-            lastMessage: text.slice(0, 50),
-            timestamp: new Date(),
+
+          if (streamedText && streamedText.trim()) {
+            // Orchestrator streamed its own response token-by-token
+            finalizeMessage(streamedText);
+            finalizedFromStream = true;
+          }
+
+          // Always clear streaming buffer and waiting indicator on completion
+          streamingMapRef.current.delete(resolvedConversationId);
+          setStreamingMap(new Map(streamingMapRef.current));
+          setWaitingMap((prev) => {
+            const m = new Map(prev);
+            m.delete(resolvedConversationId);
+            return m;
           });
+        }
+
+        // Extract nested message if present (skip if already finalized from streamed content)
+        const nestedMsg = data.status.message;
+        if (!finalizedFromStream && nestedMsg && Array.isArray(nestedMsg.parts) && shouldDisplayMessageParts(nestedMsg.parts)) {
+          const text = extractPartTexts(nestedMsg.parts).join('\n');
+
+          if (normalizedStatus === 'working') {
+            // Accumulate as a working step (non-todo status messages)
+            const wsMap = workingStepsMapRef.current;
+            const existing = wsMap.get(resolvedConversationId) || [];
+            wsMap.set(resolvedConversationId, [...existing, { name: text, state: 'completed' as const }]);
+            setWorkingStepsMap(new Map(wsMap));
+          } else {
+            // Terminal/final state — create message bubble with the full accumulated timeline
+            const steps = workingStepsMapRef.current.get(resolvedConversationId);
+            const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
+            const history = statusHistoryMapRef.current.get(resolvedConversationId);
+            messageCounterRef.current++;
+            const timestamp = new Date();
+            const agentMsg: Message = {
+              id: `msg-${messageCounterRef.current}`,
+              conversationId: resolvedConversationId,
+              type: 'agent',
+              content: text,
+              timestamp,
+              ...(steps && steps.length > 0 && { workingSteps: steps }),
+              ...(thoughts && thoughts.length > 0 && { subagentThoughts: thoughts }),
+              ...(history && history.length > 0 && { statusHistory: history }),
+              timeline: buildTimeline(thoughts, history, timestamp),
+            };
+            addMessage(resolvedConversationId, agentMsg);
+            updateConversation(resolvedConversationId, {
+              lastMessage: text.slice(0, 50),
+              timestamp: new Date(),
+            });
+            // Keep todos visible in sticky widget (don't delete workingStepsMapRef)
+            // Clear only thoughts and history so live timeline/spinner clears
+            subagentThoughtsMapRef.current.delete(resolvedConversationId);
+            setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+            statusHistoryMapRef.current.delete(resolvedConversationId);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+
+            showMessageToast(resolvedConversationId, text);
+          }
         }
 
         // Update task
         const taskId = data.id || `task-${taskCounterRef.current++}`;
-        const existingTasks = tasksMap.get(activeConversationId) || [];
+        const existingTasks = tasksMap.get(resolvedConversationId) || [];
         const existingTask = existingTasks.find((t) => t.id === taskId);
 
-        const normalizedStatus = getTaskState(data.status?.state);
         const historyEntries: TaskHistoryEntry[] = Array.isArray(data.history) ? data.history : [];
         const validationErrors = Array.isArray(data.validation_errors) ? data.validation_errors : [];
         const progressValue =
@@ -223,7 +648,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             }
           : {
               id: taskId,
-              conversationId: activeConversationId,
+              conversationId: resolvedConversationId,
               title: data.title || 'Task',
               status: normalizedStatus as Task['status'],
               statusDetails: data.status,
@@ -237,12 +662,19 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
               taskId: data.taskId || null,
             };
 
-        addOrUpdateTask(activeConversationId, task);
+        addOrUpdateTask(resolvedConversationId, task);
 
         // Update conversation active tasks status
-        const allTasks = tasksMap.get(activeConversationId) || [];
+        const allTasks = tasksMap.get(resolvedConversationId) || [];
         const hasActiveTasks = allTasks.some((t) => !isTaskComplete(t.status));
-        updateConversation(activeConversationId, { hasActiveTasks });
+        updateConversation(resolvedConversationId, { hasActiveTasks });
+
+        // Clean up pending message tracking on terminal states
+        if (isTaskComplete(normalizedStatus)) {
+          if (data.id) pendingMessagesRef.current.delete(data.id);
+          setWaitingMap((prev) => { const m = new Map(prev); m.delete(resolvedConversationId); return m; });
+          // Keep todos visible in sticky widget (don't delete workingStepsMapRef)
+        }
         return;
       }
 
@@ -256,13 +688,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           messageCounterRef.current++;
           const agentMsg: Message = {
             id: `msg-${messageCounterRef.current}`,
-            conversationId: activeConversationId,
+            conversationId: resolvedConversationId,
             type: 'agent',
             content: text,
             timestamp: new Date(),
           };
-          addMessage(activeConversationId, agentMsg);
-          updateConversation(activeConversationId, {
+          addMessage(resolvedConversationId, agentMsg);
+          updateConversation(resolvedConversationId, {
             lastMessage: text.slice(0, 50),
             timestamp: new Date(),
           });
@@ -270,7 +702,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
         // Update task with artifact
         const taskId = data.id || `task-${taskCounterRef.current++}`;
-        const existingTasks = tasksMap.get(activeConversationId) || [];
+        const existingTasks = tasksMap.get(resolvedConversationId) || [];
         const existingTask = existingTasks.find((t) => t.id === taskId);
 
         const task: Task = existingTask
@@ -284,7 +716,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             }
           : {
               id: taskId,
-              conversationId: activeConversationId,
+              conversationId: resolvedConversationId,
               title: 'Task Result',
               status: 'completed',
               statusDetails: { state: 'completed' },
@@ -298,7 +730,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
               taskId: null,
             };
 
-        addOrUpdateTask(activeConversationId, task);
+        addOrUpdateTask(resolvedConversationId, task);
         return;
       }
 
@@ -306,16 +738,16 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       messageCounterRef.current++;
       const genericMsg: Message = {
         id: `msg-${messageCounterRef.current}`,
-        conversationId: activeConversationId,
+        conversationId: resolvedConversationId,
         type: 'agent',
         content: JSON.stringify(data, null, 2),
         timestamp: new Date(),
       };
-      addMessage(activeConversationId, genericMsg);
+      addMessage(resolvedConversationId, genericMsg);
     });
 
     return unsubscribe;
-  }, [activeConversationId, onAgentResponse, addMessage, addOrUpdateTask, updateConversation, tasksMap]);
+  }, [onAgentResponse, addMessage, addOrUpdateTask, updateConversation, tasksMap]);
 
   // Load conversations from backend
   const loadConversations = useCallback(async () => {
@@ -425,6 +857,10 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
       const resp = await fetch(url.toString(), { credentials: 'include', headers });
       if (!resp.ok) {
+        // 404 means conversation doesn't exist yet (brand new) - that's okay, just skip loading
+        if (resp.status === 404) {
+          return;
+        }
         throw new Error(`Failed to load messages (status=${resp.status})`);
       }
       const data = await resp.json();
@@ -451,6 +887,33 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           }
           const ts = m.created_at || m.timestamp || m.sort_key || null;
           const timestamp = ts ? new Date(ts as string) : new Date();
+          
+          // Reconstruct timeline from saved message data
+          const timeline = reconstructTimelineFromMessage(m);
+          
+          // Check if this is an activity-log-only message (should only appear in timeline, not as MessageCard)
+          // Detect via extensions on the nested status message
+          const kind = m.kind as string | undefined;
+          let rawPayload: Record<string, unknown> | null = null;
+          if (typeof m.raw_payload === 'string' && m.raw_payload) {
+            try { rawPayload = JSON.parse(m.raw_payload); } catch { /* ignore */ }
+          }
+          const savedStatusMsg = (rawPayload?.status as any)?.message;
+          const savedExtensions = (savedStatusMsg?.extensions || []) as string[];
+          const isActivityLogOnly = savedExtensions.includes(ACTIVITY_LOG_EXT);
+          
+          // Determine if message has actual content worth displaying in MessageCard
+          const isStatusOnlyMessage = 
+            content.startsWith('Status: ') || 
+            content.startsWith('Task submitted:') ||
+            content.startsWith('Agent execution') ||
+            content.startsWith('Delegating to ') ||
+            content.startsWith('Using ') ||
+            (!content || content.trim().length === 0);
+          
+          // Mark whether this message should show a MessageCard
+          const showMessageCard = !isActivityLogOnly && !(kind === 'status-update' && isStatusOnlyMessage);
+          
           return {
             id,
             conversationId,
@@ -458,9 +921,10 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             content,
             timestamp,
             parts: partArray, // Include parts array for file attachments
+            timeline: timeline.length > 0 ? timeline : undefined, // Only include if we have events
+            showMessageCard, // Control whether to render MessageCard component
           } as Message;
-        })
-        .filter(Boolean) as Message[];
+        });
 
       setMessagesMap((prev) => {
         const newMap = new Map(prev);
@@ -491,8 +955,25 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       hasActiveTasks: false,
     };
     setConversations((prev) => [newConv, ...prev]);
+    // Pre-seed an empty messages array so loadMessages doesn't fire for this new conversation
+    setMessagesMap((prev) => {
+      const newMap = new Map(prev);
+      newMap.set(newConv.id, []);
+      return newMap;
+    });
     setActiveConversationId(newConv.id);
   }, []);
+
+  // Interrupt/cancel the current task
+  const interruptTask = useCallback(() => {
+    if (!activeConversationId) return;
+    cancelTask(activeConversationId);
+    setWaitingMap((prev) => {
+      const m = new Map(prev);
+      m.delete(activeConversationId);
+      return m;
+    });
+  }, [activeConversationId, cancelTask]);
 
   // Select a conversation
   const selectConversation = useCallback(
@@ -544,6 +1025,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
       // Add user message
       const messageId = generateUUID();
+      pendingMessagesRef.current.set(messageId, conversationId);
       messageCounterRef.current++;
 
       // Build parts array for message (text + files)
@@ -652,6 +1134,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       }
 
       // Send via socket
+      setWaitingMap((prev) => new Map(prev).set(conversationId, true));
       socketSendMessage(payload);
     },
     [
@@ -681,6 +1164,17 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
     },
     [initializeClient, sessionId, setSettings, loadConversations]
   );
+
+  // Load messages when activeConversationId changes
+  // This ensures messages are loaded when returning to a conversation after navigation
+  // Skip if messagesMap already has an entry (including empty [] from createConversation)
+  useEffect(() => {
+    if (!activeConversationId) return;
+    
+    if (!messagesMap.has(activeConversationId)) {
+      loadMessages(activeConversationId);
+    }
+  }, [activeConversationId, messagesMap, loadMessages]);
 
   // Default settings for auto-initialization — no model preset so the
   // orchestrator uses its own default (which respects OPENAI_COMPATIBLE_MODEL).
@@ -729,7 +1223,14 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         isLoadingConversations,
         isLoadingMessages,
         isConnected,
+        isWaiting,
+        streamingMessage,
+        liveWorkingSteps,
+        liveSubagentThoughts,
+        liveStatusHistory,
+        liveTimeline,
         createConversation,
+        interruptTask,
         selectConversation,
         sendMessage: sendMessageAction,
         updateSettings,

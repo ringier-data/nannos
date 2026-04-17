@@ -1,9 +1,9 @@
-import { ChatAppWrapper } from '@/components/chat';
+import { ChatApp } from '@/components/chat';
 
 export function ChatPage() {
   return (
     <div className="h-full">
-      <ChatAppWrapper socketPath="/api/v1/socket.io" />
+      <ChatApp />
     </div>
   );
 }

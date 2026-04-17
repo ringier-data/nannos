@@ -224,14 +224,15 @@ class CostTrackingCallback(BaseCallbackHandler):
         if base_input > 0:
             breakdown["base_input_tokens"] = base_input
         elif base_input < 0:
-            logger.warning(
-                f"Negative base_input_tokens calculated: total={total_input}, details_sum={input_details_sum}. "
-                f"Using 0 for base and emitting details as-is."
+            # Some providers (e.g. Bedrock with prompt caching) report input_tokens as
+            # only the non-cached tokens, with cache_read/cache_creation being additive.
+            # In that case total IS the base count.
+            logger.info(
+                f"Details exceed total input tokens (total={total_input}, details_sum={input_details_sum}). "
+                f"Treating total as base (provider reports details as additive)."
             )
-            breakdown["base_input_tokens"] = 0
-        elif total_input > 0:
-            # base_input == 0 but total_input > 0 (all tokens are in details)
-            breakdown["base_input_tokens"] = 0
+            if total_input > 0:
+                breakdown["base_input_tokens"] = total_input
 
         # Process output token details (nested breakdown)
         output_details = usage_metadata.get("output_token_details", {})
@@ -249,24 +250,12 @@ class CostTrackingCallback(BaseCallbackHandler):
         if base_output > 0:
             breakdown["base_output_tokens"] = base_output
         elif base_output < 0:
-            logger.warning(
-                f"Negative base_output_tokens calculated: total={total_output}, details_sum={output_details_sum}. "
-                f"Using 0 for base and emitting details as-is."
+            logger.info(
+                f"Details exceed total output tokens (total={total_output}, details_sum={output_details_sum}). "
+                f"Treating total as base (provider reports details as additive)."
             )
-            breakdown["base_output_tokens"] = 0
-        elif total_output > 0:
-            # base_output == 0 but total_output > 0 (all tokens are in details)
-            breakdown["base_output_tokens"] = 0
+            if total_output > 0:
+                breakdown["base_output_tokens"] = total_output
 
-        # Remove negative values and zero values from details only
-        # Keep zero base tokens if there were non-zero total tokens (edge case handling)
-        result = {}
-        for k, v in breakdown.items():
-            if v > 0:
-                result[k] = v
-            elif v == 0 and k in ("base_input_tokens", "base_output_tokens"):
-                # Keep zero base tokens if they were explicitly calculated (edge case)
-                if (k == "base_input_tokens" and total_input > 0) or (k == "base_output_tokens" and total_output > 0):
-                    result[k] = v
-
-        return result
+        # Only include positive values — the backend rejects zeros
+        return {k: v for k, v in breakdown.items() if v > 0}

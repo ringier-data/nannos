@@ -175,7 +175,7 @@ export class A2AClientService {
     const stream = client.sendMessageStream(sendParams);
 
     for await (const event of stream) {
-      this.logger.debug(`Stream event received: kind=${event.kind} content=${JSON.stringify(event)}`);
+      this.logger.debug({ event }, `Stream event received: kind=${event.kind}`);
       yield event;
     }
 

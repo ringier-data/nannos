@@ -58,14 +58,12 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
             additional_public_paths: Extra paths to skip authentication for (optional)
         """
         super().__init__(app)
-        self.public_paths = list(self.PUBLIC_PATHS)
-        if additional_public_paths:
-            self.public_paths.extend(additional_public_paths)
         self.validator = JWTValidator(
             issuer=issuer,
             expected_azp=expected_azp,
             expected_aud=expected_aud,
         )
+        self._public_paths = self.PUBLIC_PATHS + (additional_public_paths or [])
         logger.info(
             f"JWT validator middleware initialized with issuer={issuer}, "
             f"expected_azp={expected_azp}, expected_aud={expected_aud}"
@@ -83,7 +81,7 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
         5. Proceed with request
         """
         # Allow public endpoints without authentication
-        if any(request.url.path.startswith(path) for path in self.public_paths):
+        if any(request.url.path.startswith(path) for path in self._public_paths):
             return await call_next(request)
 
         # Extract Authorization header

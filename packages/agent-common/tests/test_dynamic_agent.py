@@ -6,8 +6,10 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import Tool
 
+from a2a.types import TaskState
 from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.a2a.stream_events import ErrorEvent, TaskUpdate
 from agent_common.a2a.structured_response import SubAgentResponseSchema
 from agent_common.agents.dynamic_agent import (
     DynamicLocalAgentRunnable,
@@ -104,81 +106,106 @@ class TestDynamicLocalAgentRunnable:
 
     @pytest.mark.asyncio
     async def test_process_returns_success_response(self, basic_config, mock_model):
-        """Test that _process returns A2A-compliant success response via structured output."""
+        """Test that _astream_impl yields completed TaskUpdate with correct A2A state."""
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
 
-        # Mock the agent with structured response (OpenAI style)
+        # Mock graph.astream to yield no parts (fast path to retrieve_final_state)
         mock_graph = AsyncMock()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="Task completed successfully.")],
-                "structured_response": SubAgentResponseSchema(
-                    task_state="completed",
-                    message="Task completed successfully.",
-                ),
-            }
-        )
 
-        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
-            result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Please complete the task.")]),
-                config={}
-            )
+        async def empty_stream(*args, **kwargs):
+            return
+            yield  # make it an async generator
 
-        # Check A2A response format
-        assert "messages" in result
-        assert "state" in result
-        assert result["state"] == "completed"
-        assert result["is_complete"] is True
-        assert result["requires_input"] is False
+        mock_graph.astream = empty_stream
+
+        # Mock retrieve_final_state with structured response
+        final_state = {
+            "messages": [MagicMock(content="Task completed successfully.")],
+            "structured_response": SubAgentResponseSchema(
+                task_state="completed",
+                message="Task completed successfully.",
+            ),
+        }
+
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.retrieve_final_state", return_value=final_state),
+        ):
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(
+                        a2a_tracking={}, messages=[HumanMessage(content="Please complete the task.")]
+                    ),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
+
+        # Find terminal TaskUpdate
+        terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
+        result = terminal.data
+        assert result.state == TaskState.completed
+        assert result.is_complete is True
+        assert result.requires_input is False
 
     @pytest.mark.asyncio
     async def test_process_returns_input_required_response(self, basic_config, mock_model):
-        """Test that _process returns input_required via structured output."""
+        """Test that _astream_impl yields input_required state via structured output."""
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
 
-        # Mock the agent with structured response indicating input required
         mock_graph = AsyncMock()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="What is the project name?")],
-                "structured_response": SubAgentResponseSchema(
-                    task_state="input_required",
-                    message="What is the project name?",
-                ),
-            }
-        )
 
-        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
-            result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Create a ticket")]),
-                config={}
-            )
+        async def empty_stream(*args, **kwargs):
+            return
+            yield
 
-        # Check A2A response format indicates input required
-        assert "state" in result
-        assert result["state"] == "input_required"
-        assert result["is_complete"] is False
-        assert result["requires_input"] is True
+        mock_graph.astream = empty_stream
+
+        final_state = {
+            "messages": [MagicMock(content="What is the project name?")],
+            "structured_response": SubAgentResponseSchema(
+                task_state="input_required",
+                message="What is the project name?",
+            ),
+        }
+
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.retrieve_final_state", return_value=final_state),
+        ):
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Create a ticket")]),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
+
+        terminal = [e for e in events if isinstance(e, TaskUpdate)][-1]
+        result = terminal.data
+        assert result.state == TaskState.input_required
+        assert result.is_complete is False
+        assert result.requires_input is True
 
     @pytest.mark.asyncio
     async def test_process_returns_failed_on_error(self, basic_config, mock_model):
-        """Test that _process returns failed state on error."""
+        """Test that _astream_impl yields ErrorEvent on exception."""
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
 
-        # Mock create_agent to raise an exception
+        # Mock build_sub_agent_graph to raise an exception
         with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", side_effect=Exception("Model error")):
-            result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
-                config={}
-            )
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
 
-        # Check A2A response format indicates failure
-        # A2A protocol: failed state means task did not complete successfully, so is_complete=False
-        assert "state" in result
-        assert result["state"] == "failed"
-        assert result["is_complete"] is False
-        assert "error" in result.get("messages", [{}])[-1].content.lower() or "error" in str(result).lower()
+        # Should yield an ErrorEvent
+        assert len(events) == 1
+        assert isinstance(events[0], ErrorEvent)
+        assert "Model error" in events[0].error
 
     @pytest.mark.asyncio
     async def test_mcp_tools_config(self, mcp_config, mock_model):
@@ -195,10 +222,18 @@ class TestDynamicLocalAgentRunnable:
 
     @pytest.mark.asyncio
     async def test_process_with_bedrock_tool_call(self, basic_config, mock_model):
-        """Test that _process handles Bedrock-style tool call responses."""
+        """Test that _astream_impl handles Bedrock-style tool call responses."""
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
 
-        # Mock the agent with Bedrock-style tool call in messages
+        mock_graph = AsyncMock()
+
+        async def empty_stream(*args, **kwargs):
+            return
+            yield
+
+        mock_graph.astream = empty_stream
+
+        # Bedrock-style: SubAgentResponseSchema in tool_calls, no structured_response key
         mock_message = MagicMock()
         mock_message.tool_calls = [
             {
@@ -207,45 +242,61 @@ class TestDynamicLocalAgentRunnable:
             }
         ]
 
-        mock_graph = AsyncMock()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [mock_message],
-            }
-        )
+        final_state = {
+            "messages": [mock_message],
+        }
 
-        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
-            result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
-                config={},
-            )
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.retrieve_final_state", return_value=final_state),
+        ):
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
 
-        # Check A2A response format indicates failure
-        assert result["state"] == "failed"
-        assert result["is_complete"] is False
+        terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
+        result = terminal.data
+        assert result.state == TaskState.failed
+        assert result.is_complete is True
 
     @pytest.mark.asyncio
     async def test_process_fallback_when_no_structured_response(self, basic_config, mock_model):
         """Test fallback to completed state when no structured response is found."""
         runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
 
-        # Mock the agent without structured response (shouldn't happen but test fallback)
         mock_graph = AsyncMock()
-        mock_graph.ainvoke = AsyncMock(
-            return_value={
-                "messages": [MagicMock(content="Some response without structured output")],
-            }
-        )
 
-        with patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph):
-            result = await runnable._process(
-                input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
-                config={}
-            )
+        async def empty_stream(*args, **kwargs):
+            return
+            yield
 
-        # Should fall back to completed state with warning
-        assert result["state"] == "completed"
-        assert result["is_complete"] is True
+        mock_graph.astream = empty_stream
+
+        # No structured_response key → _translate_agent_result falls back to completed
+        final_state = {
+            "messages": [MagicMock(content="Some response without structured output")],
+        }
+
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.retrieve_final_state", return_value=final_state),
+        ):
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="Do something")]),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
+
+        terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
+        result = terminal.data
+        assert result.state == TaskState.completed
+        assert result.is_complete is True
 
 
 class TestCreateDynamicLocalSubagent:

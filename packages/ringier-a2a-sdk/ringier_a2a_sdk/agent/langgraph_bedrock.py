@@ -9,26 +9,64 @@ import os
 
 import boto3
 from botocore.config import Config as BotoConfig
+from langchain.agents.middleware.types import AgentMiddleware
 from langchain_aws import ChatBedrockConverse
+from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
-from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph_checkpoint_aws import DynamoDBSaver
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import BaseTool
+from langgraph.graph.state import CompiledStateGraph
 
+from ..utils.bedrock_image_processor import preprocess_messages_for_bedrock
+from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
 from .langgraph import LangGraphAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _get_thinking_budget(thinking_level: str) -> int:
+    """Map thinking level to Claude token budget.
+
+    Based on Anthropic's official documentation:
+    - minimal: 1024 tokens (hard minimum, simple queries)
+    - low: 4096 tokens (standard agent tasks, balanced default)
+    - medium: 10000 tokens (complex reasoning, multi-step analysis)
+    - high: 16000 tokens (very complex problems, deep analysis)
+
+    Args:
+        thinking_level: The thinking depth level (minimal, low, medium, high).
+
+    Returns:
+        Token budget for Claude extended thinking.
+    """
+    budget_map = {
+        "minimal": 1024,
+        "low": 4096,
+        "medium": 10000,
+        "high": 16000,
+    }
+    return budget_map.get(thinking_level, 4096)
 
 
 # Re-export FinalResponseSchema from langgraph module for backward compatibility
 from .langgraph import FinalResponseSchema  # noqa: F401, E402
 
 
-class LangGraphBedrockAgent(LangGraphAgent):
+class LangGraphBedrockAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     """LangGraph agent using AWS Bedrock and DynamoDB checkpointing.
+
+    Supports both standard Claude models and extended thinking mode for complex reasoning.
 
     This is a concrete implementation of LangGraphAgent that:
     - Uses AWS Bedrock (Claude/other models) as the LLM
     - Uses DynamoDB checkpointers with optional S3 offloading
+    - Optionally enables Claude extended thinking mode
+
+    Configuration:
+    - AWS_BEDROCK_REGION: AWS region (default: eu-central-1)
+    - BEDROCK_MODEL_ID: Model ID (default: claude-sonnet-4-5)
+    - BEDROCK_THINKING_LEVEL: Thinking level (minimal/low/medium/high, optional)
+    - BEDROCK_READ_TIMEOUT, BEDROCK_CONNECT_TIMEOUT, etc.: Bedrock client config
 
     Subclasses must still implement:
     - _get_mcp_connections(): Return MCP server connection configuration
@@ -37,81 +75,68 @@ class LangGraphBedrockAgent(LangGraphAgent):
 
     Optional overrides:
     - _get_bedrock_model_id(): Return Bedrock model ID (default: Claude Sonnet 4.5)
+    - _get_thinking_level(): Return thinking level (minimal/low/medium/high, default: None for disabled)
     - _get_middleware(): Return agent middleware list (default: [])
     - _get_tool_interceptors(): Return tool interceptors (default: [])
     - _create_graph(): Create LangGraph with tools (has default implementation)
     """
 
-    def __init__(self, tool_query_regex: str | None = None):
+    def __init__(self, tool_query_regex: str | None = None, recursion_limit: int | None = None):
         """Initialize the LangGraph Bedrock Agent.
 
         Sets up Bedrock configuration before calling the generic LangGraphAgent init,
         which will call _create_model() and _create_checkpointer().
+
+        Args:
+            tool_query_regex: Optional regex pattern to filter MCP tools by name
+            recursion_limit: Maximum number of LangGraph steps (default: from LANGGRAPH_RECURSION_LIMIT env var or 50)
         """
         # Bedrock configuration (needed by _create_model before __init__ calls it)
         self.bedrock_region = os.getenv("AWS_BEDROCK_REGION", "eu-central-1")
         self.bedrock_model_id = self._get_bedrock_model_id()
+        self.thinking_level = self._get_thinking_level()
 
-        super().__init__(tool_query_regex=tool_query_regex)
+        super().__init__(tool_query_regex=tool_query_regex, recursion_limit=recursion_limit)
 
     def _create_model(self) -> BaseChatModel:
-        """Create ChatBedrockConverse model via boto3.
+        """Create ChatBedrockConverse model with optional extended thinking.
+
+        Supports Claude extended thinking mode for complex reasoning tasks.
+        Temperature is set to 1.0 when thinking is enabled, 0 otherwise.
 
         Returns:
             ChatBedrockConverse model instance
         """
         bedrock_client = self._create_bedrock_client()
 
+        # Configure thinking mode if enabled
+        thinking_params = None
+        temperature = 0
+        if self.thinking_level:
+            budget_tokens = _get_thinking_budget(self.thinking_level)
+            thinking_params = {"type": "enabled", "budget_tokens": budget_tokens}
+            temperature = 1.0  # CRITICAL: Required when extended thinking is enabled
+            logger.info(
+                f"Claude extended thinking enabled with level={self.thinking_level}, budget={budget_tokens} tokens"
+            )
+
+        additional_fields = {}
+        if thinking_params:
+            additional_fields["thinking"] = thinking_params
+
         model = ChatBedrockConverse(
             client=bedrock_client,
             region_name=self.bedrock_region,
             model=self.bedrock_model_id,
-            temperature=0,
+            temperature=temperature,
+            additional_model_request_fields=additional_fields if additional_fields else None,
         )
 
-        logger.info(f"Initialized Bedrock model (callbacks will be set at runtime): {self.bedrock_model_id}")
+        logger.info(
+            f"Initialized Bedrock model: {self.bedrock_model_id}, "
+            f"thinking_level={self.thinking_level}, temperature={temperature}"
+        )
         return model
-
-    def _create_checkpointer(self) -> BaseCheckpointSaver:
-        """Create DynamoDB checkpointer with optional S3 offloading.
-
-        Reads configuration from:
-        - CHECKPOINT_DYNAMODB_TABLE_NAME (required)
-        - CHECKPOINT_AWS_REGION (default: eu-central-1)
-        - CHECKPOINT_TTL_DAYS (default: 14)
-        - CHECKPOINT_COMPRESSION_ENABLED (default: true)
-        - CHECKPOINT_S3_BUCKET_NAME (optional, enables S3 offloading)
-
-        Returns:
-            Configured DynamoDBSaver instance
-
-        Raises:
-            ValueError: If CHECKPOINT_DYNAMODB_TABLE_NAME is not set
-        """
-        checkpoint_table = os.getenv("CHECKPOINT_DYNAMODB_TABLE_NAME")
-        if not checkpoint_table:
-            raise ValueError("CHECKPOINT_DYNAMODB_TABLE_NAME environment variable is required")
-
-        checkpoint_region = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
-        checkpoint_ttl_days = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
-        checkpoint_compression = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
-        checkpoint_s3_bucket = os.getenv("CHECKPOINT_S3_BUCKET_NAME")
-
-        s3_config = None
-        if checkpoint_s3_bucket:
-            s3_config = {"bucket_name": checkpoint_s3_bucket}
-            logger.info(f"S3 offloading enabled for large checkpoints: {checkpoint_s3_bucket}")
-
-        checkpointer = DynamoDBSaver(
-            table_name=checkpoint_table,
-            region_name=checkpoint_region,
-            ttl_seconds=checkpoint_ttl_days * 24 * 60 * 60,
-            enable_checkpoint_compression=checkpoint_compression,
-            s3_offload_config=s3_config,  # type: ignore[arg-type]
-        )
-
-        logger.info(f"Initialized DynamoDB checkpointer: {checkpoint_table}")
-        return checkpointer
 
     def _create_bedrock_client(self) -> boto3.client:
         """Create configured Bedrock client from environment variables."""
@@ -147,3 +172,54 @@ class LangGraphBedrockAgent(LangGraphAgent):
     def _get_bedrock_model_id(self) -> str:
         """Return Bedrock model ID. Default: Claude Sonnet 4.5 via env var."""
         return os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0")
+
+    def _get_thinking_level(self) -> str | None:
+        """Return thinking level if enabled. Can be: minimal, low, medium, high. Default: None (disabled)."""
+        return os.getenv("BEDROCK_THINKING_LEVEL")
+
+    def _get_middleware(self) -> list[AgentMiddleware]:
+        """Return agent middleware with Bedrock prompt caching and schema cleaning.
+
+        Adds BedrockPromptCachingMiddleware before base middleware
+        (ToolSchemaCleaningMiddleware) to ensure correct execution order:
+        1. Prompt caching adds cache points to the request structure
+        2. Schema cleaning converts tools to final format right before model
+
+        Subclasses should call super()._get_middleware() to preserve this order.
+
+        Returns:
+            List of middleware: [BedrockPromptCachingMiddleware, ToolSchemaCleaningMiddleware]
+        """
+        return [BedrockPromptCachingMiddleware()] + super()._get_middleware()
+
+    async def _preprocess_input_messages(self, messages: list[HumanMessage]) -> list[HumanMessage]:
+        """Convert URL-based images to inline base64 for Bedrock Converse API.
+
+        Bedrock's Converse API requires images as inline base64 data, not URLs.
+        Delegates to the bedrock_image_processor utility for the actual conversion.
+        """
+        return await preprocess_messages_for_bedrock(messages)
+
+    def _create_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
+        """Create LangGraph with thinking-aware response format.
+
+        When extended thinking is enabled, Bedrock's API cannot handle forcing
+        structured output via AutoStrategy. Uses response_format=None with an
+        explicit FinalResponseSchema tool instead, matching the orchestrator's
+        approach in graph_factory.py.
+
+        Without thinking, uses the default AutoStrategy from the base class.
+        """
+        if self.thinking_level:
+            from deepagents import create_deep_agent
+
+            return create_deep_agent(
+                model=self._model,
+                tools=tools + [self._create_response_tool()],
+                subagents=[],
+                system_prompt=self._get_system_prompt(),
+                checkpointer=self._checkpointer,
+                middleware=self._get_middleware(),
+                response_format=None,
+            )
+        return super()._create_graph(tools)

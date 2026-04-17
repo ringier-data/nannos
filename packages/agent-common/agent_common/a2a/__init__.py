@@ -45,6 +45,18 @@ from .models import (
     LocalSubAgentConfig,
 )
 
+# Stream events
+from .stream_events import (
+    ActivityLogMeta,
+    ArtifactUpdate,
+    ErrorEvent,
+    IntermediateOutputMeta,
+    StreamEvent,
+    TaskUpdate,
+    WorkPlanMeta,
+    parse_event_metadata,
+)
+
 # Structured response
 from .structured_response import (
     A2A_PROTOCOL_ADDENDUM,
@@ -77,4 +89,13 @@ __all__ = [
     "A2A_PROTOCOL_ADDENDUM",
     "StructuredResponseMixin",
     "get_response_format",
+    # Stream events
+    "TaskUpdate",
+    "ArtifactUpdate",
+    "ErrorEvent",
+    "StreamEvent",
+    "ActivityLogMeta",
+    "WorkPlanMeta",
+    "IntermediateOutputMeta",
+    "parse_event_metadata",
 ]

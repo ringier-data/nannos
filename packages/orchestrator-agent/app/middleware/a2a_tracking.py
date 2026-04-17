@@ -52,8 +52,7 @@ class A2ATrackingState(AgentState):
             "is_complete": bool,
             "requires_input": bool,
             "requires_auth": bool,
-            "state": str,
-            "artifacts": list
+            "state": str
         }
     }
     """
@@ -199,7 +198,7 @@ class A2ATaskTrackingMiddleware(AgentMiddleware[A2ATrackingState, ContextT]):
 
         # Store additional A2A protocol fields (completion status, auth requirements, etc.)
         # Including foundry_session_rid for Foundry agents' session continuity
-        for key in ["is_complete", "requires_auth", "requires_input", "state", "artifacts", "foundry_session_rid"]:
+        for key in ["is_complete", "requires_auth", "requires_input", "state", "foundry_session_rid"]:
             if key in a2a_metadata:
                 current_tracking[subagent_type][key] = a2a_metadata[key]
 

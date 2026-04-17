@@ -51,11 +51,16 @@ class RegeneratedFileResponse(BaseModel):
 @router.post("/upload")
 async def upload_files(
     request: Request,
-    conversation_id: Annotated[str, Form(...)],
     files: Annotated[list[UploadFile], File(...)],
+    conversation_id: Annotated[str | None, Form()] = None,
     user: User = Depends(require_auth),
 ) -> UploadedFileResponse:
     """Upload one or more files (including audio recordings) for a chat message.
+
+    Args:
+        conversation_id: Optional conversation ID. If not provided, a new conversation will be created.
+        files: List of files to upload
+        user: Authenticated user
 
     Returns metadata for each uploaded file, including a presigned URL that the
     frontend can use immediately for preview and download. The metadata also
@@ -65,6 +70,17 @@ async def upload_files(
 
     if not files:
         raise HTTPException(status_code=400, detail="At least one file must be provided")
+
+    # Create a new conversation if conversation_id is not provided
+    if not conversation_id:
+        conversation_id = str(uuid4())
+        try:
+            await conversation_service.get_or_create_conversation(
+                conversation_id=conversation_id,
+                user_id=user.id,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(exc)}") from exc
 
     storage: FileStorageService | None = getattr(request.app.state, "file_storage_service", None)
     if storage is None:

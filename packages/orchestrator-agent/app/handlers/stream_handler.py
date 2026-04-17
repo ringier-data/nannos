@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
 from ..models import AgentStreamResponse
 
@@ -18,34 +19,6 @@ logger = logging.getLogger(__name__)
 
 class StreamHandler:
     """Handles stream response generation and state parsing."""
-
-    @staticmethod
-    def _extract_text_from_content(content: Any) -> str:
-        """Extract text from message content, handling both string and list formats.
-
-        Bedrock models with extended thinking return content as a list of blocks:
-        [{'type': 'reasoning_content', ...}, {'type': 'text', 'text': '...'}]
-
-        GPT-4o and other models return content as a simple string.
-
-        Args:
-            content: Message content (string or list of content blocks)
-
-        Returns:
-            Extracted text content as string
-        """
-        if isinstance(content, str):
-            return content
-        elif isinstance(content, list):
-            # Extract text from content blocks
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text" and "text" in block:
-                        text_parts.append(block["text"])
-            return " ".join(text_parts) if text_parts else str(content)
-        else:
-            return str(content)
 
     @staticmethod
     def _extract_current_turn_messages(messages: list) -> list:
@@ -165,7 +138,7 @@ class StreamHandler:
             state = tracking_data.get("state", "")
 
             # Check if state is explicitly failed (now includes ToolMessage status='error' detected by middleware)
-            is_failed = ("failed" in str(state).lower()) or (state == "TaskState.failed")
+            is_failed = "failed" in str(state).lower()
 
             # Agent is blocked if: requires auth, requires input, failed, or not complete
             is_blocked = requires_auth or requires_input or is_failed or not is_complete
@@ -231,7 +204,7 @@ class StreamHandler:
             if messages:
                 last_message = messages[-1]
                 content = getattr(last_message, "content", "The agent failed to complete the task.")
-                content = StreamHandler._extract_text_from_content(content)
+                content = extract_text_from_content(content)[0]
             else:
                 content = "The agent failed to complete the task."
 
@@ -245,7 +218,7 @@ class StreamHandler:
             if messages:
                 last_message = messages[-1]
                 content = getattr(last_message, "content", "Additional input required to complete the task.")
-                content = StreamHandler._extract_text_from_content(content)
+                content = extract_text_from_content(content)[0]
             else:
                 content = "Additional input required to complete the task."
 
@@ -367,8 +340,6 @@ class StreamHandler:
                 # Extract validated fields
                 task_state = parsed.task_state
                 message = parsed.message
-                # reasoning = parsed.reasoning
-                todo_summary = parsed.todo_summary
             except Exception as e:
                 logger.error(f"Failed to parse structured_response: {e}", exc_info=True)
                 # Fallback to completed with error message
@@ -419,7 +390,16 @@ class StreamHandler:
                                         # Sub-agent content may be JSON-wrapped
                                         if isinstance(msg.content, str):
                                             parsed_content = json.loads(msg.content)
-                                            subagent_content = parsed_content.get("message", msg.content)
+                                            if isinstance(parsed_content, dict):
+                                                subagent_content = parsed_content.get("message", msg.content)
+                                            elif isinstance(parsed_content, list):
+                                                # Content is a list of blocks (e.g., thinking + text)
+                                                subagent_content = extract_text_from_content(parsed_content)[0]
+                                            else:
+                                                subagent_content = msg.content
+                                        elif isinstance(msg.content, list):
+                                            # Content is already a list of blocks
+                                            subagent_content = extract_text_from_content(msg.content)[0]
                                         else:
                                             subagent_content = msg.content
                                     except json.JSONDecodeError:
@@ -458,11 +438,6 @@ class StreamHandler:
 
             # Build metadata
             metadata = {}
-            # if reasoning:
-            #     metadata["reasoning"] = reasoning
-            if todo_summary:
-                metadata["todo_summary"] = todo_summary
-
             # Build appropriate response based on task_state
             # Note: If LLM explicitly chose input_required/failed/working, respect that decision
             if task_state == TaskState.input_required:
@@ -537,7 +512,7 @@ class StreamHandler:
         if messages:
             last_message = messages[-1]
             content = getattr(last_message, "content", str(last_message))
-            content = StreamHandler._extract_text_from_content(content)
+            content = extract_text_from_content(content)[0]
         else:
             content = "Task completed successfully"
 

@@ -26,28 +26,44 @@ tool whitelists, enabling specialized assistants without deploying separate A2A 
 
 import logging
 import os
+from collections.abc import AsyncIterable
 from typing import Any, Dict, List, Optional
 
 from deepagents import CompiledSubAgent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_mcp_adapters.callbacks import Callbacks
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphInterrupt
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
+from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
+from ringier_a2a_sdk.utils.streaming import StreamBuffer, StructuredResponseStreamer, extract_text_from_content
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.a2a.stream_events import (
+    ActivityLogMeta,
+    ArtifactUpdate,
+    ErrorEvent,
+    IntermediateOutputMeta,
+    StreamEvent,
+    TaskUpdate,
+    WorkPlanMeta,
+)
+from agent_common.a2a.stream_utils import retrieve_final_state
 from agent_common.a2a.structured_response import (
     A2A_PROTOCOL_ADDENDUM,
     StructuredResponseMixin,
     get_response_format,
 )
 from agent_common.core.graph_utils import build_sub_agent_graph
+from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.utils import get_language_display_name
 
 logger = logging.getLogger(__name__)
@@ -190,9 +206,32 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         """Return the agent description from configuration."""
         return self.config.description
 
-    @property
-    def input_modes(self) -> List[str]:
-        return self.config.input_modes or ["text"]
+    def get_supported_input_modes(self) -> List[str]:
+        """Get list of input modes supported by this dynamic agent.
+
+        Returns input modes from configuration if explicitly specified,
+        otherwise derives capabilities from the model type. Falls back to
+        ["text", "image"] if model type is unknown.
+
+        Returns:
+            List of supported content types (e.g., ["text", "image"])
+        """
+        # Use config if explicitly specified
+        if self.config.input_modes:
+            return self.config.input_modes
+        # Derive from model capabilities if model is known
+        model_type = self.get_model_type()
+        if model_type:
+            try:
+                return get_model_input_capabilities(model_type)  # type: ignore[arg-type]
+            except ValueError:
+                pass
+        # Default to text+image for modern models
+        return ["text", "image"]
+
+    def get_model_type(self) -> str | None:
+        """Return the model type for provider-specific content transforms."""
+        return self.config.model_name
 
     def get_checkpoint_ns(self, input_data: SubAgentInput) -> str:
         """Return checkpoint namespace for this dynamic agent."""
@@ -274,60 +313,99 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         If config.mcp_tools is set, only those tools are returned (whitelist filtering).
         The discovered tools override orchestrator tools entirely when whitelist is specified.
 
+        Implements retry logic with exponential backoff for transient errors (502, 503, 504).
+
         Returns:
             List of discovered BaseTool instances (filtered by whitelist if specified)
 
         Raises:
             Exception: If MCP discovery fails (will result in failed state)
         """
+        import asyncio
+
         mcp_gateway_url = self.mcp_gateway_url
         mcp_gateway_client_id = self.mcp_gateway_client_id
 
         logger.info(f"Discovering MCP tools for {self.name} from MCP gateway at {mcp_gateway_url}")
 
-        try:
-            # Build connection headers - use token exchange if oauth2_client is available
-            headers: dict[str, str] = {}
+        # Retry parameters
+        max_retries = 3
+        initial_delay = 1.0
+        last_error = None
+        delay = initial_delay
 
-            if self.oauth2_client and self.user_token:
-                # Exchange user token for MCP gateway token (same flow as ToolDiscoveryService)
-                logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
-                mcp_gateway_token = await self.oauth2_client.exchange_token(
-                    subject_token=self.user_token,
-                    target_client_id=mcp_gateway_client_id,
-                    requested_scopes=["openid", "profile", "offline_access"],
-                )
-                headers["Authorization"] = f"Bearer {mcp_gateway_token}"
-                logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
-            else:
-                logger.warning(
-                    f"No OAuth2 client or user token available for {self.name}. "
-                    f"MCP discovery may fail if authentication is required."
-                )
+        for attempt in range(max_retries):
+            try:
+                # Build connection headers - use token exchange if oauth2_client is available
+                headers: dict[str, str] = {}
 
-            client = MultiServerMCPClient(
-                connections={
-                    mcp_gateway_client_id: StreamableHttpConnection(
-                        transport="streamable_http",
-                        url=mcp_gateway_url,
-                        headers=headers if headers else None,
+                if self.oauth2_client and self.user_token:
+                    # Exchange user token for MCP gateway token (same flow as ToolDiscoveryService)
+                    logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
+                    mcp_gateway_token = await self.oauth2_client.exchange_token(
+                        subject_token=self.user_token,
+                        target_client_id=mcp_gateway_client_id,
+                        requested_scopes=["openid", "profile", "offline_access"],
                     )
-                }
-            )
+                    headers["Authorization"] = f"Bearer {mcp_gateway_token}"
+                    logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
+                else:
+                    logger.warning(
+                        f"No OAuth2 client or user token available for {self.name}. "
+                        f"MCP discovery may fail if authentication is required."
+                    )
 
-            tools = await client.get_tools()
-            logger.info(f"Discovered {len(tools)} MCP tools for {self.name}")
+                client = MultiServerMCPClient(
+                    connections={
+                        mcp_gateway_client_id: StreamableHttpConnection(
+                            transport="streamable_http",
+                            url=mcp_gateway_url,
+                            headers=headers if headers else None,
+                        )
+                    },
+                    callbacks=Callbacks(on_progress=on_mcp_progress),
+                )
 
-            tools = [tool for tool in tools if tool.name in (self.config.mcp_tools or [])]
-            logger.info(f"Filtered to {len(tools)} tools based on whitelist for {self.name}")
+                tools = await client.get_tools()
+                logger.info(f"Discovered {len(tools)} MCP tools for {self.name}")
 
-            # Validate tool schemas to prevent OpenAI API errors
-            validated_tools = [_validate_tool_schema(tool) for tool in tools]
-            return validated_tools
+                tools = [tool for tool in tools if tool.name in (self.config.mcp_tools or [])]
+                logger.info(f"Filtered to {len(tools)} tools based on whitelist for {self.name}")
 
-        except Exception as e:
-            logger.error(f"Failed to discover MCP tools for {self.name}: {e}")
-            raise
+                # Validate tool schemas to prevent OpenAI API errors
+                validated_tools = [_validate_tool_schema(tool) for tool in tools]
+
+                if attempt > 0:
+                    logger.info(f"Successfully discovered MCP tools for {self.name} on attempt {attempt + 1}")
+                return validated_tools
+
+            except Exception as e:
+                last_error = e
+
+                # Check if this is a retryable error
+                is_retryable = is_retryable_mcp_error(e)
+
+                if not is_retryable or attempt >= max_retries - 1:
+                    # Non-retryable error or exhausted retries
+                    if is_retryable:
+                        error_msg = format_mcp_error(e)
+                        logger.error(
+                            f"Failed to discover MCP tools for {self.name} after {attempt + 1} attempts: {error_msg}"
+                        )
+                    else:
+                        logger.error(f"Non-retryable error discovering MCP tools for {self.name}: {e}")
+                    raise
+
+                # Retryable error - wait and retry
+                logger.warning(
+                    f"Transient error discovering MCP tools for {self.name} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+                delay *= 2  # Exponential backoff
+
+        # Should never reach here, but just in case
+        raise last_error or Exception(f"Failed to discover MCP tools for {self.name}")
 
     def _get_effective_tools(self) -> List[BaseTool]:
         """Get the effective tools for this agent.
@@ -429,76 +507,177 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         return self._agent
 
-    async def _process(
-        self,
-        input_data: SubAgentInput,
-        config: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Process the input using the LangGraph agent.
+    async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
+        """Stream dynamic agent execution with real-time status updates and content.
 
-        Creates the agent lazily on first call, then invokes it with the content.
-        Translates the agent's response into A2A protocol format.
+        Streams the internal LangGraph execution to provide progress visibility for:
+        - MCP tool invocations
+        - Multi-step reasoning
+        - Long-running operations
+        - Incremental content delivery via artifact_update events
 
         Args:
-            input_data: The complete sub-agent input with content, IDs, and tracking
-            config: Extended config from ainvoke (checkpoint isolation + cost tracking already applied)
+            input_data: Validated input with messages and tracking IDs
+            config: Extended config with checkpoint isolation and cost tracking
 
-        Returns:
-            Dict with 'messages' and A2A metadata (state, is_complete, etc.)
+        Yields:
+            Status updates and content chunks matching middleware expectations:
+            - {\"type\": \"task_update\", \"state\": \"working\", ...} for status/activity
+            - {\"type\": \"artifact_update\", \"content\": \"...\"} for streaming content
+            - Terminal result in final yield
 
-        Note on Checkpointing:
-            Dynamic sub-agents use DynamoDB checkpointer with unique thread_id for isolation.
-            The config is automatically extended by LocalA2ARunnable.ainvoke() with:
-            - Checkpoint isolation (thread_id, checkpoint_ns, checkpointer)
-            - Cost tracking tags (sub_agent:{identifier})
-            - Inherited metadata (user_id, assistant_id) from orchestrator
-
-        TODO: shall we handle streaming responses here?
+        Raises:
+            ValueError: If context_id missing from input
+            GraphInterrupt: If user intervention needed
         """
-        # Extract content and IDs from input_data
-        content = self._extract_message_content(input_data)
+        # Prepare input with multi-modal support (handles content blocks)
+        human_message = await self._prepare_human_message_input(input_data)
         context_id, task_id = self._extract_tracking_ids(input_data)
 
         try:
             # Ensure agent is created (lazy initialization)
             agent = await self._ensure_agent()
 
-            agent_input = {"messages": [HumanMessage(content=content)]}
+            agent_input = {"messages": [human_message]}
 
-            # Config is already extended by ainvoke with checkpoint isolation and cost tracking
+            # CRITICAL: Dynamic agent graphs are standalone, not subgraphs.
+            # checkpoint_ns must be "" for standalone graphs (same pattern as GPAgentRunnable).
+            # Thread isolation is already provided by unique thread_id="{context_id}::dynamic-{name}".
+            standalone_config = {
+                **config,
+                "configurable": {
+                    **config.get("configurable", {}),
+                    "checkpoint_ns": "",  # Empty for standalone graph (not a subgraph)
+                },
+            }
+
             logger.debug(
-                f"[COST TRACKING] Dynamic agent '{self.name}' invoking with tags: {config.get('tags', [])} "
-                f"(thread_id={config.get('configurable', {}).get('thread_id')})"
+                f"[COST TRACKING] Dynamic agent '{self.name}' streaming with tags: {standalone_config.get('tags', [])} "
+                f"(thread_id={standalone_config.get('configurable', {}).get('thread_id')})"
             )
 
-            # Invoke the agent with pre-configured config from base class
-            logger.debug(f"Invoking dynamic agent '{self.name}' with content: {content[:100]}...")
-            result = await agent.ainvoke(agent_input, config=config)
+            # Shared streaming helpers
+            response_streamer = StructuredResponseStreamer("SubAgentResponseSchema")
+            stream_buffer = StreamBuffer()
+            emitted_tool_calls: set[str] = set()  # Track tool calls to avoid duplicates
 
-            # Extract response from agent result
-            return self._translate_agent_result(result, context_id, task_id)
+            # Stream the agent with custom events and messages using v2 format
+            # v2: every chunk is a StreamPart dict: {"type": ..., "ns": ..., "data": ...}
+            async for part in agent.astream(
+                agent_input,
+                config=standalone_config,
+                stream_mode=["custom", "messages"],
+                version="v2",
+            ):
+                # Extract working-state messages from intermediate updates
+                status_text = None
+                part_type = part["type"]
+
+                # Capture tool calls and stream content from message chunks
+                if part_type == "messages":
+                    msg_chunk, _metadata = part["data"]
+                    if not isinstance(msg_chunk, AIMessageChunk):
+                        continue
+
+                    # --- Tool call detection for activity log + structured response streaming ---
+                    if msg_chunk.tool_call_chunks:
+                        for tc_chunk in msg_chunk.tool_call_chunks:
+                            tool_name = tc_chunk.get("name")
+                            # Emit status for tool calls (excluding response schemas)
+                            if (
+                                tool_name
+                                and tool_name not in ("FinalResponseSchema", "SubAgentResponseSchema")
+                                and tool_name not in emitted_tool_calls
+                            ):
+                                emitted_tool_calls.add(tool_name)
+                                yield TaskUpdate(
+                                    status_text=f"Using {tool_name}\u2026",
+                                    event_metadata=ActivityLogMeta(),
+                                )
+                            # Incremental structured response streaming
+                            delta = response_streamer.feed(tc_chunk)
+                            if delta:
+                                stream_buffer.append(delta)
+                                for chunk in stream_buffer.flush_ready():
+                                    yield ArtifactUpdate(content=chunk)
+                        continue
+
+                    # --- Regular content streaming ---
+                    if msg_chunk.content:
+                        token_text, thinking_blocks = extract_text_from_content(msg_chunk.content)
+                        for tb in thinking_blocks:
+                            yield ArtifactUpdate(
+                                content=tb["thinking"],
+                                event_metadata=IntermediateOutputMeta(),
+                            )
+                        if token_text:
+                            stream_buffer.append(token_text)
+                            for chunk in stream_buffer.flush_ready():
+                                yield ArtifactUpdate(content=chunk)
+                    continue
+
+                if part_type == "custom":
+                    event_data = part["data"]
+                    if isinstance(event_data, tuple) and len(event_data) == 2:
+                        event_type, payload = event_data
+                        if isinstance(payload, dict):
+                            # Forward work plan updates from the sub-agent graph
+                            if event_type == "todo_status" and "todos" in payload:
+                                yield TaskUpdate(
+                                    event_metadata=WorkPlanMeta(todos=payload["todos"]),
+                                )
+                                continue
+                            status_text = payload.get("status")
+                    elif isinstance(event_data, dict):
+                        status_text = event_data.get("status")
+
+                # Yield working-state status updates
+                if status_text:
+                    yield TaskUpdate(
+                        status_text=status_text,
+                        event_metadata=ActivityLogMeta(),
+                    )
+
+            # Flush remaining buffer
+            remaining = stream_buffer.flush_all()
+            if remaining:
+                yield ArtifactUpdate(content=remaining)
+
+            # Retrieve final state (checkpointer saves it after each node)
+            final_values = retrieve_final_state(agent, standalone_config)
+            result = self._translate_agent_result(final_values, context_id, task_id)
+
+            # Yield terminal result
+            # TODO: shall we enforce a state here?
+            yield TaskUpdate(
+                data=result,
+            )
 
         except GraphInterrupt as gi:
-            # is not an error - just an interrupt from the graph execution
-            logger.info(f"[DYNAMIC AGENT] Graph interrupted in '{self.name}': {gi}")
-            # Re-raise so the orchestrator can handle it properly
+            logger.info(f"[DYNAMIC AGENT] Graph interrupted during streaming in '{self.name}': {gi}")
             raise
 
         except Exception as e:
-            logger.exception(f"Error in dynamic agent '{self.name}': {e}")
+            logger.exception(f"Error streaming dynamic agent '{self.name}': {e}")
 
             # Check if this is an MCP discovery error
-            if "MCP" in str(e) or "tool" in str(e).lower():
-                return self._build_error_response(
+            error_msg = str(e)
+            if "MCP" in error_msg or "tool" in error_msg.lower():
+                error_result = self._build_error_response(
                     f"Failed to initialize agent tools: {e}",
                     context_id=context_id,
                     task_id=task_id,
                 )
+            else:
+                error_result = self._build_error_response(
+                    f"Agent execution error: {e}",
+                    context_id=context_id,
+                    task_id=task_id,
+                )
 
-            return self._build_error_response(
-                f"Agent execution error: {e}",
-                context_id=context_id,
-                task_id=task_id,
+            yield ErrorEvent(
+                error=error_msg,
+                data=error_result,
             )
 
     # _translate_agent_result and _build_response_from_schema are provided by StructuredResponseMixin

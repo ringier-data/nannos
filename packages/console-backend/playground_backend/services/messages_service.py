@@ -55,7 +55,7 @@ def _parse_status_update(response_data: dict[str, Any]) -> dict[str, Any]:
     - status.state without message (pure status event)
     - artifact with parts
     """
-    final = response_data.get("final", False)
+    # A2A 1.0.0: final field removed from protocol (terminal states indicate finality)
     kind = response_data.get("kind", "status-update")
     task_id = response_data.get("taskId", response_data.get("id", ""))
     # Always generate a new message ID for status updates to avoid duplicates
@@ -115,7 +115,6 @@ def _parse_status_update(response_data: dict[str, Any]) -> dict[str, Any]:
         "role": role,
         "metadata": metadata,
         "state": state,
-        "final": final,
         "kind": kind,
         "task_id": task_id,
     }
@@ -129,7 +128,7 @@ def _parse_task(response_data: dict[str, Any]) -> dict[str, Any]:
     - status with current task state
     - id as the task identifier
     """
-    final = response_data.get("final", False)
+    # A2A 1.0.0: final field removed from protocol (terminal states indicate finality)
     kind = response_data.get("kind", "task")
     task_id = response_data.get("id", response_data.get("taskId", ""))
     message_id = task_id or str(uuid7())
@@ -169,7 +168,6 @@ def _parse_task(response_data: dict[str, Any]) -> dict[str, Any]:
         "role": role,
         "metadata": metadata,
         "state": state,
-        "final": final,
         "kind": kind,
         "task_id": task_id,
     }
@@ -187,7 +185,8 @@ def _parse_agent_response(response_data: dict[str, Any]) -> dict[str, Any]:
     - status-update / artifact-update -> _parse_status_update
     - task -> _parse_task
 
-    Returns keys: parts, message_id, role, metadata, state, final, kind, task_id, history (optional)
+    Returns keys: parts, message_id, role, metadata, state, kind, task_id, history (optional)
+    Note: A2A 1.0.0 removed 'final' field - terminal states indicate finality
 
     Raises:
         ValueError: If response kind is unknown or unsupported
@@ -330,7 +329,7 @@ class MessagesService:
         raw_payload: str = "",
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
-        final: bool = False,
+        final: bool = False,  # DEPRECATED: A2A 1.0.0 removes this field
         kind: str = "",
     ) -> Message:
         """Insert a new message.
@@ -346,7 +345,7 @@ class MessagesService:
             raw_payload: Original JSON payload (optional)
             metadata: Optional metadata dictionary
             message_id: Optional message ID (will be generated if not provided)
-            final: Indicates if this is a final message (optional)
+            final: DEPRECATED - A2A 1.0.0 removes this field (terminal states indicate finality)
             kind: Message kind ('message', 'status-update', etc.) (optional)
 
         Returns:
@@ -435,7 +434,7 @@ class MessagesService:
             role = parsed["role"]
             metadata = parsed["metadata"]
             state = parsed["state"]
-            final = parsed["final"]
+            # A2A 1.0.0: final field removed (terminal states indicate finality)
             kind = parsed["kind"]
             task_id = parsed["task_id"]
 
@@ -449,14 +448,13 @@ class MessagesService:
                 raw_payload=json.dumps(response_data, default=str),
                 metadata=metadata or {},
                 message_id=message_id,
-                final=final,
+                # final parameter omitted - A2A 1.0.0 compliance
                 kind=kind,
             )
 
             logger.info(
-                "Saved agent response (kind=%s, final=%s, state=%s) message_id=%s to conversation %s",
+                "Saved agent response (kind=%s, state=%s) message_id=%s to conversation %s",
                 kind,
-                final,
                 state,
                 message_id,
                 conversation_id,

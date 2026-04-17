@@ -54,6 +54,8 @@ async def get_messages_by_conversation(
                     "created_at": msg.created_at,
                     "state": msg.state,
                     "metadata": msg.metadata,
+                    "kind": msg.kind,
+                    "raw_payload": msg.raw_payload,
                 }
                 for msg in messages
             ],

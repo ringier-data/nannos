@@ -1,6 +1,6 @@
 # Ringier A2A SDK
 
-Current version: **v0.1.0**
+Current version: **v0.7.0**
 
 A Python SDK for building authenticated agent-to-agent communication systems using the A2A (Agent-to-Agent) protocol with OIDC authentication.
 

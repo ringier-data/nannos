@@ -4,3 +4,5 @@ export { ChatInput } from './ChatInput';
 export { ConnectionStatus } from './ConnectionStatus';
 export { TaskPanel } from './TaskPanel';
 export { SettingsModal } from './SettingsModal';
+export { ThinkingBlock } from './ThinkingBlock';
+export { StatusHistoryBlock } from './StatusHistoryBlock';

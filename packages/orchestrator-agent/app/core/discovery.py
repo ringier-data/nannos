@@ -14,9 +14,12 @@ from agent_common.a2a.config import A2AClientConfig
 from agent_common.a2a.factory import make_a2a_async_runnable
 from deepagents import CompiledSubAgent
 from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.callbacks import Callbacks
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
+from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
 from ..models.config import AgentSettings
 
@@ -213,6 +216,74 @@ class ToolDiscoveryService:
             logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
             return []
 
+    async def _get_tools_with_retry(
+        self,
+        client: MultiServerMCPClient,
+        server_name: str,
+        max_retries: int = 3,
+        initial_delay: float = 1.0,
+    ) -> list:
+        """Get tools from MCP server with exponential backoff retry for transient errors.
+
+        Retries on HTTP 502, 503, 504 errors with exponential backoff.
+        Non-retryable errors (4xx, connection refused, etc.) fail immediately.
+
+        Args:
+            client: MultiServerMCPClient instance
+            server_name: Name of the server to get tools from
+            max_retries: Maximum number of retry attempts (default: 3)
+            initial_delay: Initial delay between retries in seconds (default: 1.0)
+
+        Returns:
+            List of tools from the server
+
+        Raises:
+            Exception: If all retries are exhausted or a non-retryable error occurs
+        """
+        last_error = None
+        delay = initial_delay
+
+        for attempt in range(max_retries):
+            try:
+                server_tools = await client.get_tools(server_name=server_name)
+                # Tag tools with server_name metadata
+                for tool in server_tools:
+                    if tool.metadata is None:
+                        tool.metadata = {}
+                    tool.metadata["server_name"] = server_name
+
+                if attempt > 0:
+                    logger.info(f"Successfully loaded MCP tools from {server_name} on attempt {attempt + 1}")
+                return server_tools
+
+            except Exception as e:
+                last_error = e
+
+                # Check if this is a retryable error
+                is_retryable = is_retryable_mcp_error(e)
+
+                if not is_retryable or attempt >= max_retries - 1:
+                    # Non-retryable error or exhausted retries
+                    if is_retryable:
+                        error_msg = format_mcp_error(e)
+                        logger.error(
+                            f"Failed to load MCP tools from {server_name} after {attempt + 1} attempts: {error_msg}"
+                        )
+                    else:
+                        logger.error(f"Non-retryable error loading MCP tools from {server_name}: {e}")
+                    raise
+
+                # Retryable error - wait and retry
+                logger.warning(
+                    f"Transient error loading MCP tools from {server_name} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+                delay *= 2  # Exponential backoff
+
+        # Should never reach here, but just in case
+        raise last_error or Exception(f"Failed to load MCP tools from {server_name}")
+
     async def discover_tools(
         self,
         token: str,
@@ -289,22 +360,39 @@ class ToolDiscoveryService:
             logger.debug(f"Created {len(connections)} MCP server connections: {list(connections.keys())}")
 
             # Create client with per-server connections
-            # Discover tools per-server in parallel and tag each tool's metadata
-            # with server_name (langchain_mcp_adapters does NOT store server_name
+            # Discover tools per-server in parallel with retry logic
+            # (langchain_mcp_adapters does NOT store server_name
             # in tool.metadata automatically — it only captures it in call_tool closures)
-            client = MultiServerMCPClient(connections=connections)
+            client = MultiServerMCPClient(
+                connections=connections,
+                callbacks=Callbacks(on_progress=on_mcp_progress),
+            )
 
-            async def _get_tagged_tools(slug: str) -> list:
-                server_tools = await client.get_tools(server_name=slug)
-                for tool in server_tools:
-                    if tool.metadata is None:
-                        tool.metadata = {}
-                    tool.metadata["server_name"] = slug
-                return server_tools
+            # Gather tools from all servers with retry logic
+            # Use asyncio.gather with return_exceptions=True to handle partial failures gracefully
+            results = await asyncio.gather(
+                *[self._get_tools_with_retry(client, slug) for slug in connections], return_exceptions=True
+            )
 
-            results = await asyncio.gather(*[_get_tagged_tools(slug) for slug in connections])
-            tools = [tool for server_tools in results for tool in server_tools]
-            logger.debug(f"Discovered {len(tools)} MCP tools from {len(connections)} servers")
+            # Process results - filter out exceptions and log failures
+            tools = []
+            failed_servers = []
+            for slug, result in zip(connections.keys(), results):
+                if isinstance(result, Exception):
+                    error_msg = format_mcp_error(result)
+                    logger.error(f"Failed to discover tools from server '{slug}': {error_msg}")
+                    failed_servers.append(slug)
+                elif isinstance(result, list):
+                    tools.extend(result)
+
+            if failed_servers:
+                logger.warning(
+                    f"Tool discovery completed with failures from {len(failed_servers)} server(s): {failed_servers}"
+                )
+
+            logger.debug(
+                f"Discovered {len(tools)} MCP tools from {len(connections) - len(failed_servers)}/{len(connections)} servers"
+            )
 
             # Apply whitelist filtering if provided
             if white_list:

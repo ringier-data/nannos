@@ -2,4 +2,6 @@
 
 from .config import create_runnable_config
 
-__all__ = ["create_runnable_config"]
+__all__ = [
+    "create_runnable_config",
+]

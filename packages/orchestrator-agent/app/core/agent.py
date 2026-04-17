@@ -20,10 +20,16 @@ from a2a.types import Part, TaskState
 from agent_common.core.s3_service import get_s3_service
 from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
+from ringier_a2a_sdk.utils.streaming import (
+    StreamBuffer,
+    StructuredResponseStreamer,
+    extract_text_from_content,
+)
 
 from ..core.graph_factory import GraphFactory
 from ..handlers import StreamHandler
@@ -314,20 +320,112 @@ class OrchestratorDeepAgent:
             chunk_count = 0
             emitted_updates = set()  # Track emitted updates to avoid duplicates
 
+            # Shared streaming helpers for buffer management and structured response parsing
+            response_streamer = StructuredResponseStreamer("FinalResponseSchema")
+            stream_buffer = StreamBuffer()
+
             logger.debug("Starting graph.astream with runtime context injection...")
 
+            # The orchestrator's thread_id is used to filter out callback events
+            # leaked from sub-agent graphs (GP agent, dynamic agents) that run
+            # inside tool calls. Their metadata has a different thread_id
+            # (e.g., "{context_id}::general-purpose") while the orchestrator's
+            # own model events match the config's thread_id exactly.
+            orchestrator_thread_id = config.get("configurable", {}).get("thread_id")
+
             # Stream the response with CUSTOM EVENTS for progressive A2A status updates
-            # Using stream_mode='custom' to receive both state updates and custom events
+            # and MESSAGE CHUNKS for token-by-token streaming
+            # Using stream_mode=['custom', 'messages'] with version="v2":
+            # - 'custom': receives progressive status events from middleware
+            # - 'messages': receives AIMessageChunk tokens from the LLM
+            # v2 format: every chunk is a StreamPart dict:
+            #   {"type": "messages"|"custom", "ns": (), "data": ...}
             # CRITICAL: Pass BOTH config and context parameters:
             # - config: Infrastructure (checkpointing via thread_id, metadata for LangSmith)
             # - context: Runtime data (tools, user preferences, sub-agents)
-            async for event in graph.astream(input_data, config, stream_mode="custom", context=runtime_context):  # type: ignore
+            async for part in graph.astream(
+                input_data, config, stream_mode=["custom", "messages"], context=runtime_context, version="v2"
+            ):  # type: ignore
                 chunk_count += 1
-                logger.info(f"===== EVENT {chunk_count} =====")
-                logger.info(f"Event type: {type(event)}")
+                part_type = part["type"]
 
-                # Handle custom events emitted by middleware (progressive A2A status and todo updates)
-                if isinstance(event, tuple) and len(event) == 2:
+                if part_type == "messages":
+                    # Token-level streaming from LLM
+                    # v2 data: (message_chunk, metadata) tuple
+                    msg_chunk, _metadata = part["data"]
+                    if not isinstance(msg_chunk, AIMessageChunk):
+                        continue
+
+                    # Only process messages from the orchestrator's own graph.
+                    # Sub-agent graphs (GP agent, dynamic agents) run inside tool
+                    # calls with a different thread_id (e.g., "{ctx}::general-purpose").
+                    # Their callback events leak into the orchestrator's stream but
+                    # must be filtered out — sub-agents emit their own thinking blocks
+                    # via artifact_update events through the middleware.
+                    if _metadata.get("thread_id") != orchestrator_thread_id:
+                        continue
+
+                    # --- Tool call detection for status history ---
+                    # Capture tool calls (excluding FinalResponseSchema and SubAgentResponseSchema) for status history display
+                    # Skip "task" tool because middleware emits "Delegating to {subagent}..." instead
+                    if msg_chunk.tool_call_chunks:
+                        for tc_chunk in msg_chunk.tool_call_chunks:
+                            tool_name = tc_chunk.get("name")
+                            # Emit status for actual tool calls (not response schemas, not task tool)
+                            if (
+                                tool_name
+                                and tool_name
+                                not in ("FinalResponseSchema", "SubAgentResponseSchema", "task", "write_todos")
+                                and tool_name not in emitted_updates
+                            ):
+                                emitted_updates.add(tool_name)
+                                yield AgentStreamResponse(
+                                    state=TaskState.working,
+                                    content=f"Using {tool_name}\u2026",
+                                    metadata={"activity_log": True},
+                                )
+                            # Incremental structured response streaming
+                            delta = response_streamer.feed(tc_chunk)
+                            if delta:
+                                stream_buffer.append(delta)
+                                for chunk in stream_buffer.flush_ready():
+                                    yield AgentStreamResponse(
+                                        state=TaskState.working,
+                                        content=chunk,
+                                        metadata={"streaming_chunk": True},
+                                    )
+                        continue
+
+                    # --- Regular content streaming ---
+                    if msg_chunk.content:
+                        token_text, thinking_blocks = extract_text_from_content(msg_chunk.content)
+                        for tb in thinking_blocks:
+                            yield AgentStreamResponse(
+                                state=TaskState.working,
+                                content=tb["thinking"],
+                                metadata={
+                                    "streaming_chunk": True,
+                                    "intermediate_output": True,
+                                    "agent_name": "orchestrator",
+                                },
+                            )
+                        if token_text:
+                            stream_buffer.append(token_text)
+                            for chunk in stream_buffer.flush_ready():
+                                yield AgentStreamResponse(
+                                    state=TaskState.working,
+                                    content=chunk,
+                                    metadata={"streaming_chunk": True},
+                                )
+                    continue
+
+                if part_type == "custom":
+                    # Handle custom events emitted by middleware
+                    # v2 data: the raw payload from stream_writer()
+                    event = part["data"]
+                    if not isinstance(event, tuple) or len(event) != 2:
+                        logger.warning(f"Ignoring unexpected custom event: {type(event)}, value: {event}")
+                        continue
                     event_type, event_data = event
 
                     if event_type == "a2a_status":
@@ -345,27 +443,59 @@ class OrchestratorDeepAgent:
                         continue  # Process next event
 
                     elif event_type == "todo_status":
-                        # PROGRESSIVE TODO STATUS UPDATE from todo middleware
-                        status_msg = event_data.get("message", "")
-                        if status_msg and status_msg not in emitted_updates:
-                            emitted_updates.add(status_msg)
-                            logger.info(f"[ORCHESTRATOR] Progressive todo status: {status_msg}")
-
-                            # Yield immediately to client using A2A protocol state
+                        # STRUCTURED WORK PLAN from todo middleware
+                        todos = event_data.get("todos", [])
+                        if todos:
+                            logger.info(f"[ORCHESTRATOR] Work plan: {len(todos)} items")
                             yield AgentStreamResponse(
                                 state=TaskState.working,
-                                content=status_msg,
+                                content="",
+                                metadata={"work_plan": True, "todos": todos},
                             )
                         continue  # Process next event
 
-                # Handle regular state chunks - cast to dict for type checking
-                if not isinstance(event, dict):
-                    logger.warning(f"Ignoring non-dict event: {type(event)}, value: {event}")
-                    continue
+                    elif event_type == "status_history":
+                        # ACTIVITY LOG from tool calls (orchestrator or sub-agents via middleware)
+                        status_msg = event_data.get("message", "")
+                        source = event_data.get("source")  # sub-agent name if from sub-agent, None if orchestrator
+                        if status_msg:
+                            metadata = {"activity_log": True}
+                            if source:
+                                metadata["source"] = source
+                            yield AgentStreamResponse(
+                                state=TaskState.working,
+                                content=status_msg,
+                                metadata=metadata,
+                            )
+                        continue  # Process next event
 
-                chunk = event
-                logger.debug(f"Chunk keys: {list(chunk.keys())}")
-                logger.debug(f"Full chunk: {chunk}")
+                    elif event_type == "subagent_chunk":
+                        # STREAMING CONTENT CHUNK from a sub-agent (via TaskArtifactUpdateEvent)
+                        # These are INTERMEDIATE OUTPUTS - the orchestrator will decide whether to
+                        # use them as-is, modify them, or completely rewrite them in its final response.
+                        # Frontend should display these in a collapsible "Thinking..." section.
+                        chunk_content = event_data.get("content", "")
+                        subagent_name = event_data.get("agent_name", "sub-agent")
+                        if chunk_content:
+                            yield AgentStreamResponse(
+                                state=TaskState.working,
+                                content=chunk_content,
+                                metadata={
+                                    "streaming_chunk": True,
+                                    "intermediate_output": True,
+                                    "agent_name": subagent_name,
+                                },
+                            )
+                        continue  # Process next event
+
+            # Flush any remaining buffered content
+            remaining = stream_buffer.flush_all()
+            if remaining:
+                yield AgentStreamResponse(
+                    state=TaskState.working,
+                    content=remaining,
+                    metadata={"streaming_chunk": True},
+                )
 
             logger.debug("===== STREAM PROCESSING COMPLETE =====")
             logger.debug(f"Total chunks processed: {chunk_count}")

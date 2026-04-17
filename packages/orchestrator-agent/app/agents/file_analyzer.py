@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, cast
 
 import httpx
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
+from agent_common.a2a.stream_events import TaskResponseData
 from agent_common.core.model_factory import create_model, is_valid_model
 from agent_common.models.base import ModelType
 from deepagents import CompiledSubAgent
@@ -46,6 +47,7 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from langsmith import traceable
 from ringier_a2a_sdk.cost_tracking import CostLogger
+from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +236,7 @@ def _create_file_analyzer_model(callbacks: Optional[List] = None):
             model_name = DEFAULT_FILE_ANALYZER_MODEL
 
     logger.info(f"Creating file analyzer model: {model_name} with callbacks={callbacks}")
-    return create_model(model_name, callbacks=callbacks)  # type: ignore
+    return create_model(model_name, callbacks=callbacks, streaming=False)  # type: ignore
 
 
 class FileAnalyzerRunnable(LocalA2ARunnable):
@@ -279,10 +281,20 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
         """Return the agent name."""
         return FILE_ANALYZER_NAME
 
-    @property
-    def input_modes(self) -> List[str]:
-        """Return the list of input modalities supported by this agent."""
+    def get_supported_input_modes(self) -> List[str]:
+        """Get list of input modes supported by the file analyzer.
+
+        Gemini 3 Flash (default model) natively supports all major file types:
+        text, images, PDFs/documents, audio, and video.
+
+        Returns:
+            List of supported content types
+        """
         return ["text", "image", "file", "audio", "video"]
+
+    def get_model_type(self) -> str | None:
+        """Return the file analyzer model type for provider-specific transforms."""
+        return os.getenv("FILE_ANALYZER_MODEL", DEFAULT_FILE_ANALYZER_MODEL)
 
     @property
     def description(self) -> str:
@@ -416,51 +428,24 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
 
         return content_blocks
 
-    @staticmethod
-    def _extract_text_from_content(content: Any) -> str:
-        """Extract text from LLM response content, handling both string and list formats.
-
-        Gemini and other multimodal models return content as a list of blocks:
-        [{'type': 'text', 'text': '...', 'extras': {...}}]
-
-        Args:
-            content: LLM response content (string or list of content blocks)
-
-        Returns:
-            Extracted text content as string
-        """
-        if isinstance(content, str):
-            return content
-        elif isinstance(content, list):
-            # Extract text from content blocks
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text" and "text" in block:
-                        text_parts.append(block["text"])
-            return " ".join(text_parts) if text_parts else str(content)
-        else:
-            return str(content)
-
     @traceable(name="synthesize_analysis")
     async def _synthesize_analysis(
         self,
-        content: str,
-        file_blocks: List[TextContentBlock | ImageContentBlock | FileContentBlock],
+        content_blocks: list,
         conversation_id: Optional[str] = None,
     ) -> str:
-        """Synthesize analysis from fetched file content.
+        """Synthesize analysis from prepared content blocks.
+
+        Prepends a system prompt with file-type context, then invokes the
+        multimodal model on the full content block list.
 
         Args:
-            content: Original user request
-            file_blocks: Content blocks from fetched files
-            user_sub: User subject for cost attribution
+            content_blocks: Prepared content blocks (text + file blocks)
             conversation_id: Conversation ID for cost attribution
 
         Returns:
             Analysis result as string
         """
-        # Create callback with shared CostLogger if available
         from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
         callbacks = []
@@ -470,265 +455,158 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
 
         model = _create_file_analyzer_model(callbacks=callbacks if callbacks else None)
 
-        # Extract file type information for context
+        # Extract file type info and user request text from content blocks
         file_types = []
-        for block in file_blocks:
-            if block.get("type") == "file" and "mime_type" in block:
-                mime = block["mime_type"]
-                file_types.append(mime)
+        user_text_parts = []
+        for block in content_blocks:
+            if isinstance(block, dict):
+                if block.get("type") == "file" and "mime_type" in block:
+                    file_types.append(block["mime_type"])
+                elif block.get("type") == "text" and "text" in block:
+                    user_text_parts.append(block["text"])
 
-        # Build context about file types
+        user_request = "\n".join(user_text_parts) if user_text_parts else "Analyze the attached file(s)."
+
+        # Build file type context for system prompt
         file_type_context = ""
         if file_types:
             file_type_context = f"\n\nFile types being analyzed: {', '.join(file_types)}"
             if any(ft.startswith("audio/") for ft in file_types):
                 file_type_context += "\nNote: Audio files contain NO visual content - only analyze the audio."
 
-        # Build complete content blocks with prompt
+        # Prepend system prompt block
         prompt_block: TextContentBlock = {
             "type": "text",
-            "text": f"{FILE_ANALYZER_SYSTEM_PROMPT}{file_type_context}\n\nUser request: {content}",
+            "text": f"{FILE_ANALYZER_SYSTEM_PROMPT}{file_type_context}\n\nUser request: {user_request}",
         }
+        # Replace text blocks with the combined prompt, keep file blocks
+        file_only_blocks = [b for b in content_blocks if isinstance(b, dict) and b.get("type") != "text"]
+        all_blocks = [prompt_block] + file_only_blocks
 
-        all_content_blocks = [prompt_block] + file_blocks
+        analysis_message = HumanMessage(content_blocks=cast(list[ContentBlock], all_blocks))
 
-        # Cast to satisfy type checker (content_blocks accepts ContentBlock which is a union including these types)
-
-        analysis_message = HumanMessage(content_blocks=cast(list[ContentBlock], all_content_blocks))
-
-        # Build config with cost tracking tags using CostTrackingMixin helper
-        # Note: We don't use checkpointing in file-analyzer, so we only need tags and callbacks
+        # Cost tracking config
         if self._user_sub and conversation_id:
-            # Use proper RunnableConfig type with tags
             tags = [
                 f"user_sub:{self._user_sub}",
                 f"conversation:{conversation_id}",
             ]
             if self.sub_agent_id:
                 tags.append(f"sub_agent:{self.sub_agent_id}")
-
             config = RunnableConfig(tags=tags)  # type: ignore
-
             logger.info(f"[COST TRACKING] Invoking model with tags: {tags}")
             response = await model.ainvoke([analysis_message], config=config)
         else:
-            # No user context available, invoke without tags
             logger.warning("[COST TRACKING] No user_sub/conversation_id available, cost tracking may be incomplete")
             response = await model.ainvoke([analysis_message])
 
-        # Extract text from response content (handles both string and list formats)
-        analysis_text = self._extract_text_from_content(response.content)
+        return extract_text_from_content(response.content)[0]
 
-        return analysis_text
+    async def _prepare_human_message_input(self, input_data: SubAgentInput) -> HumanMessage:
+        """Extend base with file-type detection, MIME correction, and URL extraction.
 
-    def _extract_file_blocks_from_message(
-        self,
-        input_data: SubAgentInput,
-    ) -> list[ContentBlock]:
-        """Extract typed file ContentBlocks from the incoming HumanMessage.
+        Calls _extract_and_validate_blocks() directly (instead of super()) to avoid
+        an unnecessary decompose/recompose roundtrip, then applies file-analyzer-
+        specific processing:
+        1. Image blocks passed through directly (natively supported by multimodal models)
+        2. Other file blocks (audio, video, documents) routed through _fetch_files
+           for proper MIME type detection — critical for audio/webm correction
+           where browsers send video/webm but Gemini requires audio/webm
+        3. Regex URL fallback when no file blocks are present (user-typed URLs)
 
-        When the dispatch middleware injects files via content_blocks on the
-        HumanMessage, they appear as typed dicts (ImageContentBlock,
-        AudioContentBlock, VideoContentBlock, FileContentBlock). This method
-        extracts non-text blocks for direct use, bypassing regex URL extraction.
+        S3 URI validation is handled by the base _extract_and_validate_blocks().
 
-        Args:
-            input_data: Validated sub-agent input
-
-        Returns:
-            List of file-type ContentBlocks (may be empty)
+        Raises:
+            ValueError: For user-facing input issues (S3 URIs, no URLs, no processable files)
+            httpx.HTTPStatusError: For HTTP errors during file fetching
+            httpx.TimeoutException: For timeout during file fetching
         """
-        if not input_data.messages:
-            return []
+        text_content, file_blocks = await self._extract_and_validate_blocks(input_data)
 
-        last_msg = input_data.messages[-1]
+        if file_blocks:
+            # Route: images pass through directly, everything else through _fetch_files
+            # for proper file-type detection and MIME handling
+            processed_blocks: List[ContentBlock] = []
+            urls_needing_fetch: List[str] = []
 
-        # content_blocks is the canonical field; when set, content becomes a list
-        blocks = last_msg.content_blocks
-        if not blocks:
-            # Check if content itself is a list of blocks (content_blocks sugar)
-            raw = last_msg.content
-            if isinstance(raw, list):
-                blocks = raw
-            else:
-                return []
+            for block in file_blocks:
+                if not isinstance(block, dict):
+                    continue
+                url = block.get("url", "")
+                block_type = block.get("type", "")
 
-        file_blocks: list[ContentBlock] = []
-        for block in blocks:
-            if isinstance(block, dict) and block.get("type") in self.input_modes and block.get("type") != "text":
-                file_blocks.append(block)  # type: ignore[arg-type]
-        return file_blocks
+                if block_type == "image" and url:
+                    processed_blocks.append(block)
+                elif url:
+                    urls_needing_fetch.append(url)
 
-    @staticmethod
-    def _extract_text_from_message(input_data: SubAgentInput) -> str:
-        """Extract only the text portion of the incoming HumanMessage.
+            if urls_needing_fetch:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    fetched = await self._fetch_files(urls_needing_fetch, client)
+                    processed_blocks.extend(fetched)
 
-        When the message was built with content_blocks, we pull just the text
-        block(s). Otherwise falls back to the raw string content.
+            if not processed_blocks:
+                raise ValueError("No processable files found in the attached content blocks.")
 
-        Args:
-            input_data: Validated sub-agent input
+            logger.info(f"Prepared {len(processed_blocks)} file content block(s) for analysis")
 
-        Returns:
-            Text content as a string
-        """
-        if not input_data.messages:
-            return ""
+        else:
+            # Regex fallback: extract URLs from text content
+            s3_uris = S3_URI_PATTERN.findall(text_content)
+            if s3_uris:
+                raise ValueError(f"I cannot directly access S3 URIs. Please provide a presigned URL for: {s3_uris[0]}")
 
-        last_msg = input_data.messages[-1]
-        raw = last_msg.content
+            urls = URL_PATTERN.findall(text_content)
+            if not urls:
+                raise ValueError(
+                    "No URL found in the request. Please provide a presigned HTTPS URL to analyze, "
+                    "e.g., 'What is shown in https://...?'"
+                )
 
-        # Simple string content (no content_blocks)
-        if isinstance(raw, str):
-            return raw
+            logger.info(f"Extracting {len(urls)} URL(s) from text (regex fallback)")
 
-        # content is a list of blocks — extract text blocks
-        if isinstance(raw, list):
-            text_parts = []
-            for block in raw:
-                if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
-                    text_parts.append(block["text"])
-            return "\n".join(text_parts) if text_parts else ""
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                processed_blocks = await self._fetch_files(urls, client)
 
-        return str(raw)
+        # Build HumanMessage with text + processed file blocks
+        content_blocks: List[ContentBlock] = []
+        if text_content:
+            content_blocks.append({"type": "text", "text": text_content})  # type: ignore[arg-type]
+        content_blocks.extend(processed_blocks)
+        return HumanMessage(content=content_blocks)  # type: ignore[arg-type]
 
     async def _process(
         self,
         input_data: SubAgentInput,
         config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Analyze file(s) from URLs or typed content blocks.
+    ) -> TaskResponseData:
+        """Analyze file(s) using the prepared multimodal HumanMessage.
 
-        Two paths for receiving files:
-        1. **Deterministic** (preferred): Typed ContentBlocks injected by the dispatch
-           middleware via HumanMessage.content_blocks. These carry the exact original
-           pre-signed URLs without any LLM round-trip.
-        2. **Regex fallback**: URLs extracted from the text content of the message.
-           Used when the user types a URL directly (not from A2A FileParts).
+        Uses the overridden _prepare_human_message_input which handles:
+        - S3 URI validation
+        - File-type detection and MIME correction via _fetch_files
+        - Regex URL extraction fallback for user-typed URLs
 
         Args:
             input_data: Validated input with messages and tracking IDs
-            config: Optional parent config from orchestrator (not currently used by file-analyzer)
+            config: Optional parent config from orchestrator
         """
         context_id, task_id = self._extract_tracking_ids(input_data)
         conversation_id = input_data.orchestrator_conversation_id or context_id
 
-        # --- Path 1: Deterministic file content blocks ---
-        injected_blocks = self._extract_file_blocks_from_message(input_data)
-        if injected_blocks:
-            text_content = self._extract_text_from_message(input_data)
-            logger.info(
-                f"Using {len(injected_blocks)} deterministic file content block(s) (bypassing regex URL extraction)"
-            )
-
-            # Check for S3 URIs in injected blocks
-            s3_blocks = [b for b in injected_blocks if isinstance(b, dict) and b.get("url", "").startswith("s3://")]
-            if s3_blocks:
-                return self._build_input_required_response(
-                    f"I cannot directly access S3 URIs. Please provide a presigned URL for: {s3_blocks[0].get('url')}",
-                    context_id=context_id,
-                    task_id=task_id,
-                )
-
-            try:
-                # Injected blocks are already typed ContentBlocks ready for the model.
-                # Images can be passed by URL directly. Everything else (text, audio,
-                # video, documents) is routed through _fetch_files which does proper
-                # file-type detection, MIME correction, and content fetching.
-                #
-                # This is critical for audio recordings: browsers send video/webm for
-                # WebM containers, but Gemini rejects video/webm as inline data.
-                # _fetch_files → _detect_file_type correctly reclassifies these as
-                # audio/webm which Gemini accepts.
-                file_blocks_for_model: List[ContentBlock] = []
-                urls_needing_fetch: List[str] = []
-
-                for block in injected_blocks:
-                    if not isinstance(block, dict):
-                        continue
-                    url = block.get("url", "")
-                    block_type = block.get("type", "")
-
-                    if block_type == "image" and url:
-                        # ImageContentBlock is natively supported by multimodal models
-                        file_blocks_for_model.append(block)
-                    elif url:
-                        # Everything else (audio, video, text, documents) goes through
-                        # _fetch_files for proper file-type detection and MIME handling
-                        urls_needing_fetch.append(url)
-
-                # Fetch and detect file types via _fetch_files
-                if urls_needing_fetch:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        fetched = await self._fetch_files(urls_needing_fetch, client)
-                        file_blocks_for_model.extend(fetched)
-
-                if not file_blocks_for_model:
-                    return self._build_input_required_response(
-                        "No processable files found in the attached content blocks.",
-                        context_id=context_id,
-                        task_id=task_id,
-                    )
-
-                analysis_result = await self._synthesize_analysis(
-                    text_content or "Analyze the attached file(s).",
-                    file_blocks_for_model,
-                    conversation_id=conversation_id,
-                )
-                return self._build_success_response(analysis_result, context_id=context_id, task_id=task_id)
-
-            except httpx.HTTPStatusError as e:
-                return self._handle_http_error(e, context_id, task_id)
-            except httpx.TimeoutException:
-                return self._build_input_required_response(
-                    "Request timed out. The file may be too large or the URL may be slow.",
-                    context_id=context_id,
-                    task_id=task_id,
-                )
-            except Exception as e:
-                logger.error(f"Failed to analyze file from content blocks: {e}")
-                return self._build_error_response(
-                    f"Error analyzing file: {str(e)}", context_id=context_id, task_id=task_id
-                )
-
-        # --- Path 2: Regex fallback for user-typed URLs ---
-        content = self._extract_message_content(input_data)
-
-        s3_uris = S3_URI_PATTERN.findall(content)
-        if s3_uris:
-            return self._build_input_required_response(
-                f"I cannot directly access S3 URIs. Please provide a presigned URL for: {s3_uris[0]}",
-                context_id=context_id,
-                task_id=task_id,
-            )
-
-        urls = URL_PATTERN.findall(content)
-        if not urls:
-            return self._build_input_required_response(
-                "No URL found in the request. Please provide a presigned HTTPS URL to analyze, "
-                "e.g., 'What is shown in https://...?'",
-                context_id=context_id,
-                task_id=task_id,
-            )
-
-        logger.info(f"Analyzing {len(urls)} file(s) from URLs (regex fallback)...: {urls}")
-
         try:
-            # Fetch files and prepare content blocks
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                file_blocks = await self._fetch_files(urls, client)
+            human_message = await self._prepare_human_message_input(input_data)
 
-            # Synthesize analysis from fetched content
-            # Cost tracking happens automatically via CostTrackingCallback with tags
-            analysis_result = await self._synthesize_analysis(content, file_blocks, conversation_id=conversation_id)
-
-            logger.info("Analysis complete (cost tracking handled by callback)")
-
+            analysis_result = await self._synthesize_analysis(
+                human_message.content if isinstance(human_message.content, list) else [],
+                conversation_id=conversation_id,
+            )
             return self._build_success_response(analysis_result, context_id=context_id, task_id=task_id)
 
+        except ValueError as e:
+            return self._build_input_required_response(str(e), context_id=context_id, task_id=task_id)
         except httpx.HTTPStatusError as e:
             return self._handle_http_error(e, context_id, task_id)
-
         except httpx.TimeoutException:
             return self._build_input_required_response(
                 "Request timed out. The file may be too large or the URL may be slow. "
@@ -736,7 +614,6 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 context_id=context_id,
                 task_id=task_id,
             )
-
         except Exception as e:
             logger.error(f"Failed to analyze file: {e}")
             error_str = str(e).lower()
@@ -753,7 +630,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
         e: httpx.HTTPStatusError,
         context_id: Optional[str],
         task_id: Optional[str],
-    ) -> Dict[str, Any]:
+    ) -> TaskResponseData:
         """Build appropriate response for HTTP errors."""
         if e.response.status_code in (401, 403):
             return self._build_input_required_response(

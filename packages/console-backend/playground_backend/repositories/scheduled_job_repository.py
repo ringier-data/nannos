@@ -145,7 +145,6 @@ class ScheduledJobRepository(AuditedRepository):
                 SELECT * FROM scheduled_jobs
                 WHERE deleted_at IS NULL
                   AND enabled = TRUE
-                  AND deleted_at IS NULL
                   AND next_run_at <= :now
                 ORDER BY next_run_at ASC
                 LIMIT :limit

@@ -21,6 +21,7 @@ import { mainNavItems, groupManagerNavItems, adminNavItems } from '@/config/navi
 import { NotificationInbox } from '@/components/notifications/NotificationInbox';
 import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 import { SchedulerNotifications } from '@/components/SchedulerNotifications';
+import { SocketProvider, ChatProvider } from '@/components/chat/contexts';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -30,9 +31,11 @@ export function DashboardLayout() {
   };
 
   return (
-    <SidebarProvider>
-      <SchedulerNotifications />
-      <Sidebar>
+    <SocketProvider socketPath="/api/v1/socket.io">
+    <ChatProvider>
+      <SidebarProvider>
+        <SchedulerNotifications />
+        <Sidebar>
         <SidebarHeader>
           <div className="flex items-center gap-2 px-2 py-2">
             <span className="font-semibold">Playground</span>
@@ -127,5 +130,7 @@ export function DashboardLayout() {
         </main>
       </SidebarInset>
     </SidebarProvider>
+    </ChatProvider>
+    </SocketProvider>
   );
 }

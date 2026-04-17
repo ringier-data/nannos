@@ -48,6 +48,43 @@ npm run gen-sdk
 - Regenerate the SDK every time there are changes to the backend API.
 
 
+## A2A Extension Event Handling
+
+The frontend receives A2A events via Socket.IO from the playground-backend. Events carry extension markers that determine how they're classified and displayed.
+
+### Extension Constants (types.ts)
+
+```typescript
+const ACTIVITY_LOG_EXT = 'urn:nannos:a2a:activity-log:1.0';
+const WORK_PLAN_EXT = 'urn:nannos:a2a:work-plan:1.0';
+const INTERMEDIATE_OUTPUT_EXT = 'urn:nannos:a2a:intermediate-output:1.0';
+```
+
+### Event Classification in ChatContext.tsx
+
+| Event kind | Extension check | Behavior |
+|------------|----------------|----------|
+| `status-update` | `message.extensions` includes `WORK_PLAN_EXT` | Extract `DataPart.data.todos`, merge by source into `workingStepsMap`, display in sticky `WorkingBlock` |
+| `status-update` | `message.extensions` includes `ACTIVITY_LOG_EXT` | Extract text, push to `statusHistoryMap`, display in timeline — NOT as message bubble |
+| `artifact-update` | `artifact.extensions` includes `INTERMEDIATE_OUTPUT_EXT` | Accumulate chunks by `agent_name` in `subagentThoughtsMap`, display as thinking blocks |
+| `artifact-update` | No intermediate-output extension | Accumulate into `streamingMap` as the main response text |
+| `status-update` | `state === 'completed'` | Finalize streamed text, build timeline, clear transient state |
+
+### Sticky Working Block
+
+- `liveWorkingSteps` drives a sticky `WorkingBlock` widget between the scroll area and chat input
+- The `complete` prop is derived from `!isWaiting` (shows spinner during streaming, checkmark after)
+- Working steps are NOT deleted on task completion — they persist until the next user message
+- Todos are NOT included in the timeline (removed from `buildTimeline()`)
+
+### Timeline Building
+
+`buildTimeline(thoughts, history, timestamp)` produces a chronological `TimelineEvent[]` from:
+- `statusHistoryMap` → `{type: 'status'}` events
+- `subagentThoughtsMap` → `{type: 'thought_start/thought_end'}` events
+
+Timeline events are attached to finalized messages and reconstructed from `raw_payload` when loading history.
+
 ## API Calls
 
 - Use the generated SDK under `src/api/` for all backend API calls

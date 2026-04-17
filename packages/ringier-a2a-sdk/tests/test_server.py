@@ -154,12 +154,11 @@ class TestBaseAgentExecutor:
         with patch("ringier_a2a_sdk.server.executor.new_agent_text_message") as mock_msg:
             mock_msg.return_value = Mock()
 
-            await executor._handle_stream_item(item, mock_updater, mock_task)
+            await executor._handle_stream_item(item, mock_updater, mock_task, "artifact-1")
 
             mock_updater.update_status.assert_called_once()
             call_args = mock_updater.update_status.call_args
             assert call_args[0][0] == TaskState.working
-            assert call_args[1]["final"] is False
 
     @pytest.mark.asyncio
     async def test_handle_stream_item_completed_state(self):
@@ -177,7 +176,7 @@ class TestBaseAgentExecutor:
         with patch("ringier_a2a_sdk.server.executor.Part") as mock_part:
             mock_part.return_value = Mock()
 
-            await executor._handle_stream_item(item, mock_updater, mock_task)
+            await executor._handle_stream_item(item, mock_updater, mock_task, "artifact-1")
 
             mock_updater.add_artifact.assert_called_once()
             mock_updater.complete.assert_called_once()
@@ -198,23 +197,28 @@ class TestBaseAgentExecutor:
         with patch("ringier_a2a_sdk.server.executor.new_agent_text_message") as mock_msg:
             mock_msg.return_value = Mock()
 
-            await executor._handle_stream_item(item, mock_updater, mock_task)
+            await executor._handle_stream_item(item, mock_updater, mock_task, "artifact-1")
 
             mock_updater.update_status.assert_called_once()
             call_args = mock_updater.update_status.call_args
             assert call_args[0][0] == TaskState.failed
-            assert call_args[1]["final"] is True
 
     @pytest.mark.asyncio
-    async def test_cancel_raises_unsupported(self):
-        """Test that cancel operation raises UnsupportedOperationError."""
-        from a2a.utils.errors import ServerError
-
+    async def test_cancel_emits_canceled_event(self):
+        """Test that cancel emits a canceled TaskStatusUpdateEvent."""
         mock_agent = Mock()
         executor = BaseAgentExecutor(mock_agent)
 
         mock_context = Mock()
+        mock_context.task_id = "task-1"
+        mock_context.context_id = "ctx-1"
         mock_event_queue = AsyncMock()
 
-        with pytest.raises(ServerError):
-            await executor.cancel(mock_context, mock_event_queue)
+        await executor.cancel(mock_context, mock_event_queue)
+
+        mock_event_queue.enqueue_event.assert_called_once()
+        event = mock_event_queue.enqueue_event.call_args[0][0]
+        assert event.task_id == "task-1"
+        assert event.context_id == "ctx-1"
+        assert event.status.state == TaskState.canceled
+        assert event.final is True

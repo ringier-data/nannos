@@ -1,5 +1,24 @@
 // Chat application types
 
+// A2A extension URIs for classifying streaming events
+export const ACTIVITY_LOG_EXT = 'urn:nannos:a2a:activity-log:1.0';
+export const WORK_PLAN_EXT = 'urn:nannos:a2a:work-plan:1.0';
+export const INTERMEDIATE_OUTPUT_EXT = 'urn:nannos:a2a:intermediate-output:1.0';
+
+export interface TodoItem {
+  name: string;
+  state: 'submitted' | 'working' | 'completed' | 'failed';
+  source?: string;
+  target?: string;
+}
+
+// Unified timeline event for chronological display
+export type TimelineEvent =
+  | { type: 'todo_snapshot'; timestamp: Date; todos: TodoItem[] }  // Progressive widget (show latest)
+  | { type: 'status'; timestamp: Date; message: string; source?: string }  // Discrete event
+  | { type: 'thought_start'; timestamp: Date; agent_name: string }  // Marks start of sub-agent work
+  | { type: 'thought_end'; timestamp: Date; agent_name: string; content: string; complete: boolean };  // Complete thought
+
 export interface User {
   id: string;
   email: string;
@@ -24,6 +43,10 @@ export interface Message {
   type: 'user' | 'agent' | 'task';
   content: string;
   timestamp: Date;
+  // Unified chronological timeline of all events
+  timeline?: TimelineEvent[];
+  // Control whether to show MessageCard (false for timeline-only messages)
+  showMessageCard?: boolean;
   parts?: Array<{
     kind: string;
     text?: string;
@@ -74,12 +97,13 @@ export interface TaskStatusDetails {
   state?: string;
   label?: string;
   message?: {
-    parts?: Array<{ text?: string }>;
+    parts?: Array<{ text?: string; kind?: string; data?: unknown; media_type?: string }>;
     contextId?: string;
     messageId?: string;
     kind?: string;
     role?: string;
     taskId?: string;
+    extensions?: string[];
   };
   progress?: number;
 }
@@ -118,11 +142,14 @@ export interface AgentResponseData {
   role?: string;
   parts?: Array<{ text?: string; kind?: string }>;
   status?: TaskStatusDetails;
+  metadata?: Record<string, unknown>;
   artifact?: {
     parts?: Array<{ text?: string; kind?: string }>;
     artifactId?: string;
     contextId?: string;
     role?: string;
+    metadata?: Record<string, unknown>;
+    extensions?: string[];
   };
   artifacts?: unknown;
   kind?: string;

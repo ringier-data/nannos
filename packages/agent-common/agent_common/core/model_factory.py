@@ -58,32 +58,46 @@ _AZURE_MODELS: dict[str, dict] = {
         "api_version": "2024-08-01-preview",
         "deployment": "chatgpt-4o",
         "model_name": "gpt-4o",
+        "input_modes": ["text", "image"],
+        "backend": "azure_openai",
     },
     "gpt-4o-mini": {
         "api_version": "2025-01-01-preview",
         "deployment": "gpt-4o-mini",
         "model_name": "gpt-4o-mini",
+        "input_modes": ["text", "image"],
+        "backend": "azure_openai",
     },
 }
 
 _BEDROCK_MODELS: dict[str, dict] = {
     "claude-sonnet-4.5": {
         "bedrock_model_id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "input_modes": ["text", "image", "file"],
+        "backend": "bedrock",
     },
     "claude-sonnet-4.6": {
         "bedrock_model_id": "global.anthropic.claude-sonnet-4-6",
+        "input_modes": ["text", "image", "file"],
+        "backend": "bedrock",
     },
     "claude-haiku-4-5": {
         "bedrock_model_id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "input_modes": ["text", "image", "file"],
+        "backend": "bedrock",
     },
 }
 
 _GEMINI_MODELS: dict[str, dict] = {
     "gemini-3-pro-preview": {
         "model_id": "gemini-3-pro-preview",
+        "input_modes": ["text", "image", "audio", "video", "file"],
+        "backend": "google",
     },
     "gemini-3-flash-preview": {
         "model_id": "gemini-3-flash-preview",
+        "input_modes": ["text", "image", "audio", "video", "file"],
+        "backend": "google",
     },
 }
 
@@ -309,11 +323,46 @@ def get_thinking_budget(thinking_level: ThinkingLevel) -> int:
     return budget_map[thinking_level]
 
 
+def get_model_input_capabilities(model_type: ModelType) -> list[str]:
+    """Get supported input modes (content types) for a model.
+
+    Args:
+        model_type: The type of model to query
+
+    Returns:
+        List of supported content types (e.g., ["text", "image"])
+
+    Raises:
+        ValueError: If model type is not recognized
+    """
+    if model_type not in MODEL_CONFIG:
+        raise ValueError(f"Unknown model type: {model_type}")
+    return MODEL_CONFIG[model_type]["input_modes"]
+
+
+def get_model_backend(model_type: ModelType) -> str:
+    """Get the provider backend for a model type.
+
+    Args:
+        model_type: The type of model to query
+
+    Returns:
+        Provider backend string: "bedrock", "openai", or "google"
+
+    Raises:
+        ValueError: If model type is not recognized
+    """
+    if model_type not in MODEL_CONFIG:
+        raise ValueError(f"Unknown model type: {model_type}")
+    return MODEL_CONFIG[model_type]["backend"]
+
+
 def create_model(
     model_type: ModelType,
     bedrock_region: str | None = None,
     thinking_level: ThinkingLevel | None = None,
     callbacks: list | None = None,
+    streaming: bool = True,
 ) -> BaseChatModel:
     """Create a model instance for the given model type.
 
@@ -386,6 +435,7 @@ def create_model(
             thinking_level=gemini_thinking_level,
             include_thoughts=include_thoughts,
             callbacks=callbacks,
+            streaming=streaming,  # Enable token-level streaming
         )
     elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
         # Lazy import for AWS Bedrock provider
@@ -447,6 +497,7 @@ def create_model(
             if thinking_params["type"] == "enabled"
             else {},
             callbacks=callbacks,
+            # NOTE: Bedrock streams automatically when using .astream() - no 'streaming' parameter needed
         )
     elif model_type == "local" or MODEL_CONFIG.get(model_type, {}).get("is_local"):
         # Local OpenAI-compatible provider (Ollama, LM Studio, vLLM, etc.)
@@ -499,4 +550,5 @@ def create_model(
             temperature=0.7,
             model=model_name,
             callbacks=callbacks,
+            streaming=streaming,  # Enable token-level streaming
         )
