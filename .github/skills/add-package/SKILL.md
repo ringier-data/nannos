@@ -88,13 +88,11 @@ Only if the k8s deployment name differs from the package name:
       <new-package>) echo "<deploy-name>" ;;
 ```
 
-### 4. (Optional) Kubernetes Manifests
+### 4. Kubernetes Manifests
 
-If the package is deployed to Kubernetes:
+Update the `example-k8s-deployment/` directory with the necessary manifests to deploy the new package as a service. Look through the existing files to see the pattern.
 
-1. Create `example-k8s-deployment/base/<new-package>.yaml` with Deployment + Service
-2. Add it to `example-k8s-deployment/base/kustomization.yaml` resources list
-3. Add an image patch entry in `example-k8s-deployment/overlay/image-patch.yaml`
+!! important: If there is a `gitops` folder symlinked in this repo root this means this developer is managing a k8s cluster: See `gitops/AGENTS.md` - it has instruction on how to construct the necessary k8s manifests and add them to the FluxCD gitops.
 
 ### 5. Verify
 
