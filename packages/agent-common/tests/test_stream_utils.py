@@ -150,6 +150,58 @@ class TestStructuredResponseStreamer:
         assert result is None
 
 
+class TestStructuredResponseStreamerFeedContent:
+    """Tests for feed_content() — handles models that emit schema JSON as plain text."""
+
+    def test_non_json_content_passed_through(self):
+        streamer = StructuredResponseStreamer("FinalResponseSchema")
+        result = streamer.feed_content("Hello world")
+        assert result == "Hello world"
+        assert not streamer.content_tracking
+
+    def test_schema_json_extracts_message_only(self):
+        streamer = StructuredResponseStreamer("FinalResponseSchema")
+        # Simulate Gemini streaming FinalResponseSchema as plain text tokens
+        d1 = streamer.feed_content('{"task_state": "completed", "message": "Hello ')
+        assert d1 == "Hello "  # Only the message field delta
+        assert streamer.content_tracking
+
+        d2 = streamer.feed_content("Erik!")
+        assert d2 == "Erik!"
+
+        d3 = streamer.feed_content('"}')
+        # No new message content after closing quote
+        assert d3 is None or d3 == ""
+
+    def test_partial_json_suppressed_until_message(self):
+        streamer = StructuredResponseStreamer("FinalResponseSchema")
+        # First tokens: opening brace + task_state — no message yet
+        d1 = streamer.feed_content('{"task_state')
+        assert d1 is None  # Suppressed (accumulating JSON)
+
+        d2 = streamer.feed_content('": "completed", ')
+        assert d2 is None  # Still no message field
+
+        d3 = streamer.feed_content('"message": "Hi"')
+        assert d3 == "Hi"
+
+    def test_non_schema_json_passed_through(self):
+        """JSON that doesn't match the schema pattern is returned as-is."""
+        streamer = StructuredResponseStreamer("FinalResponseSchema")
+        # Feed JSON that has neither "message" nor "task_state"
+        result = streamer.feed_content('{"foo": "bar"}')
+        assert result == '{"foo": "bar"}'
+        assert not streamer.content_tracking
+
+    def test_incremental_message_growth(self):
+        streamer = StructuredResponseStreamer("FinalResponseSchema")
+        streamer.feed_content('{"task_state": "completed", "message": "A')
+        d2 = streamer.feed_content("B")
+        assert d2 == "B"
+        d3 = streamer.feed_content("C")
+        assert d3 == "C"
+
+
 # ---------------------------------------------------------------------------
 # extract_text_from_content
 # ---------------------------------------------------------------------------

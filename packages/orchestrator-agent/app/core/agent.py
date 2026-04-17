@@ -410,13 +410,17 @@ class OrchestratorDeepAgent:
                                 },
                             )
                         if token_text:
-                            stream_buffer.append(token_text)
-                            for chunk in stream_buffer.flush_ready():
-                                yield AgentStreamResponse(
-                                    state=TaskState.working,
-                                    content=chunk,
-                                    metadata={"streaming_chunk": True},
-                                )
+                            # Filter out FinalResponseSchema JSON that some models
+                            # (e.g. Gemini) emit as plain text instead of tool calls.
+                            filtered = response_streamer.feed_content(token_text)
+                            if filtered:
+                                stream_buffer.append(filtered)
+                                for chunk in stream_buffer.flush_ready():
+                                    yield AgentStreamResponse(
+                                        state=TaskState.working,
+                                        content=chunk,
+                                        metadata={"streaming_chunk": True},
+                                    )
                     continue
 
                 if part_type == "custom":

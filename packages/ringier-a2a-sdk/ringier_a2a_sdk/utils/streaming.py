@@ -86,6 +86,10 @@ class StructuredResponseStreamer:
     JSON string, uses ``parse_partial_json`` to extract the ``message`` field,
     and returns only the new delta text on each feed.
 
+    Some models (notably Gemini) emit the structured response as plain text
+    content instead of tool_call_chunks.  Use :meth:`feed_content` for that
+    path — it applies the same incremental ``message``-extraction logic.
+
     Usage::
 
         streamer = StructuredResponseStreamer("FinalResponseSchema")
@@ -100,6 +104,10 @@ class StructuredResponseStreamer:
         self._tracking = False
         self._args = ""
         self._streamed = ""
+        # Separate accumulator for plain-text content path
+        self._content_buf = ""
+        self._content_streamed = ""
+        self._content_tracking = False
 
     @property
     def tracking(self) -> bool:
@@ -138,6 +146,61 @@ class StructuredResponseStreamer:
         delta = current_message[len(self._streamed) :]
         self._streamed = current_message
         return delta
+
+    def feed_content(self, text: str) -> Optional[str]:
+        """Filter plain-text content that may contain structured response JSON.
+
+        Some models (e.g. Gemini) emit the FinalResponseSchema as regular text
+        instead of as a tool call.  This method accumulates text tokens and, when
+        it detects the JSON pattern, extracts only the ``message`` field delta —
+        mirroring the behaviour of :meth:`feed` for tool_call_chunks.
+
+        Returns the ``message`` delta to stream, or ``None`` when the text is
+        part of JSON that should be suppressed.  If the text is *not* detected
+        as structured JSON, it is returned unchanged so callers can stream it
+        normally.
+        """
+        self._content_buf += text
+
+        stripped = self._content_buf.lstrip()
+        if not stripped.startswith("{"):
+            # Not JSON — flush the whole buffer as normal content.
+            buf = self._content_buf
+            self._content_buf = ""
+            self._content_tracking = False
+            return buf
+
+        # Looks like JSON is accumulating.
+        self._content_tracking = True
+        parsed = parse_partial_json(stripped)
+        if not parsed:
+            return None  # Suppress — not parseable yet
+
+        # Check whether this looks like the target schema (has "message" key,
+        # and optionally "task_state" which is the FinalResponseSchema marker).
+        if "message" not in parsed:
+            if "task_state" in parsed:
+                # Schema JSON but message field hasn't appeared yet — suppress.
+                return None
+            # Unknown JSON object — not our schema, flush as-is.
+            buf = self._content_buf
+            self._content_buf = ""
+            self._content_tracking = False
+            return buf
+
+        # We have a "message" field — extract only the new delta.
+        current_message: str = parsed["message"]
+        if len(current_message) <= len(self._content_streamed):
+            return None
+
+        delta = current_message[len(self._content_streamed) :]
+        self._content_streamed = current_message
+        return delta
+
+    @property
+    def content_tracking(self) -> bool:
+        """Whether plain-text content is being tracked as structured JSON."""
+        return self._content_tracking
 
 
 def extract_text_from_content(content: Any) -> Tuple[str, List[Dict[str, str]]]:
