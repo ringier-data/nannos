@@ -368,6 +368,80 @@ deploy-dev pkg:
     kubectl -n nannos rollout status "deployment/$DEPLOY" --timeout=300s
     printf "${GREEN}✅ deployment/%s rolled out successfully${RESET}\n" "$DEPLOY"
 
+# Updates the prod image tag in the gitops repo, commits and pushes (FluxCD picks it up)
+deploy-prod pkg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CYAN='\033[1;36m' GREEN='\033[1;32m' DIM='\033[2m' RED='\033[1;31m' YELLOW='\033[1;33m' RESET='\033[0m'
+
+    source scripts/release-helpers.sh
+    GITOPS_DIR="gitops"
+    PROD_PATCH="${GITOPS_DIR}/manifests/apps/nannos/prod/image-patch.yaml"
+
+    # Validate gitops symlink
+    if [[ ! -d "$GITOPS_DIR" ]]; then
+      printf "${RED}❌ gitops directory not found.${RESET}\n"
+      printf "   Create a symlink: ${DIM}ln -s /path/to/gitops-repo gitops${RESET}\n"
+      exit 1
+    fi
+
+    if [[ ! -f "$PROD_PATCH" ]]; then
+      printf "${RED}❌ Prod image patch not found: %s${RESET}\n" "$PROD_PATCH"
+      exit 1
+    fi
+
+    # Determine packages to deploy
+    if [[ -n "{{ pkg }}" ]]; then
+      PACKAGES=("{{ pkg }}")
+    else
+      PACKAGES=({{ _buildable_packages }})
+    fi
+
+    DEPLOYED=()
+    for PKG in "${PACKAGES[@]}"; do
+      IMAGE=$(just pkg-image "$PKG")
+      if [[ -z "$IMAGE" ]]; then
+        printf "${YELLOW}⚠️  Skipping %s — no Docker image${RESET}\n" "$PKG"
+        continue
+      fi
+
+      VERSION="v$(get_package_version "$PKG")"
+
+      # Verify the image exists in the registry
+      printf "${CYAN}🔍 Verifying %s:%s exists in registry...${RESET}" "$IMAGE" "$VERSION"
+      if ! docker manifest inspect "${IMAGE}:${VERSION}" > /dev/null 2>&1; then
+        printf "\n${RED}❌ Image %s:%s not found in registry. Skipping.${RESET}\n" "$IMAGE" "$VERSION"
+        continue
+      fi
+      printf "${GREEN} ✓${RESET}\n"
+
+      # Update the image tag in prod overlay
+      printf "${CYAN}📝 Updating %s → %s in prod overlay...${RESET}" "$PKG" "$VERSION"
+      sed -i '' "s|image: ${IMAGE}:.*|image: ${IMAGE}:${VERSION}|g" "$PROD_PATCH"
+      printf "${GREEN} ✓${RESET}\n"
+      DEPLOYED+=("${PKG} ${VERSION}")
+    done
+
+    # Commit and push in gitops repo
+    cd "$GITOPS_DIR"
+    if git diff --quiet; then
+      printf "${YELLOW}⚠️  No changes — all packages already at current versions in prod${RESET}\n"
+      exit 0
+    fi
+
+    if [[ ${#DEPLOYED[@]} -eq 1 ]]; then
+      COMMIT_MSG="deploy: ${DEPLOYED[0]} to prod"
+    else
+      COMMIT_MSG="deploy: $(IFS=', '; echo "${DEPLOYED[*]}") to prod"
+    fi
+
+    git add -A
+    git commit -m "$COMMIT_MSG"
+    printf "${CYAN}🚀 Pushing to gitops repo...${RESET}"
+    git push
+    printf "${GREEN} ✓${RESET}\n"
+    printf "${GREEN}✅ Deployed to prod: %s${RESET}\n" "$(IFS=', '; echo "${DEPLOYED[*]}")"
+
 # ─── Local Database ───────────────────────────────────────────────
 
 LOCAL_DB_PORT := "4700"
@@ -507,3 +581,11 @@ reset-local:
   tmux kill-session -t nannos 2>/dev/null || true
   cd scripts/local-dev && docker compose down -v
   @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."
+
+recon: # Reconcile local Kubernetes cluster with Flux (for testing manifests)
+  #!/usr/bin/env bash
+  for name in $(kubectl get imagerepository -n flux-system -o jsonpath='{.items[*].metadata.name}'); do
+    (flux reconcile image repository "$name" 2>&1 | sed "s/^/[$name] /" && flux reconcile image policy "$name" 2>&1 | sed "s/^/[$name] /") &
+  done
+  wait
+  flux reconcile kustomization nannos-app --with-source

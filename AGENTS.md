@@ -23,6 +23,9 @@ This is a monorepo for **Nannos** — a multi-agent AI orchestration platform bu
 
 ```
 Clients (console-frontend, client-slack, client-email)
+    │ REST/WS/A2A
+    ▼
+Console Backend (admin hub, API, scheduler)
     │ A2A
     ▼
 Orchestrator Agent (LangGraph — plans & delegates)
@@ -46,6 +49,16 @@ Sub-Agents (agent-creator, agent-runner, user-created agents)
 | `client-slack-frontend` | React/TS | SPA | 8080 | Slack admin config UI |
 | `client-email` | Node/TS | A2A Svc | 3001 | Email client via AWS SES/SNS. Express 5 |
 | `playground-frontend` | — | — | — | Placeholder/unused |
+
+### Dependency Chain
+
+```
+ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-runner }
+                                              ↕ A2A
+                                      console-backend
+                                     ↕ REST        ↕ A2A
+                              console-frontend    client-slack, client-email
+```
 
 ### Key Design Decisions
 
@@ -88,3 +101,4 @@ Manifests in `example-k8s-deployment/base/`. Uses Kustomize with overlays for im
 ## Skills
 
 - **add-package** (`.github/skills/add-package/SKILL.md`): Checklist and procedure for adding a new package to the monorepo — covers directory setup, release-helpers.sh, justfile, and optional k8s manifests.
+- **deploy** (`.github/skills/deploy/SKILL.md`): Deploy a package to dev via FluxCD — covers `just deploy-dev`, gitops symlink requirements, Flux image automation with `-next` tag filtering, and troubleshooting.
