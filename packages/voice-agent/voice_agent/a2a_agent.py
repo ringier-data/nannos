@@ -69,7 +69,10 @@ from a2a.types import Message, Task, TaskState
 from langsmith import traceable
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent.base import BaseAgent
+from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token, set_request_user_sub
+from ringier_a2a_sdk.middleware.credential_injector import BaseCredentialInjector, TokenExchangeCredentialInjector
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
+from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
 from voice_agent.agent import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
@@ -79,9 +82,12 @@ from voice_agent.call_bridge import (
     _PENDING_CALLS,
     OutboundCallRequest,
     make_outbound_call,
+    send_sms,
 )
 
 _PLAYGROUND_BACKEND_URL = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
+_PLAYGROUND_FRONTEND_URL = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
+_MCP_GATEWAY_URL: str | None = os.getenv("MCP_GATEWAY_URL") or None
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +186,32 @@ class VoiceAgent(BaseAgent):
     SUPPORTED_CONTENT_TYPES = ["application/json"]
 
     def __init__(self):
+        oauth2_client = OidcOAuth2Client(
+            client_id=os.getenv("OIDC_CLIENT_ID", "voice-agent"),
+            client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
+            issuer=os.getenv("OIDC_ISSUER", ""),
+        )
+
+        # Create credential injection interceptor with token exchange
+        self._credential_injector = TokenExchangeCredentialInjector(
+            oidc_client=oauth2_client,
+            target_client_id=os.environ.get("MCP_GATEWAY_CLIENT_ID", "gatana"),
+            requested_scopes=["openid", "profile", "offline_access"],
+        )
         super().__init__()
         self._active_sessions: dict[str, dict] = {}
+        # Tracks in-progress pre-warm tasks keyed by call_sid.
+        # Populated by _stream_phone_call; consumed by _start_audio_session.
+        self._prewarm_tasks: dict[str, asyncio.Task] = {}
+        # Tracks sessions where MCP auth failed (set by _start_audio_session
+        # on receiving an mcp_auth_failed event from GeminiLiveAgent).
+        self._pending_mcp_auth: dict[str, bool] = {}
+
+    def _get_tool_interceptors(self) -> list[BaseCredentialInjector]:
+        return [self._credential_injector]
+
+    def _get_tool_interceptors(self) -> list[BaseCredentialInjector]:
+        return [self._credential_injector]
 
     @traceable(name="voice-agent", run_type="chain")
     async def _stream_impl(
@@ -231,33 +261,49 @@ class VoiceAgent(BaseAgent):
             logger.exception(f"Unexpected error in voice agent: {session_key}")
             yield AgentStreamResponse(state=TaskState.failed, content=f"Error: {str(e)}")
 
-    async def _start_audio_session(
+    async def _create_audio_session(
         self,
-        init_config: dict,
         session_key: str,
-    ) -> AsyncIterable[AgentStreamResponse]:
-        """Start a Gemini Live audio session (Twilio / browser WebSocket path).
+        system_prompt: str | None,
+        voice_name: str | None,
+        mcp_tools: list[str],
+        access_token: str | None,
+        phone_number: str | None = None,
+    ) -> None:
+        """Create a GeminiLiveAgent, start it, and register in ``_active_sessions``.
 
-        This is intentionally separate from ``_stream_impl`` so that the A2A
-        endpoint always requires a phone number, while Twilio/WebSocket callers
-        can still start a real-time session by calling this method directly.
-
-        Args:
-            init_config: Dict with optional ``system_prompt``, ``voice_name``.
-            session_key: Unique key (call_sid or WebSocket session id).
+        Single source of truth for session creation — used by both
+        ``_prewarm_audio_session`` (outbound calls, fired during ringing) and
+        ``_start_audio_session`` (cold-start fallback for inbound / browser).
         """
-        system_prompt = init_config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
-        system_prompt += (
+        if session_key in self._active_sessions:
+            return
+
+        prompt = (system_prompt or DEFAULT_SYSTEM_PROMPT) + (
             " IMPORTANT: Keep responses short and conversational. Do NOT use markdown, lists, or special characters."
         )
-        voice_name = init_config.get("voice_name") or "Kore"
+        voice = voice_name or "Kore"
 
-        logger.info(f"Audio session starting: {session_key}")
+        mcp_headers: dict[str, str] | None = None
+        if access_token:
+            set_request_user_sub(session_key)
+            set_request_access_token(access_token)
+            try:
+                mcp_headers = await self._credential_injector.get_headers()
+                logger.info("Token exchanged for MCP access (session=%s)", session_key)
+            except Exception as exc:
+                logger.warning("Token exchange failed (%s) — continuing without MCP headers", exc)
 
         audio_in: asyncio.Queue[bytes | str | None] = asyncio.Queue()
         event_out: asyncio.Queue[dict] = asyncio.Queue()
 
-        agent = GeminiLiveAgent(system_prompt=system_prompt, voice_name=voice_name)
+        agent = GeminiLiveAgent(
+            system_prompt=prompt,
+            voice_name=voice,
+            mcp_gateway_url=_MCP_GATEWAY_URL,
+            mcp_headers=mcp_headers,
+            mcp_tool_filter=mcp_tools if mcp_tools else None,
+        )
         agent_task = asyncio.create_task(agent.run(audio_in, event_out))
 
         self._active_sessions[session_key] = {
@@ -265,8 +311,86 @@ class VoiceAgent(BaseAgent):
             "event_out": event_out,
             "agent": agent,
             "agent_task": agent_task,
+            "phone_number": phone_number,
         }
+        logger.info(
+            "Gemini session created: %s (voice=%s, mcp_tools=%s, gateway=%s)",
+            session_key,
+            voice,
+            mcp_tools,
+            _MCP_GATEWAY_URL,
+        )
 
+    async def _prewarm_audio_session(
+        self,
+        session_key: str,
+        system_prompt: str,
+        voice_name: str | None,
+        mcp_tools: list[str],
+        access_token: str | None,
+        phone_number: str | None = None,
+    ) -> None:
+        """Pre-warm a Gemini session while Twilio is ringing the callee.
+
+        Fired by ``_stream_phone_call`` right after ``make_outbound_call()`` returns
+        the call_sid. The MCP handshake + Gemini WebSocket connection happen
+        concurrently with Twilio dialling, so the session is ready when answered.
+        """
+        await self._create_audio_session(
+            session_key=session_key,
+            system_prompt=system_prompt,
+            voice_name=voice_name,
+            mcp_tools=mcp_tools,
+            access_token=access_token,
+            phone_number=phone_number,
+        )
+
+    async def _start_audio_session(
+        self,
+        init_config: dict,
+        session_key: str,
+    ) -> AsyncIterable[AgentStreamResponse]:
+        """Start a Gemini Live audio session (Twilio / browser WebSocket path).
+
+        For outbound calls the Gemini session is usually pre-warmed by
+        ``_stream_phone_call`` while the phone was ringing. This method
+        attaches to it, eliminating the cold-start delay after the callee answers.
+        Falls back to full setup for inbound calls and browser WebSocket sessions.
+
+        Args:
+            init_config: Dict with optional ``system_prompt``, ``voice_name``.
+            session_key: Unique key (call_sid or WebSocket session id).
+        """
+        # ── Attach to pre-warmed session if available ─────────────────────────
+        if session_key in self._active_sessions:
+            voice_name = self._active_sessions[session_key]["agent"].voice_name
+            logger.info("Attaching to pre-warmed Gemini session: %s (voice=%s)", session_key, voice_name)
+        else:
+            # Pre-warm task may still be connecting (callee answered very quickly)
+            prewarm_task = self._prewarm_tasks.pop(session_key, None)
+            if prewarm_task is not None and not prewarm_task.done():
+                logger.info("Pre-warm still in progress for %s — waiting up to 5 s", session_key)
+                try:
+                    await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=5.0)
+                except (asyncio.TimeoutError, Exception) as exc:
+                    logger.warning("Pre-warm wait failed (%s) — falling back to full setup", exc)
+
+            if session_key in self._active_sessions:
+                voice_name = self._active_sessions[session_key]["agent"].voice_name
+                logger.info("Attached to pre-warmed session after wait: %s (voice=%s)", session_key, voice_name)
+            else:
+                # ── Cold start (inbound calls, browser WebSocket, pre-warm failed) ──
+                await self._create_audio_session(
+                    session_key=session_key,
+                    system_prompt=init_config.get("system_prompt"),
+                    voice_name=init_config.get("voice_name"),
+                    mcp_tools=init_config.get("mcp_tools") or [],
+                    access_token=init_config.get("access_token"),
+                    phone_number=None,
+                )
+
+        voice_name = self._active_sessions[session_key]["agent"].voice_name
+        event_out = self._active_sessions[session_key]["event_out"]
         yield AgentStreamResponse(
             state=TaskState.working,
             content="Voice session initialized",
@@ -305,6 +429,28 @@ class VoiceAgent(BaseAgent):
                 elif event_type == "interrupted":
                     yield AgentStreamResponse(
                         state=TaskState.working, content="Interrupted", metadata={"type": "interrupted"}
+                    )
+                elif event_type == "mcp_auth_failed":
+                    authorize_url = event.get("authorize_url", "")
+                    caller_number = self._active_sessions.get(session_key, {}).get("phone_number")
+                    logger.warning(
+                        "MCP auth failed for session %s: %s (authorize_url=%s)",
+                        session_key,
+                        event.get("message"),
+                        authorize_url,
+                    )
+                    if caller_number and authorize_url:
+                        sms_body = f"Your AI assistant needs authorization to use a tool. Please visit: {authorize_url}"
+                        try:
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(None, send_sms, caller_number, sms_body)
+                            logger.info("MCP auth URL SMS sent to %s (session=%s)", caller_number, session_key)
+                        except Exception as sms_exc:
+                            logger.warning("Failed to send MCP auth SMS: %s", sms_exc)
+                    yield AgentStreamResponse(
+                        state=TaskState.working,
+                        content="Tool authorization required — SMS sent with instructions.",
+                        metadata={"type": "mcp_auth_failed", "authorize_url": authorize_url},
                     )
                 elif event_type == "error":
                     error_msg = event.get("message", "Unknown error")
@@ -396,8 +542,10 @@ class VoiceAgent(BaseAgent):
         # ── Resolve phone number ──────────────────────────────────────────────
         # Security: only the authenticated user's own phone number is allowed.
         #
-        # The phone_number JWT claim is computed by a Keycloak script mapper:
-        # phoneNumberOverride ?? phoneNumber (already the resolved value).
+        # Prefer the JWT claim (pre-resolved by Keycloak mapper). If absent (e.g.
+        # the token is an exchanged orchestrator/scheduler token that doesn't carry
+        # the phone_number claim), fall back to GET /me on the backend which returns
+        # phone_number_override ?? phone_number_idp from the DB.
         phone_number = user_config.phone_number
         logger.info(f"User config: {user_config.model_dump()}")
 
@@ -419,7 +567,8 @@ class VoiceAgent(BaseAgent):
             system_prompt=system_prompt,
             voice_name=voice_name,
             mcp_tools=mcp_tools,
-            context="\n".join(context_messages) if context_messages else None,
+            access_token=user_config.access_token.get_secret_value() if user_config.access_token else None,
+            context_messages=context_messages or [],
         ):
             yield event
 
@@ -434,13 +583,6 @@ class VoiceAgent(BaseAgent):
 
         # Local-dev bypass: if no token came in via the request, fall back to a
         # static dev token set in the environment (e.g. obtained via `start-dev.sh`).
-        if not token:
-            token = os.environ.get("PLAYGROUND_BACKEND_DEV_TOKEN")
-            if token:
-                logger.info(
-                    "sub_agent_id=%s: no request token; using PLAYGROUND_BACKEND_DEV_TOKEN for config fetch",
-                    sub_agent_id,
-                )
 
         if not token:
             logger.warning(
@@ -492,7 +634,8 @@ class VoiceAgent(BaseAgent):
         system_prompt: str | None,
         voice_name: str | None,
         mcp_tools: list[str],
-        context: str | None,
+        access_token: str | None,
+        context_messages: list[str] | None,
     ) -> AsyncIterable[AgentStreamResponse]:
         """Initiate a Twilio phone call and hold the A2A stream open until it ends.
 
@@ -542,13 +685,73 @@ class VoiceAgent(BaseAgent):
             )
             return
 
+        # Pre-warm the Gemini session while Twilio is ringing the callee.
+        # asyncio.create_task inherits the current context so contextvars
+        # (user token etc.) are available inside _prewarm_audio_session.
+        # By the time the callee answers, Gemini + MCP are already connected.
+        prewarm_task = asyncio.create_task(
+            self._prewarm_audio_session(
+                session_key=call_sid,
+                system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+                voice_name=voice_name,
+                mcp_tools=mcp_tools,
+                access_token=access_token,
+                phone_number=phone_number,
+            )
+        )
+        self._prewarm_tasks[call_sid] = prewarm_task
+        logger.info("Fired Gemini pre-warm while ringing (call_sid=%s)", call_sid)
+
+        # Wait for the agent's mcp_status future to be resolved.
+        # _prewarm_audio_session creates the agent and starts agent.run(), which
+        # sets mcp_status as soon as the MCP handshake succeeds or fails.
+        # We wait for the prewarm task first (up to 5 s) to ensure the agent
+        # object exists in _active_sessions, then await mcp_status (up to 15 s).
+        try:
+            await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("Pre-warm not yet done at MCP-status check point: %s", exc)
+
+        mcp_auth_failed = False
+        session = self._active_sessions.get(call_sid)
+        if session:
+            agent = session["agent"]
+            if agent.mcp_status is not None:
+                try:
+                    mcp_ok = await asyncio.wait_for(asyncio.shield(agent.mcp_status), timeout=15.0)
+                    mcp_auth_failed = not mcp_ok
+                    logger.info("MCP status for call_sid=%s: %s", call_sid, "ok" if mcp_ok else "failed")
+                except (asyncio.TimeoutError, Exception) as exc:
+                    logger.debug("MCP status check timed out or failed: %s", exc)
+
+        # Send SMS if MCP auth failed during pre-warm so the caller knows
+        # their tools are unavailable and can authorize in the browser.
+        if mcp_auth_failed:
+            sms_body = (
+                "Your AI assistant is calling but couldn't connect to your tools. "
+                f"Please open {_PLAYGROUND_FRONTEND_URL} and authorize your tool "
+                "connections, then try again."
+            )
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, send_sms, phone_number, sms_body)
+                logger.info("MCP auth failure SMS sent to %s (call_sid=%s)", phone_number, call_sid)
+                yield AgentStreamResponse(
+                    state=TaskState.working,
+                    content="SMS sent to caller with tool authorization instructions.",
+                    metadata={"type": "mcp_auth_sms_sent"},
+                )
+            except Exception as sms_exc:
+                logger.warning("Failed to send MCP auth SMS to %s: %s", phone_number, sms_exc)
+
         # Register config so twilio_stream picks it up when the call connects.
         _PENDING_CALLS[call_sid] = OutboundCallRequest(
             to=phone_number,
             system_prompt=system_prompt,
             voice_name=voice_name,
             mcp_tools=mcp_tools,
-            context=context,
+            access_token=access_token,
+            context_messages=context_messages,
         )
 
         # Register future — twilio_stream finally block will resolve it
@@ -596,6 +799,10 @@ class VoiceAgent(BaseAgent):
         yield AgentStreamResponse(state=TaskState.completed, content=content)
 
     async def _end_session(self, session_key: str):
+        # Cancel any pending pre-warm task that never got picked up
+        prewarm_task = self._prewarm_tasks.pop(session_key, None)
+        if prewarm_task is not None and not prewarm_task.done():
+            prewarm_task.cancel()
         if session_key not in self._active_sessions:
             return
         session = self._active_sessions.pop(session_key)

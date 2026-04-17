@@ -46,25 +46,18 @@ import asyncio
 import base64
 import json
 import logging
-import os
 
 # audioop is stdlib on Python ≤ 3.12; audioop-lts (in dependencies) provides
 # the same `audioop` module name on Python 3.13+ where it was removed.
 import audioop
-from a2a.types import Task, TaskState, TaskStatus
+from a2a.types import TaskState
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
-from ringier_a2a_sdk.models import UserConfig
+from fastapi.responses import Response
 
 from voice_agent.a2a_agent import VoiceAgent
 from voice_agent.call_bridge import (
     _CALL_FUTURES,
     _PENDING_CALLS,
-    OutboundCallRequest,
-)
-from voice_agent.call_bridge import (
-    make_outbound_call as _make_outbound_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,87 +73,6 @@ _SW = 2  # sample width: 16-bit = 2 bytes
 
 # Global A2A voice agent instance (shared across WebSocket connections)
 _voice_agent = VoiceAgent()
-
-
-# ── Outbound calls ───────────────────────────────────────────────────────────
-# OutboundCallRequest, _PENDING_CALLS, and _CALL_FUTURES are imported from
-# call_bridge above to avoid circular imports with a2a_agent.py.
-
-
-class _OutboundCallRequest(BaseModel):
-    to: str  # E.164 phone number, e.g. "+41791234567"
-
-
-def _public_url_from_request(request: Request) -> str:
-    """Derive the server's public HTTP URL from the request Host header."""
-    host = request.headers.get("host", "localhost:8002")
-    scheme = "https" if request.url.scheme in ("https", "wss") else "http"
-    return f"{scheme}://{host}"
-
-
-@twilio_router.post("/call", summary="Initiate an outbound call")
-async def outbound_call_post(body: _OutboundCallRequest, request: Request) -> JSONResponse:
-    """Dial `body.to` via the Twilio REST API and connect the answered call to the agent.
-
-    The PUBLIC_URL env var should be set to your publicly reachable server URL
-    (e.g. the ngrok URL) so Twilio can fetch the TwiML webhook. Falls back to
-    inferring the URL from the request Host header.
-    """
-    public_url = os.environ.get("PUBLIC_URL") or _public_url_from_request(request)
-    try:
-        call_sid = _make_outbound_call(body.to, public_url)
-    except KeyError as exc:
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Missing environment variable: {exc}"},
-        )
-    return JSONResponse({"status": "calling", "to": body.to, "call_sid": call_sid})
-
-
-@twilio_router.post("/call/custom", summary="Initiate call with custom prompt")
-async def outbound_call_with_prompt(
-    body: OutboundCallRequest,
-    request: Request,
-) -> JSONResponse:
-    """Initiate an outbound call with custom system prompt.
-
-    The system_prompt will be used to configure the GeminiLiveAgent for this specific call.
-    When the WebSocket connects, it retrieves the config from _PENDING_CALLS using call_sid.
-
-    Args:
-        body: OutboundCallRequest with phone number and optional custom prompt/voice
-        request: FastAPI request for deriving public URL
-
-    Returns:
-        JSON response with call status and call_sid
-    """
-    public_url = os.environ.get("PUBLIC_URL") or _public_url_from_request(request)
-
-    try:
-        call_sid = _make_outbound_call(body.to, public_url)
-
-        # Store call config for WebSocket connection
-        _PENDING_CALLS[call_sid] = body
-        logger.info(
-            "Outbound call with custom config: call_sid=%s, has_prompt=%s, voice=%s",
-            call_sid,
-            body.system_prompt is not None,
-            body.voice_name or "default",
-        )
-
-        return JSONResponse(
-            {
-                "status": "calling",
-                "to": body.to,
-                "call_sid": call_sid,
-                "has_custom_prompt": body.system_prompt is not None,
-            }
-        )
-    except KeyError as exc:
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Missing environment variable: {exc}"},
-        )
 
 
 # ── TwiML webhook ─────────────────────────────────────────────────────────────
@@ -246,6 +158,8 @@ async def twilio_stream(websocket: WebSocket) -> None:
                             {
                                 "system_prompt": call_config.system_prompt,
                                 "voice_name": call_config.voice_name or "Kore",
+                                "mcp_tools": call_config.mcp_tools or [],
+                                "access_token": call_config.access_token,
                             }
                         )
                     else:
@@ -256,22 +170,11 @@ async def twilio_stream(websocket: WebSocket) -> None:
                         )
                         init_query = json.dumps({})  # Use defaults
 
-                    # Create UserConfig and Task for A2A protocol
-                    user_config = UserConfig(
-                        user_sub=state["call_sid"],  # Use call_sid as user identifier
-                        name="Phone Caller",
-                        email="caller@phone.local",
-                    )
-                    task = Task(
-                        id=state["call_sid"],
-                        context_id=state["call_sid"],
-                        status=TaskStatus(state=TaskState.submitted),
-                    )
 
                     # Start A2A agent streaming (non-blocking)
                     nonlocal agent_output_task
                     agent_output_task = asyncio.create_task(
-                        _agent_to_twilio(state["session_key"], user_config, task, init_query)
+                        _agent_to_twilio(state["session_key"], init_query)
                     )
 
                     # Inject context messages as human turns after the session starts.
@@ -328,7 +231,7 @@ async def twilio_stream(websocket: WebSocket) -> None:
             if state["session_key"]:
                 await _voice_agent._end_session(state["session_key"])
 
-    async def _agent_to_twilio(session_key: str, user_config, task, init_query: str) -> None:
+    async def _agent_to_twilio(session_key: str, init_query: str) -> None:
         """Consume A2A agent output and send to Twilio."""
         try:
             # The call is already connected at this point — start a Gemini Live

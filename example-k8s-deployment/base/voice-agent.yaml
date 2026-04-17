@@ -62,6 +62,10 @@ spec:
           value: "ie1"
         - name: TWILIO_EDGE
           value: "dublin"
+        - name: MCP_GATEWAY_URL
+          value: "https://YOUR_ORG_ID.gatana.ai/mcp"
+        - name: MCP_TIMEOUT_SECONDS
+          value: "60"
         - name: LANGSMITH_TRACING
           value: "true"
         - name: LANGSMITH_ENDPOINT

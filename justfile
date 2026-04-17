@@ -321,7 +321,7 @@ build-pkg pkg:
     build_with_pane "$PKG" "$LOGFILE" \
       docker buildx build --platform "$PLATFORM" \
       "${BUILD_CTX_ARGS[@]}" \
-      "${TARGET_ARGS[@]}" \
+      ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
       -t "${IMAGE}:${TAG}" "${DIR}"
 
     printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
@@ -335,7 +335,7 @@ build-pkg pkg:
       build_with_pane "$PKG" "$LOGFILE" \
         docker buildx build --platform "$PLATFORM" \
         "${BUILD_CTX_ARGS[@]}" \
-        "${TARGET_ARGS[@]}" \
+        ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
         -t "${IMAGE}:${TAG}" --push "${DIR}"
 
       printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"

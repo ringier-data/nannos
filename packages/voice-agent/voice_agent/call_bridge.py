@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 class OutboundCallRequest(BaseModel):
-    """Config for an outbound Twilio call, including agent personality.
+    """Config for an outbound Twilio call, including agent personality
+    and access_token. Access token needs to be forwarded for authentication.
 
     Stored in ``_PENDING_CALLS[call_sid]`` after the call is initiated so the
     Twilio Media Stream WebSocket handler can pick it up when the call connects.
@@ -33,12 +34,10 @@ class OutboundCallRequest(BaseModel):
     """
 
     to: str  # E.164 phone number, e.g. "+41791234567"
-    system_prompt: str | None = None  # From sub-agent config_version.system_prompt
-    voice_name: str | None = None  # Gemini voice (Kore, Puck, Aoede, …)
-    # MCP tool names from sub-agent config — wired into GeminiLiveAgent (next step)
+    system_prompt: str | None = None
+    voice_name: str | None = None
     mcp_tools: list[str] = []
-    # Human messages to inject into the Gemini Live session after the call connects.
-    # Sent as complete user turns via session.send_client_content() before audio streaming.
+    access_token: str | None = None  # User Bearer token forwarded to MCP gateway
     context_messages: list[str] = []
 
 
@@ -89,5 +88,30 @@ def make_outbound_call(to_number: str, public_url: str) -> str:
 
     client = Client(api_key, api_secret, account_sid, **kwargs)
     call = client.calls.create(to=to_number, from_=from_number, url=twiml_url)
+    if not call.sid:
+        logger.error("Failed to initiate call to=%s: %s", to_number, call)
+        raise Exception(f"Failed to initiate call: {call}")
     logger.info("Outbound call initiated to=%s call_sid=%s", to_number, call.sid)
     return call.sid
+
+
+def send_sms(to_number: str, body: str) -> str:
+    """Send an SMS via the Twilio Programmable Messaging API.
+
+    Returns the Twilio message SID.
+    """
+    from twilio.rest import Client  # noqa: PLC0415 — lazy import
+
+    account_sid = os.environ["TWILIO_ACCOUNT_SID"]
+    api_secret = os.environ["TWILIO_VERIFY_API_SECRET"]
+    api_key = os.environ["TWILIO_VERIFY_API_KEY"]
+    from_number = os.environ["TWILIO_PHONE_NUMBER"]
+    # SMS is only available in us -> do not set region/edge
+
+    client = Client(api_key, api_secret, account_sid, region="us1", edge="ashburn")
+    message = client.messages.create(to=to_number, from_=from_number, body=body)
+    logger.info("SMS sent to=%s message_sid=%s", to_number, message.sid)
+    if not message.sid:
+        logger.error("Failed to send SMS to=%s: %s", to_number, message)
+        raise Exception(f"Failed to send SMS: {message}")
+    return message.sid

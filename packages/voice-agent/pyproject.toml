@@ -15,6 +15,7 @@ dependencies = [
     "twilio>=9.0",
     "a2a-sdk[http-server]>=0.3.9",
     "ringier-a2a-sdk[langgraph]>=0.7.0",
+    "mcp>=1.0.0",
     "langsmith>=0.2.0",
     "pytz>=2025.2",
     "rcplus-alloy-common>=8.11.0",
