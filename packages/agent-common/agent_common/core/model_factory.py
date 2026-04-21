@@ -34,8 +34,8 @@ _MODEL_METADATA: dict[str, dict] = {
     "claude-sonnet-4.5": {"label": "Claude Sonnet 4.5", "provider": "AWS Bedrock", "supports_thinking": True},
     "claude-sonnet-4.6": {"label": "Claude Sonnet 4.6", "provider": "AWS Bedrock", "supports_thinking": True},
     "claude-haiku-4-5": {"label": "Claude Haiku 4.5", "provider": "AWS Bedrock", "supports_thinking": True},
-    "gemini-3-pro-preview": {
-        "label": "Gemini 3 Pro Preview",
+    "gemini-3.1-pro-preview": {
+        "label": "Gemini 3.1 Pro Preview",
         "provider": "Google Vertex AI",
         "supports_thinking": True,
         "thinking_levels": ["low", "high"],
@@ -89,8 +89,8 @@ _BEDROCK_MODELS: dict[str, dict] = {
 }
 
 _GEMINI_MODELS: dict[str, dict] = {
-    "gemini-3-pro-preview": {
-        "model_id": "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview": {
+        "model_id": "gemini-3.1-pro-preview",
         "input_modes": ["text", "image", "audio", "video", "file"],
         "backend": "google",
     },
@@ -384,7 +384,7 @@ def create_model(
     Returns:
         BaseChatModel: The created model instance
     """
-    if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+    if model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
         # Lazy import for Gemini provider
         from google.oauth2 import service_account
         from langchain_google_genai import ChatGoogleGenerativeAI

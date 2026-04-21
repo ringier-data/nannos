@@ -43,8 +43,8 @@ export const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
   { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6', provider: 'AWS Bedrock', supportsThinking: true },
   { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'AWS Bedrock', supportsThinking: true },
   {
-    value: 'gemini-3-pro-preview',
-    label: 'Gemini 3 Pro Preview',
+    value: 'gemini-3.1-pro-preview',
+    label: 'Gemini 3.1 Pro Preview',
     provider: 'Google Vertex AI',
     supportsThinking: true,
   },
@@ -132,7 +132,7 @@ export function getAvailableThinkingLevels(modelValue: string | null | undefined
   }
 
   // Fallback: Gemini 3 Pro only supports low and high
-  if (modelValue === 'gemini-3-pro-preview') {
+  if (modelValue === 'gemini-3.1-pro-preview') {
     return THINKING_LEVEL_OPTIONS.filter((opt) => opt.value === 'low' || opt.value === 'high');
   }
   // All other models support all levels
