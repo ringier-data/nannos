@@ -142,18 +142,18 @@ ALL_MODELS: list[ModelType] = [
     "claude-haiku-4-5",
     "gpt-4o",
     "gpt-4o-mini",
-    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
 ]
 
 BEDROCK_MODELS: list[ModelType] = ["claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"]
 AZURE_MODELS: list[ModelType] = ["gpt-4o", "gpt-4o-mini"]
-VERTEXAI_MODELS: list[ModelType] = ["gemini-3-pro-preview", "gemini-3-flash-preview"]
+VERTEXAI_MODELS: list[ModelType] = ["gemini-3.1-pro-preview", "gemini-3-flash-preview"]
 
 THINKING_MODELS: dict[ModelType, list[ThinkingLevel]] = {
     "claude-sonnet-4.5": [ThinkingLevel.minimal, ThinkingLevel.low, ThinkingLevel.medium],
     "claude-sonnet-4.6": [ThinkingLevel.minimal, ThinkingLevel.low, ThinkingLevel.medium],
-    "gemini-3-pro-preview": [ThinkingLevel.low],
+    "gemini-3.1-pro-preview": [ThinkingLevel.low],
     "gemini-3-flash-preview": [ThinkingLevel.low],
 }
 
