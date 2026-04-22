@@ -366,7 +366,7 @@ class GraphFactory:
         """Create a model instance for the given model type.
 
         Args:
-            model_type: The type of model to create ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
+            model_type: Any valid ModelType (see agent_common.models.base.ModelType)
 
         Returns:
             BaseChatModel: The created model instance
@@ -387,7 +387,7 @@ class GraphFactory:
         use with_config on the same model instance, but those parameters are not configurable that way yet.
 
         Args:
-            model_type: The type of model ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
+            model_type: Any valid ModelType (see agent_common.models.base.ModelType)
 
         Returns:
             BaseChatModel: The model instance (cached or newly created)
