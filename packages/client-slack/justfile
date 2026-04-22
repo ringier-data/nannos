@@ -60,8 +60,12 @@ reset-db:
   set -e
   docker ps -q --filter name=nannos-local-db | xargs -r docker stop
   docker ps -aq --filter name=nannos-local-db | xargs -r docker rm
-  docker volume rm {{LOCAL_DB_VOLUME}} 2>/dev/null || true
-  echo "✓ Database data cleared. Run 'just local-db' to start fresh."
+  if docker volume inspect {{LOCAL_DB_VOLUME}} > /dev/null 2>&1; then
+    docker volume rm {{LOCAL_DB_VOLUME}}
+    echo "✓ Database data cleared. Run 'just local-db' to start fresh."
+  else
+    echo "✓ No database volume to remove."
+  fi
 
 prepare-start: migrate
   #!/usr/bin/env bash
