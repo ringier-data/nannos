@@ -56,6 +56,12 @@ export const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
     provider: 'Google Vertex AI',
     supportsThinking: true,
   },
+  {
+    value: 'gemini-3.1-flash-lite-preview',
+    label: 'Gemini 3.1 Flash Lite Preview',
+    provider: 'Google Vertex AI',
+    supportsThinking: true,
+  },
 ] as const;
 
 /**

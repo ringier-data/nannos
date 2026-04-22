@@ -38,6 +38,7 @@ MODELS_SUPPORTING_THINKING = {
     "claude-sonnet-4.5",
     "claude-haiku-4-5",
     "gemini-3.1-pro-preview",
+    "gemini-3.1-flash-lite-preview",
     "gemini-3-flash-preview",
 }
 

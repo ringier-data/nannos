@@ -47,6 +47,11 @@ _MODEL_METADATA: dict[str, dict] = {
         "provider": "Google Vertex AI",
         "supports_thinking": True,
     },
+    "gemini-3.1-flash-lite-preview": {
+        "label": "Gemini 3.1 Flash Lite Preview",
+        "provider": "Google Vertex AI",
+        "supports_thinking": True,
+    },
     "local": {"label": "Local Model", "provider": "OpenAI Compatible", "supports_thinking": False},
 }
 
@@ -112,6 +117,11 @@ _GEMINI_MODELS: dict[str, dict] = {
     },
     "gemini-3-flash-preview": {
         "model_id": "gemini-3-flash-preview",
+        "input_modes": ["text", "image", "audio", "video", "file"],
+        "backend": "google",
+    },
+    "gemini-3.1-flash-lite-preview": {
+        "model_id": "gemini-3.1-flash-lite-preview",
         "input_modes": ["text", "image", "audio", "video", "file"],
         "backend": "google",
     },
@@ -400,7 +410,7 @@ def create_model(
     Returns:
         BaseChatModel: The created model instance
     """
-    if model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
+    if model_type in ("gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"):
         # Lazy import for Gemini provider
         from google.oauth2 import service_account
         from langchain_google_genai import ChatGoogleGenerativeAI

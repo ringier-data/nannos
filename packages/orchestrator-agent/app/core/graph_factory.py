@@ -597,7 +597,7 @@ class GraphFactory:
                 requires_response_tool = True
             else:
                 response_format = AutoStrategy(schema=FinalResponseSchema)
-        elif model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
+        elif model_type in ("gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"):
             # Gemini models: use explicit FinalResponseSchema tool instead of AutoStrategy/ToolStrategy
             # because Gemini outputs structured JSON in content text rather than via tool_call_chunks
             response_format = None
@@ -610,7 +610,7 @@ class GraphFactory:
         # Add Google built-in tools for Gemini models
         # These are passed via the tools parameter so create_deep_agent can bind them
         # (bind_tools on the model directly returns a RunnableBinding which isn't a BaseChatModel)
-        if model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
+        if model_type in ("gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"):
             logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
             static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 
