@@ -120,7 +120,7 @@ export const THINKING_LEVEL_OPTIONS = [
  *
  * Uses the model's thinkingLevels field from the API if available,
  * otherwise falls back to hardcoded restrictions:
- * - Gemini 3 Pro: only supports 'low' and 'high'
+ * - Gemini 3.1 Pro: only supports 'low', 'medium' and 'high'
  * - All others: supports all levels
  */
 export function getAvailableThinkingLevels(modelValue: string | null | undefined, models?: ModelOption[]) {
@@ -131,9 +131,9 @@ export function getAvailableThinkingLevels(modelValue: string | null | undefined
     return THINKING_LEVEL_OPTIONS.filter((opt) => model.thinkingLevels!.includes(opt.value));
   }
 
-  // Fallback: Gemini 3 Pro only supports low and high
+  // Fallback: Gemini 3.1 Pro only supports low, medium and high
   if (modelValue === 'gemini-3.1-pro-preview') {
-    return THINKING_LEVEL_OPTIONS.filter((opt) => opt.value === 'low' || opt.value === 'high');
+    return THINKING_LEVEL_OPTIONS.filter((opt) => opt.value === 'low' || opt.value === 'medium' || opt.value === 'high');
   }
   // All other models support all levels
   return THINKING_LEVEL_OPTIONS;

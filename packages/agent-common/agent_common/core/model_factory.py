@@ -38,7 +38,7 @@ _MODEL_METADATA: dict[str, dict] = {
         "label": "Gemini 3.1 Pro Preview",
         "provider": "Google Vertex AI",
         "supports_thinking": True,
-        "thinking_levels": ["low", "high"],
+        "thinking_levels": ["low", "medium", "high"],
     },
     "gemini-3-flash-preview": {
         "label": "Gemini 3 Flash Preview",
