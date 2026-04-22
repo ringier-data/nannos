@@ -1,11 +1,9 @@
 """Tests for SessionService."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from playground_backend.exceptions import SessionNotFoundError, SessionOwnershipError
 from playground_backend.services.session_service import SessionService

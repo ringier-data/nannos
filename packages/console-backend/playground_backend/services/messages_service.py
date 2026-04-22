@@ -352,7 +352,19 @@ class MessagesService:
                         "(conversation_id, message_id, sort_key, user_id, role, parts, "
                         "task_id, created_at, state, raw_payload, metadata, kind, final) "
                         "VALUES (:conversation_id, :message_id, :sort_key, :user_id, :role, CAST(:parts AS jsonb), "
-                        ":task_id, :created_at, :state, :raw_payload, CAST(:metadata AS jsonb), :kind, :final)"
+                        ":task_id, :created_at, :state, :raw_payload, CAST(:metadata AS jsonb), :kind, :final) "
+                        "ON CONFLICT (message_id) DO UPDATE SET "
+                        "conversation_id = EXCLUDED.conversation_id, "
+                        "sort_key = EXCLUDED.sort_key, "
+                        "role = EXCLUDED.role, "
+                        "parts = EXCLUDED.parts, "
+                        "task_id = EXCLUDED.task_id, "
+                        "created_at = EXCLUDED.created_at, "
+                        "state = EXCLUDED.state, "
+                        "raw_payload = EXCLUDED.raw_payload, "
+                        "metadata = EXCLUDED.metadata, "
+                        "kind = EXCLUDED.kind, "
+                        "final = EXCLUDED.final"
                     ),
                     {
                         "conversation_id": conversation_id,

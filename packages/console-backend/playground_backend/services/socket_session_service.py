@@ -128,7 +128,7 @@ class SocketSessionService:
                 await db.execute(
                     text(
                         "UPDATE socket_sessions SET agent_url = :agent_url, "
-                        "custom_headers = :custom_headers, is_initialized = TRUE "
+                        "custom_headers = CAST(:custom_headers AS jsonb), is_initialized = TRUE "
                         "WHERE socket_id = :socket_id"
                     ),
                     {
