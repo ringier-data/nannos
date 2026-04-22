@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import uuid6
 from aiodynamo.client import Client
-from aiodynamo.credentials import Credentials, Key, StaticCredentials
 from aiodynamo.errors import ItemNotFound
 from aiodynamo.expressions import F, HashAndRangeKeyCondition, HashKey
 from aiodynamo.http.httpx import HTTPX
@@ -14,6 +13,7 @@ from aiodynamo.http.httpx import HTTPX
 from ..config import config
 from ..exceptions import ConversationOwnershipError
 from ..models.conversation import Conversation
+from ..utils.aws_credentials import BotoRefreshableCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +28,9 @@ class ConversationService:
         # Conversations TTL - 90 days for retention
         self.conversation_ttl_seconds = 7776000  # 90 days
 
-        # Use auto credentials - handles ECS, EKS Pod Identity, env vars,
-        # and ~/.aws/credentials with automatic token refresh
-        credentials = Credentials.auto()
+        # Use boto3 refreshable credentials - handles all AWS credential sources
+        # (EKS Pod Identity, IRSA, env vars, profiles) with automatic token refresh
+        credentials = BotoRefreshableCredentials()
 
         self.client = Client(
             HTTPX(httpx.AsyncClient()),

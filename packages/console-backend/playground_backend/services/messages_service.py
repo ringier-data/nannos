@@ -8,13 +8,13 @@ from typing import Any, cast
 import httpx
 from a2a.types import FilePart, FileWithUri, Part, TaskState
 from aiodynamo.client import Client
-from aiodynamo.credentials import Credentials
 from aiodynamo.expressions import F, HashAndRangeKeyCondition, HashKey
 from aiodynamo.http.httpx import HTTPX
 from uuid6 import uuid7
 
 from ..config import config
 from ..models.message import Message
+from ..utils.aws_credentials import BotoRefreshableCredentials
 from .file_storage_service import FileStorageService
 
 logger = logging.getLogger(__name__)
@@ -220,9 +220,9 @@ class MessagesService:
         # Messages TTL - 90 days for retention
         self.message_ttl_seconds = 7776000  # 90 days
 
-        # Use auto credentials - handles ECS, EKS Pod Identity, env vars,
-        # and ~/.aws/credentials with automatic token refresh
-        credentials = Credentials.auto()
+        # Use boto3 refreshable credentials - handles all AWS credential sources
+        # (EKS Pod Identity, IRSA, env vars, profiles) with automatic token refresh
+        credentials = BotoRefreshableCredentials()
 
         self.client = Client(
             HTTPX(httpx.AsyncClient()),
