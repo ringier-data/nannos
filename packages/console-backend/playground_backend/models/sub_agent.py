@@ -108,9 +108,7 @@ class SubAgentConfigVersion(BaseModel):
     description: str  # Agent skill set description - crucial for orchestrator routing
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: str | None = (
-        None  # LLM model: 'gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6', 'claude-haiku-4-5'
-    )
+    model: str | None = None  # LLM model (see ModelName literal for valid values)
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] = Field(default_factory=list)  # MCP tool names enabled for this version
@@ -187,6 +185,8 @@ class SubAgent(BaseModel):
 ModelName = Literal[
     "gpt-4o",
     "gpt-4o-mini",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
     "claude-sonnet-4.5",
     "claude-sonnet-4.6",
     "claude-haiku-4-5",

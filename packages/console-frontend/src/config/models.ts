@@ -39,6 +39,8 @@ function toModelOption(m: AvailableModel): ModelOption {
 export const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
   { value: 'gpt-4o', label: 'GPT-4o', provider: 'Azure OpenAI', supportsThinking: false },
   { value: 'gpt-4o-mini', label: 'GPT-4o Mini', provider: 'Azure OpenAI', supportsThinking: false },
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', provider: 'Azure OpenAI', supportsThinking: false },
+  { value: 'gpt-5.4-nano', label: 'GPT-5.4 Nano', provider: 'Azure OpenAI', supportsThinking: false },
   { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5', provider: 'AWS Bedrock', supportsThinking: true },
   { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6', provider: 'AWS Bedrock', supportsThinking: true },
   { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'AWS Bedrock', supportsThinking: true },
