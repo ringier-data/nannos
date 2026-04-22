@@ -1,10 +1,8 @@
 """Conversation service for managing conversations in DynamoDB."""
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
-import boto3
 import httpx
 import uuid6
 from aiodynamo.client import Client
@@ -30,21 +28,9 @@ class ConversationService:
         # Conversations TTL - 90 days for retention
         self.conversation_ttl_seconds = 7776000  # 90 days
 
-        try:
-            _ = os.environ["ECS_CONTAINER_METADATA_URI"]
-            credentials = Credentials.auto()
-            logger.info("Using auto credentials (ECS environment)")
-        except KeyError:
-            boto_session = boto3.Session()
-            boto3_credentials = boto_session.get_credentials()
-            credentials = StaticCredentials(
-                key=Key(
-                    id=boto3_credentials.access_key,
-                    secret=boto3_credentials.secret_key,
-                    token=boto3_credentials.token,
-                )
-            )
-            logger.info("Using static credentials (local environment)")
+        # Use auto credentials - handles ECS, EKS Pod Identity, env vars,
+        # and ~/.aws/credentials with automatic token refresh
+        credentials = Credentials.auto()
 
         self.client = Client(
             HTTPX(httpx.AsyncClient()),

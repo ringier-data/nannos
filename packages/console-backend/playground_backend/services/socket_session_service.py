@@ -1,13 +1,11 @@
 """Socket session service for managing Socket.IO sessions in DynamoDB."""
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
-import boto3
 import httpx
 from aiodynamo.client import Client
-from aiodynamo.credentials import Credentials, Key, StaticCredentials
+from aiodynamo.credentials import Credentials
 from aiodynamo.errors import ItemNotFound
 from aiodynamo.expressions import F, UpdateExpression, Value
 from aiodynamo.http.httpx import HTTPX
@@ -35,23 +33,9 @@ class SocketSessionService:
         # 48 hours is a safety buffer for orphaned records from crashes/ungraceful disconnects
         self.session_ttl_seconds = 172800  # 48 hours
 
-        # Initialize aiodynamo client with appropriate credentials
-        # Use auto credentials in ECS, static credentials locally
-        try:
-            _ = os.environ["ECS_CONTAINER_METADATA_URI"]
-            credentials = Credentials.auto()
-            logger.info("Using auto credentials (ECS environment)")
-        except KeyError:
-            boto_session = boto3.Session()
-            boto3_credentials = boto_session.get_credentials()
-            credentials = StaticCredentials(
-                key=Key(
-                    id=boto3_credentials.access_key,
-                    secret=boto3_credentials.secret_key,
-                    token=boto3_credentials.token,
-                )
-            )
-            logger.info("Using static credentials (local environment)")
+        # Use auto credentials - handles ECS, EKS Pod Identity, env vars,
+        # and ~/.aws/credentials with automatic token refresh
+        credentials = Credentials.auto()
 
         self.client = Client(
             HTTPX(httpx.AsyncClient()),

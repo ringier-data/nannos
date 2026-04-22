@@ -2,15 +2,13 @@
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
-import boto3
 import httpx
 from a2a.types import FilePart, FileWithUri, Part, TaskState
 from aiodynamo.client import Client
-from aiodynamo.credentials import Credentials, Key, StaticCredentials
+from aiodynamo.credentials import Credentials
 from aiodynamo.expressions import F, HashAndRangeKeyCondition, HashKey
 from aiodynamo.http.httpx import HTTPX
 from uuid6 import uuid7
@@ -222,21 +220,9 @@ class MessagesService:
         # Messages TTL - 90 days for retention
         self.message_ttl_seconds = 7776000  # 90 days
 
-        try:
-            _ = os.environ["ECS_CONTAINER_METADATA_URI"]
-            credentials = Credentials.auto()
-            logger.info("Using auto credentials (ECS environment)")
-        except KeyError:
-            boto_session = boto3.Session()
-            boto3_credentials = boto_session.get_credentials()
-            credentials = StaticCredentials(
-                key=Key(
-                    id=boto3_credentials.access_key,
-                    secret=boto3_credentials.secret_key,
-                    token=boto3_credentials.token,
-                )
-            )
-            logger.info("Using static credentials (local environment)")
+        # Use auto credentials - handles ECS, EKS Pod Identity, env vars,
+        # and ~/.aws/credentials with automatic token refresh
+        credentials = Credentials.auto()
 
         self.client = Client(
             HTTPX(httpx.AsyncClient()),
