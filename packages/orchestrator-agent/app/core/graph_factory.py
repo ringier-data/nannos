@@ -587,7 +587,7 @@ class GraphFactory:
         # causing raw JSON to be streamed to the client. The explicit tool approach ensures proper
         # tool_call_chunks streaming detection.
         requires_response_tool = False
-        if model_type in ("gpt-4o", "gpt-4o-mini", "local"):
+        if model_type in ("gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5.4-nano", "local"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
         elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
             # if thinking is enabled we need to set response_format to None since the bedrock api can't handle

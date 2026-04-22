@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 ModelType = Literal[
     "gpt-4o",
     "gpt-4o-mini",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
     "claude-sonnet-4.5",
     "claude-sonnet-4.6",
     "claude-haiku-4-5",
