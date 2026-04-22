@@ -121,16 +121,16 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.usage_service.set_repository(app.state.usage_repository)
     app.state.usage_service.set_rate_card_service(app.state.rate_card_service)
 
-    # Initialize DynamoDB-backed or in-memory services depending on credentials
-    use_dynamodb = bool(os.getenv("DYNAMODB_SESSIONS_TABLE"))
-    if use_dynamodb:
+    # Initialize PostgreSQL-backed or in-memory services depending on configuration
+    use_in_memory = bool(os.getenv("USE_IN_MEMORY_STORE"))
+    if not use_in_memory:
         app.state.session_service = SessionService()
         app.state.socket_session_service = SocketSessionService()
         app.state.conversation_service = ConversationService()
         app.state.messages_service = MessagesService(conversation_service=app.state.conversation_service)
     else:
         logger.warning(
-            "DYNAMODB_SESSIONS_TABLE not set — using in-memory stores for sessions, "
+            "USE_IN_MEMORY_STORE is set — using in-memory stores for sessions, "
             "conversations, and messages. Data will be lost on restart."
         )
         from .services.in_memory_conversation_service import InMemoryConversationService

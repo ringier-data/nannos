@@ -1,6 +1,6 @@
-"""In-memory messages service — drop-in replacement for DynamoDB-backed MessagesService.
+"""In-memory messages service — drop-in replacement for PostgreSQL-backed MessagesService.
 
-Used when DynamoDB is not available (local development without AWS credentials).
+Used when USE_IN_MEMORY_STORE is set (local development without PostgreSQL).
 Data is lost on process restart.
 """
 
@@ -67,7 +67,6 @@ class InMemoryMessagesService:
             state=state,
             raw_payload=raw_payload,
             metadata=metadata or {},
-            ttl=int(now.timestamp()) + 30 * 86400,
             final=final,
             kind=kind,
         )

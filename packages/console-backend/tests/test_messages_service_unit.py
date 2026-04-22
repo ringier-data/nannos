@@ -1,23 +1,29 @@
 """Unit tests for playground_backend.services.messages_service."""
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from a2a.types import FilePart, FileWithUri, Part, TaskState, TextPart
 
 from playground_backend.models.message import Message
 from playground_backend.services.messages_service import (
-    MessagesService,
     _parse_agent_response,
     _parse_status_update,
     _parse_task,
 )
 
 
+def _make_messages_service():
+    """Create a MessagesService with mocked DB session factory."""
+    with patch("playground_backend.services.messages_service.get_async_session_factory", return_value=MagicMock()):
+        from playground_backend.services.messages_service import MessagesService
+        return MessagesService()
+
+
 @pytest.mark.asyncio
 async def test_save_agent_response_nested_and_flat_formats():
-    ms = MessagesService()
+    ms = _make_messages_service()
 
     # Patch insert_message to capture args and return a Message
     called = {}
@@ -207,7 +213,7 @@ def test_parse_agent_response_dispatches_correctly():
 @pytest.mark.asyncio
 async def test_save_agent_response_with_history():
     """Test that save_agent_response calls save_history_messages when history present."""
-    ms = MessagesService()
+    ms = _make_messages_service()
 
     insert_calls = []
     history_calls = []
@@ -262,7 +268,7 @@ async def test_save_agent_response_with_history():
 async def test_hydrate_with_expired_urls():
     """Test that expired presigned URLs are regenerated."""
 
-    ms = MessagesService()
+    ms = _make_messages_service()
 
     # Mock FileStorageService
     mock_storage = AsyncMock()
@@ -309,7 +315,7 @@ async def test_hydrate_with_expired_urls():
 async def test_hydrate_skips_valid_urls():
     """Test that valid presigned URLs are not regenerated."""
 
-    ms = MessagesService()
+    ms = _make_messages_service()
 
     # Mock FileStorageService
     mock_storage = AsyncMock()
@@ -353,7 +359,7 @@ async def test_hydrate_skips_valid_urls():
 async def test_hydrate_with_no_file_metadata():
     """Test that hydration skips when no file metadata present."""
 
-    ms = MessagesService()
+    ms = _make_messages_service()
 
     file_part = Part(
         root=FilePart(
@@ -383,7 +389,7 @@ async def test_hydrate_with_no_file_metadata():
 async def test_hydrate_multiple_files():
     """Test hydrating message with multiple file parts."""
 
-    ms = MessagesService()
+    ms = _make_messages_service()
 
     mock_storage = AsyncMock()
     mock_storage.generate_presigned_get_url = AsyncMock(
@@ -436,7 +442,7 @@ async def test_hydrate_multiple_files():
 async def test_hydrate_multiple_messages():
     """Test batch hydration of multiple messages."""
 
-    ms = MessagesService()
+    ms = _make_messages_service()
 
     mock_storage = AsyncMock()
     mock_storage.generate_presigned_get_url = AsyncMock(

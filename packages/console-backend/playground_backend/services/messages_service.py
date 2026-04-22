@@ -1,21 +1,15 @@
-"""Messages service for managing messages in DynamoDB."""
+"""Messages service for managing messages in PostgreSQL."""
 
 import json
 import logging
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, cast
 
-import boto3
-import httpx
 from a2a.types import FilePart, FileWithUri, Part, TaskState
-from aiodynamo.client import Client
-from aiodynamo.credentials import Credentials, Key, StaticCredentials
-from aiodynamo.expressions import F, HashAndRangeKeyCondition, HashKey
-from aiodynamo.http.httpx import HTTPX
+from sqlalchemy import text
 from uuid6 import uuid7
 
-from ..config import config
+from ..db.connection import get_async_session_factory
 from ..models.message import Message
 from .file_storage_service import FileStorageService
 
@@ -208,7 +202,7 @@ def _parse_agent_response(response_data: dict[str, Any]) -> dict[str, Any]:
 
 
 class MessagesService:
-    """Manages messages in DynamoDB."""
+    """Manages messages in PostgreSQL."""
 
     def __init__(self, conversation_service=None) -> None:
         """Initialize the messages service.
@@ -217,101 +211,68 @@ class MessagesService:
             conversation_service: Optional ConversationService instance for updating conversation metadata
         """
         self.conversation_service = conversation_service
-        dynamodb_config = config.dynamodb
-        self.table_name = dynamodb_config.messages_table
-        # Messages TTL - 90 days for retention
-        self.message_ttl_seconds = 7776000  # 90 days
-
-        try:
-            _ = os.environ["ECS_CONTAINER_METADATA_URI"]
-            credentials = Credentials.auto()
-            logger.info("Using auto credentials (ECS environment)")
-        except KeyError:
-            boto_session = boto3.Session()
-            boto3_credentials = boto_session.get_credentials()
-            credentials = StaticCredentials(
-                key=Key(
-                    id=boto3_credentials.access_key,
-                    secret=boto3_credentials.secret_key,
-                    token=boto3_credentials.token,
-                )
-            )
-            logger.info("Using static credentials (local environment)")
-
-        self.client = Client(
-            HTTPX(httpx.AsyncClient()),
-            credentials,
-            dynamodb_config.region,
-        )
-        self.table = self.client.table(self.table_name)
-
-        logger.info(f"MessagesService initialized with table: {self.table_name}")
+        self._session_factory = get_async_session_factory()
+        logger.info("MessagesService initialized (PostgreSQL)")
 
     async def get_messages_by_conversation(self, conversation_id: str, user_id: str, limit: int = 100) -> list[Message]:
         """Retrieve messages for a conversation.
 
         Args:
             conversation_id: The conversation ID (partition key)
+            user_id: The user ID (for access control)
             limit: Maximum number of messages to return (default: 100)
 
         Returns:
-            List of messages ordered by sort_key (chronological order)
+            List of messages ordered by created_at (chronological order)
         """
         try:
-            results = []
-
-            try:
-                key_cond = HashAndRangeKeyCondition(
-                    hash_key=HashKey("conversationId", conversation_id),
-                    range_key_condition=F("sortKey").begins_with("MSG#"),
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    text(
+                        "SELECT * FROM messages "
+                        "WHERE conversation_id = :conversation_id AND user_id = :user_id "
+                        "AND kind NOT IN ('task', 'status-update') "
+                        "ORDER BY created_at ASC "
+                        "LIMIT :limit"
+                    ),
+                    {"conversation_id": conversation_id, "user_id": user_id, "limit": limit},
                 )
+                rows = result.mappings().all()
 
-                query_kwargs = {
-                    "key_condition": key_cond,
-                    "limit": limit,
-                    "filter_expression": F("userId") == str(user_id),
-                }
-
-                async for item in self.table.query(**query_kwargs):
+            results = []
+            for row in rows:
+                try:
+                    stored_state = row["state"] or "unknown"
                     try:
-                        stored_state = item.get("state", "unknown")
-                        try:
-                            stored_state_enum = TaskState(stored_state)
-                        except Exception:
-                            stored_state_enum = TaskState.unknown
-
-                        results.append(
-                            Message(
-                                conversation_id=item["conversationId"],
-                                sort_key=item["sortKey"],
-                                user_id=item["userId"],
-                                message_id=item["messageId"],
-                                role=item["role"],
-                                parts=item.get("parts", []),
-                                task_id=item.get("taskId", ""),
-                                created_at=item["createdAt"],
-                                state=stored_state_enum,
-                                raw_payload=item.get("rawPayload", ""),
-                                metadata=item.get("metadata", {}),
-                                ttl=item["ttl"],
-                                final=item.get("final", False),
-                                kind=item.get("kind", ""),
-                            )
-                        )
+                        stored_state_enum = TaskState(stored_state)
                     except Exception:
-                        logger.exception(
-                            "Failed to parse message item for conversation %s: %s",
-                            conversation_id,
-                            item,
-                        )
-                        continue
+                        stored_state_enum = TaskState.unknown
 
-            except Exception:
-                logger.exception(f"Query failed for conversation {conversation_id}")
-                return []
+                    results.append(
+                        Message(
+                            conversation_id=row["conversation_id"],
+                            sort_key=row["sort_key"],
+                            user_id=row["user_id"],
+                            message_id=row["message_id"],
+                            role=row["role"],
+                            parts=row["parts"] or [],
+                            task_id=row["task_id"] or "",
+                            created_at=row["created_at"].isoformat() if isinstance(row["created_at"], datetime) else row["created_at"],
+                            state=stored_state_enum,
+                            raw_payload=row["raw_payload"] or "",
+                            metadata=row["metadata"] or {},
+                            final=row["final"] or False,
+                            kind=row["kind"] or "",
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to parse message row for conversation %s",
+                        conversation_id,
+                    )
+                    continue
 
             logger.debug(f"Retrieved {len(results)} messages for conversation: {conversation_id}")
-
             return results
 
         except Exception as e:
@@ -361,11 +322,11 @@ class MessagesService:
         # Construct composite sort key: MSG#<timestamp>#<messageId>
         sort_key = f"MSG#{timestamp_ms}#{message_id}"
 
-        ttl = int((created_at + timedelta(seconds=self.message_ttl_seconds)).timestamp())
-
         # Serialize/normalize `parts` to plain mappings for storage and use
         db_parts = [_serialize_part(p) for p in parts]
         db_parts = cast("list[Part]", db_parts)
+
+        state_str = state.value if hasattr(state, "value") else str(state)
 
         message = Message(
             conversation_id=conversation_id,
@@ -379,30 +340,37 @@ class MessagesService:
             state=state,
             raw_payload=raw_payload,
             metadata=metadata or {},
-            ttl=ttl,
             final=final,
             kind=kind,
         )
 
         try:
-            await self.table.put_item(
-                item={
-                    "conversationId": message.conversation_id,
-                    "sortKey": message.sort_key,
-                    "userId": message.user_id,
-                    "messageId": message.message_id,
-                    "role": message.role,
-                    "parts": db_parts,
-                    "taskId": message.task_id,
-                    "createdAt": message.created_at,
-                    "state": message.state.value if hasattr(message.state, "value") else str(message.state),
-                    "rawPayload": message.raw_payload,
-                    "metadata": message.metadata,
-                    "ttl": message.ttl,
-                    "final": message.final,
-                    "kind": message.kind,
-                }
-            )
+            async with self._session_factory() as db:
+                await db.execute(
+                    text(
+                        "INSERT INTO messages "
+                        "(conversation_id, message_id, sort_key, user_id, role, parts, "
+                        "task_id, created_at, state, raw_payload, metadata, kind, final) "
+                        "VALUES (:conversation_id, :message_id, :sort_key, :user_id, :role, CAST(:parts AS jsonb), "
+                        ":task_id, :created_at, :state, :raw_payload, CAST(:metadata AS jsonb), :kind, :final)"
+                    ),
+                    {
+                        "conversation_id": conversation_id,
+                        "message_id": message_id,
+                        "sort_key": sort_key,
+                        "user_id": user_id,
+                        "role": role,
+                        "parts": json.dumps(db_parts, default=str),
+                        "task_id": task_id,
+                        "created_at": created_at,
+                        "state": state_str,
+                        "raw_payload": raw_payload,
+                        "metadata": json.dumps(metadata or {}, default=str),
+                        "kind": kind,
+                        "final": final,
+                    },
+                )
+                await db.commit()
 
             logger.info(f"Inserted message: {message_id} in conversation: {conversation_id}")
             return message
@@ -416,7 +384,7 @@ class MessagesService:
         conversation_id: str,
         user_id: str,
     ) -> Message | None:
-        """Save agent response to DynamoDB.
+        """Save agent response to PostgreSQL.
 
         Args:
             response_data: Full response data from agent

@@ -1,6 +1,6 @@
-"""In-memory conversation service — drop-in replacement for DynamoDB-backed ConversationService.
+"""In-memory conversation service — drop-in replacement for PostgreSQL-backed ConversationService.
 
-Used when DynamoDB is not available (local development without AWS credentials).
+Used when USE_IN_MEMORY_STORE is set (local development without PostgreSQL).
 Data is lost on process restart.
 """
 
@@ -76,7 +76,6 @@ class InMemoryConversationService:
             title=title,
             agent_url=agent_url,
             sub_agent_config_hash=sub_agent_config_hash,
-            ttl=int(now.timestamp()) + 30 * 86400,  # 30 days
         )
         self._conversations[cid] = conv
         self._user_index.setdefault(user_id, []).append(cid)

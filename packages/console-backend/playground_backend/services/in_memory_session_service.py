@@ -1,12 +1,12 @@
-"""In-memory session service — drop-in replacement for DynamoDB-backed SessionService.
+"""In-memory session service — drop-in replacement for PostgreSQL-backed SessionService.
 
-Used when DynamoDB is not available (local development without AWS credentials).
+Used when USE_IN_MEMORY_STORE is set (local development without PostgreSQL).
 Data is lost on process restart.
 """
 
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ..models.session import StoredSession
 
@@ -40,14 +40,14 @@ class InMemorySessionService:
             refresh_token=refresh_token,
             id_token=id_token,
             issued_at=now,
-            ttl=int(now.timestamp()) + 86400,  # 24h
+            expires_at=now + timedelta(hours=24),
         )
         self._sessions[session_id] = session
         return session_id
 
     async def get_session(self, session_id: str) -> StoredSession | None:
         session = self._sessions.get(session_id)
-        if session and session.ttl < int(datetime.now(timezone.utc).timestamp()):
+        if session and session.expires_at < datetime.now(timezone.utc):
             del self._sessions[session_id]
             return None
         return session

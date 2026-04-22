@@ -1,19 +1,13 @@
-"""Session service for managing user sessions in DynamoDB."""
+"""Session service for managing user sessions in PostgreSQL."""
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-import boto3
-import httpx
-from aiodynamo.client import Client
-from aiodynamo.credentials import Credentials, Key, StaticCredentials
-from aiodynamo.errors import ItemNotFound
-from aiodynamo.expressions import F, UpdateExpression, Value
-from aiodynamo.http.httpx import HTTPX
+from sqlalchemy import text
 
 from ..config import config
+from ..db.connection import get_async_session_factory
 from ..exceptions import SessionNotFoundError, SessionOwnershipError
 from ..models.session import StoredSession
 
@@ -21,40 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class SessionService:
-    """Manages user sessions in DynamoDB."""
+    """Manages user sessions in PostgreSQL."""
 
     def __init__(self) -> None:
         """Initialize the session service."""
-        dynamodb_config = config.dynamodb
-        self.table_name = dynamodb_config.sessions_table
         self.session_ttl_seconds = config.session_ttl_seconds
-
-        # Initialize aiodynamo client with appropriate credentials
-        # Use auto credentials in ECS, static credentials locally
-        try:
-            _ = os.environ["ECS_CONTAINER_METADATA_URI"]
-            credentials = Credentials.auto()
-            logger.info("Using auto credentials (ECS environment)")
-        except KeyError:
-            boto_session = boto3.Session()
-            boto3_credentials = boto_session.get_credentials()
-            credentials = StaticCredentials(
-                key=Key(
-                    id=boto3_credentials.access_key,
-                    secret=boto3_credentials.secret_key,
-                    token=boto3_credentials.token,
-                )
-            )
-            logger.info("Using static credentials (local environment)")
-
-        self.client = Client(
-            HTTPX(httpx.AsyncClient()),
-            credentials,
-            dynamodb_config.region,
-        )
-        self.table = self.client.table(self.table_name)
-
-        logger.info(f"SessionService initialized with table: {self.table_name}")
+        self._session_factory = get_async_session_factory()
+        logger.info("SessionService initialized (PostgreSQL)")
 
     async def create_session(
         self,
@@ -79,32 +46,30 @@ class SessionService:
         session_id = str(uuid4())
         issued_at = datetime.now(tz=timezone.utc)
         access_token_expires_at = issued_at + timedelta(seconds=access_token_expires_in)
-        ttl = int((issued_at + timedelta(seconds=self.session_ttl_seconds)).timestamp())
+        expires_at = issued_at + timedelta(seconds=self.session_ttl_seconds)
 
-        stored_session = StoredSession(
-            session_id=session_id,
-            user_id=user_id,
-            access_token=access_token,
-            access_token_expires_at=access_token_expires_at,
-            refresh_token=refresh_token,
-            id_token=id_token,
-            issued_at=issued_at,
-            ttl=ttl,
-        )
-        logger.info(f"Table name: {self.table_name}, Creating session for user: {user_id}")
         try:
-            await self.table.put_item(
-                item={
-                    "session_id": stored_session.session_id,
-                    "user_id": stored_session.user_id,
-                    "access_token": stored_session.access_token,
-                    "access_token_expires_at": stored_session.access_token_expires_at.isoformat(),
-                    "refresh_token": stored_session.refresh_token,
-                    "id_token": stored_session.id_token,
-                    "issued_at": stored_session.issued_at.isoformat(),
-                    "ttl": stored_session.ttl,
-                }
-            )
+            async with self._session_factory() as db:
+                await db.execute(
+                    text(
+                        "INSERT INTO sessions "
+                        "(session_id, user_id, access_token, access_token_expires_at, "
+                        "refresh_token, id_token, issued_at, expires_at) "
+                        "VALUES (:session_id, :user_id, :access_token, :access_token_expires_at, "
+                        ":refresh_token, :id_token, :issued_at, :expires_at)"
+                    ),
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "access_token": access_token,
+                        "access_token_expires_at": access_token_expires_at,
+                        "refresh_token": refresh_token,
+                        "id_token": id_token,
+                        "issued_at": issued_at,
+                        "expires_at": expires_at,
+                    },
+                )
+                await db.commit()
             logger.info(f"Created session for user: {user_id}")
             return session_id
         except Exception as e:
@@ -121,26 +86,29 @@ class SessionService:
             The stored session or None if not found
         """
         try:
-            item = await self.table.get_item(key={"session_id": session_id})
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    text("SELECT * FROM sessions WHERE session_id = :session_id"),
+                    {"session_id": session_id},
+                )
+                row = result.mappings().first()
+
+            if not row:
+                logger.debug(f"Session not found: {session_id}")
+                return None
+
             return StoredSession(
-                session_id=item["session_id"],
-                user_id=item["user_id"],
-                access_token=item["access_token"],
-                access_token_expires_at=datetime.fromisoformat(item["access_token_expires_at"]),
-                refresh_token=item["refresh_token"],
-                id_token=item["id_token"],
-                issued_at=datetime.fromisoformat(item["issued_at"]),
-                ttl=item["ttl"],
-                orchestrator_session_cookie=item.get("orchestrator_session_cookie"),
-                orchestrator_cookie_expires_at=(
-                    datetime.fromisoformat(item["orchestrator_cookie_expires_at"])
-                    if item.get("orchestrator_cookie_expires_at")
-                    else None
-                ),
+                session_id=row["session_id"],
+                user_id=row["user_id"],
+                access_token=row["access_token"],
+                access_token_expires_at=row["access_token_expires_at"],
+                refresh_token=row["refresh_token"],
+                id_token=row["id_token"],
+                issued_at=row["issued_at"],
+                expires_at=row["expires_at"],
+                orchestrator_session_cookie=row["orchestrator_session_cookie"],
+                orchestrator_cookie_expires_at=row["orchestrator_cookie_expires_at"],
             )
-        except ItemNotFound:
-            logger.debug(f"Session not found: {session_id}")
-            return None
         except Exception as e:
             logger.error(f"Failed to get session: {e}")
             return None
@@ -152,7 +120,12 @@ class SessionService:
             session_id: The session ID to delete
         """
         try:
-            await self.table.delete_item(key={"session_id": session_id})
+            async with self._session_factory() as db:
+                await db.execute(
+                    text("DELETE FROM sessions WHERE session_id = :session_id"),
+                    {"session_id": session_id},
+                )
+                await db.commit()
             logger.info(f"Destroyed session: {session_id}")
         except Exception as e:
             logger.error(f"Failed to destroy session: {e}")
@@ -185,31 +158,7 @@ class SessionService:
             SessionNotFoundError: If the session doesn't exist
             SessionOwnershipError: If user_id doesn't match the session's owner
         """
-        # Use provided issued_at or current time
-        if issued_at is None:
-            issued_at = datetime.now(tz=timezone.utc)
-
-        ttl = int((issued_at + timedelta(seconds=self.session_ttl_seconds)).timestamp())
-
-        # Build update expression using aiodynamo
-        set_updates = [
-            (F("issued_at"), Value(issued_at.isoformat())),
-            (F("ttl"), Value(ttl)),
-        ]
-
-        if access_token is not None:
-            set_updates.append((F("access_token"), Value(access_token)))
-
-        if access_token_expires_at is not None:
-            set_updates.append((F("access_token_expires_at"), Value(access_token_expires_at.isoformat())))
-
-        if refresh_token is not None:
-            set_updates.append((F("refresh_token"), Value(refresh_token)))
-
-        if id_token is not None:
-            set_updates.append((F("id_token"), Value(id_token)))
-
-        # First verify the user_id matches
+        # First verify the session exists and user_id matches
         existing_session = await self.get_session(session_id)
         if not existing_session:
             logger.error(f"Failed to update session {session_id}: session not found")
@@ -219,12 +168,47 @@ class SessionService:
             logger.error(f"Failed to update session {session_id}: user_id mismatch (attempted: {user_id})")
             raise SessionOwnershipError(f"User {user_id} does not own session {session_id}")
 
-        # Perform the update
+        # Use provided issued_at or current time
+        if issued_at is None:
+            issued_at = datetime.now(tz=timezone.utc)
+
+        expires_at = issued_at + timedelta(seconds=self.session_ttl_seconds)
+
+        # Build dynamic SET clause
+        set_parts = ["issued_at = :issued_at", "expires_at = :expires_at"]
+        params: dict = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "issued_at": issued_at,
+            "expires_at": expires_at,
+        }
+
+        if access_token is not None:
+            set_parts.append("access_token = :access_token")
+            params["access_token"] = access_token
+
+        if access_token_expires_at is not None:
+            set_parts.append("access_token_expires_at = :access_token_expires_at")
+            params["access_token_expires_at"] = access_token_expires_at
+
+        if refresh_token is not None:
+            set_parts.append("refresh_token = :refresh_token")
+            params["refresh_token"] = refresh_token
+
+        if id_token is not None:
+            set_parts.append("id_token = :id_token")
+            params["id_token"] = id_token
+
         try:
-            await self.table.update_item(
-                key={"session_id": session_id},
-                update_expression=UpdateExpression(set_updates=set_updates),
-            )
+            async with self._session_factory() as db:
+                await db.execute(
+                    text(
+                        f"UPDATE sessions SET {', '.join(set_parts)} "
+                        "WHERE session_id = :session_id AND user_id = :user_id"
+                    ),
+                    params,
+                )
+                await db.commit()
             logger.info(f"Updated session: {session_id}")
         except Exception as e:
             logger.error(f"Failed to update session: {e}")
@@ -274,15 +258,16 @@ class SessionService:
             expires_at: When the cookie expires
         """
         try:
-            set_updates = [
-                (F("orchestrator_session_cookie"), Value(cookie)),
-                (F("orchestrator_cookie_expires_at"), Value(expires_at.isoformat())),
-            ]
-
-            await self.table.update_item(
-                key={"session_id": session_id},
-                update_expression=UpdateExpression(set_updates=set_updates),
-            )
+            async with self._session_factory() as db:
+                await db.execute(
+                    text(
+                        "UPDATE sessions SET orchestrator_session_cookie = :cookie, "
+                        "orchestrator_cookie_expires_at = :expires_at "
+                        "WHERE session_id = :session_id"
+                    ),
+                    {"session_id": session_id, "cookie": cookie, "expires_at": expires_at},
+                )
+                await db.commit()
             logger.debug(f"Updated orchestrator cookie for session: {session_id}")
         except Exception as e:
             logger.error(f"Failed to update orchestrator cookie: {e}")
@@ -295,15 +280,16 @@ class SessionService:
             session_id: The session ID
         """
         try:
-            set_updates = [
-                (F("orchestrator_session_cookie"), Value(None)),
-                (F("orchestrator_cookie_expires_at"), Value(None)),
-            ]
-
-            await self.table.update_item(
-                key={"session_id": session_id},
-                update_expression=UpdateExpression(set_updates=set_updates),
-            )
+            async with self._session_factory() as db:
+                await db.execute(
+                    text(
+                        "UPDATE sessions SET orchestrator_session_cookie = NULL, "
+                        "orchestrator_cookie_expires_at = NULL "
+                        "WHERE session_id = :session_id"
+                    ),
+                    {"session_id": session_id},
+                )
+                await db.commit()
             logger.debug(f"Cleared orchestrator cookie for session: {session_id}")
         except Exception as e:
             logger.error(f"Failed to clear orchestrator cookie: {e}")

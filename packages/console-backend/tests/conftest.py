@@ -6,24 +6,17 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
-import boto3
 import docker
-import httpx
 import pytest
 import pytest_asyncio
-from aiodynamo.client import Client
-from aiodynamo.credentials import Key, StaticCredentials
-from aiodynamo.http.httpx import HTTPX
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from yarl import URL
 
 from playground_backend.config import (
     Config,
-    DynamoDBConfig,
     OidcConfig,
     OrchestratorConfig,
 )
@@ -40,7 +33,6 @@ from playground_backend.services.audit_service import AuditService
 from playground_backend.services.notification_service import NotificationService
 from playground_backend.services.oauth_service import OAuthService
 from playground_backend.services.secrets_service import SecretsService
-from playground_backend.services.session_service import SessionService
 from playground_backend.services.sub_agent_service import SubAgentService
 from playground_backend.services.user_group_service import UserGroupService
 from playground_backend.services.user_service import UserService
@@ -68,7 +60,6 @@ def cleanup_docker_networks():
             # Test images we create containers from
             test_images = [
                 "docker.rcplus.io/pgvector/pgvector:pg16",
-                "amazon/dynamodb-local",
             ]
 
             for network in networks:
@@ -122,19 +113,6 @@ def cleanup_docker_networks():
     cleanup()
 
 
-# Mock boto3 credentials for all tests
-@pytest.fixture(autouse=True)
-def mock_boto3_credentials():
-    """Mock boto3 Session.get_credentials() to return test credentials."""
-    mock_credentials = Mock()
-    mock_credentials.access_key = "test-access-key"
-    mock_credentials.secret_key = "test-secret-key"
-    mock_credentials.token = None
-
-    with patch("boto3.Session.get_credentials", return_value=mock_credentials):
-        yield mock_credentials
-
-
 # Test configuration
 @pytest.fixture
 def test_config():
@@ -148,13 +126,6 @@ def test_config():
             client_id="test_client_id",
             client_secret=SecretStr("test_client_secret"),
             scope="openid profile email",
-        ),
-        dynamodb=DynamoDBConfig(
-            region="us-east-1",
-            users_table="a2a-inspector-users",
-            sessions_table="a2a-inspector-sessions",
-            conversations_table="a2a-inspector-conversations",
-            messages_table="a2a-inspector-messages",
         ),
         orchestrator=OrchestratorConfig(
             client_id="orchestrator_client_id",
@@ -173,7 +144,6 @@ def mock_config(test_config, monkeypatch):
     monkeypatch.setattr(config_module.config, "secret_key", test_config.secret_key)
     monkeypatch.setattr(config_module.config, "session_ttl_seconds", test_config.session_ttl_seconds)
     monkeypatch.setattr(config_module.config, "oidc", test_config.oidc)
-    monkeypatch.setattr(config_module.config, "dynamodb", test_config.dynamodb)
     monkeypatch.setattr(config_module.config, "orchestrator", test_config.orchestrator)
 
     # Also patch the config imported by auth_controller
@@ -189,155 +159,18 @@ def mock_config(test_config, monkeypatch):
     return test_config
 
 
-# DynamoDB Local fixtures
-@pytest.fixture(scope="session")
-def dynamodb_local():
-    """Start DynamoDB Local container for the test session."""
-    client = docker.from_env()
-
-    # Clean up any existing DynamoDB Local containers or containers using port 8765
-    try:
-        for container in client.containers.list(all=True):
-            try:
-                # Check if it's using port 8765
-                ports = container.ports.get("8000/tcp") or []
-                is_using_port = any(port_mapping.get("HostPort") == "8765" for port_mapping in ports)
-
-                # Also check if it's a DynamoDB Local image
-                is_dynamodb = "amazon/dynamodb-local" in container.image.tags
-
-                if is_using_port or is_dynamodb:
-                    try:
-                        container.stop(timeout=1)
-                    except Exception:
-                        pass
-                    try:
-                        container.remove(force=True)
-                    except Exception:
-                        pass
-            except Exception:
-                continue
-    except Exception:
-        pass  # Ignore cleanup errors
-
-    # Pull and start DynamoDB Local container
-    container = client.containers.run(
-        "amazon/dynamodb-local:latest",
-        command="-jar DynamoDBLocal.jar -inMemory -sharedDb",
-        ports={"8000/tcp": 8765},
-        detach=True,
-        remove=True,
-    )
-
-    # Wait a moment for DynamoDB Local to start
-    time.sleep(2)
-
-    logger.info(f"DynamoDB Local container started: {container.id}")
-
-    yield "http://localhost:8765"
-
-    # Cleanup - stop the container
-    logger.info(f"Stopping DynamoDB Local container: {container.id}")
-    try:
-        container.stop(timeout=1)
-        logger.info("DynamoDB Local container stopped successfully")
-    except Exception as e:
-        logger.warning(f"Failed to stop container (may already be removed): {e}")
-
-
-@pytest.fixture(scope="function")
-def dynamodb_tables(dynamodb_local, mock_config):
-    """Create DynamoDB tables for each test."""
-    # Create boto3 client to set up tables
-    dynamodb = boto3.resource(
-        "dynamodb",
-        endpoint_url=dynamodb_local,
-        region_name=mock_config.dynamodb.region,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-    )
-
-    # Create users table
-    users_table = dynamodb.create_table(
-        TableName=mock_config.dynamodb.users_table,
-        KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
-        BillingMode="PAY_PER_REQUEST",
-    )
-
-    # Create sessions table
-    sessions_table = dynamodb.create_table(
-        TableName=mock_config.dynamodb.sessions_table,
-        KeySchema=[{"AttributeName": "session_id", "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": "session_id", "AttributeType": "S"}],
-        BillingMode="PAY_PER_REQUEST",
-    )
-
-    # Create conversations table with userId (HASH) + conversationId (RANGE)
-    # UUIDv7 conversationIds are time-ordered, enabling efficient newest-first queries
-    conversations_table = dynamodb.create_table(
-        TableName=mock_config.dynamodb.conversations_table,
-        KeySchema=[
-            {"AttributeName": "userId", "KeyType": "HASH"},
-            {"AttributeName": "conversationId", "KeyType": "RANGE"},
-        ],
-        AttributeDefinitions=[
-            {"AttributeName": "userId", "AttributeType": "S"},
-            {"AttributeName": "conversationId", "AttributeType": "S"},
-        ],
-        BillingMode="PAY_PER_REQUEST",
-    )
-
-    # Create messages table
-    messages_table = dynamodb.create_table(
-        TableName=mock_config.dynamodb.messages_table,
-        KeySchema=[
-            {"AttributeName": "conversationId", "KeyType": "HASH"},
-            {"AttributeName": "sortKey", "KeyType": "RANGE"},
-        ],
-        AttributeDefinitions=[
-            {"AttributeName": "conversationId", "AttributeType": "S"},
-            {"AttributeName": "sortKey", "AttributeType": "S"},
-        ],
-        BillingMode="PAY_PER_REQUEST",
-    )
-
-    # Wait for tables to be ready
-    users_table.wait_until_exists()
-    sessions_table.wait_until_exists()
-    conversations_table.wait_until_exists()
-    messages_table.wait_until_exists()
-
-    # Return URL object for aiodynamo
-    yield URL(dynamodb_local)
-
-    # Cleanup: delete tables after test
-    users_table.delete()
-    sessions_table.delete()
-    conversations_table.delete()
-    messages_table.delete()
-
-
-# Service fixtures with aiodynamo clients pointing to DynamoDB Local
-@pytest_asyncio.fixture
-async def session_service(mock_config, dynamodb_tables):
-    """Create SessionService instance with DynamoDB Local."""
-    http_client = httpx.AsyncClient()
-    client = Client(
-        HTTPX(http_client),
-        StaticCredentials(Key("test", "test")),
-        mock_config.dynamodb.region,
-        endpoint=dynamodb_tables,
-    )
-
-    service = SessionService()
-    service.client = client
-    service.table = client.table(mock_config.dynamodb.sessions_table)
-
-    yield service
-
-    # Cleanup - close the underlying httpx client
-    await http_client.aclose()
+@pytest.fixture
+def session_service():
+    """Create a mock SessionService for tests."""
+    service = MagicMock()
+    service.create_session = AsyncMock(return_value="test-session-id")
+    service.get_session = AsyncMock(return_value=None)
+    service.destroy_session = AsyncMock()
+    service.update_session = AsyncMock()
+    service.get_orchestrator_cookie = AsyncMock(return_value=None)
+    service.update_orchestrator_cookie = AsyncMock()
+    service.clear_orchestrator_cookie = AsyncMock()
+    return service
 
 
 @pytest.fixture
@@ -673,9 +506,7 @@ def mock_oauth(mock_config, monkeypatch):
 
 @pytest_asyncio.fixture
 async def auth_controller(session_service, user_service, mock_config):
-    """Create AuthController instance with mocked OAuth."""
-    # Don't call register_oauth_provider() in tests - it tries to make real HTTP requests
-    # Tests will mock oauth.oidc directly as needed
+    """Create AuthController instance with mocked session service."""
     controller = AuthController(session_service, user_service)
     yield controller
 
@@ -769,12 +600,11 @@ def postgres_template():
     network_name = f"test-network-{random.randint(1000, 9999)}"
     db_container_name = f"test-postgres-{random.randint(1000, 9999)}"
 
-    # Get migrations directory path - now in infrastructure
-    # Use absolute path from this file's location
+    # Get migrations directory path
     tests_dir = os.path.dirname(os.path.abspath(__file__))
-    # Go up: tests -> playground-backend -> app -> rcplus-nannos-infrastructure-agents
-    repo_root = os.path.abspath(os.path.join(tests_dir, "..", "..", ".."))
-    migrations_dir = os.path.join(repo_root, "infrastructure", "roles", "basis", "files", "ddl", "scripts")
+    # Go up: tests -> console-backend, then into sqlmigrations/ddl
+    package_root = os.path.abspath(os.path.join(tests_dir, ".."))
+    migrations_dir = os.path.join(package_root, "sqlmigrations", "ddl")
     migrations_dir = os.path.normpath(os.path.realpath(migrations_dir))
 
     containers_to_cleanup = []

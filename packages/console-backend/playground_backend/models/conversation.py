@@ -1,4 +1,4 @@
-"""Conversation model for DynamoDB storage."""
+"""Conversation model."""
 
 from datetime import datetime
 
@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 
 class Conversation(BaseModel):
-    """Conversation model for DynamoDB storage."""
+    """Conversation model."""
 
     conversation_id: str  # Unique conversation ID (primary key - PK)
     user_id: str  # User who owns the conversation
@@ -18,4 +18,3 @@ class Conversation(BaseModel):
     title: str = ""  # Conversation title/name
     agent_url: str = ""  # Agent URL used in this conversation
     sub_agent_config_hash: str | None = None  # Optional version hash for playground mode (e.g., "abc123")
-    ttl: int  # Unix timestamp for DynamoDB TTL
