@@ -19,7 +19,7 @@ local-db:
   docker run -d \
     --name nannos-local-db \
     -p {{LOCAL_DB_PORT}}:5432 \
-    -v {{LOCAL_DB_VOLUME}}:/var/lib/postgresql \
+    -v {{LOCAL_DB_VOLUME}}:/var/lib/postgresql/data \
     -e POSTGRES_USER=postgres \
     -e POSTGRES_PASSWORD=password \
     -e POSTGRES_DB=nannos \
