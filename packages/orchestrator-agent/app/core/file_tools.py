@@ -13,7 +13,7 @@ the unified read_file tool.
 import logging
 from typing import Literal
 
-from agent_common.core.s3_service import get_s3_service
+from agent_common.core.object_storage import get_object_storage_service
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
@@ -56,10 +56,10 @@ def _create_generate_presigned_url_tool() -> BaseTool:
             Presigned HTTPS URL that can be used to access the file
         """
         expiration_seconds = 86400 if expiration == "24h" else 3600
-        s3_service = get_s3_service()
+        storage_service = get_object_storage_service()
 
         try:
-            url = await s3_service.generate_presigned_url(s3_uri, expiration=expiration_seconds)
+            url = await storage_service.generate_presigned_url(s3_uri, expiration_seconds=expiration_seconds)
             logger.info(f"Generated presigned URL for {s3_uri} (expires in {expiration})")
             return url
         except Exception as e:

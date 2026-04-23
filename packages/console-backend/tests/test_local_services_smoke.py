@@ -148,13 +148,13 @@ async def test_messages_ordering():
     assert msgs[1].role == "assistant"
 
 
-# -- LocalFileStorageService -------------------------------------------------
+# -- FileStorageService with LocalObjectStorageService ----------------------
 
 @pytest.mark.asyncio
 async def test_local_storage_properties():
     with tempfile.TemporaryDirectory() as tmpdir:
         svc = LocalFileStorageService(base_path=tmpdir)
-        assert svc.bucket == "local"
+        assert isinstance(svc.bucket, str)
         assert svc.presigned_ttl_seconds == 3600
 
 
@@ -189,13 +189,12 @@ async def test_local_storage_upload_and_delete():
         upload = UF(filename="test.png", file=io.BytesIO(content), headers={"content-type": "image/png"})
 
         result = await svc.upload_file(upload, user_id="u1", conversation_id="c1")
-        assert result.bucket == "local"
         assert result.name == "test.png"
         assert result.size == len(content)
         assert result.key.startswith("uploads/u1/c1/")
 
-        # Verify file exists on disk
-        file_path = os.path.join(tmpdir, result.key)
+        # Verify file exists on disk (under bucket subdir)
+        file_path = os.path.join(tmpdir, result.bucket, result.key)
         assert os.path.isfile(file_path)
 
         # Delete

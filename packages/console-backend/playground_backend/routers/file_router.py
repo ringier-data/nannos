@@ -188,23 +188,30 @@ async def serve_local_file(
 ) -> FileResponse:
     """Serve a file from local filesystem storage.
 
-    Only active when LocalFileStorageService is in use (no S3 bucket configured).
+    Only active when local object storage is in use (OBJECT_STORAGE_TYPE=local).
     """
-    from playground_backend.services.local_file_storage_service import LocalFileStorageService
+    from playground_backend.services.object_storage import LocalObjectStorageService
 
-    storage = getattr(request.app.state, "file_storage_service", None)
-    if not isinstance(storage, LocalFileStorageService):
+    storage_svc = getattr(request.app.state, "file_storage_service", None)
+    if storage_svc is None:
+        raise HTTPException(status_code=404, detail="File storage not configured")
+
+    # Check if the underlying storage is local
+    local_storage = storage_svc._storage if hasattr(storage_svc, "_storage") else None
+    if not isinstance(local_storage, LocalObjectStorageService):
         raise HTTPException(status_code=404, detail="Local file serving is not enabled")
 
     # Security: verify the user owns the file (key format: uploads/{user_id}/...)
     parts = file_path.split("/")
-    if len(parts) < 2 or parts[0] != storage._prefix or parts[1] != user.id:
+    prefix = storage_svc._prefix if hasattr(storage_svc, "_prefix") else "uploads"
+    if len(parts) < 2 or parts[0] != prefix or parts[1] != user.id:
         raise HTTPException(status_code=403, detail="Access denied to this file")
 
-    abs_path = os.path.join(storage._base_path, file_path)
-    # Prevent path traversal
+    bucket = storage_svc._bucket if hasattr(storage_svc, "_bucket") else "local"
+    abs_path = str(local_storage._object_path(bucket, file_path))
+    # Prevent path traversal (already handled by _object_path, but double-check)
+    base_real = os.path.realpath(str(local_storage.root_path))
     abs_path = os.path.realpath(abs_path)
-    base_real = os.path.realpath(storage._base_path)
     if not abs_path.startswith(base_real + os.sep) and abs_path != base_real:
         raise HTTPException(status_code=403, detail="Invalid file path")
 

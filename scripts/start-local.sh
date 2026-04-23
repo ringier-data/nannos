@@ -297,6 +297,8 @@ CHECKPOINT_AWS_REGION=""
 DYNAMODB_USERS_TABLE=""
 DOCUMENT_STORE_S3_BUCKET=""
 FILES_S3_BUCKET=""
+OBJECT_STORAGE_TYPE=""
+LOCAL_STORAGE_PATH=""
 
 if [[ "$_HAS_AWS" == true ]]; then
   log "Fetching secrets from AWS SSM (profile: $AWS_PROFILE)..."
@@ -339,7 +341,14 @@ if [[ "$_HAS_AWS" == true ]]; then
   DYNAMODB_USERS_TABLE="dev-nannos-infrastructure-agents-users"
   DOCUMENT_STORE_S3_BUCKET="dev-nannos-infrastructure-agents-files"
   FILES_S3_BUCKET="dev-nannos-infrastructure-agents-files"
+  OBJECT_STORAGE_TYPE="s3"
   ok "AWS resources configured (dev environment)"
+else
+  # Full Local: use filesystem-based object storage
+  OBJECT_STORAGE_TYPE="local"
+  LOCAL_STORAGE_PATH="$ROOT_DIR/.local-storage"
+  mkdir -p "$LOCAL_STORAGE_PATH"
+  ok "Object storage: local filesystem ($LOCAL_STORAGE_PATH)"
 fi
 
 # ── OIDC configuration ──
@@ -703,6 +712,8 @@ procs:
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
       DYNAMODB_USERS_TABLE: "$DYNAMODB_USERS_TABLE"
       FILES_S3_BUCKET: "$FILES_S3_BUCKET"
+      OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
+      LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
 
   orchestrator:
     cwd: "$ROOT_DIR/packages/orchestrator-agent"
@@ -746,6 +757,8 @@ procs:
       CHECKPOINT_AWS_REGION: "$CHECKPOINT_AWS_REGION"
       DYNAMODB_USERS_TABLE: "$DYNAMODB_USERS_TABLE"
       DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
+      OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
+      LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
 
   creator:
     cwd: "$ROOT_DIR/packages/agent-creator"
@@ -811,6 +824,8 @@ procs:
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
       CHECKPOINT_AWS_REGION: "$CHECKPOINT_AWS_REGION"
       DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
+      OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
+      LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
 
   frontend:
     cwd: "$ROOT_DIR/packages/console-frontend"

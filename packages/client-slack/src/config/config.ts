@@ -34,6 +34,11 @@ export interface Config {
       fileUploadBucket: string;
     };
   };
+  readonly objectStorage: {
+    type: string;          // 's3' (default) or 'local'
+    endpointUrl: string;   // Optional: S3-compatible endpoint (MinIO, etc.)
+    localPath: string;     // Only for type='local'
+  };
   readonly oidc: {
     issuerUrl: string;
     clientId: string;
@@ -193,6 +198,11 @@ export async function getConfigFromEnv(): Promise<Config> {
       s3: {
         fileUploadBucket: process.env.FILES_S3_BUCKET || `dev-nannos-infrastructure-agents-files`,
       },
+    },
+    objectStorage: {
+      type: process.env.OBJECT_STORAGE_TYPE || 's3',
+      endpointUrl: process.env.S3_ENDPOINT_URL || '',
+      localPath: process.env.LOCAL_STORAGE_PATH || './local-storage',
     },
     oidc: {
       issuerUrl: process.env.OIDC_ISSUER_URL!,

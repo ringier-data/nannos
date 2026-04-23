@@ -23,7 +23,7 @@ from langgraph.types import interrupt
 from langsmith import traceable
 from typing_extensions import NotRequired
 
-from agent_common.core.s3_service import S3Service
+from agent_common.core.object_storage import IObjectStorageService
 
 
 class DocumentStoreState(AgentState):
@@ -360,20 +360,20 @@ async def _export_file_impl(
     file_path: str,
     user_id: str,
     store: AsyncPostgresStore,
-    s3_service: S3Service,
-    s3_bucket: str,
+    storage_service: IObjectStorageService,
+    storage_bucket: str,
 ) -> str:
-    """Export a file from filesystem to S3.
+    """Export a file from filesystem to object storage.
 
-    Reads persisted files from store and exports to S3. Works independently of document indexing.
+    Reads persisted files from store and exports to object storage. Works independently of document indexing.
     Handles both personal (/memories/) and channel (/channel_memories/) files.
 
     Args:
         file_path: Path of the file to export (should start with /memories/ or /channel_memories/)
-        user_id: User ID for S3 key generation
+        user_id: User ID for storage key generation
         store: AsyncPostgresStore instance for reading files
-        s3_service: S3 service for uploads
-        s3_bucket: S3 bucket name for result storage
+        storage_service: Object storage service for uploads
+        storage_bucket: Bucket name for result storage
 
     Returns:
         Presigned URL for downloaded file
@@ -433,32 +433,34 @@ async def _export_file_impl(
     elif file_path.endswith((".txt", ".log")):
         content_type = "text/plain"
 
-    # Upload to S3
+    # Upload to object storage
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     file_name = file_path.split("/")[-1]  # Get basename
-    s3_key = f"docstore/exports/{user_id}/{timestamp}_{file_name}"
-    s3_uri = f"s3://{s3_bucket}/{s3_key}"
+    storage_key = f"docstore/exports/{user_id}/{timestamp}_{file_name}"
 
-    await s3_service.upload_content(
+    stored = await storage_service.upload(
+        bucket=storage_bucket,
+        key=storage_key,
         content=file_content.encode("utf-8"),
-        bucket=s3_bucket,
-        key=s3_key,
         content_type=content_type,
     )
 
-    logger.info(f"Exported '{file_path}' to {s3_uri}")
+    logger.info(f"Exported '{file_path}' to {stored.uri}")
 
     # Generate presigned URL (24 hours)
-    presigned_url = await s3_service.generate_presigned_url(s3_uri, expiration=86400)
+    presigned_url = await storage_service.generate_presigned_url(stored.uri, expiration_seconds=86400)
 
-    return f"Exported file '{file_path}' to S3.\n\nDownload link (expires in 24 hours):\n{presigned_url}"
+    return f"Exported file '{file_path}'.\n\nDownload link (expires in 24 hours):\n{presigned_url}"
 
 
 def create_document_store_tools(
     store: AsyncPostgresStore,
-    s3_service: S3Service,
-    s3_bucket: str,
+    storage_service: IObjectStorageService,
+    storage_bucket: str,
     user_id: str,
+    # Backward-compatible aliases
+    s3_service: "IObjectStorageService | None" = None,
+    s3_bucket: str | None = None,
 ) -> list[BaseTool]:
     """Create document store tools for semantic search, personal file access, and export.
 
@@ -469,13 +471,20 @@ def create_document_store_tools(
 
     Args:
         store: AsyncPostgresStore instance
-        s3_service: S3 service for file exports
-        s3_bucket: S3 bucket for storing exported files
-        user_id: User ID for document namespacing and S3 keys
+        storage_service: Object storage service for file exports
+        storage_bucket: Bucket for storing exported files
+        user_id: User ID for document namespacing and storage keys
+        s3_service: Deprecated alias for storage_service
+        s3_bucket: Deprecated alias for storage_bucket
 
     Returns:
         List of document store tools (search, read_personal_file, export)
     """
+    # Support deprecated parameter names for backward compatibility
+    if s3_service is not None and storage_service is None:  # type: ignore[unreachable]
+        storage_service = s3_service
+    if s3_bucket is not None and not storage_bucket:
+        storage_bucket = s3_bucket
 
     @traceable(run_type="retriever")
     async def _search_documents_retriever(
@@ -619,8 +628,8 @@ def create_document_store_tools(
             file_path=file_path,
             user_id=user_id,
             store=store,
-            s3_service=s3_service,
-            s3_bucket=s3_bucket,
+            storage_service=storage_service,
+            storage_bucket=storage_bucket,
         )
 
     return [

@@ -1,4 +1,8 @@
-"""Service for managing file uploads to S3 and generating presigned URLs."""
+"""Service for managing file uploads and generating presigned URLs.
+
+Uses IObjectStorageService abstraction from agent-common to support
+both S3 and local filesystem backends transparently.
+"""
 
 import logging
 import mimetypes
@@ -8,9 +12,9 @@ from dataclasses import dataclass
 from typing import Optional
 from uuid import uuid4
 
-from aiobotocore.session import get_session
 from fastapi import UploadFile
 
+from playground_backend.services.object_storage import IObjectStorageService
 from playground_backend.config import config
 
 logger = logging.getLogger(__name__)
@@ -57,7 +61,7 @@ _ALLOWED_AUDIO_MIME_TYPES = {
 
 @dataclass(slots=True)
 class UploadedFile:
-    """Represents a file uploaded to S3."""
+    """Represents a file uploaded to storage."""
 
     id: str
     bucket: str
@@ -70,14 +74,16 @@ class UploadedFile:
 
 
 class FileStorageService:
-    """Handles file uploads and presigned URL generation for user attachments including audio."""
+    """Handles file uploads and presigned URL generation for user attachments including audio.
 
-    def __init__(self, region: Optional[str] = None) -> None:
+    Uses IObjectStorageService for backend-agnostic storage operations.
+    """
+
+    def __init__(self, storage_service: IObjectStorageService, region: Optional[str] = None) -> None:
+        self._storage = storage_service
         self._bucket = config.file_storage.bucket
         self._prefix = config.file_storage.prefix.strip("/ ") or "uploads"
         self._presigned_ttl = config.file_storage.presigned_ttl_seconds
-        self._region = region or os.getenv("AWS_REGION", "eu-central-1")
-        self._session = get_session()
 
     @property
     def bucket(self) -> str:
@@ -178,13 +184,13 @@ class FileStorageService:
         upload.file.seek(0)
 
         try:
-            async with self._session.create_client("s3", region_name=self._region) as client:
-                await client.put_object(
-                    Bucket=self._bucket,
-                    Key=key,
-                    Body=upload.file,
-                    ContentType=content_type,
-                )
+            content = await upload.read()
+            stored = await self._storage.upload(
+                bucket=self._bucket,
+                key=key,
+                content=content,
+                content_type=content_type,
+            )
         except Exception as exc:  # pragma: no cover
             logger.exception("Failed to upload file %s to bucket %s", filename, self._bucket)
             raise RuntimeError("File upload failed") from exc
@@ -209,26 +215,22 @@ class FileStorageService:
         )
 
     async def generate_presigned_get_url(self, key: str, *, expires_in: Optional[int] = None) -> str:
-        """Generate a presigned GET URL for the provided S3 object key."""
+        """Generate a presigned GET URL for the provided object key."""
 
         expires = expires_in or self._presigned_ttl
+        storage_uri = f"s3://{self._bucket}/{key}" if self._storage.storage_type == "s3" else f"file://{self._bucket}/{key}"
         try:
-            async with self._session.create_client("s3", region_name=self._region) as client:
-                return await client.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": self._bucket, "Key": key},
-                    ExpiresIn=expires,
-                )
+            return await self._storage.generate_presigned_url(storage_uri, expiration_seconds=expires)
         except Exception as exc:  # pragma: no cover
             logger.exception("Failed to generate presigned URL for key %s", key)
             raise RuntimeError("Failed to generate download URL") from exc
 
     async def delete_file(self, key: str) -> None:
-        """Delete a file from S3. Intended for future lifecycle management."""
+        """Delete a file from storage. Intended for future lifecycle management."""
 
+        storage_uri = f"s3://{self._bucket}/{key}" if self._storage.storage_type == "s3" else f"file://{self._bucket}/{key}"
         try:
-            async with self._session.create_client("s3", region_name=self._region) as client:
-                await client.delete_object(Bucket=self._bucket, Key=key)
+            await self._storage.delete(storage_uri)
         except Exception as exc:  # pragma: no cover
-            logger.exception("Failed to delete S3 object %s", key)
+            logger.exception("Failed to delete object %s", key)
             raise RuntimeError("Failed to delete file") from exc

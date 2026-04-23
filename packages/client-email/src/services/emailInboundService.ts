@@ -1,4 +1,3 @@
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { SNSClient, SubscribeCommand, ListSubscriptionsByTopicCommand } from '@aws-sdk/client-sns';
 import { simpleParser, ParsedMail, Attachment } from 'mailparser';
 import { Logger } from '../utils/logger.js';
@@ -8,6 +7,7 @@ import { UserAuthService } from '../services/userAuthService.js';
 import { A2AClientService, A2ARequest } from '../services/a2aClientService.js';
 import { FileStorageService } from '../services/fileStorageService.js';
 import { EmailOutboundService, REPLY_MARKER } from '../services/emailOutboundService.js';
+import { IObjectStorageService, createObjectStorageService } from '../services/objectStorageService.js';
 import { isSupportedFileType, isFileSizeAllowed } from '../utils/fileUtils.js';
 import { randomUUID } from 'crypto';
 import * as oidcModule from 'openid-client';
@@ -94,7 +94,7 @@ interface SNSMessage {
  * - Checks auth, uploads attachments, dispatches to A2A
  */
 export class EmailInboundService {
-  private readonly s3Client: S3Client;
+  private readonly objectStorage: IObjectStorageService;
   private readonly snsClient: SNSClient;
   private readonly config: Config;
   private readonly storage: Storage;
@@ -109,9 +109,10 @@ export class EmailInboundService {
     userAuthService: UserAuthService,
     a2aClientService: A2AClientService,
     fileStorageService: FileStorageService,
-    emailOutboundService: EmailOutboundService
+    emailOutboundService: EmailOutboundService,
+    objectStorage?: IObjectStorageService,
   ) {
-    this.s3Client = new S3Client({ region: config.aws.region });
+    this.objectStorage = objectStorage || createObjectStorageService({ region: config.aws.region });
     this.snsClient = new SNSClient({ region: config.aws.region });
     this.config = config;
     this.storage = storage;
@@ -279,16 +280,10 @@ export class EmailInboundService {
   }
 
   /**
-   * Fetch raw MIME email from S3 (where SES stored it).
+   * Fetch raw MIME email from storage (where SES stored it).
    */
   private async fetchRawEmailFromS3(bucket: string, key: string): Promise<Buffer> {
-    const command = new GetObjectCommand({ Bucket: bucket, Key: key });
-    const response = await this.s3Client.send(command);
-    const bodyBytes = await response.Body?.transformToByteArray();
-    if (!bodyBytes) {
-      throw new Error('Empty email body from S3');
-    }
-    return Buffer.from(bodyBytes);
+    return this.objectStorage.download(bucket, key);
   }
 
   /**
