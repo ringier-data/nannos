@@ -175,8 +175,25 @@ const reconstructTimelineFromMessage = (msg: Record<string, unknown>): TimelineE
       }
 
       if (content) {
+        events.push({ type: 'thought_start', timestamp, agent_name: agentName });
         events.push({ type: 'thought_end', timestamp, agent_name: agentName, content, complete: true });
       }
+    }
+  }
+
+  // Plain status-update with working state (no activity-log extension):
+  // sub-agent progress messages (e.g. "Initiating call...", "Call ringing...").
+  // During live streaming these are accumulated as working steps in the timeline;
+  // reconstruct the same behavior from persisted messages.
+  const statusState = (statusObj?.state) as string | undefined;
+  if (kind === 'status-update' && !messageExtensions.includes(ACTIVITY_LOG_EXT) && statusState === 'working') {
+    let message = '';
+    const parts = msg.parts as Array<{ kind?: string; text?: string }> | undefined;
+    if (parts && parts.length > 0) {
+      message = parts.map(p => p.text || '').join(' ').trim();
+    }
+    if (message) {
+      events.push({ type: 'status', timestamp, message });
     }
   }
   
@@ -579,11 +596,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           const text = extractPartTexts(nestedMsg.parts).join('\n');
 
           if (normalizedStatus === 'working') {
-            // Accumulate as a working step (non-todo status messages)
-            const wsMap = workingStepsMapRef.current;
-            const existing = wsMap.get(resolvedConversationId) || [];
-            wsMap.set(resolvedConversationId, [...existing, { name: text, state: 'completed' as const }]);
-            setWorkingStepsMap(new Map(wsMap));
+            // Add to status history for timeline display (same as activity-log events).
+            // These are sub-agent progress messages (e.g. "Initiating call...") that
+            // should appear in the live timeline.
+            const history = statusHistoryMapRef.current.get(resolvedConversationId) || [];
+            history.push({ timestamp: new Date(), message: text });
+            statusHistoryMapRef.current.set(resolvedConversationId, history);
+            setStatusHistoryMap(new Map(statusHistoryMapRef.current));
           } else {
             // Terminal/final state — create message bubble with the full accumulated timeline
             const steps = workingStepsMapRef.current.get(resolvedConversationId);
@@ -891,9 +910,15 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           // Reconstruct timeline from saved message data
           const timeline = reconstructTimelineFromMessage(m);
           
-          // Check if this is an activity-log-only message (should only appear in timeline, not as MessageCard)
-          // Detect via extensions on the nested status message
+          // Determine whether this message should render as a MessageCard bubble
+          // or only contribute to the timeline. This mirrors the live streaming
+          // behavior where:
+          //   - activity-log status-updates → timeline only
+          //   - working-state status-updates → timeline only (working steps)
+          //   - task kind → timeline only (protocol artifact)
+          //   - terminal status-updates and artifacts with content → bubble
           const kind = m.kind as string | undefined;
+          const state = m.state as string | undefined;
           let rawPayload: Record<string, unknown> | null = null;
           if (typeof m.raw_payload === 'string' && m.raw_payload) {
             try { rawPayload = JSON.parse(m.raw_payload); } catch { /* ignore */ }
@@ -902,17 +927,24 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           const savedExtensions = (savedStatusMsg?.extensions || []) as string[];
           const isActivityLogOnly = savedExtensions.includes(ACTIVITY_LOG_EXT);
           
-          // Determine if message has actual content worth displaying in MessageCard
-          const isStatusOnlyMessage = 
-            content.startsWith('Status: ') || 
-            content.startsWith('Task submitted:') ||
-            content.startsWith('Agent execution') ||
-            content.startsWith('Delegating to ') ||
-            content.startsWith('Using ') ||
+          // Check for intermediate-output artifact (sub-agent reasoning)
+          const savedArtifact = rawPayload?.artifact as Record<string, unknown> | undefined;
+          const savedArtifactExtensions = (savedArtifact?.extensions || []) as string[];
+          const isIntermediateOutput = savedArtifactExtensions.includes(INTERMEDIATE_OUTPUT_EXT);
+          
+          // Messages that should only appear in the timeline, not as chat bubbles:
+          // 1. Activity-log events (have ACTIVITY_LOG_EXT extension)
+          // 2. Status-updates with working state (sub-agent progress)
+          // 3. Task kind messages (protocol-level task submissions)
+          // 4. Intermediate-output artifacts (sub-agent reasoning blocks)
+          const isTimelineOnly =
+            isActivityLogOnly ||
+            isIntermediateOutput ||
+            (kind === 'status-update' && state === 'working') ||
+            kind === 'task' ||
             (!content || content.trim().length === 0);
           
-          // Mark whether this message should show a MessageCard
-          const showMessageCard = !isActivityLogOnly && !(kind === 'status-update' && isStatusOnlyMessage);
+          const showMessageCard = !isTimelineOnly;
           
           return {
             id,
@@ -926,11 +958,47 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           } as Message;
         });
 
+      // Aggregate timeline events from consecutive timeline-only messages
+      // into the next bubble message. This mirrors the live streaming behavior
+      // where working steps accumulate and render as a single timeline block
+      // above the final response.
+      const aggregated: Message[] = [];
+      let pendingTimeline: TimelineEvent[] = [];
+      for (const msg of mapped) {
+        if (msg.showMessageCard === false) {
+          // Collect timeline events from hidden messages
+          if (msg.timeline) pendingTimeline.push(...msg.timeline);
+        } else {
+          // Attach accumulated timeline to the next visible message
+          if (pendingTimeline.length > 0) {
+            const merged = [...pendingTimeline, ...(msg.timeline || [])];
+            merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+            msg.timeline = merged;
+            pendingTimeline = [];
+          }
+          aggregated.push(msg);
+        }
+      }
+      // If there are leftover timeline-only messages at the end (no following
+      // bubble), create a synthetic timeline-only message so they're still visible
+      if (pendingTimeline.length > 0) {
+        pendingTimeline.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        aggregated.push({
+          id: `timeline-${pendingTimeline[0].timestamp.getTime()}`,
+          conversationId,
+          type: 'agent',
+          content: '',
+          timestamp: pendingTimeline[0].timestamp,
+          timeline: pendingTimeline,
+          showMessageCard: false,
+        } as Message);
+      }
+
       setMessagesMap((prev) => {
         const newMap = new Map(prev);
         const existing = newMap.get(conversationId) || [];
         const existingIds = new Set(existing.map((x) => x.id));
-        const merged = [...existing, ...mapped.filter((m) => !existingIds.has(m.id))];
+        const merged = [...existing, ...aggregated.filter((m) => !existingIds.has(m.id))];
         merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
         newMap.set(conversationId, merged);
         return newMap;

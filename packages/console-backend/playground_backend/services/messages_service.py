@@ -231,7 +231,6 @@ class MessagesService:
                     text(
                         "SELECT * FROM messages "
                         "WHERE conversation_id = :conversation_id AND user_id = :user_id "
-                        "AND kind NOT IN ('task', 'status-update') "
                         "ORDER BY created_at ASC "
                         "LIMIT :limit"
                     ),
@@ -257,7 +256,9 @@ class MessagesService:
                             role=row["role"],
                             parts=row["parts"] or [],
                             task_id=row["task_id"] or "",
-                            created_at=row["created_at"].isoformat() if isinstance(row["created_at"], datetime) else row["created_at"],
+                            created_at=row["created_at"].isoformat()
+                            if isinstance(row["created_at"], datetime)
+                            else row["created_at"],
                             state=stored_state_enum,
                             raw_payload=row["raw_payload"] or "",
                             metadata=row["metadata"] or {},

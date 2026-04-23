@@ -1420,7 +1420,17 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                             # Skip duplicates and overly long content (likely full responses, not status)
                             if status_text not in seen_statuses and len(status_text) <= 200:
                                 seen_statuses.add(status_text)
-                                await self._emit_status(stream_writer, status_text)
+                                # Emit as activity-log with sub-agent source attribution
+                                # so it appears in the timeline under the sub-agent name
+                                if stream_writer:
+                                    try:
+                                        result = stream_writer(
+                                            ("status_history", {"message": status_text, "source": subagent_type})
+                                        )
+                                        if inspect.iscoroutine(result):
+                                            await result
+                                    except Exception as e:
+                                        logger.debug(f"Failed to emit sub-agent working status: {e}")
 
                 elif isinstance(item, ArtifactUpdate):
                     # Forward streaming artifact chunks from sub-agent as INTERMEDIATE OUTPUT.

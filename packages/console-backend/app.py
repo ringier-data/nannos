@@ -377,6 +377,11 @@ active_tasks: dict[str, ActiveTaskInfo] = {}
 # Intermediate output (with urn:nannos:a2a:intermediate-output:1.0 extensions) are NOT accumulated.
 _streaming_buffers: dict[str, str] = {}
 
+# Buffer for accumulating intermediate-output chunks (sub-agent thoughts) per conversation.
+# Keyed by "{context_id}:{agent_name}". Persisted when the conversation turn ends
+# (terminal status or main artifact last_chunk) so reasoning blocks survive page reload.
+_intermediate_buffers: dict[str, str] = {}
+
 
 # ==============================================================================
 # Active Task Helpers
@@ -445,6 +450,54 @@ async def _deferred_connection_cleanup(sid: str) -> None:
 async def _emit_debug_log(sid: str, event_id: str, log_type: str, data: Any) -> None:
     """Helper to emit a structured debug log event to the client."""
     await sio.emit(SocketEvents.DEBUG_LOG, {"type": log_type, "data": data, "id": event_id}, to=sid)
+
+
+async def _flush_intermediate_buffers(
+    context_id: str,
+    messages_service: Any,
+    user_id: str,
+    task_id: str = "",
+) -> None:
+    """Persist accumulated intermediate-output buffers for a conversation.
+
+    Flushes all agent thought buffers matching the context_id prefix,
+    saving each as an artifact-update message with the intermediate-output
+    extension so the frontend can reconstruct reasoning blocks from history.
+    """
+    prefix = f"{context_id}:"
+    keys_to_flush = [k for k in _intermediate_buffers if k.startswith(prefix)]
+    for buf_key in keys_to_flush:
+        content = _intermediate_buffers.pop(buf_key)
+        if not content.strip():
+            continue
+        agent_name = buf_key.split(":", 1)[1] if ":" in buf_key else "unknown"
+        logger.info(
+            f"[STREAMING] Persisting intermediate output ({len(content)} chars) from {agent_name} "
+            f"for context {context_id}"
+        )
+        # Build a synthetic artifact-update payload with the intermediate-output extension
+        # so reconstructTimelineFromMessage can reconstruct the reasoning block
+        synthetic_payload = json.dumps(
+            {
+                "kind": "artifact-update",
+                "artifact": {
+                    "parts": [{"kind": "text", "text": content}],
+                    "extensions": ["urn:nannos:a2a:intermediate-output:1.0"],
+                    "metadata": {"agent_name": agent_name},
+                },
+            }
+        )
+        await messages_service.insert_message(
+            conversation_id=context_id,
+            user_id=user_id,
+            role="assistant",
+            parts=[{"kind": "text", "text": content}],
+            task_id=task_id,
+            state=TaskState.completed,
+            kind="artifact-update",
+            raw_payload=synthetic_payload,
+            metadata={"agent_name": agent_name},
+        )
 
 
 async def _process_a2a_response(
@@ -567,17 +620,30 @@ async def _process_a2a_response(
                                 f"Buffer size: {len(_streaming_buffers[effective_context_id])} chars"
                             )
                     else:
-                        # Log intermediate output for debugging
+                        # Accumulate intermediate output for persistence at turn end
                         parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
                         chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
-                        logger.info(
-                            f"[STREAMING] Intermediate output chunk ({len(chunk_text)} chars, last_chunk={is_last_chunk}): "
-                            f"{artifact_metadata.get('agent_name', 'unknown')} - preview: {chunk_text[:50]}..."
-                        )
+                        if chunk_text:
+                            agent_name = artifact_metadata.get("agent_name", "unknown")
+                            buf_key = f"{effective_context_id}:{agent_name}"
+                            _intermediate_buffers[buf_key] = _intermediate_buffers.get(buf_key, "") + chunk_text
+                            logger.info(
+                                f"[STREAMING] Intermediate output chunk ({len(chunk_text)} chars) from {agent_name}, "
+                                f"buffer: {len(_intermediate_buffers[buf_key])} chars"
+                            )
 
                 # Persist accumulated content when the artifact stream closes
+                safety_net_saved = False
                 if is_last_chunk and effective_context_id in _streaming_buffers:
                     accumulated = _streaming_buffers.pop(effective_context_id)
+                    # Flush intermediate-output buffers (sub-agent thoughts) BEFORE
+                    # the final response so DB ordering matches logical order
+                    await _flush_intermediate_buffers(
+                        effective_context_id,
+                        messages_service,
+                        socket_session.user_id,
+                        task_id=response_data.get("taskId", ""),
+                    )
                     if accumulated.strip():
                         logger.info(
                             f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) for context {effective_context_id}"
@@ -615,12 +681,21 @@ async def _process_a2a_response(
                                 state=TaskState(status_state),
                                 kind="status-update",
                             )
+                            safety_net_saved = True
+                        # Also flush intermediate-output buffers on failure
+                        await _flush_intermediate_buffers(
+                            effective_context_id,
+                            messages_service,
+                            socket_session.user_id,
+                            task_id=response_data.get("taskId", ""),
+                        )
 
                 # Save non-streaming responses to database
                 # Skip if:
                 # 1. is_work_plan - transient state updates
                 # 2. is_artifact_append - streaming chunks (saved when last_chunk arrives)
                 # 3. Terminal status without content - pure completion signal after streaming finished
+                # 4. safety_net_saved - buffer already flushed for this failed/canceled event
                 is_terminal_status_only = (
                     response_data.get("kind") == "status-update"
                     and status_obj
@@ -628,7 +703,16 @@ async def _process_a2a_response(
                     and not status_obj.get("message")  # No nested message content
                 )
 
-                if not is_work_plan and not is_artifact_append and not is_terminal_status_only:
+                # Flush intermediate-output buffers on any terminal status
+                if is_terminal_status_only:
+                    await _flush_intermediate_buffers(
+                        effective_context_id,
+                        messages_service,
+                        socket_session.user_id,
+                        task_id=response_data.get("taskId", ""),
+                    )
+
+                if not is_work_plan and not is_artifact_append and not is_terminal_status_only and not safety_net_saved:
                     await messages_service.save_agent_response(
                         response_data=response_data,
                         conversation_id=effective_context_id,
