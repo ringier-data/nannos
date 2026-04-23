@@ -1,6 +1,6 @@
-"""In-memory socket session service — drop-in replacement for DynamoDB-backed SocketSessionService.
+"""In-memory socket session service — drop-in replacement for PostgreSQL-backed SocketSessionService.
 
-Used when DynamoDB is not available (local development without AWS credentials).
+Used when USE_IN_MEMORY_STORE is set (local development without PostgreSQL).
 Data is lost on process restart.
 """
 
@@ -31,7 +31,6 @@ class InMemorySocketSessionService:
             user_id=user_id,
             http_session_id=http_session_id,
             created_at=now,
-            ttl=int(now.timestamp()) + 86400,
         )
         key = f"socket:{socket_id}"
         self._sessions[key] = session
@@ -39,11 +38,7 @@ class InMemorySocketSessionService:
 
     async def get_session(self, socket_id: str) -> SocketSession | None:
         key = f"socket:{socket_id}"
-        session = self._sessions.get(key)
-        if session and session.ttl < int(datetime.now(timezone.utc).timestamp()):
-            del self._sessions[key]
-            return None
-        return session
+        return self._sessions.get(key)
 
     async def initialize_client(
         self,

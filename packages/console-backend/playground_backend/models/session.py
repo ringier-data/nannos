@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class StoredSession(BaseModel):
-    """Session model for DynamoDB storage."""
+    """Session model for storage."""
 
     session_id: str  # Primary key
     user_id: str  # User's sub from OIDC
@@ -15,7 +15,7 @@ class StoredSession(BaseModel):
     refresh_token: str
     id_token: str  # ID token for logout
     issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    ttl: int  # Unix timestamp for DynamoDB TTL
+    expires_at: datetime  # When the session expires
     # Orchestrator session cookie (JWT from orchestrator agent)
     orchestrator_session_cookie: str | None = None
     orchestrator_cookie_expires_at: datetime | None = None

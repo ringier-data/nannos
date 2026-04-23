@@ -38,14 +38,15 @@ def _make_mock_message(**kwargs):
     return MagicMock(**default)
 
 
-@patch("playground_backend.routers.message_router.messages_service")
-def test_get_messages_success(mock_service):
+def test_get_messages_success():
     msgs = [
         _make_mock_message(message_id="m1", sort_key=1),
         _make_mock_message(message_id="m2", sort_key=2, role="assistant", parts=["reply"]),
     ]
+    mock_service = MagicMock()
     mock_service.get_messages_by_conversation = AsyncMock(return_value=msgs)
     mock_service.hydrate_messages_files = AsyncMock(return_value=msgs)
+    app.state.messages_service = mock_service
 
     resp = client.get("/api/v1/messages/conv-123?limit=100")
     assert resp.status_code == 200
@@ -68,30 +69,33 @@ def test_limit_validation_high():
     assert resp.status_code == 400
 
 
-@patch("playground_backend.routers.message_router.messages_service")
-def test_empty_result(mock_service):
+def test_empty_result():
+    mock_service = MagicMock()
     mock_service.get_messages_by_conversation = AsyncMock(return_value=[])
     mock_service.hydrate_messages_files = AsyncMock(return_value=[])
+    app.state.messages_service = mock_service
     resp = client.get("/api/v1/messages/conv-123")
     assert resp.status_code == 200
     assert resp.json()["count"] == 0
     assert resp.json()["messages"] == []
 
 
-@patch("playground_backend.routers.message_router.messages_service")
-def test_service_error(mock_service):
+def test_service_error():
+    mock_service = MagicMock()
     mock_service.get_messages_by_conversation = AsyncMock(side_effect=Exception("db"))
     mock_service.hydrate_messages_files = AsyncMock()
+    app.state.messages_service = mock_service
     resp = client.get("/api/v1/messages/conv-123")
     assert resp.status_code == 500
     assert "Failed to retrieve messages" in resp.json()["detail"]
 
 
-@patch("playground_backend.routers.message_router.messages_service")
-def test_created_at_serialization(mock_service):
+def test_created_at_serialization():
     mock_msg = _make_mock_message(created_at="2025-11-19T12:00:00+00:00")
+    mock_service = MagicMock()
     mock_service.get_messages_by_conversation = AsyncMock(return_value=[mock_msg])
     mock_service.hydrate_messages_files = AsyncMock(return_value=[mock_msg])
+    app.state.messages_service = mock_service
     resp = client.get("/api/v1/messages/conv-123")
     assert resp.status_code == 200
     conv = resp.json()["messages"][0]

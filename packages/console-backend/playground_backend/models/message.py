@@ -1,4 +1,4 @@
-"""Message model for DynamoDB storage."""
+"""Message model."""
 
 from typing import Any
 
@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class Message(BaseModel):
-    """Message model for DynamoDB storage.
+    """Message model.
 
     Uses composite key structure:
     - Partition Key: conversation_id
@@ -25,6 +25,5 @@ class Message(BaseModel):
     state: TaskState = TaskState.unknown  # Message state as A2A TaskState
     raw_payload: str = ""  # Original JSON payload
     metadata: dict[str, Any] = Field(default_factory=dict)  # Optional metadata
-    ttl: int  # Unix timestamp for DynamoDB TTL
     final: bool = False  # DEPRECATED: A2A 1.0.0 removes this field (kept for backward compatibility)
     kind: str = ""  # Message kind: 'message', 'status-update', etc.

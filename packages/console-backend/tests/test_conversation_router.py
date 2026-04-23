@@ -22,6 +22,11 @@ app.include_router(conversation_router.router)
 app.dependency_overrides[conversation_router.require_auth] = lambda: MagicMock(
     id="test-user-id", email="test@example.com", is_administrator=False
 )
+
+# Set up a default mock conversation_service on app.state
+_default_mock_conversation_service = MagicMock()
+app.state.conversation_service = _default_mock_conversation_service
+
 client = TestClient(app)
 
 
@@ -56,10 +61,11 @@ def mock_conversations():
     ]
 
 
-@patch("playground_backend.routers.conversation_router.conversation_service")
-def test_get_conversations_success(mock_service, mock_conversations):
+def test_get_conversations_success(mock_conversations):
     """Successful retrieval returns serialized conversations and correct count."""
+    mock_service = MagicMock()
     mock_service.get_conversations_by_user_id = AsyncMock(return_value=mock_conversations)
+    app.state.conversation_service = mock_service
 
     resp = client.get("/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9&limit=20")
 
@@ -88,9 +94,10 @@ def test_get_conversations_limit_validation_high():
     assert "Limit must be between 1 and 50" in resp.json()["detail"]
 
 
-@patch("playground_backend.routers.conversation_router.conversation_service")
-def test_get_conversations_empty(mock_service):
+def test_get_conversations_empty():
+    mock_service = MagicMock()
     mock_service.get_conversations_by_user_id = AsyncMock(return_value=[])
+    app.state.conversation_service = mock_service
 
     resp = client.get("/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9")
     assert resp.status_code == 200
@@ -99,18 +106,20 @@ def test_get_conversations_empty(mock_service):
     assert data["conversations"] == []
 
 
-@patch("playground_backend.routers.conversation_router.conversation_service")
-def test_get_conversations_service_error(mock_service):
+def test_get_conversations_service_error():
+    mock_service = MagicMock()
     mock_service.get_conversations_by_user_id = AsyncMock(side_effect=Exception("boom"))
+    app.state.conversation_service = mock_service
 
     resp = client.get("/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9")
     assert resp.status_code == 500
     assert "Failed to retrieve conversations" in resp.json()["detail"]
 
 
-@patch("playground_backend.routers.conversation_router.conversation_service")
-def test_datetime_serialization(mock_service, mock_conversations):
+def test_datetime_serialization(mock_conversations):
+    mock_service = MagicMock()
     mock_service.get_conversations_by_user_id = AsyncMock(return_value=[mock_conversations[0]])
+    app.state.conversation_service = mock_service
 
     resp = client.get("/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9")
     assert resp.status_code == 200
@@ -119,13 +128,14 @@ def test_datetime_serialization(mock_service, mock_conversations):
     assert conv["last_message_at"].endswith("+00:00")
 
 
-@patch("playground_backend.routers.conversation_router.conversation_service")
 @patch("playground_backend.routers.conversation_router.config")
-def test_get_conversations_permission(mock_config, mock_service):
+def test_get_conversations_permission(mock_config):
     """Test that non-local environment enforces user can only request their own conversations."""
     # Set up non-local environment
     mock_config.is_local.return_value = False
+    mock_service = MagicMock()
     mock_service.get_conversations_by_user_id = AsyncMock(return_value=[])
+    app.state.conversation_service = mock_service
 
     # Override the dependency to inject a specific user
     test_user = MagicMock(id="user-1", email="user1@test.com")

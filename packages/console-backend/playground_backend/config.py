@@ -14,30 +14,6 @@ class OidcConfig(BaseModel):
     scope: str = Field(default="openid profile email offline_access")
 
 
-class DynamoDBConfig(BaseModel):
-    """DynamoDB configuration."""
-
-    region: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "eu-central-1"))
-    users_table: str = Field(
-        default_factory=lambda: os.getenv("DYNAMODB_USERS_TABLE", "dev-nannos-infrastructure-agents-users")
-    )
-    sessions_table: str = Field(
-        default_factory=lambda: os.getenv(
-            "DYNAMODB_SESSIONS_TABLE", "dev-nannos-infrastructure-agents-chat-ui-sessions"
-        )
-    )
-    conversations_table: str = Field(
-        default_factory=lambda: os.getenv(
-            "DYNAMODB_CONVERSATIONS_TABLE", "dev-nannos-infrastructure-agents-chat-ui-conversations"
-        )
-    )
-    messages_table: str = Field(
-        default_factory=lambda: os.getenv(
-            "DYNAMODB_MESSAGES_TABLE", "dev-nannos-infrastructure-agents-chat-ui-messages"
-        )
-    )
-
-
 class FileStorageConfig(BaseModel):
     """S3 configuration for user-uploaded files including audio recordings."""
 
@@ -136,7 +112,6 @@ class Config(BaseModel):
     cookie_name: str = Field(default="a2a-chatui")
 
     oidc: OidcConfig = Field(default_factory=OidcConfig)
-    dynamodb: DynamoDBConfig = Field(default_factory=DynamoDBConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)
