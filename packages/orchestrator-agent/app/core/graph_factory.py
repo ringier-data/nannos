@@ -366,7 +366,7 @@ class GraphFactory:
         """Create a model instance for the given model type.
 
         Args:
-            model_type: The type of model to create ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
+            model_type: Any valid ModelType (see agent_common.models.base.ModelType)
 
         Returns:
             BaseChatModel: The created model instance
@@ -387,7 +387,7 @@ class GraphFactory:
         use with_config on the same model instance, but those parameters are not configurable that way yet.
 
         Args:
-            model_type: The type of model ('gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4.5', 'claude-sonnet-4.6' or 'claude-haiku-4-5')
+            model_type: Any valid ModelType (see agent_common.models.base.ModelType)
 
         Returns:
             BaseChatModel: The model instance (cached or newly created)
@@ -587,7 +587,7 @@ class GraphFactory:
         # causing raw JSON to be streamed to the client. The explicit tool approach ensures proper
         # tool_call_chunks streaming detection.
         requires_response_tool = False
-        if model_type in ("gpt-4o", "gpt-4o-mini", "local"):
+        if model_type in ("gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5.4-nano", "local"):
             response_format = ToolStrategy(schema=FinalResponseSchema)
         elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
             # if thinking is enabled we need to set response_format to None since the bedrock api can't handle
@@ -597,7 +597,7 @@ class GraphFactory:
                 requires_response_tool = True
             else:
                 response_format = AutoStrategy(schema=FinalResponseSchema)
-        elif model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+        elif model_type in ("gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"):
             # Gemini models: use explicit FinalResponseSchema tool instead of AutoStrategy/ToolStrategy
             # because Gemini outputs structured JSON in content text rather than via tool_call_chunks
             response_format = None
@@ -610,7 +610,7 @@ class GraphFactory:
         # Add Google built-in tools for Gemini models
         # These are passed via the tools parameter so create_deep_agent can bind them
         # (bind_tools on the model directly returns a RunnableBinding which isn't a BaseChatModel)
-        if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+        if model_type in ("gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"):
             logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
             static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 
