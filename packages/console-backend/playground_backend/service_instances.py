@@ -143,15 +143,11 @@ async def initialize_services(app: "FastAPI") -> None:
         app.state.conversation_service = InMemoryConversationService()
         app.state.messages_service = InMemoryMessagesService(conversation_service=app.state.conversation_service)
 
-    # Initialize file storage (S3 or local filesystem)
-    use_s3 = bool(os.getenv("FILES_S3_BUCKET"))
-    if use_s3:
-        app.state.file_storage_service = FileStorageService()
-    else:
-        logger.warning("FILES_S3_BUCKET not set — using local filesystem for file storage")
-        from .services.local_file_storage_service import LocalFileStorageService
+    # Initialize file storage (S3 or local filesystem via object storage abstraction)
+    from playground_backend.services.object_storage import create_object_storage_service
 
-        app.state.file_storage_service = LocalFileStorageService()
+    storage_service = create_object_storage_service()
+    app.state.file_storage_service = FileStorageService(storage_service=storage_service)
 
     # Initialize OAuth service
     oidc_config = config.oidc

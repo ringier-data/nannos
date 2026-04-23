@@ -39,11 +39,14 @@ class DynamoDBConfig(BaseModel):
 
 
 class FileStorageConfig(BaseModel):
-    """S3 configuration for user-uploaded files including audio recordings."""
+    """Configuration for user-uploaded files including audio recordings."""
 
     bucket: str = Field(default_factory=lambda: os.getenv("FILES_S3_BUCKET", "dev-nannos-infrastructure-agents-files"))
     presigned_ttl_seconds: int = Field(default_factory=lambda: int(os.getenv("FILES_PRESIGNED_TTL_SECONDS", "3600")))
     prefix: str = Field(default_factory=lambda: os.getenv("FILES_S3_PREFIX", ""))
+    storage_type: str = Field(default_factory=lambda: os.getenv("OBJECT_STORAGE_TYPE", "s3"))
+    endpoint_url: str = Field(default_factory=lambda: os.getenv("S3_ENDPOINT_URL", ""))
+    local_storage_path: str = Field(default_factory=lambda: os.getenv("LOCAL_STORAGE_PATH", "./local-storage"))
 
 
 class PostgresConfig(BaseModel):

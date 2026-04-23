@@ -20,7 +20,7 @@ def build_runtime_context(
     checkpointer: Any = None,
     static_tools: list[Any] | None = None,
     document_store: Any = None,  # AsyncPostgresStore | None
-    s3_service: Any = None,  # S3Service | None
+    storage_service: Any = None,  # IObjectStorageService | None
     document_store_bucket: str | None = None,
     backend_factory: Any = None,
     cost_logger: Any = None,
@@ -54,8 +54,8 @@ def build_runtime_context(
         checkpointer: Shared checkpointer for dynamic sub-agent multi-turn conversations.
         static_tools: Static tools from orchestrator (e.g., get_current_time, create_presigned_url).
         document_store: AsyncPostgresStore instance for document storage (optional).
-        s3_service: S3Service for uploading direct retrieval results (optional).
-        document_store_bucket: S3 bucket name for document store results (optional).
+        storage_service: IObjectStorageService for uploading direct retrieval results (optional).
+        document_store_bucket: Storage bucket name for document store results (optional).
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
@@ -88,13 +88,13 @@ def build_runtime_context(
             tool_registry[tool.get("name", str(tool))] = tool
 
     # Add document store tools if dependencies are provided
-    if document_store is not None and s3_service is not None and document_store_bucket:
+    if document_store is not None and storage_service is not None and document_store_bucket:
         logger.info(f"Adding document store tools for user_id: {user_config.user_id}")
 
         doc_tools = create_document_store_tools(
             store=document_store,
-            s3_service=s3_service,
-            s3_bucket=document_store_bucket,
+            storage_service=storage_service,
+            storage_bucket=document_store_bucket,
             user_id=user_config.user_id,  # Use database ID for docstore namespace
         )
         for tool in doc_tools:
