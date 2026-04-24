@@ -23,7 +23,8 @@ from .repositories.sub_agent_repository import SubAgentRepository
 from .repositories.usage_repository import UsageRepository
 from .repositories.user_group_repository import UserGroupRepository
 from .repositories.user_repository import UserRepository
-from .services import SecretsService, SessionService, SocketSessionService, UserService
+from .services import SecretsService, SessionService, UserService
+from .services.in_memory_socket_session_service import InMemorySocketSessionService
 from .services.audit_service import AuditService
 from .services.conversation_service import ConversationService
 from .services.file_storage_service import FileStorageService
@@ -121,11 +122,15 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.usage_service.set_repository(app.state.usage_repository)
     app.state.usage_service.set_rate_card_service(app.state.rate_card_service)
 
+    # Socket sessions are always in-memory: they are ephemeral per-connection state
+    # tied to a specific pod via Socket.IO sticky sessions. PG persistence adds
+    # latency and risks stale-row accumulation with no benefit.
+    app.state.socket_session_service = InMemorySocketSessionService()
+
     # Initialize PostgreSQL-backed or in-memory services depending on configuration
     use_in_memory = bool(os.getenv("USE_IN_MEMORY_STORE"))
     if not use_in_memory:
         app.state.session_service = SessionService()
-        app.state.socket_session_service = SocketSessionService()
         app.state.conversation_service = ConversationService()
         app.state.messages_service = MessagesService(conversation_service=app.state.conversation_service)
     else:
@@ -136,10 +141,8 @@ async def initialize_services(app: "FastAPI") -> None:
         from .services.in_memory_conversation_service import InMemoryConversationService
         from .services.in_memory_messages_service import InMemoryMessagesService
         from .services.in_memory_session_service import InMemorySessionService
-        from .services.in_memory_socket_session_service import InMemorySocketSessionService
 
         app.state.session_service = InMemorySessionService()
-        app.state.socket_session_service = InMemorySocketSessionService()
         app.state.conversation_service = InMemoryConversationService()
         app.state.messages_service = InMemoryMessagesService(conversation_service=app.state.conversation_service)
 

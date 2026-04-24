@@ -18,19 +18,6 @@ CREATE TABLE sessions (
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
 
--- Socket sessions table: stores Socket.IO session data (migrated from DynamoDB)
-CREATE TABLE socket_sessions (
-    socket_id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    http_session_id TEXT NOT NULL,
-    agent_url TEXT,
-    custom_headers JSONB NOT NULL DEFAULT '{}',
-    is_initialized BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_socket_sessions_user_id ON socket_sessions(user_id);
-
 -- Conversations table: stores conversation metadata (migrated from DynamoDB)
 CREATE TABLE conversations (
     conversation_id TEXT PRIMARY KEY,
@@ -79,9 +66,6 @@ DROP TABLE IF EXISTS messages;
 DROP INDEX IF EXISTS idx_conversations_user_conversation;
 DROP INDEX IF EXISTS idx_conversations_user_id;
 DROP TABLE IF EXISTS conversations;
-
-DROP INDEX IF EXISTS idx_socket_sessions_user_id;
-DROP TABLE IF EXISTS socket_sessions;
 
 DROP INDEX IF EXISTS idx_sessions_expires_at;
 DROP INDEX IF EXISTS idx_sessions_user_id;

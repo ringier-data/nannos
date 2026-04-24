@@ -1233,7 +1233,7 @@ class TestVersionDeletion:
         )
 
         # Try to delete as non-owner
-        with pytest.raises(PermissionError, match="Only the owner can delete versions"):
+        with pytest.raises(PermissionError, match="You don't have permission to delete this version"):
             await service.delete_version(pg_session, agent.id, 2, actor=other)
 
     @pytest.mark.asyncio

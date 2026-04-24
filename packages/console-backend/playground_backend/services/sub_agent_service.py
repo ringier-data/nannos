@@ -956,7 +956,7 @@ class SubAgentService:
     ) -> bool:
         """Delete a sub-agent."""
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
-        can_delete = self.check_user_permission(
+        can_delete = await self.check_user_permission(
             db, sub_agent_id, actor.id, required_permission="write", sub_agent=existing
         )
         if not can_delete:
@@ -996,7 +996,7 @@ class SubAgentService:
             ValueError: If version is approved (cannot delete approved versions)
         """
         existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
-        can_delete = self.check_user_permission(
+        can_delete = await self.check_user_permission(
             db, sub_agent_id, actor.id, required_permission="write", sub_agent=existing
         )
         if not can_delete:
