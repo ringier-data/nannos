@@ -25,6 +25,8 @@ from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
+from pdf2image import convert_from_path
+from pdf2image.pdf2image import pdfinfo_from_path
 
 from ..executor import get_sync_executor, run_in_sync_executor
 from .base import (
@@ -566,7 +568,6 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         For Google Slides that exceed the 10 MB PDF export limit, falls back
         to per-slide Slides API thumbnails (rate-limited but avoids the cap).
         """
-        from pdf2image import convert_from_bytes
 
         if file.mime_type in GOOGLE_NATIVE_TYPES:
             try:
@@ -584,11 +585,11 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
                     try:
                         pptx_bytes = await self._export_as_pptx(file.id, credentials)
                         pdf_bytes = await _convert_office_to_pdf(pptx_bytes, suffix=".pptx")
-                    except Exception:
+                    except Exception as pptx_exc:
                         logger.warning(
-                            "PPTX fallback also failed for %s, falling back to Slides API thumbnails",
+                            "PPTX fallback also failed for %s, because of `%s`, falling back to Slides API thumbnails",
                             file.name,
-                            exc_info=True,
+                            str(pptx_exc),
                         )
                         return await self._get_all_slides_thumbnails(file, pages, credentials)
                 elif is_timeout:
@@ -607,18 +608,61 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         else:
             pdf_bytes = await self._download_file(file.id, credentials)
 
-        # Render ALL pages in one call to poppler (single process spawn)
-        images = await run_in_sync_executor(
-            lambda: convert_from_bytes(pdf_bytes, dpi=150, fmt="png"),
-        )
+        # Write PDF to a temp file so we can render pages from disk
+        # instead of holding bytes + PIL images simultaneously.
 
-        result: dict[int, bytes] = {}
-        for page in pages:
-            idx = page.page_number - 1  # 0-based
-            if idx < len(images):
-                buf = io.BytesIO()
-                images[idx].save(buf, format="PNG")
-                result[page.page_number] = buf.getvalue()
+        pdf_tmpfile = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        try:
+            pdf_tmpfile.write(pdf_bytes)
+            pdf_tmpfile.close()
+
+            # Render pages in batches to bound peak memory.
+            # Each batch spawns poppler for a page range, converts to PIL,
+            # extracts needed PNGs, then frees the PIL objects before next batch.
+            _BATCH_SIZE = 10
+            _THUMB_DPI = 100  # 100 DPI ≈ 1333×750 px (sufficient for 800px-wide thumbnails)
+
+            result: dict[int, bytes] = {}
+            needed = {p.page_number for p in pages}
+
+            info = await run_in_sync_executor(
+                lambda: pdfinfo_from_path(pdf_tmpfile.name),
+            )
+            total_pages = info.get("Pages", 0)
+            if total_pages == 0:
+                return result
+
+            # Process all pages in batches
+            for batch_start in range(1, total_pages + 1, _BATCH_SIZE):
+                batch_end = min(batch_start + _BATCH_SIZE - 1, total_pages)
+
+                # Check if any needed pages are in this range
+                batch_needed = needed & set(range(batch_start, batch_end + 1))
+                if not batch_needed:
+                    continue
+
+                _s = batch_start
+                _e = batch_end
+                images = await run_in_sync_executor(
+                    lambda: convert_from_path(
+                        pdf_tmpfile.name,
+                        dpi=_THUMB_DPI,
+                        fmt="png",
+                        first_page=_s,
+                        last_page=_e,
+                    ),
+                )
+
+                for i, img in enumerate(images):
+                    page_num = batch_start + i
+                    if page_num in needed:
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        result[page_num] = buf.getvalue()
+                    img.close()
+
+        finally:
+            os.unlink(pdf_tmpfile.name)
 
         return result
 

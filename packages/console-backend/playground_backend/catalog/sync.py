@@ -873,6 +873,8 @@ class CatalogSyncPipeline:
         logger.info("summary(%s): %.1fs", file.name, time.monotonic() - t0)
 
         # --- Batch fetch all thumbnails (download PDF/PPTX once, render all) ---
+        # Gate through the render semaphore — only N files do the heavy
+        # PDF-download + soffice + PIL rendering at the same time.
         t0 = time.monotonic()
         changed_page_list = [page for page, _ in changed_pages_info]
         all_thumbnails: dict[int, bytes] = {}

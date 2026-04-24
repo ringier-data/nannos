@@ -440,6 +440,61 @@ class CatalogRepository(AuditedRepository):
         data["id"] = str(data["id"])
         return Catalog(**data, owner=owner)
 
+    # --- Job Claiming (FOR UPDATE SKIP LOCKED) ---
+
+    async def claim_pending_jobs(
+        self,
+        db: AsyncSession,
+        limit: int = 3,
+    ) -> list[CatalogSyncJob]:
+        """Claim up to *limit* claimable sync jobs using SELECT … FOR UPDATE SKIP LOCKED.
+
+        Picks up both 'pending' (normal sync) and 'reindexing' (vector re-index)
+        jobs.  Pending jobs are transitioned to 'running'; reindexing jobs keep
+        their status so the worker can distinguish them.
+        Other workers calling this concurrently will skip the locked rows,
+        preventing double-processing.
+        """
+        now = datetime.now(timezone.utc)
+        result = await db.execute(
+            text("""
+                SELECT * FROM catalog_sync_jobs
+                WHERE status IN ('pending', 'reindexing')
+                ORDER BY created_at ASC
+                LIMIT :limit
+                FOR UPDATE SKIP LOCKED
+            """),
+            {"limit": limit},
+        )
+        rows = result.mappings().all()
+        if not rows:
+            return []
+
+        # Only transition pending → running; reindexing jobs keep their status
+        pending_ids = [row["id"] for row in rows if row["status"] == "pending"]
+        reindex_ids = [row["id"] for row in rows if row["status"] == "reindexing"]
+
+        if pending_ids:
+            await db.execute(
+                text("""
+                    UPDATE catalog_sync_jobs
+                    SET status = 'running', started_at = :now
+                    WHERE id = ANY(:ids)
+                """),
+                {"now": now, "ids": pending_ids},
+            )
+        if reindex_ids:
+            await db.execute(
+                text("""
+                    UPDATE catalog_sync_jobs
+                    SET started_at = :now
+                    WHERE id = ANY(:ids)
+                """),
+                {"now": now, "ids": reindex_ids},
+            )
+
+        return [self._row_to_sync_job(row) for row in rows]
+
     # --- Scheduled Sync ---
 
     async def get_catalogs_due_for_sync(

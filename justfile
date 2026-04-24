@@ -36,6 +36,7 @@ img_client_slack := registry + "/nannos-client-slack"
 img_client_slack_frontend := registry + "/nannos-client-slack-frontend"
 img_client_email := registry + "/nannos-client-email"
 img_voice_agent := registry + "/nannos-voice-agent"
+img_catalog_worker := registry + "/nannos-catalog-worker"
 
 # Default build platform
 platform := "linux/arm64"
@@ -44,7 +45,7 @@ platform := "linux/arm64"
 build_ts := `date -u +%Y%m%d%H%M%S`
 
 # Packages that have Dockerfiles (used by build recipes)
-_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend console-frontend client-slack client-slack-frontend client-email voice-agent"
+_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend catalog-worker console-frontend client-slack client-slack-frontend client-email voice-agent"
 
 # Build flags (override on CLI, e.g. just push=true build)
 push := ""
@@ -75,6 +76,7 @@ pkg-image pkg:
       client-slack-frontend) echo "{{ img_client_slack_frontend }}" ;;
       client-email)       echo "{{ img_client_email }}" ;;
       voice-agent)        echo "{{ img_voice_agent }}" ;;
+      catalog-worker)     echo "{{ img_catalog_worker }}" ;;
       *) echo "" ;;
     esac
 
@@ -171,12 +173,31 @@ release bump="":
         just build-pkg "$pkg"
       fi
     done
+    # Also build virtual packages that share a parent's directory
+    for vpkg in $VIRTUAL_PACKAGES; do
+      parent_dir="$(pkg_dir "$vpkg")"
+      for pkg in "${CHANGED[@]}"; do
+        if [[ "$(pkg_dir "$pkg")" == "$parent_dir" ]]; then
+          just build-pkg "$vpkg"
+          break
+        fi
+      done
+    done
 
     # Phase 3: Push all (reuses cached builds)
     for pkg in "${CHANGED[@]}"; do
       if [[ " $BUILDABLE " =~ " $pkg " ]]; then
         just push=true build-pkg "$pkg"
       fi
+    done
+    for vpkg in $VIRTUAL_PACKAGES; do
+      parent_dir="$(pkg_dir "$vpkg")"
+      for pkg in "${CHANGED[@]}"; do
+        if [[ "$(pkg_dir "$pkg")" == "$parent_dir" ]]; then
+          just push=true build-pkg "$vpkg"
+          break
+        fi
+      done
     done
 
 # Release a single package (bump version, commit, tag, build, push)
@@ -287,12 +308,20 @@ build-pkg pkg:
       --build-context "agent-common=packages/agent-common"
     )
 
+    # Multi-stage target support: some packages build a specific Dockerfile stage
+    TARGET_ARGS=()
+    case "$PKG" in
+      console-backend) TARGET_ARGS=(--target api) ;;
+      catalog-worker)  TARGET_ARGS=(--target catalog-worker) ;;
+    esac
+
     printf "${CYAN}🏗️  Building %s (%s)...${RESET}" "$PKG" "$TAG"
     T=$SECONDS
 
     build_with_pane "$PKG" "$LOGFILE" \
       docker buildx build --platform "$PLATFORM" \
       "${BUILD_CTX_ARGS[@]}" \
+      "${TARGET_ARGS[@]}" \
       -t "${IMAGE}:${TAG}" "${DIR}"
 
     printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
@@ -306,6 +335,7 @@ build-pkg pkg:
       build_with_pane "$PKG" "$LOGFILE" \
         docker buildx build --platform "$PLATFORM" \
         "${BUILD_CTX_ARGS[@]}" \
+        "${TARGET_ARGS[@]}" \
         -t "${IMAGE}:${TAG}" --push "${DIR}"
 
       printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"

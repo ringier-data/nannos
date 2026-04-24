@@ -26,17 +26,15 @@ COPY --from=ringier-a2a-sdk . ../ringier-a2a-sdk
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 RUN uv pip install validators
 
-# Final runtime image
-FROM docker.rcplus.io/python:3.13-slim AS runtime
+# --- API runtime (no LibreOffice/poppler — lighter image for console-backend) ---
+FROM docker.rcplus.io/python:3.13-slim AS api
 LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
 ARG WORKDIR
 ARG API_PORT
 ENV API_PORT=${API_PORT}
 
 # Install postgresql-client (required by migrate.sh for psql)
-# poppler-utils provides pdfinfo/pdftoppm for PPTX/PDF thumbnail rendering via pdf2image
-# libreoffice-impress-nogui provides soffice --headless for PPTX→PDF conversion without X11/GUI deps
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client poppler-utils libreoffice-impress-nogui && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
 
 # Copy rambler binary for running migrations
 COPY --from=rambler-source /rambler /usr/local/bin/rambler
@@ -65,3 +63,20 @@ RUN chmod +x ./entrypoint.sh
 EXPOSE ${API_PORT}
 
 ENTRYPOINT ["./entrypoint.sh"]
+
+
+# --- Catalog worker runtime (with LibreOffice + poppler for PPTX/PDF processing) ---
+FROM docker.rcplus.io/python:3.13-slim AS catalog-worker
+LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
+ARG WORKDIR
+
+# poppler-utils provides pdfinfo/pdftoppm for PPTX/PDF thumbnail rendering via pdf2image
+# libreoffice-impress-nogui provides soffice --headless for PPTX→PDF conversion without X11/GUI deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils libreoffice-impress-nogui && rm -rf /var/lib/apt/lists/*
+
+WORKDIR ${WORKDIR}
+COPY --from=backend-builder ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
+COPY --from=backend-builder ${WORKDIR} .
+
+ENTRYPOINT [".venv/bin/python", "catalog_worker.py"]

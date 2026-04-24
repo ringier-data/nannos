@@ -197,20 +197,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Start scheduler engine
     await app.state.scheduler_engine.start()
 
-    # Start catalog sync engine (if auto-sync is enabled)
-    # Always heal stuck jobs (manual syncs can leave orphaned running jobs on restart)
-    await app.state.catalog_sync_engine.heal_stuck_jobs()
-
-    # Start the task queue (workers that execute sync jobs)
-    if hasattr(app.state, "sync_task_queue"):
-        await app.state.sync_task_queue.start(
-            handler=app.state.catalog_service.handle_sync_task,
-        )
-        logger.info("Sync task queue started")
-
-    if config.catalog.auto_sync_enabled:
-        await app.state.catalog_sync_engine.start()
-
     # Start internal cost logger for catalog sync cost tracking
     from playground_backend.services.llm_cost_tracking import _internal_cost_logger
 
@@ -231,15 +217,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if hasattr(app.state, "scheduler_engine"):
         await app.state.scheduler_engine.stop()
         logger.info("Scheduler engine stopped")
-    if hasattr(app.state, "catalog_sync_engine"):
-        await app.state.catalog_sync_engine.stop()
-        logger.info("Catalog sync engine stopped")
-    if hasattr(app.state, "sync_task_queue"):
-        await app.state.sync_task_queue.stop()
-        logger.info("Sync task queue stopped")
-    from playground_backend.catalog.executor import shutdown_sync_executor
-
-    shutdown_sync_executor()
     if _internal_cost_logger is not None:
         await _internal_cost_logger.shutdown()
         logger.info("Internal cost logger stopped")
@@ -773,6 +750,25 @@ async def health_check() -> JSONResponse:
         },
         status_code=200,
     )
+
+
+@app.post("/api/internal/catalog-sync-progress")
+async def catalog_sync_progress(request: Request) -> JSONResponse:
+    """Internal webhook for the catalog-worker to relay sync progress via Socket.IO.
+
+    Not routed through the Gateway — only reachable within the K8s cluster.
+    No authentication required (internal service-to-service communication).
+    """
+    data = await request.json()
+    user_id = data.get("user_id")
+    if not user_id:
+        return JSONResponse(content={"error": "user_id required"}, status_code=400)
+
+    socket_mgr = getattr(request.app.state, "socket_notification_manager", None)
+    if socket_mgr:
+        await socket_mgr.emit_to_user(user_id, "catalog_sync_progress", data)
+
+    return JSONResponse(content={"ok": True}, status_code=200)
 
 
 @app.get("/api/v1/")

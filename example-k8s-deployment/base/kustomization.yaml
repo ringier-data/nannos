@@ -6,6 +6,7 @@ resources:
   - ./gateway.yaml
   - ./agent-creator.yaml
   - ./agent-runner.yaml
+  - ./catalog-worker.yaml
   - ./console.yaml
   - ./orchestrator.yaml
   - ./client-slack.yaml

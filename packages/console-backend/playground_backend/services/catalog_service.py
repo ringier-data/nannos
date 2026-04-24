@@ -1,9 +1,7 @@
 """Service for managing catalogs."""
 
-import asyncio
 import json
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
@@ -24,7 +22,6 @@ from ..models.user import User
 
 if TYPE_CHECKING:
     from ..catalog.sync import CatalogSyncPipeline
-    from ..catalog.task_queue import SyncTaskMessage, SyncTaskQueue
     from ..catalog.token_service import CatalogTokenService
     from ..repositories.catalog_repository import CatalogRepository
 
@@ -40,7 +37,6 @@ class CatalogService:
         self._token_service: "CatalogTokenService | None" = None
         self._db_session_factory: Any = None
         self._socket_notification_manager: Any = None
-        self._task_queue: "SyncTaskQueue | None" = None
 
     def set_repository(self, repo: "CatalogRepository") -> None:
         self._repo = repo
@@ -56,9 +52,6 @@ class CatalogService:
 
     def set_socket_notification_manager(self, manager: Any) -> None:
         self._socket_notification_manager = manager
-
-    def set_task_queue(self, queue: "SyncTaskQueue") -> None:
-        self._task_queue = queue
 
     @property
     def repo(self) -> "CatalogRepository":
@@ -421,9 +414,10 @@ class CatalogService:
         actor: User,
         is_admin: bool = False,
     ) -> CatalogSyncJob:
-        """Launch background re-index for pages with indexed_at = NULL.
+        """Queue a re-index for pages with indexed_at = NULL.
 
-        Creates a sync job with 'reindexing' status so progress survives page refresh.
+        Inserts a sync job row with 'reindexing' status. The catalog-worker
+        picks it up via ``claim_pending_jobs()`` (FOR UPDATE SKIP LOCKED).
         Returns the created sync job.
         """
         catalog = await self.repo.get_catalog(db, catalog_id)
@@ -431,8 +425,6 @@ class CatalogService:
             raise ValueError("Catalog not found")
         if not is_admin and catalog.owner_user_id != actor.id:
             raise PermissionError("Only the owner or an admin can re-index")
-        if not self._sync_pipeline:
-            raise RuntimeError("Sync pipeline not configured")
 
         # Check if a sync/reindex is already active
         latest = await self.repo.get_latest_sync_job(db, catalog_id)
@@ -455,7 +447,7 @@ class CatalogService:
         if total == 0:
             raise ValueError("No unindexed pages found")
 
-        # Create sync job with 'reindexing' status
+        # Create sync job with 'reindexing' status — worker will claim it
         job_id = await self.repo.create_sync_job(db, catalog_id)
         await self.repo.update_sync_job(
             db,
@@ -471,66 +463,7 @@ class CatalogService:
         if not job:
             raise RuntimeError("Failed to retrieve created sync job")
 
-        # Register per-job state and launch background task
-        self._setup_sync_progress_socket(catalog, job_id, user_sub=actor.id)
-
-        asyncio.create_task(
-            self._run_reindex_background(catalog_id, job_id, total, actor.id),
-            name=f"catalog-reindex-{catalog_id}",
-        )
         return job
-
-    async def _run_reindex_background(
-        self, catalog_id: str, sync_job_id: str, total: int, user_sub: str | None = None
-    ) -> None:
-        """Run reindex in background, tracking progress through the sync job."""
-        assert self._sync_pipeline is not None
-        assert self._db_session_factory is not None
-
-        pipeline = self._sync_pipeline
-        db_factory = self._db_session_factory
-
-        async def _progress(data: dict) -> None:
-            """Update sync job with reindex progress."""
-            async with db_factory() as db:
-                await pipeline._update_sync_job(
-                    db,
-                    sync_job_id,
-                    processed_files=data.get("indexed", 0),  # repurposed
-                    failed_files=data.get("failed", 0),  # repurposed
-                )
-
-        try:
-            result = await pipeline.reindex_unindexed_pages(
-                catalog_id,
-                progress_callback=_progress,
-                sync_job_id=sync_job_id,
-            )
-            async with db_factory() as db:
-                await pipeline._update_sync_job(
-                    db,
-                    sync_job_id,
-                    status="completed",
-                    completed_at=datetime.now(timezone.utc),
-                    processed_files=result.get("indexed", 0),
-                    failed_files=result.get("failed", 0),
-                )
-            logger.info("Reindex completed for catalog %s (job %s)", catalog_id, sync_job_id)
-        except Exception as exc:
-            logger.exception("Reindex failed for catalog %s (job %s)", catalog_id, sync_job_id)
-            try:
-                async with db_factory() as db:
-                    await pipeline._update_sync_job(
-                        db,
-                        sync_job_id,
-                        status="failed",
-                        completed_at=datetime.now(timezone.utc),
-                        error_details={"error": str(exc)},
-                    )
-            except Exception:
-                logger.exception("Failed to mark reindex job %s as failed", sync_job_id)
-        finally:
-            pipeline.teardown_job(sync_job_id)
 
     async def trigger_sync(
         self,
@@ -539,7 +472,11 @@ class CatalogService:
         actor: User,
         is_admin: bool = False,
     ) -> CatalogSyncJob:
-        """Trigger a manual sync for a catalog."""
+        """Trigger a manual sync for a catalog.
+
+        Inserts a pending sync job row. The catalog-worker process will
+        pick it up via ``claim_pending_jobs()`` (FOR UPDATE SKIP LOCKED).
+        """
         catalog = await self.repo.get_catalog(db, catalog_id)
         if not catalog:
             raise ValueError("Catalog not found")
@@ -562,26 +499,6 @@ class CatalogService:
         job = await self.repo.get_sync_job(db, job_id)
         if not job:
             raise RuntimeError("Failed to retrieve created sync job")
-
-        # Enqueue via task queue (preferred) or fall back to direct background task
-        if self._task_queue:
-            from ..catalog.task_queue import SyncTaskMessage
-
-            await self._task_queue.enqueue(
-                SyncTaskMessage(
-                    catalog_id=catalog_id,
-                    sync_job_id=job_id,
-                    triggered_by="manual",
-                    user_sub=actor.id,
-                )
-            )
-        elif self._sync_pipeline and self._token_service and self._db_session_factory:
-            asyncio.create_task(
-                self._run_sync_background(catalog, job_id, user_sub=actor.id),
-                name=f"catalog-sync-{catalog_id}",
-            )
-        else:
-            logger.warning("Sync pipeline not configured; job %s will remain pending", job_id)
 
         return job
 
@@ -701,245 +618,3 @@ class CatalogService:
             raise ValueError(f"Cannot cancel a sync in '{latest.status}' state")
 
         return await self._transition_sync_job(db, catalog_id, target)
-
-    def _setup_sync_progress_socket(self, catalog: Catalog, sync_job_id: str, user_sub: str | None = None) -> None:
-        """Register per-job state (socket callback + cost attribution) on the sync pipeline."""
-        assert self._sync_pipeline is not None
-        socket_mgr = self._socket_notification_manager
-        user_id = catalog.owner_user_id
-        callback = None
-        if socket_mgr and user_id:
-
-            async def _sync_progress(job_id: str, fields: dict) -> None:
-                payload: dict = {}
-                for k, v in fields.items():
-                    if isinstance(v, datetime):
-                        payload[k] = v.isoformat()
-                    else:
-                        payload[k] = v
-                payload["job_id"] = job_id
-                payload["catalog_id"] = catalog.id
-                await socket_mgr.emit_to_user(user_id, "catalog_sync_progress", payload)
-
-            callback = _sync_progress
-
-        self._sync_pipeline.setup_job(
-            sync_job_id=sync_job_id,
-            user_sub=user_sub or catalog.owner_user_id,
-            catalog_id=catalog.id,
-            progress_callback=callback,
-        )
-
-    async def _run_sync_background(self, catalog: Catalog, sync_job_id: str, user_sub: str | None = None) -> None:
-        """Run sync pipeline in a background task."""
-        assert self._sync_pipeline is not None
-        assert self._token_service is not None
-        assert self._db_session_factory is not None
-
-        # Register per-job state (socket callback + cost attribution)
-        self._setup_sync_progress_socket(catalog, sync_job_id, user_sub=user_sub)
-
-        try:
-            async with self._db_session_factory() as db:
-                credentials = await self._token_service.get_credentials(db, catalog.id)
-                if not credentials:
-                    logger.error("No active Google connection for catalog %s", catalog.id)
-                    await self._sync_pipeline._update_sync_job(
-                        db,
-                        sync_job_id,
-                        status="failed",
-                        completed_at=datetime.now(timezone.utc),
-                        error_details={"error": "No active Google connection"},
-                    )
-                    await db.commit()
-                    return
-
-            source_config = catalog.source_config or {}
-
-            # Check if this is a full sync or incremental
-            from ..catalog.sync import normalize_source_config
-
-            sources = normalize_source_config(source_config)
-            has_change_tokens = any(s.get("change_token") for s in sources)
-
-            async with self._db_session_factory() as db:
-                latest_completed = await db.execute(
-                    __import__("sqlalchemy").text("""
-                        SELECT id FROM catalog_sync_jobs
-                        WHERE catalog_id = :cid AND status = 'completed'
-                        ORDER BY completed_at DESC LIMIT 1
-                    """),
-                    {"cid": catalog.id},
-                )
-                has_prior_sync = latest_completed.first() is not None
-
-            if has_prior_sync and has_change_tokens:
-                new_tokens = await self._sync_pipeline.run_incremental_sync(
-                    catalog_id=catalog.id,
-                    source_config=source_config,
-                    sync_job_id=sync_job_id,
-                    credentials=credentials,
-                )
-                # Persist updated change tokens back to source_config
-                if new_tokens:
-                    await self._persist_change_tokens(catalog.id, source_config, new_tokens)
-            else:
-                await self._sync_pipeline.run_full_sync(
-                    catalog_id=catalog.id,
-                    source_config=source_config,
-                    sync_job_id=sync_job_id,
-                    credentials=credentials,
-                )
-
-            logger.info("Sync completed for catalog %s (job %s)", catalog.id, sync_job_id)
-
-        except Exception:
-            logger.exception("Background sync failed for catalog %s (job %s)", catalog.id, sync_job_id)
-            # Ensure the job transitions to 'failed' so it doesn't stay stuck in pending/running
-            try:
-                async with self._db_session_factory() as db:
-                    await self._sync_pipeline._update_sync_job(
-                        db,
-                        sync_job_id,
-                        status="failed",
-                        completed_at=datetime.now(timezone.utc),
-                        error_details={"error": "Unexpected sync failure. Check server logs."},
-                    )
-                    await db.commit()
-            except Exception:
-                logger.exception("Failed to mark sync job %s as failed", sync_job_id)
-        finally:
-            self._sync_pipeline.teardown_job(sync_job_id)
-
-    async def _persist_change_tokens(
-        self, catalog_id: str, source_config: dict, new_tokens: dict[str, str | None]
-    ) -> None:
-        """Write updated per-source change tokens back to source_config."""
-        try:
-            from ..catalog.sync import normalize_source_config
-
-            sources = normalize_source_config(source_config)
-            updated = False
-            for src in sources:
-                token = new_tokens.get(src.get("id", ""))
-                if token is not None:
-                    src["change_token"] = token
-                    updated = True
-            if updated:
-                async with self._db_session_factory() as db:
-                    await db.execute(
-                        text("UPDATE catalogs SET source_config = :cfg WHERE id = :cid"),
-                        {"cfg": json.dumps({"sources": sources}), "cid": catalog_id},
-                    )
-                    await db.commit()
-        except Exception:
-            logger.warning("Failed to persist change tokens for catalog %s", catalog_id)
-
-    # --- Task Queue Handler ---
-
-    async def handle_sync_task(self, message: "SyncTaskMessage") -> None:
-        """Execute a sync task from the queue.
-
-        This is the unified handler used by the :class:`SyncTaskQueue` for
-        both scheduled and manual syncs.
-        """
-        assert self._sync_pipeline is not None, "sync pipeline not configured"
-        assert self._token_service is not None, "token service not configured"
-        assert self._db_session_factory is not None, "db session factory not configured"
-
-        catalog_id = message.catalog_id
-        sync_job_id = message.sync_job_id
-
-        # Look up catalog metadata
-        async with self._db_session_factory() as db:
-            catalog = await self.repo.get_catalog(db, catalog_id)
-        if not catalog:
-            logger.error("Catalog %s not found; failing sync job %s", catalog_id, sync_job_id)
-            async with self._db_session_factory() as db:
-                await self._sync_pipeline._update_sync_job(
-                    db,
-                    sync_job_id,
-                    status="failed",
-                    completed_at=datetime.now(timezone.utc),
-                    error_details={"error": "Catalog not found"},
-                )
-                await db.commit()
-            return
-
-        # Register per-job state (socket callback + cost attribution)
-        self._setup_sync_progress_socket(catalog, sync_job_id, user_sub=message.user_sub)
-
-        try:
-            async with self._db_session_factory() as db:
-                credentials = await self._token_service.get_credentials(db, catalog.id)
-                if not credentials:
-                    logger.error("No active Google connection for catalog %s", catalog.id)
-                    await self._sync_pipeline._update_sync_job(
-                        db,
-                        sync_job_id,
-                        status="failed",
-                        completed_at=datetime.now(timezone.utc),
-                        error_details={"error": "No active Google connection"},
-                    )
-                    await db.commit()
-                    return
-
-            source_config = catalog.source_config or {}
-
-            # Check if this is a full sync or incremental
-            from ..catalog.sync import normalize_source_config
-
-            sources = normalize_source_config(source_config)
-            has_change_tokens = any(s.get("change_token") for s in sources)
-
-            async with self._db_session_factory() as db:
-                latest_completed = await db.execute(
-                    __import__("sqlalchemy").text("""
-                        SELECT id FROM catalog_sync_jobs
-                        WHERE catalog_id = :cid AND status = 'completed'
-                        ORDER BY completed_at DESC LIMIT 1
-                    """),
-                    {"cid": catalog.id},
-                )
-                has_prior_sync = latest_completed.first() is not None
-
-            if has_prior_sync and has_change_tokens:
-                new_tokens = await self._sync_pipeline.run_incremental_sync(
-                    catalog_id=catalog.id,
-                    source_config=source_config,
-                    sync_job_id=sync_job_id,
-                    credentials=credentials,
-                )
-                if new_tokens:
-                    await self._persist_change_tokens(catalog.id, source_config, new_tokens)
-            else:
-                await self._sync_pipeline.run_full_sync(
-                    catalog_id=catalog.id,
-                    source_config=source_config,
-                    sync_job_id=sync_job_id,
-                    credentials=credentials,
-                )
-
-            logger.info(
-                "Sync completed for catalog %s (job %s, triggered_by=%s)",
-                catalog.id,
-                sync_job_id,
-                message.triggered_by,
-            )
-
-        except Exception:
-            logger.exception("Sync failed for catalog %s (job %s)", catalog.id, sync_job_id)
-            try:
-                async with self._db_session_factory() as db:
-                    await self._sync_pipeline._update_sync_job(
-                        db,
-                        sync_job_id,
-                        status="failed",
-                        completed_at=datetime.now(timezone.utc),
-                        error_details={"error": "Unexpected sync failure. Check server logs."},
-                    )
-                    await db.commit()
-            except Exception:
-                logger.exception("Failed to mark sync job %s as failed", sync_job_id)
-        finally:
-            self._sync_pipeline.teardown_job(sync_job_id)

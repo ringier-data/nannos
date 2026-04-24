@@ -28,7 +28,6 @@ from .repositories.user_repository import UserRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
 from .services.audit_service import AuditService
 from .services.catalog_service import CatalogService
-from .services.catalog_sync_engine import CatalogSyncEngine
 from .services.conversation_service import ConversationService
 from .services.file_storage_service import FileStorageService
 from .services.keycloak_admin_service import KeycloakAdminService
@@ -109,9 +108,7 @@ async def initialize_services(app: "FastAPI") -> None:
         client_secret=config.catalog.google_oauth_client_secret.get_secret_value(),
     )
 
-    # Wire sync pipeline into catalog service (for manual trigger_sync)
-    from .catalog.task_queue import InMemoryTaskQueue
-
+    # Wire sync pipeline into catalog service (for reindex)
     if config.catalog.is_configured:
         from .catalog.adapters.google_drive import GoogleDriveAdapter
         from .catalog.sync import CatalogSyncPipeline
@@ -124,26 +121,6 @@ async def initialize_services(app: "FastAPI") -> None:
         app.state.catalog_service.set_token_service(app.state.catalog_token_service)
         app.state.catalog_service.set_db_session_factory(get_sync_session_factory())
         app.state.catalog_service.set_socket_notification_manager(app.state.socket_notification_manager)
-
-        # Task queue — swap InMemoryTaskQueue with an SQS implementation for
-        # horizontal scaling.  The queue is shared by the sync engine (scheduled)
-        # and catalog service (manual triggers).
-        _task_queue: InMemoryTaskQueue | None = InMemoryTaskQueue(
-            max_workers=config.catalog.sync_max_concurrent,
-        )
-        app.state.sync_task_queue = _task_queue
-        app.state.catalog_service.set_task_queue(_task_queue)
-    else:
-        _task_queue = None
-
-    # Catalog sync engine (scheduled background syncs)
-    app.state.catalog_sync_engine = CatalogSyncEngine(
-        repo=app.state.catalog_repository,
-        task_queue=_task_queue or InMemoryTaskQueue(max_workers=1),
-        db_session_factory=get_sync_session_factory(),
-        sync_interval_seconds=config.catalog.sync_interval_seconds,
-        tick_interval_seconds=config.catalog.sync_tick_interval_seconds,
-    )
 
     app.state.user_group_service = UserGroupService()
     app.state.user_group_service.set_repository(app.state.user_group_repository)

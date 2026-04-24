@@ -10,7 +10,7 @@ class OidcConfig(BaseModel):
 
     client_id: str = Field(default_factory=lambda: os.getenv("OIDC_CLIENT_ID", ""))
     client_secret: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("OIDC_CLIENT_SECRET", "")))
-    issuer: str = Field(default_factory=lambda: os.environ["OIDC_ISSUER"])
+    issuer: str = Field(default_factory=lambda: os.getenv("OIDC_ISSUER", ""))
     scope: str = Field(default="openid profile email offline_access")
 
 
