@@ -7,6 +7,7 @@ their own model and checkpointer via abstract factory methods.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -134,6 +135,21 @@ class LangGraphAgent(BaseAgent):
         self._mcp_load_error: str | None = None  # Store MCP connection error for user-friendly messaging
         logger.info("MCP tool discovery will happen on first request")
 
+        # MCP tool refresh configuration (used by LangGraphAgent subclasses)
+        self._mcp_refresh_enabled = os.getenv("MCP_TOOLS_REFRESH_ENABLED", "true").lower() == "true"
+        try:
+            self._mcp_refresh_interval_seconds = int(os.getenv("MCP_TOOLS_REFRESH_INTERVAL_SECONDS", "300"))
+        except ValueError:
+            self._mcp_refresh_interval_seconds = 300
+
+        # MCP tool refresh state (initialized by LangGraphAgent)
+        self._refresh_task: asyncio.Task | None = None
+        self._refresh_stop_event: asyncio.Event | None = None
+        # Track MCP server interface hash for smart refresh detection
+        # (only refresh graph if tool interface actually changed)
+        self._mcp_interface_hashes: dict[str, str] = {}  # server_name -> SHA256 hash of tools interface
+        self._mcp_server_capabilities: dict[str, dict] = {}  # server_name -> capabilities tracking dict
+
         # Graph and MCP client
         self._graph: CompiledStateGraph | None = None
         self._mcp_client: MultiServerMCPClient | None = None
@@ -257,7 +273,7 @@ class LangGraphAgent(BaseAgent):
         """Filter tools by query regex pattern."""
         if not self.tool_query_regex:
             return tools
-        filtered_tools = [tool for tool in tools if self.tool_query_regex.search(tool.name)]
+        filtered_tools: list[BaseTool] = [tool for tool in tools if self.tool_query_regex.search(tool.name)]
         logger.info(
             f"Filtered tools with pattern '{self.tool_query_regex.pattern}': {[tool.name for tool in filtered_tools]}"
         )
@@ -285,6 +301,111 @@ class LangGraphAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"Failed to enable cost tracking: {e}")
 
+    async def _extract_mcp_server_info(self) -> None:
+        """Track available MCP servers for refresh detection.
+
+        Uses only the public API (.connections) to identify servers.
+        Actual version/capability detection relies on interface hash comparison
+        during refresh cycles, which is more reliable than post-hoc inspection.
+
+        Should be called after MultiServerMCPClient is created.
+        """
+        if not self._mcp_client:
+            return
+
+        try:
+            # Use only the public connections dict (no internal attributes)
+            if hasattr(self._mcp_client, "connections"):
+                connections: dict = self._mcp_client.connections  # type: ignore
+                for server_name in connections.keys():
+                    # Initialize server tracking with minimal info
+                    # Actual detection happens via interface hash comparison in refresh cycles
+                    self._mcp_server_capabilities[server_name] = {
+                        "tracked": True,  # Indicates this server is being monitored
+                    }
+                    logger.debug(f"Tracking MCP server for refresh: {server_name}")
+        except Exception as e:
+            logger.debug(f"Error tracking MCP servers: {e}")
+
+    @staticmethod
+    def _compute_interface_hash(tools: list[BaseTool]) -> str:
+        """Compute SHA256 hash of tool interface (names and schemas).
+
+        This hash changes if tools are added/removed or their schemas change,
+        but not if internal tool logic changes.
+
+        Args:
+            tools: List of BaseTool instances
+
+        Returns:
+            SHA256 hex digest of the tool interface
+        """
+        # Build a deterministic JSON representation of the tool interface
+        interface_data: list[dict[str, str | dict]] = []
+        for tool in sorted(tools, key=lambda t: t.name):
+            # Extract name and schema
+            tool_schema: dict[str, str | dict] = {
+                "name": tool.name,
+                "description": tool.description or "",
+            }
+            if hasattr(tool, "args_schema") and tool.args_schema:
+                # Include args schema for change detection
+                try:
+                    # Get the JSON schema if available
+                    if hasattr(tool.args_schema, "model_json_schema"):
+                        tool_schema["schema"] = tool.args_schema.model_json_schema()
+                    else:
+                        tool_schema["schema"] = str(tool.args_schema)
+                except Exception:
+                    tool_schema["schema"] = str(tool.args_schema)
+            interface_data.append(tool_schema)
+
+        # Compute SHA256 hash of the JSON representation
+        interface_json = json.dumps(interface_data, sort_keys=True)
+        return hashlib.sha256(interface_json.encode()).hexdigest()
+
+    async def _check_mcp_interface_changed(
+        self, server_name: str, tools: list[BaseTool], server_info: dict | None = None
+    ) -> bool:
+        """Check if MCP server interface has changed since last discovery.
+
+        Uses tool interface hash (names and schemas) for reliable change detection.
+        This approach works with the public MultiServerMCPClient API and detects:
+        - Tools added/removed
+        - Tool schemas changed
+        - Argument signatures modified
+
+        Args:
+            server_name: Name of the MCP server
+            tools: List of tools discovered from the server
+            server_info: Unused (kept for compatibility), hash comparison is reliable
+
+        Returns:
+            True if interface changed (refresh needed), False if unchanged
+        """
+        # Compute interface hash
+        current_hash: str = self._compute_interface_hash(tools)
+        previous_hash: str | None = self._mcp_interface_hashes.get(server_name)
+
+        # Check if interface changed (first time or hash differs)
+        if previous_hash is not None and current_hash != previous_hash:
+            logger.info(
+                f"MCP server '{server_name}' interface changed (hash: {previous_hash[:8]}... -> {current_hash[:8]}...)"
+            )
+            # Update stored hash
+            self._mcp_interface_hashes[server_name] = current_hash
+            return True
+
+        # Store hash on first discovery
+        if previous_hash is None:
+            self._mcp_interface_hashes[server_name] = current_hash
+            logger.debug(f"Stored initial interface hash for MCP server '{server_name}'")
+            return False  # First time, not a "change"
+
+        # No change detected
+        logger.debug(f"MCP server '{server_name}' interface unchanged")
+        return False
+
     async def _ensure_mcp_tools_loaded(self):
         """Ensure MCP tools are discovered and loaded (lazy, on first request).
 
@@ -309,17 +430,21 @@ class LangGraphAgent(BaseAgent):
         try:
             logger.info("Discovering MCP tools...")
 
-            connections = await self._get_mcp_connections()
-            callbacks = Callbacks(on_progress=on_mcp_progress)
+            connections: dict[str, StreamableHttpConnection] = await self._get_mcp_connections()
+            callbacks: Callbacks = Callbacks(on_progress=on_mcp_progress)
             self._mcp_client = MultiServerMCPClient(connections=connections, callbacks=callbacks)  # type: ignore
-            interceptors = self._get_tool_interceptors()
 
-            all_tools = []
+            # Track MCP servers for refresh detection
+            await self._extract_mcp_server_info()
+
+            interceptors: list = self._get_tool_interceptors()
+
+            all_tools: list[BaseTool] = []
             for server_name, connection in connections.items():
                 logger.info(f"Loading tools from MCP server: {server_name}")
 
                 # Retry transient failures with exponential backoff
-                tools = await self._load_mcp_tools_with_retry(
+                tools: list[BaseTool] = await self._load_mcp_tools_with_retry(
                     connection=connection,
                     interceptors=interceptors,
                     server_name=server_name,
@@ -329,6 +454,9 @@ class LangGraphAgent(BaseAgent):
                 tools = self._filter_tools(tools)
                 all_tools.extend(tools)
                 logger.info(f"Loaded {len(tools)} tools from {server_name}")
+
+                # Store interface hash for this server for future change detection
+                await self._check_mcp_interface_changed(server_name, tools)
 
             self._mcp_tools = all_tools
             logger.info(f"Discovered total of {len(self._mcp_tools)} MCP tools")
@@ -462,10 +590,209 @@ class LangGraphAgent(BaseAgent):
             response_format=AutoStrategy(schema=FinalResponseSchema),
         )
 
+    # --- MCP Tool Refresh (periodic re-discovery) ---
+
+    async def _start_mcp_refresh_worker(self):
+        """Background worker that periodically re-discovers MCP tools.
+
+        Runs in an independent async task, refreshing tools at a configurable interval
+        (MCP_TOOLS_REFRESH_INTERVAL_SECONDS, default 300 seconds / 5 minutes). Uses the
+        existing _ensure_mcp_tools_loaded() to discover tools and acquires _mcp_tools_lock
+        to prevent collision with active tool-calls.
+
+        Gracefully handles errors and continues refreshing even if a cycle fails.
+        Respects _refresh_stop_event for graceful shutdown.
+
+        This worker is completely independent from stream processing — it runs in the
+        background as long as the agent instance is active.
+        """
+        logger.info(
+            f"MCP tool refresh worker started (interval: {self._mcp_refresh_interval_seconds}s, "
+            f"enabled: {self._mcp_refresh_enabled})"
+        )
+
+        if not self._mcp_refresh_enabled:
+            logger.info("MCP tool refresh is disabled, skipping worker")
+            return
+
+        try:
+            while not self._refresh_stop_event.is_set():
+                try:
+                    # Wait for the interval or until stop signal
+                    await asyncio.wait_for(
+                        self._refresh_stop_event.wait(),
+                        timeout=self._mcp_refresh_interval_seconds,
+                    )
+                    # If we get here, the stop event was set
+                    break
+                except asyncio.TimeoutError:
+                    # Timeout is expected — time to refresh tools
+                    pass
+
+                try:
+                    logger.debug("MCP tool refresh cycle started")
+
+                    # Smart refresh: only recreate graph if interface actually changed
+                    # This avoids unnecessary graph rebuilds when no schemas changed
+                    if self._mcp_tools is None:
+                        # Tools not yet loaded, do normal load
+                        await self._ensure_mcp_tools_loaded()
+                    else:
+                        # Tools already loaded, check if interface changed
+                        try:
+                            interface_changed: bool = False
+                            connections: dict[str, StreamableHttpConnection] = await self._get_mcp_connections()
+                            callbacks: Callbacks = Callbacks(on_progress=on_mcp_progress)
+
+                            for server_name, connection in connections.items():
+                                logger.debug(f"Checking interface changes for MCP server: {server_name}")
+
+                                # Discover current tools
+                                tools: list[BaseTool] = await self._load_mcp_tools_with_retry(
+                                    connection=connection,
+                                    interceptors=self._get_tool_interceptors(),
+                                    server_name=server_name,
+                                    callbacks=callbacks,
+                                )
+                                tools = self._filter_tools(tools)
+
+                                # Check if interface changed (hash-based detection)
+                                if await self._check_mcp_interface_changed(
+                                    server_name=server_name,
+                                    tools=tools,
+                                ):
+                                    logger.info(f"Interface changes detected for {server_name}, triggering refresh")
+                                    interface_changed = True
+                                    break
+
+                            if interface_changed:
+                                # Interface changed, reset and reload all tools
+                                previous_tool_count = len(self._mcp_tools)
+                                self._mcp_tools = None
+                                self._graph = None
+                                logger.debug(f"Reset MCP tools ({previous_tool_count} tools) due to interface changes")
+
+                                await self._ensure_mcp_tools_loaded()
+                                if self._mcp_tools is not None:
+                                    logger.info(
+                                        f"MCP tools refreshed after interface change: {len(self._mcp_tools)} tools loaded"
+                                    )
+                            else:
+                                logger.debug("No interface changes detected, skipping graph rebuild")
+
+                        except Exception as e:
+                            logger.error(f"Error checking MCP interface changes: {e}", exc_info=False)
+                            # Fall back to full reload on error
+                            logger.info("Falling back to full MCP tools reload")
+                            self._mcp_tools = None
+                            self._graph = None
+                            await self._ensure_mcp_tools_loaded()
+
+                except Exception as e:
+                    logger.error(f"Error during MCP tool refresh cycle: {e}", exc_info=False)
+                    # Continue with next refresh cycle even if this one failed
+
+        except asyncio.CancelledError:
+            logger.info("MCP tool refresh worker cancelled")
+            raise
+        finally:
+            logger.info("MCP tool refresh worker stopped")
+
+    async def _start_mcp_refresh(self) -> None:
+        """Start the MCP tool refresh worker (idempotent).
+
+        Creates an independent background task that periodically re-discovers MCP tools.
+        Safe to call multiple times — only starts the worker once per instance.
+
+        Should be called from FastAPI lifespan startup event:
+            await agent.startup()  # Calls this method internally
+        """
+        if self._refresh_task is not None:
+            logger.debug("MCP tool refresh worker already started")
+            return
+
+        if not self._mcp_refresh_enabled:
+            logger.debug("MCP tool refresh is disabled, skipping startup")
+            return
+
+        logger.info("Starting MCP tool refresh worker")
+        self._refresh_stop_event = asyncio.Event()
+        self._refresh_task = asyncio.create_task(self._start_mcp_refresh_worker())
+
+    async def _stop_mcp_refresh(self) -> None:
+        """Stop the MCP tool refresh worker gracefully.
+
+        Cancels the background refresh task and waits for cleanup with timeout.
+
+        Should be called from FastAPI lifespan shutdown event:
+            await agent.shutdown()  # Calls this method internally
+        """
+        if self._refresh_task is None:
+            logger.debug("MCP tool refresh worker not running")
+            return
+
+        logger.info("Stopping MCP tool refresh worker")
+
+        # Signal the worker to stop
+        if self._refresh_stop_event:
+            self._refresh_stop_event.set()
+
+        # Cancel the task if it hasn't finished
+        if not self._refresh_task.done():
+            self._refresh_task.cancel()
+
+        # Wait for task cleanup with timeout
+        try:
+            await asyncio.wait_for(asyncio.shield(self._refresh_task), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for MCP tool refresh worker to stop")
+        except (asyncio.CancelledError, Exception):
+            # Expected when task is cancelled or completes
+            pass
+
+        self._refresh_task = None
+        self._refresh_stop_event = None
+        logger.info("MCP tool refresh worker stopped")
+
     async def close(self):
         """Cleanup resources."""
         await self.flush_cost_tracking()
         logger.info(f"{self.__class__.__name__} closed")
+
+    async def startup(self) -> None:
+        """Async startup hook for lifecycle initialization.
+
+        Starts the MCP tool refresh worker. Called from FastAPI lifespan startup event.
+        Safe to call multiple times (idempotent).
+
+        Subclasses that override this method should call super().startup() to ensure
+        refresh worker is started:
+
+            async def startup(self):
+                await super().startup()
+                # subclass-specific startup logic
+        """
+        logger.info(f"Starting up {self.__class__.__name__}")
+        await self._start_mcp_refresh()
+        logger.info(f"{self.__class__.__name__} startup complete")
+
+    async def shutdown(self) -> None:
+        """Async shutdown hook for graceful cleanup.
+
+        Stops the MCP tool refresh worker and closes related resources. Called from
+        FastAPI lifespan shutdown event.
+
+        Subclasses that override this method should call super().shutdown() to ensure
+        refresh worker is stopped:
+
+            async def shutdown(self):
+                await super().shutdown()
+                # subclass-specific shutdown logic
+        """
+        logger.info(f"Shutting down {self.__class__.__name__}")
+        await self._stop_mcp_refresh()
+        await self.close()
+        logger.info(f"{self.__class__.__name__} shutdown complete")
 
     async def _stream_impl(
         self, messages: list[Message], user_config: UserConfig, task: Task
@@ -531,9 +858,9 @@ class LangGraphAgent(BaseAgent):
             #
             # IMPORTANT: Must include __pregel_checkpointer in config to prevent LangGraph from
             # interpreting checkpoint_ns as a subgraph identifier (see LangGraph pregel /main.py:1244)
-            checkpoint_ns = self._get_checkpoint_namespace()
+            checkpoint_ns: str = self._get_checkpoint_namespace()
             # Use natural A2A context_id with checkpoint namespace for thread isolation.
-            effective_thread_id = f"{task.context_id}::{checkpoint_ns}"
+            effective_thread_id: str = f"{task.context_id}::{checkpoint_ns}"
             config = self.create_runnable_config(
                 user_sub=user_config.user_sub,
                 conversation_id=task.context_id,
@@ -544,7 +871,9 @@ class LangGraphAgent(BaseAgent):
             )
 
             # Convert A2A messages to LangChain HumanMessages
-            input_messages = [HumanMessage(content_blocks=a2a_parts_to_content(msg.parts or [])) for msg in messages]
+            input_messages: list[HumanMessage] = [
+                HumanMessage(content_blocks=a2a_parts_to_content(msg.parts or [])) for msg in messages
+            ]
 
             # Allow provider-specific preprocessing (e.g., Bedrock URL→base64 image conversion)
             input_messages = await self._preprocess_input_messages(input_messages)
