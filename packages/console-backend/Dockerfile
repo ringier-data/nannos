@@ -3,7 +3,7 @@ ARG WORKDIR="/opt/app"
 FROM zhaowde/rambler:5.4.0-rag2 AS rambler-source
 
 # Build the backend
-# NOTE: ringier-a2a-sdk must be copied into playground-backend/ before building
+# NOTE: ringier-a2a-sdk must be copied into agent-console/ before building
 FROM docker.rcplus.io/python:3.13-slim AS backend-builder
 ARG WORKDIR
 
@@ -34,7 +34,9 @@ ARG API_PORT
 ENV API_PORT=${API_PORT}
 
 # Install postgresql-client (required by migrate.sh for psql)
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+# poppler-utils provides pdfinfo/pdftoppm for PPTX/PDF thumbnail rendering via pdf2image
+# libreoffice-impress-nogui provides soffice --headless for PPTX→PDF conversion without X11/GUI deps
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client poppler-utils libreoffice-impress-nogui && rm -rf /var/lib/apt/lists/*
 
 # Copy rambler binary for running migrations
 COPY --from=rambler-source /rambler /usr/local/bin/rambler

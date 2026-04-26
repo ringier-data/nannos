@@ -1,6 +1,7 @@
 """Shared utility functions for the orchestrator agent."""
 
 import logging
+import os
 from typing import Any
 
 from agent_common.utils import (  # noqa: F401
@@ -101,6 +102,31 @@ def build_runtime_context(
             tool_registry[tool.name] = tool
         logger.info(f"Added {len(doc_tools)} document store tools: {[t.name for t in doc_tools]}")
 
+    # Add catalog search tool if user has accessible catalogs
+    logger.debug(
+        f"User has {len(user_config.accessible_catalog_ids or [])} accessible catalogs for catalog_search tool"
+    )
+    if user_config.accessible_catalog_ids:
+        from agent_common.core.catalog_tools import create_catalog_search_tool
+
+        catalog_vector_bucket = os.environ.get("CATALOG_VECTOR_BUCKET_NAME", "")
+        catalog_thumbnails_bucket = os.environ.get("CATALOG_THUMBNAILS_S3_BUCKET", "")
+        if catalog_vector_bucket:
+            catalog_tool = create_catalog_search_tool(
+                accessible_catalog_ids=user_config.accessible_catalog_ids,
+                thumbnails_s3_bucket=catalog_thumbnails_bucket,
+                vector_bucket_name=catalog_vector_bucket,
+                cost_logger=cost_logger,
+            )
+            if catalog_tool:
+                tool_registry[catalog_tool.name] = catalog_tool
+                logger.info(
+                    "Added catalog_search tool for %d catalogs",
+                    len(user_config.accessible_catalog_ids),
+                )
+        else:
+            logger.warning("CATALOG_VECTOR_BUCKET_NAME not set, skipping catalog_search tool")
+
     # Start with built-in local sub-agents (like file-analyzer, task-scheduler)
     # These run in-process but use the same registry as remote A2A agents
     subagent_registry: dict[str, CompiledSubAgent] = {}
@@ -179,6 +205,9 @@ def build_runtime_context(
     orchestrator_auto_tools = {
         name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
     }
+    # Auto-include catalog_search — always available if user has accessible catalogs
+    if "catalog_search" in tool_registry:
+        orchestrator_auto_tools.add("catalog_search")
     whitelisted_tool_names.update(orchestrator_auto_tools)
     logger.debug(
         f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/playground tools)"

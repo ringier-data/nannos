@@ -85,31 +85,38 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
         if user_context.language:
             language_name = get_language_display_name(user_context.language)
             preferences_parts.append(
-                f"- **Response Language**: You MUST respond in {language_name} ({user_context.language}). "
-                f"All your responses, explanations, and communications with the user should be in {language_name}. "
-                f"However, technical terms, code, tool names, and API calls should remain in their original form."
+                f"<language>\n"
+                f"Respond in {language_name} ({user_context.language}). "
+                f"All responses, explanations, and communications should be in {language_name}. "
+                f"Technical terms, code, tool names, and API calls should remain in their original form.\n"
+                f"</language>"
             )
 
         # Timezone preference
         if user_context.timezone:
             preferences_parts.append(
-                f"- **User Timezone**: The user's timezone is {user_context.timezone}. "
-                f"When using the get_current_time tool, pass timezone='{user_context.timezone}' to get times in their local timezone."
+                f"<timezone>\n"
+                f"The user's timezone is {user_context.timezone}. "
+                f"When using the get_current_time tool, pass timezone='{user_context.timezone}' to get times in their local timezone.\n"
+                f"</timezone>"
             )
 
         # Message formatting preference (conversation-level)
         formatting = getattr(user_context, "message_formatting", "markdown")
         if formatting == "slack":
             preferences_parts.append(
-                "- **Message Formatting**: Format your responses using Slack mrkdwn syntax. "
-                "Use *bold* for emphasis, _italic_ for secondary emphasis, `code` for inline code, "
-                "```code blocks``` for multi-line code, and <@U123456> format for user mentions. "
-                "Avoid markdown syntax that Slack doesn't support (e.g., # headers, **bold**)."
+                '<message_formatting format="slack">\n'
+                "Format responses using Slack mrkdwn syntax: *bold* for emphasis, _italic_ for secondary emphasis, "
+                "`code` for inline code, ```code blocks``` for multi-line code. "
+                "Avoid markdown syntax that Slack doesn't support (e.g., # headers, **bold**).\n"
+                "</message_formatting>"
             )
         elif formatting == "plain":
             preferences_parts.append(
-                "- **Message Formatting**: Use plain text only. Do not use any formatting syntax "
-                "(no markdown, no bold, no code blocks). Keep responses simple and readable as plain text."
+                '<message_formatting format="plain">\n'
+                "Use plain text only. Do not use any formatting syntax "
+                "(no markdown, no bold, no code blocks). Keep responses simple and readable.\n"
+                "</message_formatting>"
             )
         # Default 'markdown' needs no special instruction - standard behavior
 
@@ -118,23 +125,25 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
         slack_handle = getattr(user_context, "slack_user_handle", None)
         if slack_handle:
             preferences_parts.append(
-                "- **Multi-User Conversation**: This is a multi-user conversation. Each user message is prefixed "
-                "with the speaker's identity in the format `[Name <@SlackHandle>]: message`. You should:\n"
-                "  - Track who said what and refer to users naturally (e.g., 'as Bob mentioned')\n"
-                "  - When you need input from a specific user, mention them using their Slack handle from the prefix\n"
-                f"  - The current speaker is: {user_context.name} {slack_handle}\n"
-                "  - Address responses appropriately when multiple users are involved"
+                "<multi_user_conversation>\n"
+                "This is a multi-user conversation. Each user message is prefixed "
+                "with the speaker's identity in the format `[Name <@SlackHandle>]: message`.\n"
+                "- Track who said what and refer to users naturally (e.g., 'as Bob mentioned').\n"
+                "- When you need input from a specific user, mention them using their Slack handle.\n"
+                f"- The current speaker is: {user_context.name} {slack_handle}\n"
+                "- Address responses appropriately when multiple users are involved.\n"
+                "</multi_user_conversation>"
             )
 
         # Custom prompt addendum from user settings
         custom_prompt = getattr(user_context, "custom_prompt", None)
         if custom_prompt:
-            preferences_parts.append(f"- **Custom Instructions**: {custom_prompt}")
+            preferences_parts.append(f"<custom_instructions>\n{custom_prompt}\n</custom_instructions>")
 
         if not preferences_parts:
             return ""
 
-        addendum = "\n\n**User Preferences:**\n" + "\n".join(preferences_parts)
+        addendum = "\n\n<user_preferences>\n" + "\n".join(preferences_parts) + "\n</user_preferences>"
 
         logger.debug(
             f"UserPreferencesMiddleware: Built preferences addendum for user {user_context.user_id}: "

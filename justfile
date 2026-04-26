@@ -35,6 +35,7 @@ img_console_frontend := registry + "/nannos-console-frontend"
 img_client_slack := registry + "/nannos-client-slack"
 img_client_slack_frontend := registry + "/nannos-client-slack-frontend"
 img_client_email := registry + "/nannos-client-email"
+img_voice_agent := registry + "/nannos-voice-agent"
 
 # Default build platform
 platform := "linux/arm64"
@@ -43,7 +44,7 @@ platform := "linux/arm64"
 build_ts := `date -u +%Y%m%d%H%M%S`
 
 # Packages that have Dockerfiles (used by build recipes)
-_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend console-frontend client-slack client-slack-frontend client-email"
+_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend console-frontend client-slack client-slack-frontend client-email voice-agent"
 
 # Build flags (override on CLI, e.g. just push=true build)
 push := ""
@@ -73,6 +74,7 @@ pkg-image pkg:
       client-slack)       echo "{{ img_client_slack }}" ;;
       client-slack-frontend) echo "{{ img_client_slack_frontend }}" ;;
       client-email)       echo "{{ img_client_email }}" ;;
+      voice-agent)        echo "{{ img_voice_agent }}" ;;
       *) echo "" ;;
     esac
 
@@ -520,6 +522,14 @@ _build-migrations:
 _run-migrations port: _build-migrations
   #!/usr/bin/env bash
   set -e
+  # Ensure the target schema exists (Rambler assumes it does)
+  docker run --rm \
+    --network host \
+    --entrypoint psql \
+    -e PGPASSWORD=password \
+    {{_migrations_image}} \
+    -h 127.0.0.1 -p {{port}} -U postgres -d nannos \
+    -c "CREATE SCHEMA IF NOT EXISTS nannos;"
   docker run --rm \
     --network host \
     -v "$(pwd)/{{_migrations_dir}}/ddl:/migrations/ddl:ro" \
@@ -568,8 +578,8 @@ test-db-psql: test-db
 # ─── Local Development ────────────────────────────────────────────
 
 # Start all services locally (requires OPENAI_COMPATIBLE_BASE_URL)
-start-local:
-  ./scripts/start-local.sh
+start-local *FLAGS:
+  ./scripts/start-local.sh {{FLAGS}}
 
 # Stop local infrastructure (PostgreSQL + Keycloak) and all services
 stop-local:

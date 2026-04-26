@@ -98,8 +98,10 @@ class TestA2AClientRunnableInitialization:
         assert a2a_client_runnable.name == agent_card.name
 
     def test_description_property(self, a2a_client_runnable, agent_card):
-        """Test description property returns agent card description."""
-        assert a2a_client_runnable.description == agent_card.description
+        """Test description property includes agent card description and skills."""
+        desc = a2a_client_runnable.description
+        assert agent_card.description in desc
+        assert '<skill name="test-skill">' in desc
 
 
 class TestA2AClientRunnableTextExtraction:

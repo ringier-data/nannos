@@ -187,6 +187,9 @@ async def create_sub_agent(
     try:
         sub_agent = await sub_agent_service.create_sub_agent(db, data, actor=user)
         return sub_agent
+    except ValueError as e:
+        logger.debug(f"Validation error creating sub-agent: {e}")
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to create sub-agent: {e}")
         raise HTTPException(status_code=500, detail="Failed to create sub-agent")

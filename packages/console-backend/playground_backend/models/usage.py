@@ -122,6 +122,8 @@ class UsageLog(BaseModel):
     sub_agent_config_version_id: int | None = None
     scheduled_job_id: int | None = None
     scheduled_job_name: str | None = None
+    catalog_id: str | None = None
+    catalog_name: str | None = None
     provider: str | None = None
     model_name: str | None = None
     total_cost_usd: Decimal
@@ -141,6 +143,7 @@ class UsageLogCreate(BaseModel):
     sub_agent_id: int | None = None
     sub_agent_config_version_id: int | None = None
     scheduled_job_id: int | None = None
+    catalog_id: str | None = None
     provider: str | None = None
     model_name: str | None = None
     billing_unit_breakdown: dict[str, int] = Field(
@@ -221,6 +224,14 @@ class UsageByConversation(BaseModel):
     last_message_at: datetime
 
 
+class UsageByService(BaseModel):
+    """Usage breakdown by service type (orchestrator, catalog, scheduler)."""
+
+    service: str
+    total_cost_usd: Decimal
+    total_requests: int
+
+
 class BillingUnitBreakdown(BaseModel):
     """Usage breakdown by billing unit type."""
 
@@ -235,6 +246,7 @@ class DetailedUsageReport(BaseModel):
     summary: UsageSummary
     by_sub_agent: list[UsageBySubAgent] = Field(default_factory=list)
     by_conversation: list[UsageByConversation] = Field(default_factory=list)
+    by_service: list[UsageByService] = Field(default_factory=list)
     billing_unit_breakdown: list[BillingUnitBreakdown] = Field(default_factory=list)
 
 

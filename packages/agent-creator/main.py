@@ -47,7 +47,7 @@ agent = AgentCreator()
 async def lifespan(app) -> AsyncIterator[None]:
     """Lifespan context manager for the FastAPI application.
 
-    Handles cleanup on shutdown.
+    Handles startup (MCP refresh worker, cost logger) and shutdown (graceful cleanup).
 
     Args:
         app: The FastAPI application instance
@@ -56,14 +56,14 @@ async def lifespan(app) -> AsyncIterator[None]:
         None
     """
 
-    # await agent.startup()
+    # Startup: start MCP refresh worker and cost tracking logger
+    await agent.startup()
     logger.info("Application startup complete")
 
     yield
 
-    # Shutdown: cleanup the agent (cost logger, etc.)
+    # Shutdown: stop MCP refresh worker, flush cost tracking, cleanup
     await agent.shutdown()
-    await agent.close()
     logger.info("Application shutdown - Agent Creator closed")
 
 

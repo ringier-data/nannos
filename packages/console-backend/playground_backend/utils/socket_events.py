@@ -29,3 +29,7 @@ class SocketEvents:
 
     # Scheduler notifications
     SCHEDULER_NOTIFICATION = "scheduler_notification"
+
+    # Catalog events
+    CATALOG_REINDEX_PROGRESS = "catalog_reindex_progress"
+    CATALOG_SYNC_PROGRESS = "catalog_sync_progress"

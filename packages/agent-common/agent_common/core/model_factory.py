@@ -60,6 +60,8 @@ _AZURE_MODELS: dict[str, dict] = {
         "model_name": "gpt-4o",
         "input_modes": ["text", "image"],
         "backend": "azure_openai",
+        "display_name": "GPT-4o",
+        "description": "Best for general-purpose tasks, faster responses, strong coding capabilities",
     },
     "gpt-4o-mini": {
         "api_version": "2025-01-01-preview",
@@ -67,6 +69,8 @@ _AZURE_MODELS: dict[str, dict] = {
         "model_name": "gpt-4o-mini",
         "input_modes": ["text", "image"],
         "backend": "azure_openai",
+        "display_name": "GPT-4o Mini",
+        "description": "Cost-effective option for simpler tasks, faster responses, good for routine operations",
     },
 }
 
@@ -75,29 +79,39 @@ _BEDROCK_MODELS: dict[str, dict] = {
         "bedrock_model_id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "input_modes": ["text", "image", "file"],
         "backend": "bedrock",
+        "display_name": "Claude Sonnet 4.5",
+        "description": "Best for detailed analysis, longer context understanding, nuanced communication, supports thinking mode",
     },
     "claude-sonnet-4.6": {
         "bedrock_model_id": "global.anthropic.claude-sonnet-4-6",
         "input_modes": ["text", "image", "file"],
         "backend": "bedrock",
+        "display_name": "Claude Sonnet 4.6",
+        "description": "Improved reasoning and creativity over 4.5, ideal for complex problem-solving and creative tasks, supports thinking mode",
     },
     "claude-haiku-4-5": {
         "bedrock_model_id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
         "input_modes": ["text", "image", "file"],
         "backend": "bedrock",
+        "display_name": "Claude Haiku 4.5",
+        "description": "Ultra-fast and cost-efficient for high-volume, low-latency tasks",
     },
 }
 
 _GEMINI_MODELS: dict[str, dict] = {
-    "gemini-3-pro-preview": {
-        "model_id": "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview": {
+        "model_id": "gemini-3.1-pro-preview",
         "input_modes": ["text", "image", "audio", "video", "file"],
         "backend": "google",
+        "display_name": "Gemini 3.1 Pro (Preview)",
+        "description": "Google's advanced model for complex reasoning, supports multimodal input including audio and video, supports thinking mode",
     },
     "gemini-3-flash-preview": {
         "model_id": "gemini-3-flash-preview",
         "input_modes": ["text", "image", "audio", "video", "file"],
         "backend": "google",
+        "display_name": "Gemini 3 Flash (Preview)",
+        "description": "Google's fast and efficient model, supports multimodal input including audio and video, supports thinking mode",
     },
 }
 
@@ -299,6 +313,23 @@ def get_default_model() -> ModelType:
     return get_resolved_default_model()
 
 
+def get_models_prompt_text() -> str:
+    """Generate a prompt-ready text block describing all available models.
+
+    This is the single source of truth for model descriptions used in system prompts.
+    Services that cannot import this module should keep their copy in sync.
+
+    Returns:
+        A formatted string with one line per model: "- DisplayName (model-id): Description"
+    """
+    lines = []
+    for model_id, config in MODEL_CONFIG.items():
+        display_name = config.get("display_name", model_id)
+        description = config.get("description", "")
+        lines.append(f"- {display_name} ({model_id}): {description}")
+    return "\n".join(lines)
+
+
 def get_thinking_budget(thinking_level: ThinkingLevel) -> int:
     """Map thinking level to Claude token budget.
 
@@ -384,7 +415,7 @@ def create_model(
     Returns:
         BaseChatModel: The created model instance
     """
-    if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+    if model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
         # Lazy import for Gemini provider
         from google.oauth2 import service_account
         from langchain_google_genai import ChatGoogleGenerativeAI

@@ -1,108 +1,54 @@
 /**
  * Model configuration for the application.
- *
- * Models are fetched dynamically from the backend via GET /api/v1/models.
- * The FALLBACK_MODEL_OPTIONS are used only while the API response is loading
- * or if the fetch fails.
+ * 
+ * This file is the single source of truth for available LLM models.
+ * Update this file to add/remove models across the entire application.
  */
-
-import { useQuery } from '@tanstack/react-query';
-import { listAvailableModelsApiV1ModelsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
-import type { AvailableModel } from '@/api/generated/types.gen';
 
 export interface ModelOption {
   value: string;
   label: string;
   provider?: string;
   supportsThinking?: boolean; // Indicates if model supports extended thinking mode
-  thinkingLevels?: string[]; // Available thinking levels (if restricted)
-  isDefault?: boolean; // Whether this is the orchestrator's default model
-}
-
-/** Map an SDK AvailableModel (snake_case) to a ModelOption (camelCase). */
-function toModelOption(m: AvailableModel): ModelOption {
-  return {
-    value: m.value,
-    label: m.label,
-    provider: m.provider,
-    supportsThinking: m.supports_thinking,
-    thinkingLevels: m.thinking_levels ?? undefined,
-    isDefault: m.is_default,
-  };
 }
 
 /**
- * Fallback model list used while the API is loading or unavailable.
- * Should be kept roughly in sync with what production offers, but the
- * API response is always authoritative.
+ * Available LLM models for local agents and orchestrator.
+ * 
+ * Model values must match the backend's expected model identifiers.
+ * supportsThinking indicates which models support extended thinking mode.
  */
-export const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
+export const MODEL_OPTIONS: ModelOption[] = [
   { value: 'gpt-4o', label: 'GPT-4o', provider: 'Azure OpenAI', supportsThinking: false },
   { value: 'gpt-4o-mini', label: 'GPT-4o Mini', provider: 'Azure OpenAI', supportsThinking: false },
   { value: 'claude-sonnet-4.5', label: 'Claude Sonnet 4.5', provider: 'AWS Bedrock', supportsThinking: true },
   { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6', provider: 'AWS Bedrock', supportsThinking: true },
   { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'AWS Bedrock', supportsThinking: true },
-  {
-    value: 'gemini-3-pro-preview',
-    label: 'Gemini 3 Pro Preview',
-    provider: 'Google Vertex AI',
-    supportsThinking: true,
-  },
-  {
-    value: 'gemini-3-flash-preview',
-    label: 'Gemini 3 Flash Preview',
-    provider: 'Google Vertex AI',
-    supportsThinking: true,
-  },
+  { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', provider: 'Google Vertex AI', supportsThinking: true },
+  { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview', provider: 'Google Vertex AI', supportsThinking: true },
 ] as const;
 
 /**
- * @deprecated Use useAvailableModels() hook instead.
- * Kept for backward compatibility — returns the static fallback list.
- */
-export const MODEL_OPTIONS = FALLBACK_MODEL_OPTIONS;
-
-/**
- * React Query hook to get the list of available models.
- * Returns the API response when available, falls back to FALLBACK_MODEL_OPTIONS.
- */
-export function useAvailableModels() {
-  const query = useQuery({
-    ...listAvailableModelsApiV1ModelsGetOptions(),
-    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
-    retry: 2,
-  });
-
-  return {
-    models: query.data ? query.data.map(toModelOption) : FALLBACK_MODEL_OPTIONS,
-    isLoading: query.isLoading,
-    error: query.error,
-  };
-}
-
-/**
  * Get model label by value.
- * Accepts an optional models list for dynamic lookups.
  */
-export function getModelLabel(value: string, models?: ModelOption[]): string {
-  return (models ?? FALLBACK_MODEL_OPTIONS).find((m) => m.value === value)?.label || value;
+export function getModelLabel(value: string): string {
+  return MODEL_OPTIONS.find(m => m.value === value)?.label || value;
 }
 
 /**
  * Get model option by value.
- * Accepts an optional models list for dynamic lookups.
  */
-export function getModelOption(value: string, models?: ModelOption[]): ModelOption | undefined {
-  return (models ?? FALLBACK_MODEL_OPTIONS).find((m) => m.value === value);
+export function getModelOption(value: string): ModelOption | undefined {
+  return MODEL_OPTIONS.find(m => m.value === value);
 }
 
 /**
  * Check if a model supports extended thinking mode.
- * Accepts an optional models list for dynamic lookups.
  */
-export function modelSupportsThinking(modelValue: string | null | undefined, models?: ModelOption[]): boolean {
+export function modelSupportsThinking(modelValue: string | null | undefined, _models?: ModelOption[]): boolean {
   if (!modelValue) return false;
-  return (models ?? FALLBACK_MODEL_OPTIONS).find((m) => m.value === modelValue)?.supportsThinking || false;
+  const models = _models ?? MODEL_OPTIONS;
+  return models.find(m => m.value === modelValue)?.supportsThinking || false;
 }
 
 /**
@@ -117,24 +63,24 @@ export const THINKING_LEVEL_OPTIONS = [
 
 /**
  * Get available thinking levels for a specific model.
- *
- * Uses the model's thinkingLevels field from the API if available,
- * otherwise falls back to hardcoded restrictions:
+ * 
+ * According to Gemini 3 documentation:
  * - Gemini 3 Pro: only supports 'low' and 'high'
- * - All others: supports all levels
+ * - Gemini 3 Flash: supports all levels
+ * - Claude Sonnet: supports all levels
  */
-export function getAvailableThinkingLevels(modelValue: string | null | undefined, models?: ModelOption[]) {
-  const model = modelValue ? (models ?? FALLBACK_MODEL_OPTIONS).find((m) => m.value === modelValue) : undefined;
-
-  // If the API provided explicit thinking levels, use them
-  if (model?.thinkingLevels) {
-    return THINKING_LEVEL_OPTIONS.filter((opt) => model.thinkingLevels!.includes(opt.value));
-  }
-
-  // Fallback: Gemini 3 Pro only supports low and high
-  if (modelValue === 'gemini-3-pro-preview') {
-    return THINKING_LEVEL_OPTIONS.filter((opt) => opt.value === 'low' || opt.value === 'high');
+export function getAvailableThinkingLevels(modelValue: string | null | undefined, _models?: ModelOption[]) {
+  // Gemini 3 Pro only supports low and high
+  if (modelValue === 'gemini-3.1-pro-preview') {
+    return THINKING_LEVEL_OPTIONS.filter(opt => opt.value === 'low' || opt.value === 'high');
   }
   // All other models support all levels
   return THINKING_LEVEL_OPTIONS;
+}
+
+/**
+ * Hook that returns the available models.
+ */
+export function useAvailableModels() {
+  return { models: MODEL_OPTIONS as ModelOption[] };
 }

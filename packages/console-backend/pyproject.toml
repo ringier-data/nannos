@@ -32,6 +32,15 @@ dependencies = [
     "croniter>=2.0.0",
     "jsonpath-ng>=1.6.0",
     "cryptography>=42.0.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-genai>=1.0.0",
+    "python-pptx>=1.0.0",
+    "pypdf>=4.0.0",
+    "pdf2image>=1.17.0",
+    "langchain-core>=0.3.0",
+    "langchain-aws",
+    "langsmith>=0.4.37",
 ]
 
 [tool.setuptools.packages.find]

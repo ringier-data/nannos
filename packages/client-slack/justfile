@@ -41,6 +41,14 @@ migrate: local-db build-migrations
   #!/usr/bin/env bash
   set -e
   echo "Running migrations..."
+  # Ensure the target schema exists (Rambler assumes it does)
+  docker run --rm \
+    --network host \
+    --entrypoint psql \
+    -e PGPASSWORD=password \
+    nannos-migrations:latest \
+    -h 127.0.0.1 -p {{LOCAL_DB_PORT}} -U postgres -d nannos \
+    -c "CREATE SCHEMA IF NOT EXISTS nannos;"
   docker run --rm \
     --network host \
     -e PGHOST=127.0.0.1 \

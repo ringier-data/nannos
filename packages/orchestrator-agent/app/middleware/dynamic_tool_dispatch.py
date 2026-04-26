@@ -30,6 +30,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import textwrap
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterable, Optional, TypedDict, cast
@@ -58,7 +59,7 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import AIMessage, ContentBlock, HumanMessage, TextContentBlock, ToolMessage
+from langchain_core.messages import AIMessage, ContentBlock, HumanMessage, SystemMessage, TextContentBlock, ToolMessage
 from langchain_core.messages.content import NonStandardContentBlock
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -183,32 +184,133 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         self.agent_settings = agent_settings
         self.cost_logger = cost_logger
 
+    @staticmethod
+    def _build_agent_list(subagent_registry: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Build agent description lines and name list from the subagent registry.
+
+        Each agent is wrapped in ``<agent name="...">`` XML tags so that LLMs
+        can clearly see where one agent's description ends and the next begins.
+
+        Args:
+            subagent_registry: Mapping of agent name to CompiledSubAgent dicts.
+
+        Returns:
+            Tuple of (description lines like ``["<agent name=...>desc</agent>", ...]``,
+            name list).
+        """
+        descriptions: list[str] = []
+        names: list[str] = []
+        for name, subagent in subagent_registry.items():
+            desc = subagent.get("description", f"Agent: {name}")
+            descriptions.append(f'<agent name="{name}">\n{desc}\n</agent>')
+            names.append(name)
+        return descriptions, names
+
+    # Marker text that SubAgentMiddleware appends to the system prompt.
+    # Used to locate the "- general-purpose: ..." agent list and replace it
+    # with the full set of runtime-discovered agents.
+    _SYSTEM_PROMPT_AGENT_MARKER = "Available subagent types:\n"
+
+    # Marker text that SubAgentMiddleware bakes into the task tool description
+    # via TASK_TOOL_DESCRIPTION.  Used to locate the agent list inside the tool
+    # description and replace it with the full registry.
+    _TOOL_DESC_AGENT_MARKER = "Available agent types and the tools they have access to:\n"
+
+    def _enhance_system_prompt_agents(
+        self, system_message: SystemMessage | None, user_context: GraphRuntimeContext
+    ) -> SystemMessage | None:
+        """Replace the agent list in the system prompt with all runtime agents.
+
+        ``SubAgentMiddleware`` appends a text block to the system message that
+        contains ``TASK_SYSTEM_PROMPT`` followed by
+        ``"Available subagent types:\n- general-purpose: ..."``.
+
+        Because sub-agents are discovered at request time (not graph-creation
+        time), the list only contains "general-purpose".  This method finds
+        that marker and replaces the ``- name: desc`` lines that follow with
+        the full set from ``user_context.subagent_registry``.
+
+        Args:
+            system_message: The current system message (may be ``None``).
+            user_context: Runtime context carrying the subagent registry.
+
+        Returns:
+            A new ``SystemMessage`` with the agent list replaced, or the
+            original message unchanged if the marker was not found or the
+            registry is empty.
+        """
+        if system_message is None or not user_context.subagent_registry:
+            return system_message
+
+        agent_descs, _ = self._build_agent_list(user_context.subagent_registry)
+        if not agent_descs:
+            return system_message
+
+        new_agent_block = "\n".join(agent_descs)
+        marker = self._SYSTEM_PROMPT_AGENT_MARKER
+
+        # The marker + subsequent agent entries may appear in any content block.
+        # We replace in the first block where the marker is found.
+        # Pattern: marker text followed by either:
+        #   - Old format: lines starting with "- " (from SubAgentMiddleware)
+        #   - New format: <agent>...</agent> XML blocks (from our enhancement)
+        pattern = re.compile(
+            re.escape(marker) + r"(?:(?:- .+(?:\n|$))+|(?:<agent[\s\S]*?</agent>\n?)+)",
+            re.MULTILINE,
+        )
+
+        found = False
+        new_blocks: list[ContentBlock] = []
+        for block in system_message.content_blocks:
+            if found or not isinstance(block, dict) or block.get("type") != "text":
+                new_blocks.append(block)
+                continue
+            text: str = block.get("text", "")
+            if marker in text:
+                new_text = pattern.sub(marker + new_agent_block, text, count=1)
+                new_blocks.append({"type": "text", "text": new_text})
+                found = True
+            else:
+                new_blocks.append(block)
+
+        if not found:
+            # Marker not found — deepagents version may have changed the text.
+            # Fall back to appending the agent list.
+            logger.warning(
+                "DynamicToolDispatchMiddleware: could not find '%s' marker in system prompt; "
+                "appending agent list as fallback",
+                marker.rstrip(),
+            )
+            new_blocks.append(
+                {
+                    "type": "text",
+                    "text": f"\n\n{marker}" + new_agent_block,
+                }
+            )
+
+        return SystemMessage(content_blocks=new_blocks)
+
     def _enhance_task_tool_schema(
         self, task_tool_dict: dict[str, Any], user_context: GraphRuntimeContext
     ) -> dict[str, Any]:
-        """Enhance the task tool's description and subagent_type enum.
+        """Replace the agent list in the task tool description and update the enum.
 
-        All sub-agents (both local and remote A2A) are now in subagent_registry,
-        so we simply build the enum from that unified registry.
+        ``SubAgentMiddleware`` bakes a task tool whose description contains
+        ``"Available agent types and the tools they have access to:\n- general-purpose: ..."``.
+        This method **replaces** that section with the full set of agents from
+        ``subagent_registry`` instead of appending a duplicate section.
 
         Args:
-            task_tool_dict: The task tool in OpenAI dict format
-            user_context: User context with subagent_registry
+            task_tool_dict: The task tool in OpenAI dict format.
+            user_context: User context with ``subagent_registry``.
 
         Returns:
-            Enhanced task tool dict with all subagents in enum
+            Enhanced task tool dict with all subagents in description and enum.
         """
         if not user_context.subagent_registry:
             return task_tool_dict
 
-        # Build agent descriptions and names from unified registry
-        agent_descriptions = []
-        agent_names = []
-        for name, subagent in user_context.subagent_registry.items():
-            description = subagent.get("description", f"Agent: {name}")
-            agent_descriptions.append(f"- {name}: {description}")
-            agent_names.append(name)
-
+        agent_descs, agent_names = self._build_agent_list(user_context.subagent_registry)
         if not agent_names:
             return task_tool_dict
 
@@ -217,11 +319,26 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         parameters = function_dict.get("parameters", {})
         properties = parameters.get("properties", {})
         subagent_type_prop = properties.get("subagent_type", {})
-        original_description = function_dict.get("description", "")
+        original_description: str = function_dict.get("description", "")
 
-        # Enhance the description with agent info
-        agent_section = "\n\nAvailable agents:\n" + "\n".join(agent_descriptions)
-        enhanced_description = original_description + agent_section
+        # Replace the agent list that follows the marker, or fall back to append
+        marker = self._TOOL_DESC_AGENT_MARKER
+        new_agent_block = "\n".join(agent_descs)
+        pattern = re.compile(
+            re.escape(marker) + r"(?:(?:- .+(?:\n|$))+|(?:<agent[\s\S]*?</agent>\n?)+)",
+            re.MULTILINE,
+        )
+
+        if marker in original_description:
+            enhanced_description = pattern.sub(marker + new_agent_block, original_description, count=1)
+        else:
+            # Marker not found — fall back to appending
+            logger.warning(
+                "DynamicToolDispatchMiddleware: could not find '%s' marker in task tool "
+                "description; appending agent list as fallback",
+                marker.rstrip(),
+            )
+            enhanced_description = original_description + "\n\nAvailable agents:\n" + new_agent_block
 
         # Create enhanced subagent_type property with enum
         enhanced_subagent_type = {
@@ -760,7 +877,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         Returns:
             HumanMessage with appropriate content blocks for the agent's input modes
         """
-        input_modes = subagent["runnable"].input_modes
+        runnable = subagent["runnable"]
+        input_modes = runnable.input_modes
         subagent_name = subagent["name"]
         _TEXT_ONLY_MODES = {"text", "text/plain"}
 
@@ -893,9 +1011,18 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
         )
 
-        # Override request with user's tools (dict format bypasses validation)
+        # Enhance the system prompt so the LLM sees all runtime-discovered agents
+        # (SubAgentMiddleware only listed agents known at graph creation time)
+        enhanced_system = self._enhance_system_prompt_agents(request.system_message, user_context)
+
+        # Override request with user's tools and enhanced system prompt
         # Cast needed because list is invariant in Python typing
-        return handler(request.override(tools=cast(list[BaseTool | dict], tool_dicts)))
+        return handler(
+            request.override(
+                system_message=enhanced_system,
+                tools=cast(list[BaseTool | dict], tool_dicts),
+            )
+        )
 
     async def awrap_model_call(
         self,
@@ -947,6 +1074,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             )
             request = request.override(messages=filtered_messages)
 
+        # Enhance the system prompt so the LLM sees all runtime-discovered agents
+        # (SubAgentMiddleware only listed agents known at graph creation time)
+        enhanced_system = self._enhance_system_prompt_agents(request.system_message, user_context)
+
         # Try progressive cleanup levels on INVALID_ARGUMENT errors
         # MODERATE removes all enums (solves global state space limit with 80+ tools)
         for level in [CleanupLevel.MINIMAL, CleanupLevel.MODERATE, CleanupLevel.AGGRESSIVE]:
@@ -964,7 +1095,12 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
                 )
 
-                result = await handler(request.override(tools=cast(list[BaseTool | dict], tool_dicts)))
+                result = await handler(
+                    request.override(
+                        system_message=enhanced_system,
+                        tools=cast(list[BaseTool | dict], tool_dicts),
+                    )
+                )
                 return result
             except Exception as e:
                 # Check if it's a Gemini INVALID_ARGUMENT error

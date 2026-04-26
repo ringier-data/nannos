@@ -23,7 +23,7 @@ class TestNormalizeThinkingConfig:
 
     def test_gemini_models_support_thinking(self):
         """Test that Gemini models support thinking."""
-        for model in ["gemini-3-pro-preview", "gemini-3-flash-preview"]:
+        for model in ["gemini-3.1-pro-preview", "gemini-3-flash-preview"]:
             enable, level = _normalize_thinking_config(
                 model=model,
                 enable_thinking=True,
@@ -112,7 +112,7 @@ class TestModelsSupportingThinking:
         """Test that the supported models set contains the expected models."""
         assert "claude-sonnet-4.5" in MODELS_SUPPORTING_THINKING
         assert "claude-haiku-4-5" in MODELS_SUPPORTING_THINKING
-        assert "gemini-3-pro-preview" in MODELS_SUPPORTING_THINKING
+        assert "gemini-3.1-pro-preview" in MODELS_SUPPORTING_THINKING
         assert "gemini-3-flash-preview" in MODELS_SUPPORTING_THINKING
 
     def test_unsupported_models_not_in_set(self):

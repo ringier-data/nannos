@@ -11,6 +11,7 @@ from ..models.usage import (
     BillingUnitBreakdown,
     DetailedUsageReport,
     UsageByConversation,
+    UsageByService,
     UsageBySubAgent,
     UsageSummary,
 )
@@ -335,10 +336,26 @@ class UsageService:
             for row in billing_unit_data
         ]
 
+        service_data = await self.repository.get_usage_by_service(
+            db=db,
+            user_id=user_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        by_service = [
+            UsageByService(
+                service=row["service"],
+                total_cost_usd=row["total_cost_usd"],
+                total_requests=row["total_requests"],
+            )
+            for row in service_data
+        ]
+
         return DetailedUsageReport(
             summary=summary,
             by_sub_agent=by_sub_agent,
             by_conversation=by_conversation,
+            by_service=by_service,
             billing_unit_breakdown=billing_unit_breakdown,
         )
 

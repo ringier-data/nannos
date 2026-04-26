@@ -145,6 +145,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             local_subagents=user.local_subagents,
             agent_metadata=user.agent_metadata,
             tool_names=user.tool_names,
+            accessible_catalog_ids=user.catalog_ids or None,
             enable_thinking=enable_thinking,
             thinking_level=thinking_level,
         )

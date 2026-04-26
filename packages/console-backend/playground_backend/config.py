@@ -102,6 +102,50 @@ class AutoApproveConfig(BaseModel):
     max_mcp_tools_count: int = Field(default_factory=lambda: int(os.getenv("AUTO_APPROVE_MAX_MCP_TOOLS_COUNT", "3")))
 
 
+class CatalogConfig(BaseModel):
+    """Catalog system configuration."""
+
+    google_oauth_client_id: str = Field(default_factory=lambda: os.getenv("GOOGLE_OAUTH_CLIENT_ID", ""))
+    google_oauth_client_secret: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", ""))
+    )
+    google_oauth_redirect_uri: str = Field(
+        default_factory=lambda: os.getenv(
+            "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:5001/api/v1/catalogs/connect/callback"
+        )
+    )
+    thumbnails_s3_bucket: str = Field(
+        default_factory=lambda: os.getenv("CATALOG_THUMBNAILS_S3_BUCKET", "dev-nannos-catalog-thumbnails")
+    )
+    vector_bucket_name: str = Field(
+        default_factory=lambda: os.getenv("CATALOG_VECTOR_BUCKET_NAME", "dev-nannos-catalog-vectors")
+    )
+    vector_store_backend: str = Field(default_factory=lambda: os.getenv("CATALOG_VECTOR_STORE_BACKEND", "s3_vectors"))
+    kms_key_id: str = Field(
+        default_factory=lambda: os.getenv(
+            "CATALOG_TOKEN_KMS_KEY_ID", os.getenv("KMS_VAULT_KEY_ID", "alias/dev-nannos-sensitive-data-kms-key")
+        )
+    )
+    summarization_model_id: str = Field(
+        default_factory=lambda: os.getenv(
+            "CATALOG_SUMMARIZATION_MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
+    )
+    sync_interval_seconds: int = Field(default_factory=lambda: int(os.getenv("CATALOG_SYNC_INTERVAL_SECONDS", "86400")))
+    sync_tick_interval_seconds: int = Field(
+        default_factory=lambda: int(os.getenv("CATALOG_SYNC_TICK_INTERVAL_SECONDS", "300"))
+    )
+    sync_max_concurrent: int = Field(default_factory=lambda: int(os.getenv("CATALOG_SYNC_MAX_CONCURRENT", "3")))
+    auto_sync_enabled: bool = Field(
+        default_factory=lambda: os.getenv("CATALOG_AUTO_SYNC_ENABLED", "true").lower() == "true"
+    )
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Google OAuth is fully configured for catalog connections."""
+        return bool(self.google_oauth_client_id and self.google_oauth_client_secret.get_secret_value())
+
+
 class Config(BaseModel):
     """Application configuration."""
 

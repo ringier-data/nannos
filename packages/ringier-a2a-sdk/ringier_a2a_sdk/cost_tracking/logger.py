@@ -102,7 +102,7 @@ def get_request_conversation_id() -> Optional[str]:
     return _current_conversation_id.get()
 
 
-def start_cost_batching() -> None:
+def start_cost_batching(catalog_id: Optional[str] = None) -> None:
     """
     Start accumulating costs in the current context instead of logging immediately.
 
@@ -126,6 +126,7 @@ def start_cost_batching() -> None:
             "call_count": 0,
             "provider": None,
             "model": None,
+            "catalog_id": catalog_id,
         }
     )
     logger.debug("[COST BATCHING] Started cost accumulation")
@@ -196,6 +197,7 @@ async def flush_cost_batch(cost_logger: Optional["CostLogger"] = None) -> None:
     call_count = accumulator["call_count"]
     provider = accumulator["provider"]
     model = accumulator["model"]
+    catalog_id = accumulator.get("catalog_id")
 
     if tokens == 0 or call_count == 0:
         logger.debug("[COST BATCHING] No costs to flush")
@@ -220,6 +222,7 @@ async def flush_cost_batch(cost_logger: Optional["CostLogger"] = None) -> None:
         provider=provider,
         model_name=model,
         conversation_id=conversation_id,
+        catalog_id=catalog_id,
     )
 
     logger.info(
@@ -395,6 +398,7 @@ class CostLogger:
         invoked_at: Optional[datetime] = None,
         _sub_agent_id_from_tag: Optional[int] = None,
         _scheduled_job_id_from_tag: Optional[int] = None,
+        catalog_id: Optional[str] = None,
     ):
         """
         Queue a cost record for async batch sending.
@@ -434,6 +438,7 @@ class CostLogger:
             "scheduled_job_id": _scheduled_job_id_from_tag,  # From tag (preferred) or instance attribute (fallback)
             "langsmith_run_id": langsmith_run_id,
             "langsmith_trace_id": langsmith_trace_id,
+            "catalog_id": catalog_id,
             "invoked_at": (invoked_at or datetime.now(timezone.utc)).isoformat(),
         }
 

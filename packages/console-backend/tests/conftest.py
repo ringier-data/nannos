@@ -4,7 +4,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import docker
 import pytest
@@ -445,7 +445,7 @@ def oidc_token_exchange_response() -> dict[str, Any]:
         "access_token": "exchanged_access_token",
         "token_type": "Bearer",
         "expires_in": 3600,
-        "scope": "openid profile",
+        "scope": "openid profile email",
         "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
     }
 
@@ -883,7 +883,9 @@ async def app_with_db(app, pg_session, test_user_model):
 @pytest_asyncio.fixture()
 async def client(app):
     """Mock the database using the pg_session."""
+    from playground_backend.db.connection import force_reset_db_state
 
+    force_reset_db_state()
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(
@@ -902,7 +904,9 @@ async def client(app):
 @pytest_asyncio.fixture()
 async def client_with_db(app_with_db):
     """Mock the database using the pg_session."""
+    from playground_backend.db.connection import force_reset_db_state
 
+    force_reset_db_state()
     async with LifespanManager(app_with_db):
         transport = ASGITransport(app=app_with_db)
         async with AsyncClient(

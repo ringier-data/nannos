@@ -119,7 +119,7 @@ class TestCreateModelWithThinking:
                 "GCP_LOCATION": "us-central1",
             },
         ):
-            create_model("gemini-3-pro-preview", thinking_level=ThinkingLevel.medium)
+            create_model("gemini-3.1-pro-preview", thinking_level=ThinkingLevel.medium)
 
         mock_gemini.assert_called_once()
         call_kwargs = mock_gemini.call_args[1]
@@ -143,7 +143,7 @@ class TestCreateModelWithThinking:
                 "GCP_LOCATION": "us-central1",
             },
         ):
-            create_model("gemini-3-pro-preview", thinking_level=None)
+            create_model("gemini-3.1-pro-preview", thinking_level=None)
 
         mock_gemini.assert_called_once()
         call_kwargs = mock_gemini.call_args[1]

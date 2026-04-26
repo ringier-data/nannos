@@ -31,16 +31,17 @@ from .utils import append_to_system_message
 logger = logging.getLogger(__name__)
 
 
-_FILESYSTEM_STORAGE_PATHS_PROMPT = """## Filesystem Storage Paths
-
+_FILESYSTEM_STORAGE_PATHS_PROMPT = """
+<filesystem_storage_paths>
 The filesystem supports different storage locations with different persistence:
 
-- **Ephemeral storage** (root `/`): Files without a prefix are temporary and cleared after conversation ends
-- **Personal storage** (`/memories/`): Files persist across conversations, private to you
-- **Channel storage** (`/channel_memories/`): Files shared with all channel members
+- Ephemeral storage (root `/`): Files without a prefix are temporary and cleared after conversation ends.
+- Personal storage (`/memories/`): Files persist across conversations, private to you.
+- Channel storage (`/channel_memories/`): Files shared with all channel members.
 
 Use `/memories/` for documents, notes, and data you want to keep long-term.
-Use `/channel_memories/` in Slack channels when sharing files with team members."""
+Use `/channel_memories/` in Slack channels when sharing files with team members.
+</filesystem_storage_paths>"""
 
 
 class StoragePathsInstructionMiddleware(AgentMiddleware):

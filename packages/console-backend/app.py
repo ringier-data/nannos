@@ -37,6 +37,7 @@ from rcplus_alloy_common.logging import (
     configure_existing_logger,
     configure_logger,
 )
+from sqlalchemy import text as sa_text
 from starlette.middleware.sessions import SessionMiddleware
 
 from playground_backend.config import config
@@ -51,6 +52,7 @@ from playground_backend.routers.admin_audit_router import router as admin_audit_
 from playground_backend.routers.admin_group_router import router as admin_group_router
 from playground_backend.routers.admin_user_router import router as admin_user_router
 from playground_backend.routers.auth_router import router as auth_router
+from playground_backend.routers.catalog_router import router as catalog_router
 from playground_backend.routers.conversation_router import router as conversation_router
 from playground_backend.routers.delivery_channel_router import router as delivery_channel_router
 from playground_backend.routers.file_router import router as file_router
@@ -135,6 +137,46 @@ async def shutdown_handler() -> None:
         logger.error(f"Error during shutdown: {e}", exc_info=True)
 
 
+# ── Agent URL sync at startup ────────────────────────────────────────────────
+# Maps env var → agent name seeded in migration 040.
+_REMOTE_AGENT_ENV_MAP: dict[str, str] = {
+    "VOICE_AGENT_URL": "voice-agent",
+    "AGENT_CREATOR_URL": "agent-creator",
+}
+
+
+async def _sync_remote_agent_urls() -> None:
+    """Update agent_url for system-owned remote agents from environment variables.
+
+    Called once during startup so that migration-seeded placeholder URLs are
+    replaced with the real service URLs configured in the environment.
+    """
+
+    session_factory = get_async_session_factory()
+    async with session_factory() as db:
+        for env_var, agent_name in _REMOTE_AGENT_ENV_MAP.items():
+            url = os.environ.get(env_var)
+            if not url:
+                logger.debug("Skipping agent URL sync for %s (env %s not set)", agent_name, env_var)
+                continue
+            result = await db.execute(
+                sa_text("""
+                    UPDATE sub_agent_config_versions cv
+                    SET agent_url = :url
+                    FROM sub_agents sa
+                    WHERE cv.sub_agent_id = sa.id
+                      AND sa.name = :name
+                      AND sa.owner_user_id = 'system'
+                      AND cv.version = sa.default_version
+                      AND cv.agent_url IS DISTINCT FROM :url
+                """),
+                {"url": url, "name": agent_name},
+            )
+            if result.rowcount:
+                logger.info("Synced agent_url for '%s' → %s", agent_name, url)
+        await db.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Lifespan context manager for startup and shutdown events."""
@@ -145,12 +187,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     logger.info("PostgreSQL database initialized")
 
+    # Sync system-owned remote agent URLs from environment variables
+    await _sync_remote_agent_urls()
+
     # Initialize services and store in app.state
     await initialize_services(app)
     logger.info("Services initialized")
 
     # Start scheduler engine
     await app.state.scheduler_engine.start()
+
+    # Start catalog sync engine (if auto-sync is enabled)
+    # Always heal stuck jobs (manual syncs can leave orphaned running jobs on restart)
+    await app.state.catalog_sync_engine.heal_stuck_jobs()
+
+    # Start the task queue (workers that execute sync jobs)
+    if hasattr(app.state, "sync_task_queue"):
+        await app.state.sync_task_queue.start(
+            handler=app.state.catalog_service.handle_sync_task,
+        )
+        logger.info("Sync task queue started")
+
+    if config.catalog.auto_sync_enabled:
+        await app.state.catalog_sync_engine.start()
+
+    # Start internal cost logger for catalog sync cost tracking
+    from playground_backend.services.llm_cost_tracking import _internal_cost_logger
+
+    if _internal_cost_logger is not None:
+        await _internal_cost_logger.start()
+        logger.info("Internal cost logger started")
 
     # Start connection pool cleanup task
     connection_pool.start_cleanup_task()
@@ -165,6 +231,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if hasattr(app.state, "scheduler_engine"):
         await app.state.scheduler_engine.stop()
         logger.info("Scheduler engine stopped")
+    if hasattr(app.state, "catalog_sync_engine"):
+        await app.state.catalog_sync_engine.stop()
+        logger.info("Catalog sync engine stopped")
+    if hasattr(app.state, "sync_task_queue"):
+        await app.state.sync_task_queue.stop()
+        logger.info("Sync task queue stopped")
+    from playground_backend.catalog.executor import shutdown_sync_executor
+
+    shutdown_sync_executor()
+    if _internal_cost_logger is not None:
+        await _internal_cost_logger.shutdown()
+        logger.info("Internal cost logger stopped")
     await shutdown_handler()
     await cleanup_services(app)
     await close_db()
@@ -199,15 +277,15 @@ if config.is_local() or config.is_dev():
     )
 
 # Add Starlette's SessionMiddleware for OAuth state management
-# This is required by Authlib to store temporary OAuth state
-# Restricted to /api/v1/auth/ path since it's only used during OAuth flow
+# This is required by Authlib to store temporary OAuth state during login,
+# and by the catalog Google OAuth connect flow.
 app.add_middleware(
     SessionMiddleware,
     secret_key=config.secret_key,
     max_age=600,  # OAuth state expires in 10 minutes
     same_site="lax",
     https_only=not config.is_local(),
-    path="/api/v1/auth/",
+    path="/api/v1/",
 )
 
 # Add custom session middleware to load user from cookies
@@ -232,6 +310,7 @@ app.include_router(notification_router)
 # Scheduler router MUST be registered before FastApiMCP instantiation below
 app.include_router(scheduler_router)
 app.include_router(delivery_channel_router)
+app.include_router(catalog_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.

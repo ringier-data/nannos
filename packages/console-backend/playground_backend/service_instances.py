@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING
 
 from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 
+from .catalog.token_service import CatalogTokenService
 from .config import config
-from .db.connection import get_async_session_factory
+from .db.connection import get_async_session_factory, get_sync_session_factory
+from .repositories.catalog_repository import CatalogRepository
 from .repositories.delivery_channel_repository import DeliveryChannelRepository
 from .repositories.rate_card_repository import RateCardRepository
 from .repositories.scheduled_job_repository import ScheduledJobRepository
@@ -25,6 +27,8 @@ from .repositories.user_group_repository import UserGroupRepository
 from .repositories.user_repository import UserRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
 from .services.audit_service import AuditService
+from .services.catalog_service import CatalogService
+from .services.catalog_sync_engine import CatalogSyncEngine
 from .services.conversation_service import ConversationService
 from .services.file_storage_service import FileStorageService
 from .services.keycloak_admin_service import KeycloakAdminService
@@ -93,6 +97,54 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.sub_agent_service.set_repository(app.state.sub_agent_repository)
     app.state.sub_agent_service.set_notification_service(app.state.notification_service)
 
+    app.state.catalog_repository = CatalogRepository()
+    app.state.catalog_repository.set_audit_service(app.state.audit_service)
+
+    app.state.catalog_service = CatalogService()
+    app.state.catalog_service.set_repository(app.state.catalog_repository)
+
+    app.state.catalog_token_service = CatalogTokenService(
+        kms_key_id=config.catalog.kms_key_id,
+        client_id=config.catalog.google_oauth_client_id,
+        client_secret=config.catalog.google_oauth_client_secret.get_secret_value(),
+    )
+
+    # Wire sync pipeline into catalog service (for manual trigger_sync)
+    from .catalog.task_queue import InMemoryTaskQueue
+
+    if config.catalog.is_configured:
+        from .catalog.adapters.google_drive import GoogleDriveAdapter
+        from .catalog.sync import CatalogSyncPipeline
+
+        _sync_pipeline = CatalogSyncPipeline(
+            adapter=GoogleDriveAdapter(),
+            db_session_factory=get_async_session_factory(),
+        )
+        app.state.catalog_service.set_sync_pipeline(_sync_pipeline)
+        app.state.catalog_service.set_token_service(app.state.catalog_token_service)
+        app.state.catalog_service.set_db_session_factory(get_sync_session_factory())
+        app.state.catalog_service.set_socket_notification_manager(app.state.socket_notification_manager)
+
+        # Task queue — swap InMemoryTaskQueue with an SQS implementation for
+        # horizontal scaling.  The queue is shared by the sync engine (scheduled)
+        # and catalog service (manual triggers).
+        _task_queue: InMemoryTaskQueue | None = InMemoryTaskQueue(
+            max_workers=config.catalog.sync_max_concurrent,
+        )
+        app.state.sync_task_queue = _task_queue
+        app.state.catalog_service.set_task_queue(_task_queue)
+    else:
+        _task_queue = None
+
+    # Catalog sync engine (scheduled background syncs)
+    app.state.catalog_sync_engine = CatalogSyncEngine(
+        repo=app.state.catalog_repository,
+        task_queue=_task_queue or InMemoryTaskQueue(max_workers=1),
+        db_session_factory=get_sync_session_factory(),
+        sync_interval_seconds=config.catalog.sync_interval_seconds,
+        tick_interval_seconds=config.catalog.sync_tick_interval_seconds,
+    )
+
     app.state.user_group_service = UserGroupService()
     app.state.user_group_service.set_repository(app.state.user_group_repository)
     app.state.user_group_service.set_sub_agent_service(app.state.sub_agent_service)
@@ -120,6 +172,20 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.usage_service = UsageService()
     app.state.usage_service.set_repository(app.state.usage_repository)
     app.state.usage_service.set_rate_card_service(app.state.rate_card_service)
+
+    # Wire internal cost logger into sync pipeline (must be after usage_service init)
+    if (
+        config.catalog.is_configured
+        and hasattr(app.state, "catalog_service")
+        and app.state.catalog_service._sync_pipeline
+    ):
+        from .services.llm_cost_tracking import get_internal_cost_logger
+
+        _internal_cost_logger = get_internal_cost_logger(
+            usage_service=app.state.usage_service,
+            db_session_factory=get_async_session_factory(),
+        )
+        app.state.catalog_service._sync_pipeline._cost_logger = _internal_cost_logger
 
     # Initialize PostgreSQL-backed or in-memory services depending on configuration
     use_in_memory = bool(os.getenv("USE_IN_MEMORY_STORE"))

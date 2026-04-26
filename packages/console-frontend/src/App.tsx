@@ -11,6 +11,8 @@ import { UsagePage } from './pages/UsagePage';
 import { SchedulerPage } from './pages/SchedulerPage';
 import { SchedulerJobDetailPage } from './pages/SchedulerJobDetailPage';
 import { DeliveryChannelsPage } from './pages/DeliveryChannelsPage';
+import { CatalogsPage } from './pages/CatalogsPage';
+import { CatalogDetailPage } from './pages/CatalogDetailPage';
 import { AdminRoute } from './components/AdminRoute';
 import { GroupManagerRoute } from './components/GroupManagerRoute';
 import { UsersPage } from './pages/admin/UsersPage';
@@ -60,6 +62,8 @@ function App() {
         <Route path="usage" element={<UsagePage />} />
         <Route path="scheduler" element={<SchedulerPage />} />
         <Route path="scheduler/:id" element={<SchedulerJobDetailPage />} />
+        <Route path="catalogs" element={<CatalogsPage />} />
+        <Route path="catalogs/:id" element={<CatalogDetailPage />} />
         <Route path="delivery-channels" element={<DeliveryChannelsPage />} />
         <Route path="groups" element={<GroupManagerRoute><GroupsPage /></GroupManagerRoute>} />
         <Route path="groups/:id" element={<GroupManagerRoute><GroupDetailPage /></GroupManagerRoute>} />

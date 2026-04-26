@@ -101,8 +101,19 @@ class A2AClientRunnable(BaseA2ARunnable):
 
     @property
     def description(self) -> str:
-        """Return the agent description."""
-        return self.agent_card.description or "No description provided."
+        """Return the agent description with structured skill/example markup."""
+        skills_parts: list[str] = []
+        for skill in self.agent_card.skills or []:
+            examples_txt = ""
+            if skill.examples:
+                example_lines = "\n".join(f"  - {ex}" for ex in skill.examples)
+                examples_txt = f"\n<examples>\n{example_lines}\n</examples>"
+            skills_parts.append(f'<skill name="{skill.name}">\n{skill.description}{examples_txt}\n</skill>')
+        skills_txt = ""
+        if skills_parts:
+            skills_txt = "\n<skills>\n" + "\n".join(skills_parts) + "\n</skills>"
+        full_description = f"{self.agent_card.description or ''}{skills_txt}"
+        return full_description.strip() or "An A2A agent."
 
     async def _inject_trace_headers(self, request: httpx.Request) -> None:
         """Inject LangSmith distributed tracing headers into each request.

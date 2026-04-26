@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 MODELS_SUPPORTING_THINKING = {
     "claude-sonnet-4.5",
     "claude-haiku-4-5",
-    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
 }
 
@@ -218,7 +218,11 @@ class SubAgentService:
                 ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
         """
 
-        activation_filter = "AND (usa.sub_agent_id IS NOT NULL)" if activated_only else ""
+        activation_filter = (
+            "AND (usa.sub_agent_id IS NOT NULL OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE))"
+            if activated_only
+            else ""
+        )
 
         if is_admin and status_filter is None:
             # Admins see all sub-agents

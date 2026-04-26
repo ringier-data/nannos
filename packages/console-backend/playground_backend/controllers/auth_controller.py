@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import URL
 
 from ..config import config
+from ..services.keycloak_admin_service import KeycloakAdminService, KeycloakSyncError
 from ..services.scheduler_token_service import SchedulerTokenService
 from ..services.session_service import SessionService
 from ..services.user_service import UserService
@@ -54,11 +55,13 @@ class AuthController:
         session_service: SessionService,
         user_service: UserService,
         scheduler_token_service: SchedulerTokenService | None = None,
+        keycloak_admin_service: KeycloakAdminService | None = None,
     ) -> None:
         """Initialize the auth controller."""
         self.session_service = session_service
         self.user_service = user_service
         self.scheduler_token_service = scheduler_token_service
+        self.keycloak_admin_service = keycloak_admin_service
         self.oidc_config = config.oidc
         self.base_domain = config.base_domain
         self.is_dev = config.is_local() or config.is_dev()
@@ -184,6 +187,13 @@ class AuthController:
         given_name = userinfo.get("given_name", "")
         family_name = userinfo.get("family_name", "")
         company_name = userinfo.get("company_name")
+        # NOTE: we have access to phone_number_idp (phoneNumber) and phone_number (phoneNumberOverride) in
+        # Keycloak (IdP broker).The former is the phone number from Okta (IdP), while the latter is an optional override
+        # field that can be used to correct or update a user's phone number without changing the IdP data (changing just
+        # the IdP broker). In the users table we store the phone_number_idp, and we sync it on every login
+        # to ensure it's up to date, while in the user_settings table we store the phone_number override.
+        phone_number_idp = userinfo.get("phone_number_idp")
+        phone_number_override = userinfo.get("phone_number")
 
         if not sub or not email:
             logger.error("Missing required user info")
@@ -197,11 +207,26 @@ class AuthController:
                 email=email,
                 first_name=given_name,
                 last_name=family_name,
+                phone_number_idp=phone_number_idp,
                 company_name=company_name,
             )
         except Exception as e:
             logger.error(f"Failed to upsert user: {e}")
             raise
+
+        # Seed Keycloak phoneNumberOverride with IdP phone when it's empty.
+        # The direct attribute mapper for phoneNumberOverride requires the attribute to be populated;
+        # without the script mapper we can no longer fall back to phoneNumber dynamically.
+        if not phone_number_override and phone_number_idp and self.keycloak_admin_service:
+            try:
+                await self.keycloak_admin_service.sync_phone_number_override(sub, phone_number_idp)
+                logger.info("Seeded Keycloak phoneNumberOverride with IdP phone for user %s", user.id)
+            except KeycloakSyncError as exc:
+                logger.warning(
+                    "Failed to seed Keycloak phoneNumberOverride for user %s: %s",
+                    user.id,
+                    exc,
+                )
 
         logger.info(f"User {user.id} logged in successfully")
         # Get tokens for session

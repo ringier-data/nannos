@@ -41,7 +41,7 @@ spec:
         - name: OIDC_ISSUER
           value: "https://login.my-issuer.com/realms/nannos"
         - name: SCHEDULER_SERVICE_CLIENT_ID
-          value: "playground-backend"
+          value: "agent-console"
         - name: AGENT_BASE_URL
           value: "https://agent-runner.${BASE_DOMAIN}"
         - name: PLAYGROUND_BACKEND_URL

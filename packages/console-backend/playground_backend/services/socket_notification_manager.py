@@ -53,6 +53,26 @@ class SocketNotificationManager:
                 del self._user_connections[user_id]
         logger.info(f"Unregistered WebSocket connection for user {user_id}: {sid}")
 
+    async def emit_to_user(self, user_id: str, event: str, data: dict[str, Any]) -> bool:
+        """Emit an event to all active connections for a user.
+
+        Args:
+            user_id: User's unique identifier
+            event: Socket.IO event name
+            data: Event payload
+
+        Returns:
+            True if event was sent to at least one connection
+        """
+        if user_id not in self._user_connections:
+            return False
+        for sid in self._user_connections[user_id]:
+            try:
+                await self._sio.emit(event, data, room=sid)
+            except Exception as e:
+                logger.error(f"Failed to emit {event} to session {sid}: {e}")
+        return True
+
     async def send_notification(self, user_id: str, notification: dict[str, Any]) -> bool:
         """Send a notification to a user via WebSocket.
 

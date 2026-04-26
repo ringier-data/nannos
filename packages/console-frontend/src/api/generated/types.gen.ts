@@ -12,6 +12,35 @@ export type ClientOptions = {
 export type ActivationSource = 'user' | 'group' | 'admin';
 
 /**
+ * AddSourceRequest
+ *
+ * Request model for adding a source to a catalog.
+ */
+export type AddSourceRequest = {
+    type: CatalogSourceKind;
+    /**
+     * Drive Id
+     */
+    drive_id?: string | null;
+    /**
+     * Drive Name
+     */
+    drive_name?: string | null;
+    /**
+     * Folder Id
+     */
+    folder_id?: string | null;
+    /**
+     * Folder Name
+     */
+    folder_name?: string | null;
+    /**
+     * Exclude Folder Patterns
+     */
+    exclude_folder_patterns?: Array<string>;
+};
+
+/**
  * AdminModeToggleRequest
  *
  * Request model for admin mode toggle.
@@ -51,7 +80,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog';
 
 /**
  * AuditLog
@@ -211,13 +240,13 @@ export type BillingUnitDetail = {
  */
 export type BodyUploadFilesApiV1FilesUploadPost = {
     /**
-     * Conversation Id
-     */
-    conversation_id: string;
-    /**
      * Files
      */
-    files: Array<Blob | File>;
+    files: Array<string>;
+    /**
+     * Conversation Id
+     */
+    conversation_id?: string | null;
 };
 
 /**
@@ -323,6 +352,478 @@ export type BulkUserOperationResponse = {
      * Data
      */
     data: Array<BulkOperationResult>;
+};
+
+/**
+ * Catalog
+ *
+ * Catalog entity.
+ */
+export type Catalog = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    owner?: CatalogOwner | null;
+    source_type: CatalogSourceType;
+    /**
+     * Source Config
+     */
+    source_config?: {
+        [key: string]: unknown;
+    };
+    status?: CatalogStatus;
+    /**
+     * Has Connection
+     */
+    has_connection?: boolean;
+    /**
+     * Total Pages
+     */
+    total_pages?: number;
+    /**
+     * Indexed Pages
+     */
+    indexed_pages?: number;
+    /**
+     * Last Synced At
+     */
+    last_synced_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+};
+
+/**
+ * CatalogCreate
+ *
+ * Request model for creating a catalog.
+ */
+export type CatalogCreate = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    source_type: CatalogSourceType;
+    /**
+     * Source Config
+     */
+    source_config?: {
+        [key: string]: unknown;
+    };
+};
+
+/**
+ * CatalogFile
+ *
+ * Catalog file (document-level metadata).
+ */
+export type CatalogFile = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Catalog Id
+     */
+    catalog_id: string;
+    /**
+     * Source File Id
+     */
+    source_file_id: string;
+    /**
+     * Source File Name
+     */
+    source_file_name: string;
+    /**
+     * Mime Type
+     */
+    mime_type?: string | null;
+    /**
+     * Folder Path
+     */
+    folder_path?: string | null;
+    /**
+     * Page Count
+     */
+    page_count?: number | null;
+    /**
+     * Indexed Pages
+     */
+    indexed_pages?: number;
+    /**
+     * Indexing Excluded
+     */
+    indexing_excluded?: boolean;
+    sync_status?: CatalogFileSyncStatus;
+    /**
+     * Skip Reason
+     */
+    skip_reason?: string | null;
+    /**
+     * Summary
+     */
+    summary?: string | null;
+    /**
+     * Metadata
+     */
+    metadata?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Source Modified At
+     */
+    source_modified_at?: string | null;
+    /**
+     * Synced At
+     */
+    synced_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+};
+
+/**
+ * CatalogFileListResponse
+ *
+ * List response for catalog files.
+ */
+export type CatalogFileListResponse = {
+    /**
+     * Items
+     */
+    items: Array<CatalogFile>;
+    /**
+     * Total
+     */
+    total: number;
+};
+
+/**
+ * CatalogFileSyncStatus
+ *
+ * Sync status for individual catalog files.
+ */
+export type CatalogFileSyncStatus = 'pending' | 'syncing' | 'synced' | 'failed' | 'skipped';
+
+/**
+ * CatalogListResponse
+ *
+ * Paginated catalog list response.
+ */
+export type CatalogListResponse = {
+    /**
+     * Items
+     */
+    items: Array<Catalog>;
+    /**
+     * Total
+     */
+    total: number;
+};
+
+/**
+ * CatalogOwner
+ *
+ * Owner information for catalog responses.
+ */
+export type CatalogOwner = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Email
+     */
+    email: string;
+};
+
+/**
+ * CatalogPage
+ *
+ * Catalog page (individual slide/page within a file).
+ */
+export type CatalogPage = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Catalog Id
+     */
+    catalog_id: string;
+    /**
+     * File Id
+     */
+    file_id: string;
+    /**
+     * Page Number
+     */
+    page_number: number;
+    /**
+     * Title
+     */
+    title?: string | null;
+    /**
+     * Text Content
+     */
+    text_content?: string | null;
+    /**
+     * Speaker Notes
+     */
+    speaker_notes?: string | null;
+    /**
+     * Content Hash
+     */
+    content_hash?: string | null;
+    /**
+     * Thumbnail S3 Key
+     */
+    thumbnail_s3_key?: string | null;
+    /**
+     * Source Ref
+     */
+    source_ref?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Metadata
+     */
+    metadata?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Indexed At
+     */
+    indexed_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+};
+
+/**
+ * CatalogPageListResponse
+ *
+ * List response for catalog pages.
+ */
+export type CatalogPageListResponse = {
+    /**
+     * Items
+     */
+    items: Array<CatalogPage>;
+    /**
+     * Total
+     */
+    total: number;
+};
+
+/**
+ * CatalogPermission
+ *
+ * Catalog permission entry.
+ */
+export type CatalogPermission = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Catalog Id
+     */
+    catalog_id: string;
+    /**
+     * User Group Id
+     */
+    user_group_id: number;
+    /**
+     * Permissions
+     */
+    permissions?: Array<string>;
+    /**
+     * Created At
+     */
+    created_at?: string;
+};
+
+/**
+ * CatalogPermissionUpdate
+ *
+ * Request model for updating catalog permissions.
+ */
+export type CatalogPermissionUpdate = {
+    /**
+     * Permissions
+     */
+    permissions: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+/**
+ * CatalogSource
+ *
+ * A single source within a catalog (e.g. one shared drive or one shared folder).
+ */
+export type CatalogSource = {
+    /**
+     * Id
+     */
+    id: string;
+    type: CatalogSourceKind;
+    /**
+     * Drive Id
+     */
+    drive_id?: string | null;
+    /**
+     * Drive Name
+     */
+    drive_name?: string | null;
+    /**
+     * Folder Id
+     */
+    folder_id?: string | null;
+    /**
+     * Folder Name
+     */
+    folder_name?: string | null;
+    /**
+     * Exclude Folder Patterns
+     */
+    exclude_folder_patterns?: Array<string>;
+};
+
+/**
+ * CatalogSourceKind
+ *
+ * Kind of source within a catalog (e.g. entire shared drive, subfolder, or user-shared folder).
+ */
+export type CatalogSourceKind = 'shared_drive' | 'drive_folder' | 'shared_folder';
+
+/**
+ * CatalogSourceType
+ *
+ * Catalog source type enum matching database enum.
+ */
+export type CatalogSourceType = 'google_drive';
+
+/**
+ * CatalogStatus
+ *
+ * Catalog status enum matching database enum.
+ */
+export type CatalogStatus = 'active' | 'syncing' | 'error' | 'disabled';
+
+/**
+ * CatalogSyncJob
+ *
+ * Catalog sync job status.
+ */
+export type CatalogSyncJob = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Catalog Id
+     */
+    catalog_id: string;
+    status?: CatalogSyncJobStatus;
+    /**
+     * Total Files
+     */
+    total_files?: number;
+    /**
+     * Processed Files
+     */
+    processed_files?: number;
+    /**
+     * Failed Files
+     */
+    failed_files?: number;
+    /**
+     * Error Details
+     */
+    error_details?: {
+        [key: string]: unknown;
+    } | Array<{
+        [key: string]: unknown;
+    }> | null;
+    /**
+     * Started At
+     */
+    started_at?: string | null;
+    /**
+     * Completed At
+     */
+    completed_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+};
+
+/**
+ * CatalogSyncJobStatus
+ *
+ * Catalog sync job status enum matching database enum.
+ */
+export type CatalogSyncJobStatus = 'pending' | 'running' | 'reindexing' | 'paused' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+
+/**
+ * CatalogUpdate
+ *
+ * Request model for updating a catalog.
+ */
+export type CatalogUpdate = {
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Source Config
+     */
+    source_config?: {
+        [key: string]: unknown;
+    } | null;
 };
 
 /**
@@ -468,6 +969,10 @@ export type DetailedUsageReport = {
      * By Conversation
      */
     by_conversation?: Array<UsageByConversation>;
+    /**
+     * By Service
+     */
+    by_service?: Array<UsageByService>;
     /**
      * Billing Unit Breakdown
      */
@@ -795,6 +1300,38 @@ export type PaginationMeta = {
 };
 
 /**
+ * PhoneVerificationCheckRequest
+ *
+ * Request to verify a phone verification code.
+ */
+export type PhoneVerificationCheckRequest = {
+    /**
+     * Phone Number
+     */
+    phone_number: string;
+    /**
+     * Code
+     */
+    code: string;
+};
+
+/**
+ * PhoneVerificationRequest
+ *
+ * Request to send a phone verification code.
+ */
+export type PhoneVerificationRequest = {
+    /**
+     * Phone Number
+     */
+    phone_number: string;
+    /**
+     * Channel
+     */
+    channel?: string;
+};
+
+/**
  * RateCardEntriesList
  *
  * List of rate card entries with pagination.
@@ -1115,6 +1652,10 @@ export type ScheduledJob = {
      */
     delivery_channel_id?: number | null;
     /**
+     * Voice Call
+     */
+    voice_call?: boolean;
+    /**
      * Enabled
      */
     enabled: boolean;
@@ -1241,6 +1782,12 @@ export type ScheduledJobCreate = {
      */
     delivery_channel_id?: number | null;
     /**
+     * Voice Call
+     *
+     * When enabled, the job is dispatched as a phone call via the voice-agent.
+     */
+    voice_call?: boolean;
+    /**
      * Max Failures
      */
     max_failures?: number;
@@ -1352,6 +1899,10 @@ export type ScheduledJobUpdate = {
      * Delivery Channel Id
      */
     delivery_channel_id?: number | null;
+    /**
+     * Voice Call
+     */
+    voice_call?: boolean | null;
     /**
      * Enabled
      */
@@ -2056,6 +2607,30 @@ export type UnreadCountResponse = {
 };
 
 /**
+ * UpdateFileIndexing
+ *
+ * Request model for toggling file indexing exclusion.
+ */
+export type UpdateFileIndexing = {
+    /**
+     * Indexing Excluded
+     */
+    indexing_excluded: boolean;
+};
+
+/**
+ * UpdateSourceRequest
+ *
+ * Request model for updating a source's settings (e.g. exclusion patterns).
+ */
+export type UpdateSourceRequest = {
+    /**
+     * Exclude Folder Patterns
+     */
+    exclude_folder_patterns?: Array<string>;
+};
+
+/**
  * UploadedFileInfo
  *
  * Response model for uploaded file metadata.
@@ -2138,6 +2713,26 @@ export type UsageByConversation = {
 };
 
 /**
+ * UsageByService
+ *
+ * Usage breakdown by service type (orchestrator, catalog, scheduler).
+ */
+export type UsageByService = {
+    /**
+     * Service
+     */
+    service: string;
+    /**
+     * Total Cost Usd
+     */
+    total_cost_usd: string;
+    /**
+     * Total Requests
+     */
+    total_requests: number;
+};
+
+/**
  * UsageBySubAgent
  *
  * Usage breakdown by sub-agent.
@@ -2208,6 +2803,14 @@ export type UsageLog = {
      */
     scheduled_job_name?: string | null;
     /**
+     * Catalog Id
+     */
+    catalog_id?: string | null;
+    /**
+     * Catalog Name
+     */
+    catalog_name?: string | null;
+    /**
      * Provider
      */
     provider?: string | null;
@@ -2277,6 +2880,10 @@ export type UsageLogCreate = {
      * Scheduled Job Id
      */
     scheduled_job_id?: number | null;
+    /**
+     * Catalog Id
+     */
+    catalog_id?: string | null;
     /**
      * Provider
      */
@@ -2638,6 +3245,10 @@ export type UserSettings = {
     enable_thinking?: boolean | null;
     thinking_level?: OrchestratorThinkingLevel | null;
     /**
+     * Phone Number Override
+     */
+    phone_number_override?: string | null;
+    /**
      * Created At
      */
     created_at?: string;
@@ -2691,6 +3302,10 @@ export type UserSettingsUpdate = {
      */
     enable_thinking?: boolean | null;
     thinking_level?: OrchestratorThinkingLevel | null;
+    /**
+     * Phone Number Override
+     */
+    phone_number_override?: string | null;
 };
 
 /**
@@ -2746,6 +3361,10 @@ export type UserWithGroups = {
     role?: UserRole;
     status?: UserStatus;
     /**
+     * Phone Number Idp
+     */
+    phone_number_idp?: string | null;
+    /**
      * Deleted At
      */
     deleted_at?: string | null;
@@ -2779,12 +3398,22 @@ export type ValidationError = {
      * Error Type
      */
     type: string;
+    /**
+     * Input
+     */
+    input?: unknown;
+    /**
+     * Context
+     */
+    ctx?: {
+        [key: string]: unknown;
+    };
 };
 
 /**
  * Model
  */
-export type ModelEnum = 'gpt-4o' | 'gpt-4o-mini' | 'claude-sonnet-4.5' | 'claude-sonnet-4.6' | 'claude-haiku-4-5';
+export type ModelEnum = 'gpt-4o' | 'gpt-4o-mini' | 'claude-sonnet-4.5' | 'claude-sonnet-4.6' | 'claude-haiku-4-5' | 'gemini-3.1-pro-preview' | 'gemini-3-flash-preview';
 
 /**
  * Action
@@ -2924,6 +3553,84 @@ export type UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses = {
 };
 
 export type UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponse = UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses[keyof UpdateCurrentUserSettingsApiV1AuthMeSettingsPatchResponses];
+
+export type SendPhoneVerificationApiV1AuthMePhoneVerifyPostData = {
+    body: PhoneVerificationRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/me/phone/verify';
+};
+
+export type SendPhoneVerificationApiV1AuthMePhoneVerifyPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SendPhoneVerificationApiV1AuthMePhoneVerifyPostError = SendPhoneVerificationApiV1AuthMePhoneVerifyPostErrors[keyof SendPhoneVerificationApiV1AuthMePhoneVerifyPostErrors];
+
+export type SendPhoneVerificationApiV1AuthMePhoneVerifyPostResponses = {
+    /**
+     * Response Send Phone Verification Api V1 Auth Me Phone Verify Post
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type SendPhoneVerificationApiV1AuthMePhoneVerifyPostResponse = SendPhoneVerificationApiV1AuthMePhoneVerifyPostResponses[keyof SendPhoneVerificationApiV1AuthMePhoneVerifyPostResponses];
+
+export type ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostData = {
+    body: PhoneVerificationCheckRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/me/phone/confirm';
+};
+
+export type ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostError = ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostErrors[keyof ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostErrors];
+
+export type ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostResponses = {
+    /**
+     * Response Confirm Phone Verification Api V1 Auth Me Phone Confirm Post
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostResponse = ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostResponses[keyof ConfirmPhoneVerificationApiV1AuthMePhoneConfirmPostResponses];
+
+export type ClearPhoneOverrideApiV1AuthMePhoneOverrideDeleteData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/me/phone/override';
+};
+
+export type ClearPhoneOverrideApiV1AuthMePhoneOverrideDeleteResponses = {
+    /**
+     * Response Clear Phone Override Api V1 Auth Me Phone Override Delete
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type ClearPhoneOverrideApiV1AuthMePhoneOverrideDeleteResponse = ClearPhoneOverrideApiV1AuthMePhoneOverrideDeleteResponses[keyof ClearPhoneOverrideApiV1AuthMePhoneOverrideDeleteResponses];
 
 export type ToggleAdminModeApiV1AuthAdminModePostData = {
     body: AdminModeToggleRequest;
@@ -5934,6 +6641,903 @@ export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses = {
 };
 
 export type UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponse = UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses[keyof UpdateChannelApiV1DeliveryChannelsChannelIdPatchResponses];
+
+export type ListCatalogsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/catalogs';
+};
+
+export type ListCatalogsResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogListResponse;
+};
+
+export type ListCatalogsResponse = ListCatalogsResponses[keyof ListCatalogsResponses];
+
+export type CreateCatalogData = {
+    body: CatalogCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/catalogs';
+};
+
+export type CreateCatalogErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateCatalogError = CreateCatalogErrors[keyof CreateCatalogErrors];
+
+export type CreateCatalogResponses = {
+    /**
+     * Successful Response
+     */
+    201: Catalog;
+};
+
+export type CreateCatalogResponse = CreateCatalogResponses[keyof CreateCatalogResponses];
+
+export type CatalogConnectGoogleData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Catalog Id
+         *
+         * Catalog ID to connect
+         */
+        catalog_id: string;
+    };
+    url: '/api/v1/catalogs/connect';
+};
+
+export type CatalogConnectGoogleErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CatalogConnectGoogleError = CatalogConnectGoogleErrors[keyof CatalogConnectGoogleErrors];
+
+export type CatalogConnectGoogleResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type CatalogConnectCallbackData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Code
+         */
+        code: string;
+        /**
+         * State
+         */
+        state: string;
+    };
+    url: '/api/v1/catalogs/connect/callback';
+};
+
+export type CatalogConnectCallbackErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CatalogConnectCallbackError = CatalogConnectCallbackErrors[keyof CatalogConnectCallbackErrors];
+
+export type CatalogConnectCallbackResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ListSharedDrivesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Catalog Id
+         *
+         * Catalog ID with active connection
+         */
+        catalog_id: string;
+    };
+    url: '/api/v1/catalogs/shared-drives';
+};
+
+export type ListSharedDrivesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSharedDrivesError = ListSharedDrivesErrors[keyof ListSharedDrivesErrors];
+
+export type ListSharedDrivesResponses = {
+    /**
+     * Response List Shared Drives
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type ListSharedDrivesResponse = ListSharedDrivesResponses[keyof ListSharedDrivesResponses];
+
+export type ListDriveFoldersData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Catalog Id
+         *
+         * Catalog ID with active connection
+         */
+        catalog_id: string;
+        /**
+         * Shared Drive Id
+         *
+         * Shared Drive ID (omit for user-shared folders)
+         */
+        shared_drive_id?: string | null;
+        /**
+         * Parent Id
+         *
+         * Parent folder ID (omit for root)
+         */
+        parent_id?: string | null;
+    };
+    url: '/api/v1/catalogs/folders';
+};
+
+export type ListDriveFoldersErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListDriveFoldersError = ListDriveFoldersErrors[keyof ListDriveFoldersErrors];
+
+export type ListDriveFoldersResponses = {
+    /**
+     * Response List Drive Folders
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type ListDriveFoldersResponse = ListDriveFoldersResponses[keyof ListDriveFoldersResponses];
+
+export type ListUserSharedFoldersData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Catalog Id
+         *
+         * Catalog ID with active connection
+         */
+        catalog_id: string;
+    };
+    url: '/api/v1/catalogs/shared-folders';
+};
+
+export type ListUserSharedFoldersErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListUserSharedFoldersError = ListUserSharedFoldersErrors[keyof ListUserSharedFoldersErrors];
+
+export type ListUserSharedFoldersResponses = {
+    /**
+     * Response List User Shared Folders
+     *
+     * Successful Response
+     */
+    200: Array<{
+        [key: string]: unknown;
+    }>;
+};
+
+export type ListUserSharedFoldersResponse = ListUserSharedFoldersResponses[keyof ListUserSharedFoldersResponses];
+
+export type DeleteCatalogData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}';
+};
+
+export type DeleteCatalogErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteCatalogError = DeleteCatalogErrors[keyof DeleteCatalogErrors];
+
+export type DeleteCatalogResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteCatalogResponse = DeleteCatalogResponses[keyof DeleteCatalogResponses];
+
+export type GetCatalogData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}';
+};
+
+export type GetCatalogErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetCatalogError = GetCatalogErrors[keyof GetCatalogErrors];
+
+export type GetCatalogResponses = {
+    /**
+     * Successful Response
+     */
+    200: Catalog;
+};
+
+export type GetCatalogResponse = GetCatalogResponses[keyof GetCatalogResponses];
+
+export type UpdateCatalogData = {
+    body: CatalogUpdate;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}';
+};
+
+export type UpdateCatalogErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateCatalogError = UpdateCatalogErrors[keyof UpdateCatalogErrors];
+
+export type UpdateCatalogResponses = {
+    /**
+     * Successful Response
+     */
+    200: Catalog;
+};
+
+export type UpdateCatalogResponse = UpdateCatalogResponses[keyof UpdateCatalogResponses];
+
+export type GetCatalogPermissionsData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/permissions';
+};
+
+export type GetCatalogPermissionsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetCatalogPermissionsError = GetCatalogPermissionsErrors[keyof GetCatalogPermissionsErrors];
+
+export type GetCatalogPermissionsResponses = {
+    /**
+     * Response Get Catalog Permissions
+     *
+     * Successful Response
+     */
+    200: Array<CatalogPermission>;
+};
+
+export type GetCatalogPermissionsResponse = GetCatalogPermissionsResponses[keyof GetCatalogPermissionsResponses];
+
+export type SetCatalogPermissionsData = {
+    body: CatalogPermissionUpdate;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/permissions';
+};
+
+export type SetCatalogPermissionsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetCatalogPermissionsError = SetCatalogPermissionsErrors[keyof SetCatalogPermissionsErrors];
+
+export type SetCatalogPermissionsResponses = {
+    /**
+     * Response Set Catalog Permissions
+     *
+     * Successful Response
+     */
+    200: Array<CatalogPermission>;
+};
+
+export type SetCatalogPermissionsResponse = SetCatalogPermissionsResponses[keyof SetCatalogPermissionsResponses];
+
+export type ListCatalogFilesData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: {
+        /**
+         * Limit
+         */
+        limit?: number;
+        /**
+         * Offset
+         */
+        offset?: number;
+        /**
+         * Search
+         */
+        search?: string | null;
+        /**
+         * Status
+         */
+        status?: string | null;
+    };
+    url: '/api/v1/catalogs/{catalog_id}/files';
+};
+
+export type ListCatalogFilesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListCatalogFilesError = ListCatalogFilesErrors[keyof ListCatalogFilesErrors];
+
+export type ListCatalogFilesResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogFileListResponse;
+};
+
+export type ListCatalogFilesResponse = ListCatalogFilesResponses[keyof ListCatalogFilesResponses];
+
+export type ListCatalogPagesData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: {
+        /**
+         * Limit
+         */
+        limit?: number;
+        /**
+         * Offset
+         */
+        offset?: number;
+    };
+    url: '/api/v1/catalogs/{catalog_id}/pages';
+};
+
+export type ListCatalogPagesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListCatalogPagesError = ListCatalogPagesErrors[keyof ListCatalogPagesErrors];
+
+export type ListCatalogPagesResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogPageListResponse;
+};
+
+export type ListCatalogPagesResponse = ListCatalogPagesResponses[keyof ListCatalogPagesResponses];
+
+export type ListFilePagesData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+        /**
+         * File Id
+         */
+        file_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/files/{file_id}/pages';
+};
+
+export type ListFilePagesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListFilePagesError = ListFilePagesErrors[keyof ListFilePagesErrors];
+
+export type ListFilePagesResponses = {
+    /**
+     * Response List File Pages
+     *
+     * Successful Response
+     */
+    200: Array<CatalogPage>;
+};
+
+export type ListFilePagesResponse = ListFilePagesResponses[keyof ListFilePagesResponses];
+
+export type UpdateFileIndexingData = {
+    body: UpdateFileIndexing;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+        /**
+         * File Id
+         */
+        file_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/files/{file_id}/indexing';
+};
+
+export type UpdateFileIndexingErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateFileIndexingError = UpdateFileIndexingErrors[keyof UpdateFileIndexingErrors];
+
+export type UpdateFileIndexingResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogFile;
+};
+
+export type UpdateFileIndexingResponse = UpdateFileIndexingResponses[keyof UpdateFileIndexingResponses];
+
+export type ListCatalogSourcesData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sources';
+};
+
+export type ListCatalogSourcesErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListCatalogSourcesError = ListCatalogSourcesErrors[keyof ListCatalogSourcesErrors];
+
+export type ListCatalogSourcesResponses = {
+    /**
+     * Response List Catalog Sources
+     *
+     * Successful Response
+     */
+    200: Array<CatalogSource>;
+};
+
+export type ListCatalogSourcesResponse = ListCatalogSourcesResponses[keyof ListCatalogSourcesResponses];
+
+export type AddCatalogSourceData = {
+    body: AddSourceRequest;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sources';
+};
+
+export type AddCatalogSourceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type AddCatalogSourceError = AddCatalogSourceErrors[keyof AddCatalogSourceErrors];
+
+export type AddCatalogSourceResponses = {
+    /**
+     * Successful Response
+     */
+    201: CatalogSource;
+};
+
+export type AddCatalogSourceResponse = AddCatalogSourceResponses[keyof AddCatalogSourceResponses];
+
+export type RemoveCatalogSourceData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+        /**
+         * Source Id
+         */
+        source_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sources/{source_id}';
+};
+
+export type RemoveCatalogSourceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveCatalogSourceError = RemoveCatalogSourceErrors[keyof RemoveCatalogSourceErrors];
+
+export type RemoveCatalogSourceResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type RemoveCatalogSourceResponse = RemoveCatalogSourceResponses[keyof RemoveCatalogSourceResponses];
+
+export type UpdateCatalogSourceData = {
+    body: UpdateSourceRequest;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+        /**
+         * Source Id
+         */
+        source_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sources/{source_id}';
+};
+
+export type UpdateCatalogSourceErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateCatalogSourceError = UpdateCatalogSourceErrors[keyof UpdateCatalogSourceErrors];
+
+export type UpdateCatalogSourceResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogSource;
+};
+
+export type UpdateCatalogSourceResponse = UpdateCatalogSourceResponses[keyof UpdateCatalogSourceResponses];
+
+export type ReindexCatalogData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/reindex';
+};
+
+export type ReindexCatalogErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ReindexCatalogError = ReindexCatalogErrors[keyof ReindexCatalogErrors];
+
+export type ReindexCatalogResponses = {
+    /**
+     * Successful Response
+     */
+    202: CatalogSyncJob;
+};
+
+export type ReindexCatalogResponse = ReindexCatalogResponses[keyof ReindexCatalogResponses];
+
+export type TriggerCatalogSyncData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sync';
+};
+
+export type TriggerCatalogSyncErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type TriggerCatalogSyncError = TriggerCatalogSyncErrors[keyof TriggerCatalogSyncErrors];
+
+export type TriggerCatalogSyncResponses = {
+    /**
+     * Successful Response
+     */
+    202: CatalogSyncJob;
+};
+
+export type TriggerCatalogSyncResponse = TriggerCatalogSyncResponses[keyof TriggerCatalogSyncResponses];
+
+export type GetCatalogSyncStatusData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sync/status';
+};
+
+export type GetCatalogSyncStatusErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetCatalogSyncStatusError = GetCatalogSyncStatusErrors[keyof GetCatalogSyncStatusErrors];
+
+export type GetCatalogSyncStatusResponses = {
+    /**
+     * Response Get Catalog Sync Status
+     *
+     * Successful Response
+     */
+    200: CatalogSyncJob | null;
+};
+
+export type GetCatalogSyncStatusResponse = GetCatalogSyncStatusResponses[keyof GetCatalogSyncStatusResponses];
+
+export type PauseCatalogSyncData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sync/pause';
+};
+
+export type PauseCatalogSyncErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PauseCatalogSyncError = PauseCatalogSyncErrors[keyof PauseCatalogSyncErrors];
+
+export type PauseCatalogSyncResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogSyncJob;
+};
+
+export type PauseCatalogSyncResponse = PauseCatalogSyncResponses[keyof PauseCatalogSyncResponses];
+
+export type ResumeCatalogSyncData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sync/resume';
+};
+
+export type ResumeCatalogSyncErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ResumeCatalogSyncError = ResumeCatalogSyncErrors[keyof ResumeCatalogSyncErrors];
+
+export type ResumeCatalogSyncResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogSyncJob;
+};
+
+export type ResumeCatalogSyncResponse = ResumeCatalogSyncResponses[keyof ResumeCatalogSyncResponses];
+
+export type CancelCatalogSyncData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/sync/cancel';
+};
+
+export type CancelCatalogSyncErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CancelCatalogSyncError = CancelCatalogSyncErrors[keyof CancelCatalogSyncErrors];
+
+export type CancelCatalogSyncResponses = {
+    /**
+     * Successful Response
+     */
+    200: CatalogSyncJob;
+};
+
+export type CancelCatalogSyncResponse = CancelCatalogSyncResponses[keyof CancelCatalogSyncResponses];
+
+export type GetSyncQueueDiagnosticsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/catalogs/sync/queue/diagnostics';
+};
+
+export type GetSyncQueueDiagnosticsResponses = {
+    /**
+     * Response Get Sync Queue Diagnostics
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type GetSyncQueueDiagnosticsResponse = GetSyncQueueDiagnosticsResponses[keyof GetSyncQueueDiagnosticsResponses];
+
+export type GetPageThumbnailData = {
+    body?: never;
+    path: {
+        /**
+         * Catalog Id
+         */
+        catalog_id: string;
+        /**
+         * Page Id
+         */
+        page_id: string;
+    };
+    query?: never;
+    url: '/api/v1/catalogs/{catalog_id}/pages/{page_id}/thumbnail';
+};
+
+export type GetPageThumbnailErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetPageThumbnailError = GetPageThumbnailErrors[keyof GetPageThumbnailErrors];
+
+export type GetPageThumbnailResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;

@@ -50,7 +50,7 @@ npm run gen-sdk
 
 ## A2A Extension Event Handling
 
-The frontend receives A2A events via Socket.IO from the playground-backend. Events carry extension markers that determine how they're classified and displayed.
+The frontend receives A2A events via Socket.IO from the agent-console. Events carry extension markers that determine how they're classified and displayed.
 
 ### Extension Constants (types.ts)
 
