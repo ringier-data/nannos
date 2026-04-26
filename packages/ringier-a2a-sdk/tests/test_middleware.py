@@ -114,3 +114,43 @@ class TestUserContextFromRequestStateMiddleware:
 
         # Context should be None after request
         assert current_user_context.get() is None
+
+    def test_middleware_propagates_phone_number(self):
+        """Test that phone_number from request.state.user is propagated to context."""
+
+        context_during_request = {}
+
+        def endpoint(request):
+            ctx = current_user_context.get()
+            context_during_request["user_context"] = ctx
+            return PlainTextResponse("OK")
+
+        class MockOidcMiddleware(Middleware):
+            def __init__(self, app):
+                self.app = app
+
+            async def __call__(self, scope, receive, send):
+                from starlette.requests import Request
+
+                request = Request(scope, receive)
+                request.state.user = {
+                    "sub": "sub-123",
+                    "email": "test@example.com",
+                    "name": "Test User",
+                    "phone_number": "+41791234567",
+                    "token": "jwt-token",
+                }
+                scope["state"] = request.state._state
+                await self.app(scope, receive, send)
+
+        app = Starlette(
+            routes=[Route("/test", endpoint, methods=["POST"])],
+        )
+        app = UserContextFromRequestStateMiddleware(app)
+        app = MockOidcMiddleware(app)
+
+        client = TestClient(app)
+        response = client.post("/test")
+
+        assert response.status_code == 200
+        assert context_during_request["user_context"]["phone_number"] == "+41791234567"

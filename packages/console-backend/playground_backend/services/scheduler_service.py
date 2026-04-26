@@ -117,6 +117,7 @@ class SchedulerService:
             "llm_condition": data.llm_condition,
             "destroy_after_trigger": data.destroy_after_trigger,
             "delivery_channel_id": data.delivery_channel_id,
+            "voice_call": data.voice_call,
             "max_failures": data.max_failures,
             "created_at": now,
             "updated_at": now,
@@ -184,7 +185,7 @@ class SchedulerService:
             fields["delivery_channel_id"] = delivery_channel_id
 
         # Handle fields that still use old pattern (from kwargs/data)
-        for attr in ("enabled", "max_failures", "sub_agent_id"):
+        for attr in ("enabled", "max_failures", "sub_agent_id", "voice_call"):
             val = getattr(data, attr, None)
             if val is not None:
                 fields[attr] = val

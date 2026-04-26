@@ -12,6 +12,25 @@ interface SchedulerNotification {
   timestamp: string;
 }
 
+export interface CallCompletedData {
+  call_sid: string;
+  status: string;
+  transcript: Array<{ role: string; text: string }>;
+}
+
+export interface CatalogReindexProgressData {
+  catalog_id: string;
+  indexed: number;
+  failed: number;
+  total: number;
+}
+
+export interface CatalogSyncProgressData {
+  catalog_id: string;
+  job_id: string;
+  [key: string]: unknown;
+}
+
 interface SocketContextType {
   socket: Socket | null;
   isConnected: boolean;
@@ -22,6 +41,9 @@ interface SocketContextType {
   cancelTask: (conversationId: string) => void;
   onAgentResponse: (callback: (data: AgentResponseData) => void) => () => void;
   onSchedulerNotification: (callback: (data: SchedulerNotification) => void) => () => void;
+  onCallCompleted: (callback: (data: CallCompletedData) => void) => () => void;
+  onCatalogReindexProgress: (callback: (data: CatalogReindexProgressData) => void) => () => void;
+  onCatalogSyncProgress: (callback: (data: CatalogSyncProgressData) => void) => () => void;
 }
 
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
@@ -39,6 +61,9 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const responseCallbacksRef = useRef<Set<(data: AgentResponseData) => void>>(new Set());
   const schedulerCallbacksRef = useRef<Set<(data: SchedulerNotification) => void>>(new Set());
+  const callCompletedCallbacksRef = useRef<Set<(data: CallCompletedData) => void>>(new Set());
+  const catalogReindexCallbacksRef = useRef<Set<(data: CatalogReindexProgressData) => void>>(new Set());
+  const catalogSyncCallbacksRef = useRef<Set<(data: CatalogSyncProgressData) => void>>(new Set());
   const initResolveRef = useRef<((value: boolean) => void) | null>(null);
   const customHeadersRef = useRef(customHeaders);
 
@@ -79,6 +104,19 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
     newSocket.on('scheduler_notification', (data: SchedulerNotification) => {
       console.log('Scheduler notification:', data);
       schedulerCallbacksRef.current.forEach((callback) => callback(data));
+    });
+
+    newSocket.on('call_completed', (data: CallCompletedData) => {
+      console.log('Call completed:', data);
+      callCompletedCallbacksRef.current.forEach((callback) => callback(data));
+    });
+
+    newSocket.on('catalog_reindex_progress', (data: CatalogReindexProgressData) => {
+      catalogReindexCallbacksRef.current.forEach((callback) => callback(data));
+    });
+
+    newSocket.on('catalog_sync_progress', (data: CatalogSyncProgressData) => {
+      catalogSyncCallbacksRef.current.forEach((callback) => callback(data));
     });
 
     newSocket.on('debug_log', (data: unknown) => {
@@ -159,6 +197,27 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
     };
   }, []);
 
+  const onCallCompleted = useCallback((callback: (data: CallCompletedData) => void) => {
+    callCompletedCallbacksRef.current.add(callback);
+    return () => {
+      callCompletedCallbacksRef.current.delete(callback);
+    };
+  }, []);
+
+  const onCatalogReindexProgress = useCallback((callback: (data: CatalogReindexProgressData) => void) => {
+    catalogReindexCallbacksRef.current.add(callback);
+    return () => {
+      catalogReindexCallbacksRef.current.delete(callback);
+    };
+  }, []);
+
+  const onCatalogSyncProgress = useCallback((callback: (data: CatalogSyncProgressData) => void) => {
+    catalogSyncCallbacksRef.current.add(callback);
+    return () => {
+      catalogSyncCallbacksRef.current.delete(callback);
+    };
+  }, []);
+
   return (
     <SocketContext.Provider
       value={{
@@ -171,6 +230,9 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
         cancelTask,
         onAgentResponse,
         onSchedulerNotification,
+        onCallCompleted,
+        onCatalogReindexProgress,
+        onCatalogSyncProgress,
       }}
     >
       {children}

@@ -75,7 +75,8 @@ class UserService:
         try:
             query = text("""
                 SELECT id, sub, email, first_name, last_name, company_name,
-                       is_administrator, role, status, deleted_at, created_at, updated_at
+                       is_administrator, role, status, phone_number_idp,
+                       deleted_at, created_at, updated_at
                 FROM users
                 WHERE id = :user_id
             """)
@@ -96,6 +97,7 @@ class UserService:
                 is_administrator=row["is_administrator"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
+                phone_number_idp=row["phone_number_idp"],
                 deleted_at=row["deleted_at"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
@@ -117,7 +119,8 @@ class UserService:
         try:
             query = text("""
                 SELECT id, sub, email, first_name, last_name, company_name,
-                       is_administrator, role, status, deleted_at, created_at, updated_at
+                       is_administrator, role, status, phone_number_idp,
+                       deleted_at, created_at, updated_at
                 FROM users
                 WHERE sub = :sub
             """)
@@ -138,6 +141,7 @@ class UserService:
                 is_administrator=row["is_administrator"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
+                phone_number_idp=row["phone_number_idp"],
                 deleted_at=row["deleted_at"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
@@ -394,6 +398,7 @@ class UserService:
         email: str,
         first_name: str,
         last_name: str,
+        phone_number_idp: str | None,
         company_name: str | None,
         retries_left: int = 1,
     ) -> User:
@@ -419,18 +424,20 @@ class UserService:
 
             query = text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, company_name,
-                                is_administrator, role, status, created_at, updated_at)
+                                is_administrator, role, status, phone_number_idp, created_at, updated_at)
                 VALUES (:id, :sub, :email, :first_name, :last_name, :company_name,
-                        FALSE, 'member', 'active', :now, :now)
+                        FALSE, 'member', 'active', :phone_number_idp, :now, :now)
                 ON CONFLICT (id) DO UPDATE SET
                     sub = EXCLUDED.sub,
                     email = EXCLUDED.email,
                     first_name = EXCLUDED.first_name,
                     last_name = EXCLUDED.last_name,
                     company_name = EXCLUDED.company_name,
+                    phone_number_idp = COALESCE(EXCLUDED.phone_number_idp, users.phone_number_idp),
                     updated_at = EXCLUDED.updated_at
                 RETURNING id, sub, email, first_name, last_name, company_name,
-                        is_administrator, role, status, deleted_at, created_at, updated_at
+                        is_administrator, role, status, phone_number_idp,
+                        deleted_at, created_at, updated_at
             """)
 
             result = await db.execute(
@@ -442,6 +449,7 @@ class UserService:
                     "first_name": first_name,
                     "last_name": last_name,
                     "company_name": company_name,
+                    "phone_number_idp": phone_number_idp,
                     "now": now,
                 },
             )
@@ -461,6 +469,7 @@ class UserService:
                 is_administrator=row["is_administrator"],
                 role=row["role"],
                 status=UserStatus(row["status"]),
+                phone_number_idp=row["phone_number_idp"],
                 deleted_at=row["deleted_at"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
@@ -533,6 +542,7 @@ class UserService:
                     email=email,
                     first_name=first_name,
                     last_name=last_name,
+                    phone_number_idp=phone_number_idp,
                     company_name=company_name,
                     retries_left=retries_left - 1,
                 )
@@ -549,6 +559,7 @@ class UserService:
         email: str,
         first_name: str,
         last_name: str,
+        phone_number_idp: str | None = None,
         company_name: str | None = None,
     ) -> User:
         """Create or update a user using PostgreSQL upsert.
@@ -563,6 +574,7 @@ class UserService:
             email: The user's email
             first_name: The user's first name
             last_name: The user's last name
+            phone_number_idp: The user's phone number from IDP (optional)
             company_name: The user's company name (optional)
 
         Returns:
@@ -576,6 +588,7 @@ class UserService:
                 email=email,
                 first_name=first_name,
                 last_name=last_name,
+                phone_number_idp=phone_number_idp,
                 company_name=company_name,
                 retries_left=1,
             )

@@ -74,6 +74,9 @@ class UserConfig(BaseModel):
     scheduled_job_id: Optional[int] = Field(
         default=None, description="Scheduled job ID for cost attribution (set by agent-runner)"
     )
+    phone_number: Optional[str] = Field(
+        default=None, description="User's resolved phone number (override ?? idp, from JWT phone_number claim)"
+    )
     sub_agents: Optional[list] = Field(default=None, description="Discovered sub-agents")
     tools: Optional[list] = Field(default=None, description="Discovered tools")
 

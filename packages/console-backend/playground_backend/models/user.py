@@ -49,6 +49,7 @@ class User(BaseModel):
     is_administrator: bool = False
     role: UserRole = UserRole.MEMBER
     status: UserStatus = UserStatus.ACTIVE
+    phone_number_idp: str | None = None
     deleted_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -162,6 +163,7 @@ class UserSettings(BaseModel):
     preferred_model: str | None = None
     enable_thinking: bool | None = None
     thinking_level: OrchestratorThinkingLevel | None = None
+    phone_number_override: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -184,10 +186,13 @@ class UserSettingsUpdate(BaseModel):
     preferred_model: str | None = None
     enable_thinking: bool | None = None
     thinking_level: OrchestratorThinkingLevel | None = None
+    phone_number_override: str | None = None
 
 
 class UserSettingsResponse(BaseModel):
     """User settings response."""
+
+    model_config = {"from_attributes": True}
 
     data: UserSettings
 
@@ -196,6 +201,20 @@ class UserAdminUpdate(BaseModel):
     """Request for admin to update user fields."""
 
     is_administrator: bool | None = None
+
+
+class PhoneVerificationRequest(BaseModel):
+    """Request to send a phone verification code."""
+
+    phone_number: str
+    channel: str = "sms"  # "sms" or "call"
+
+
+class PhoneVerificationCheckRequest(BaseModel):
+    """Request to verify a phone verification code."""
+
+    phone_number: str
+    code: str
 
 
 class ImpersonateStartRequest(BaseModel):

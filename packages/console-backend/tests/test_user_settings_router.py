@@ -5,6 +5,8 @@ import os
 # Ensure code chooses auto credentials path during imports (avoid boto3 local credentials)
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
+from unittest.mock import patch
+
 import pytest
 import pytest_asyncio
 
@@ -196,3 +198,33 @@ class TestUserSettingsEndpoints:
         assert data["data"]["language"] == "fr"
         assert data["data"]["timezone"] == "Asia/Tokyo"  # Preserved
         assert data["data"]["custom_prompt"] == "Initial prompt"  # Preserved
+
+    async def test_patch_settings_phone_number_override(self, client_with_db):
+        """Test PATCH /me/settings with phone_number_override (when Verify not configured)."""
+        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+            mock_svc.is_configured = False
+
+            response = await client_with_db.patch(
+                "/api/v1/auth/me/settings",
+                json={"phone_number_override": "+41791234567"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["data"]["phone_number_override"] == "+41791234567"
+
+    async def test_get_settings_includes_phone_override(self, client_with_db):
+        """Test GET /me/settings returns phone_number_override in response."""
+        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+            mock_svc.is_configured = False
+
+            # Set phone override
+            await client_with_db.patch(
+                "/api/v1/auth/me/settings",
+                json={"phone_number_override": "+41795555555"},
+            )
+
+        response = await client_with_db.get("/api/v1/auth/me/settings")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["data"]["phone_number_override"] == "+41795555555"

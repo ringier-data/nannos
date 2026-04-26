@@ -19,6 +19,7 @@ import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
@@ -143,6 +144,8 @@ interface CreateJobForm {
   sub_agent_mode: SubAgentMode;
   // Existing sub-agent mode
   sub_agent_id: string;
+  // Voice call mode: dispatch job via voice-agent
+  voice_call: boolean;
   // Automated sub-agent mode
   automated_name: string;
   automated_description: string;
@@ -173,6 +176,7 @@ const defaultForm: CreateJobForm = {
   run_at: '',
   sub_agent_mode: 'existing',
   sub_agent_id: '',
+  voice_call: false,
   automated_name: '',
   automated_description: '',
   automated_model: 'claude-sonnet-4.5',
@@ -224,9 +228,6 @@ function CreateJobDialog({
 
   // Pre-select the first channel once loaded
   useEffect(() => {
-    if (channels.length > 0 && !form.delivery_channel) {
-      setForm((f) => ({ ...f, delivery_channel: String(channels[0].id) }));
-    }
   }, [channels]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectedTool = mcpTools.find((t) => t.name === form.check_tool);
@@ -298,9 +299,6 @@ function CreateJobDialog({
       if (!form.condition_expr.trim()) return setError('Condition expression is required for watch jobs');
       // Message is optional - LLM will generate one if left empty
     }
-    
-    if (!form.delivery_channel)
-      return setError('Delivery channel is required');
 
     // Parse check_args JSON
     let check_args: Record<string, unknown> | undefined;
@@ -321,7 +319,8 @@ function CreateJobDialog({
         interval_seconds: parseInt(form.interval_seconds),
       }),
       ...(form.schedule_kind === 'once' && { run_at: form.run_at }),
-      delivery_channel_id: parseInt(form.delivery_channel),
+      ...(form.delivery_channel && { delivery_channel_id: parseInt(form.delivery_channel) }),
+      voice_call: form.voice_call,
     };
 
     // Task job: either existing sub-agent or automated sub-agent
@@ -498,12 +497,12 @@ function CreateJobDialog({
                         <SelectValue placeholder="Select a sub-agent…" />
                       </SelectTrigger>
                       <SelectContent>
-                        {subAgents.length === 0 ? (
+                        {subAgents.filter((sa) => sa.name !== 'voice-agent').length === 0 ? (
                           <div className="px-3 py-2 text-sm text-muted-foreground">
                             No sub-agents found
                           </div>
                         ) : (
-                          subAgents.map((sa) => (
+                          subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
                             <SelectItem key={sa.id} value={String(sa.id)}>
                               <span>{sa.name}</span>
                               {sa.type === 'automated' && (
@@ -677,6 +676,23 @@ function CreateJobDialog({
                 </>
               )}
             </>
+          )}
+
+          {/* Voice call toggle — dispatch job as a phone call via voice-agent */}
+          {form.job_type === 'task' && (
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <Label htmlFor="voice_call" className="cursor-pointer">Voice call</Label>
+                <p className="text-xs text-muted-foreground">
+                  Dispatch this job as a phone call via the voice agent.
+                </p>
+              </div>
+              <Switch
+                id="voice_call"
+                checked={form.voice_call}
+                onCheckedChange={(checked) => update('voice_call', checked)}
+              />
+            </div>
           )}
 
           {/* Prompt for task jobs */}
@@ -869,33 +885,30 @@ function CreateJobDialog({
 
           {/* Delivery channel */}
           <div className="grid gap-1.5">
-            <Label>Delivery channel</Label>
+            <Label>Delivery channel <span className="text-muted-foreground text-xs">(optional)</span></Label>
             <Select
-              value={form.delivery_channel}
+              value={form.delivery_channel || '_none'}
               onValueChange={(v) => {
-                update('delivery_channel', v);
+                update('delivery_channel', v === '_none' ? '' : v);
               }}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Select a delivery channel…" />
+                <SelectValue placeholder="None (in-app notifications only)" />
               </SelectTrigger>
               <SelectContent>
-                {channels.length === 0 ? (
-                  <div className="px-3 py-2 text-sm text-muted-foreground">
-                    No delivery channels registered
-                  </div>
-                ) : (
-                  channels.map((ch) => (
-                    <SelectItem key={ch.id} value={String(ch.id)}>
-                      {ch.name}
-                      {ch.description && (
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          — {ch.description}
-                        </span>
-                      )}
-                    </SelectItem>
-                  ))
-                )}
+                <SelectItem value="_none">
+                  <span className="text-muted-foreground">None (in-app only)</span>
+                </SelectItem>
+                {channels.map((ch) => (
+                  <SelectItem key={ch.id} value={String(ch.id)}>
+                    {ch.name}
+                    {ch.description && (
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        — {ch.description}
+                      </span>
+                    )}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>

@@ -119,6 +119,7 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
                 "sub": payload.get("sub"),
                 "email": payload.get("email"),
                 "name": payload.get("name"),
+                "phone_number": payload.get("phone_number"),
                 "token": token,
                 "groups": payload.get("groups", []),
             }

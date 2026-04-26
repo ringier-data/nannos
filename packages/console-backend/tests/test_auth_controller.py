@@ -409,3 +409,207 @@ class TestAuthController:
             await auth_controller.get_login(request)
 
         assert exc_info.value.status_code == 422
+
+    async def test_login_callback_syncs_phone_number_idp_from_keycloak(
+        self,
+        session_service,
+        user_service,
+        create_mock_request,
+        create_mock_response,
+        mock_config,
+        mock_oauth,
+        pg_session,
+    ):
+        """Test that login callback passes phone_number_idp to upsert_user."""
+        controller = AuthController(session_service, user_service)
+
+        request = create_mock_request()
+        request.session["redirect_to"] = f"https://{mock_config.base_domain}/"
+        response = create_mock_response()
+
+        mock_user = MagicMock(id="user-123", email="test@example.com")
+        controller.user_service.upsert_user = AsyncMock(return_value=mock_user)
+
+        mock_token = {
+            "access_token": "test_access_token",
+            "id_token": "test_id_token",
+            "refresh_token": "test_refresh_token",
+            "userinfo": {
+                "sub": "test-user-id",
+                "email": "test@example.com",
+                "given_name": "Test",
+                "family_name": "User",
+                "phone_number_idp": "+41791234567",
+                "phone_number": "+41799999999",
+            },
+        }
+        mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
+
+        await controller.get_login_callback(request, response, db=pg_session)
+
+        controller.user_service.upsert_user.assert_called_once()
+        call_kwargs = controller.user_service.upsert_user.call_args
+        assert call_kwargs.kwargs.get("phone_number_idp") == "+41791234567"
+
+    async def test_login_callback_without_phone_number_passes_none(
+        self,
+        session_service,
+        user_service,
+        create_mock_request,
+        create_mock_response,
+        mock_config,
+        mock_oauth,
+        pg_session,
+    ):
+        """Test that login callback without phone_number_idp passes None to upsert_user."""
+        controller = AuthController(session_service, user_service)
+
+        request = create_mock_request()
+        request.session["redirect_to"] = f"https://{mock_config.base_domain}/"
+        response = create_mock_response()
+
+        mock_user = MagicMock(id="user-123", email="test@example.com")
+        controller.user_service.upsert_user = AsyncMock(return_value=mock_user)
+
+        mock_token = {
+            "access_token": "test_access_token",
+            "id_token": "test_id_token",
+            "refresh_token": "test_refresh_token",
+            "userinfo": {
+                "sub": "test-user-id",
+                "email": "test@example.com",
+                "given_name": "Test",
+                "family_name": "User",
+            },
+        }
+        mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
+
+        await controller.get_login_callback(request, response, db=pg_session)
+
+        controller.user_service.upsert_user.assert_called_once()
+        call_kwargs = controller.user_service.upsert_user.call_args
+        assert call_kwargs.kwargs.get("phone_number_idp") is None
+
+    async def test_login_callback_seeds_keycloak_override_when_empty(
+        self,
+        session_service,
+        user_service,
+        create_mock_request,
+        create_mock_response,
+        mock_config,
+        mock_oauth,
+        pg_session,
+    ):
+        """Test that login seeds Keycloak phoneNumberOverride with IdP phone when override is empty."""
+        mock_keycloak = AsyncMock()
+        controller = AuthController(session_service, user_service, keycloak_admin_service=mock_keycloak)
+
+        request = create_mock_request()
+        request.session["redirect_to"] = f"https://{mock_config.base_domain}/"
+        response = create_mock_response()
+
+        mock_user = MagicMock(id="user-123", email="test@example.com")
+        controller.user_service.upsert_user = AsyncMock(return_value=mock_user)
+
+        mock_token = {
+            "access_token": "test_access_token",
+            "id_token": "test_id_token",
+            "refresh_token": "test_refresh_token",
+            "userinfo": {
+                "sub": "test-user-id",
+                "email": "test@example.com",
+                "given_name": "Test",
+                "family_name": "User",
+                "phone_number_idp": "+41791234567",
+                # phone_number (phoneNumberOverride) is absent → empty
+            },
+        }
+        mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
+
+        await controller.get_login_callback(request, response, db=pg_session)
+
+        # Should seed Keycloak phoneNumberOverride with IdP phone
+        mock_keycloak.sync_phone_number_override.assert_called_once_with("test-user-id", "+41791234567")
+
+    async def test_login_callback_skips_keycloak_seed_when_override_exists(
+        self,
+        session_service,
+        user_service,
+        create_mock_request,
+        create_mock_response,
+        mock_config,
+        mock_oauth,
+        pg_session,
+    ):
+        """Test that login does NOT seed Keycloak when phoneNumberOverride already has a value."""
+        mock_keycloak = AsyncMock()
+        controller = AuthController(session_service, user_service, keycloak_admin_service=mock_keycloak)
+
+        request = create_mock_request()
+        request.session["redirect_to"] = f"https://{mock_config.base_domain}/"
+        response = create_mock_response()
+
+        mock_user = MagicMock(id="user-123", email="test@example.com")
+        controller.user_service.upsert_user = AsyncMock(return_value=mock_user)
+
+        mock_token = {
+            "access_token": "test_access_token",
+            "id_token": "test_id_token",
+            "refresh_token": "test_refresh_token",
+            "userinfo": {
+                "sub": "test-user-id",
+                "email": "test@example.com",
+                "given_name": "Test",
+                "family_name": "User",
+                "phone_number_idp": "+41791234567",
+                "phone_number": "+41799999999",  # Override already populated
+            },
+        }
+        mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
+
+        await controller.get_login_callback(request, response, db=pg_session)
+
+        # Should NOT seed Keycloak — override already has a value
+        mock_keycloak.sync_phone_number_override.assert_not_called()
+
+    async def test_login_callback_keycloak_seed_failure_is_non_blocking(
+        self,
+        session_service,
+        user_service,
+        create_mock_request,
+        create_mock_response,
+        mock_config,
+        mock_oauth,
+        pg_session,
+    ):
+        """Test that Keycloak seeding failure does not block the login flow."""
+        from playground_backend.services.keycloak_admin_service import KeycloakSyncError
+
+        mock_keycloak = AsyncMock()
+        mock_keycloak.sync_phone_number_override.side_effect = KeycloakSyncError("Connection refused")
+        controller = AuthController(session_service, user_service, keycloak_admin_service=mock_keycloak)
+
+        request = create_mock_request()
+        request.session["redirect_to"] = f"https://{mock_config.base_domain}/"
+        response = create_mock_response()
+
+        mock_user = MagicMock(id="user-123", email="test@example.com")
+        controller.user_service.upsert_user = AsyncMock(return_value=mock_user)
+
+        mock_token = {
+            "access_token": "test_access_token",
+            "id_token": "test_id_token",
+            "refresh_token": "test_refresh_token",
+            "userinfo": {
+                "sub": "test-user-id",
+                "email": "test@example.com",
+                "given_name": "Test",
+                "family_name": "User",
+                "phone_number_idp": "+41791234567",
+            },
+        }
+        mock_oauth.authorize_access_token = AsyncMock(return_value=mock_token)
+
+        # Should NOT raise — login completes despite Keycloak failure
+        result = await controller.get_login_callback(request, response, db=pg_session)
+        assert result.status_code == 303

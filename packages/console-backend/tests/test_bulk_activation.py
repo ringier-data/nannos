@@ -34,13 +34,13 @@ async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, type, owner_user_id, current_version, default_version)
-            VALUES (1, 'Test Agent', 'remote', 'owner-123', 1, 1)
+            VALUES (99, 'Test Agent', 'remote', 'owner-123', 1, 1)
         """)
     )
     await pg_session.execute(
         text("""
             INSERT INTO sub_agent_config_versions (sub_agent_id, version, version_hash, status, description, change_summary, system_prompt)
-            VALUES (1, 1, 'hash123', 'approved', 'Test agent description', 'Initial version', 'Test prompt')
+            VALUES (99, 1, 'hash123', 'approved', 'Test agent description', 'Initial version', 'Test prompt')
         """)
     )
     await pg_session.execute(
@@ -57,7 +57,7 @@ async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession
         db=pg_session,
         actor=test_user,
         user_ids=user_ids,
-        sub_agent_id=1,
+        sub_agent_id=99,
         activated_by=ActivationSource.GROUP,
         group_id=1,
     )
@@ -70,7 +70,7 @@ async def test_bulk_activate_sub_agent_group_activation(pg_session: AsyncSession
         text("""
             SELECT user_id, activated_by, activated_by_groups
             FROM user_sub_agent_activations
-            WHERE sub_agent_id = 1
+            WHERE sub_agent_id = 99
             ORDER BY user_id
         """)
     )
@@ -104,7 +104,7 @@ async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession,
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, type, owner_user_id, current_version, default_version)
-            VALUES (2, 'Test Agent 2', 'remote', 'owner-123', 1, 1)
+            VALUES (98, 'Test Agent 2', 'remote', 'owner-123', 1, 1)
         """)
     )
     await pg_session.commit()
@@ -114,7 +114,7 @@ async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession,
         db=pg_session,
         actor=test_user,
         user_ids=["user-1"],
-        sub_agent_id=2,
+        sub_agent_id=98,
         activated_by=ActivationSource.USER,
     )
     await pg_session.commit()
@@ -126,7 +126,7 @@ async def test_bulk_activate_sub_agent_user_activation(pg_session: AsyncSession,
         text("""
             SELECT activated_by, activated_by_groups
             FROM user_sub_agent_activations
-            WHERE user_id = 'user-1' AND sub_agent_id = 2
+            WHERE user_id = 'user-1' AND sub_agent_id = 98
         """)
     )
     row = result.fetchone()
@@ -158,7 +158,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession, test_u
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, type, owner_user_id, current_version, default_version)
-            VALUES (3, 'Test Agent 3', 'remote', 'owner-123', 1, 1)
+            VALUES (97, 'Test Agent 3', 'remote', 'owner-123', 1, 1)
         """)
     )
     await pg_session.execute(
@@ -176,7 +176,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession, test_u
         db=pg_session,
         actor=test_user,
         user_ids=user_ids,
-        sub_agent_id=3,
+        sub_agent_id=97,
         activated_by=ActivationSource.GROUP,
         group_id=2,
     )
@@ -187,7 +187,7 @@ async def test_bulk_activate_handles_duplicates(pg_session: AsyncSession, test_u
         db=pg_session,
         actor=test_user,
         user_ids=user_ids,
-        sub_agent_id=3,
+        sub_agent_id=97,
         activated_by=ActivationSource.GROUP,
         group_id=2,
     )

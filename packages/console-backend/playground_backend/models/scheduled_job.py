@@ -82,6 +82,8 @@ class ScheduledJob(BaseModel):
     last_check_result: dict[str, Any] | None = None
     # Delivery — references a registered delivery channel
     delivery_channel_id: int | None = None
+    # Voice call flag
+    voice_call: bool = False
     # Control
     enabled: bool
     max_failures: int
@@ -180,6 +182,12 @@ class ScheduledJobCreate(BaseModel):
         description="ID of a registered delivery channel.  The channel must be visible to the user.",
     )
 
+    # Voice call — when True, the scheduler dispatches via the voice-agent
+    voice_call: bool = Field(
+        default=False,
+        description="When enabled, the job is dispatched as a phone call via the voice-agent.",
+    )
+
     max_failures: int = Field(default=3, ge=1, le=20)
 
     @field_validator("check_args", mode="before")
@@ -269,5 +277,6 @@ class ScheduledJobUpdate(BaseModel):
     llm_condition: str | None = None
     destroy_after_trigger: bool | None = None
     delivery_channel_id: int | None = None
+    voice_call: bool | None = None
     enabled: bool | None = None
     max_failures: int | None = Field(default=None, ge=1, le=20)

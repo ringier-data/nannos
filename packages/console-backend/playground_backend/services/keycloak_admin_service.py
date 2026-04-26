@@ -1,6 +1,6 @@
 """Keycloak Admin API service for group synchronization.
 
-This service provides one-way synchronization from playground-backend to Keycloak.
+This service provides one-way synchronization from agent-console backend to Keycloak.
 Groups and memberships created in the backend are automatically reflected in Keycloak,
 enabling the MCP Gateway and other systems to trust the 'groups' claim in JWT tokens.
 
@@ -336,3 +336,51 @@ class KeycloakAdminService:
             raise KeycloakSyncError(
                 f"Unexpected error removing user '{user_sub}' from group '{keycloak_group_id}': {e}"
             ) from e
+
+    async def update_user_attribute(self, user_sub: str, attribute_name: str, attribute_value: str | None) -> None:
+        """Update a user attribute in Keycloak.
+
+        Args:
+            user_sub: User's OIDC subject identifier (Keycloak user ID)
+            attribute_name: Name of the attribute (e.g., "phoneNumberOverride", "phoneNumber")
+            attribute_value: Value to set. If None, clears the attribute.
+
+        Raises:
+            KeycloakSyncError: If user update fails
+        """
+        try:
+            # Keycloak PUT /users/{id} replaces the ENTIRE user representation.
+            # We must fetch the current user first, merge the attribute, then PUT
+            # the full representation — otherwise required fields like email are lost.
+            # open issue https://github.com/keycloak/keycloak/issues/19691 to implement PATCH semantics.
+            user_repr = await self.admin.a_get_user(user_sub)
+            existing_attrs = user_repr.get("attributes", {})
+            existing_attrs[attribute_name] = [attribute_value] if attribute_value else []
+            user_repr["attributes"] = existing_attrs
+
+            await self.admin.a_update_user(user_sub, user_repr)
+            logger.info(f"Updated user {user_sub} attribute '{attribute_name}' = {attribute_value}")
+
+        except KeycloakError as e:
+            logger.error(f"Failed to update user '{user_sub}' attribute '{attribute_name}': {e}")
+            raise KeycloakSyncError(f"Failed to update user '{user_sub}' attribute '{attribute_name}': {e}") from e
+        except Exception as e:
+            logger.error(f"Unexpected error updating user '{user_sub}' attribute '{attribute_name}': {e}")
+            raise KeycloakSyncError(
+                f"Unexpected error updating user '{user_sub}' attribute '{attribute_name}': {e}"
+            ) from e
+
+    async def sync_phone_number_override(self, user_sub: str, phone_override: str | None) -> None:
+        """Sync phone number override to Keycloak user attribute.
+
+        Called when a user creates/updates/deletes a phone override in the backend.
+        Ensures the 'phoneNumberOverride' attribute is synchronized.
+
+        Args:
+            user_sub: User's OIDC subject identifier (Keycloak user ID)
+            phone_override: Phone override value, or None to clear
+
+        Raises:
+            KeycloakSyncError: If synchronization fails
+        """
+        await self.update_user_attribute(user_sub, "phoneNumberOverride", phone_override)

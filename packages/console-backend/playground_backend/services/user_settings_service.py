@@ -34,6 +34,7 @@ class UserSettingsService:
         query = text("""
             SELECT user_id, language, timezone, custom_prompt, mcp_tools, 
                    preferred_model, enable_thinking, thinking_level,
+                   phone_number_override,
                    created_at, updated_at
             FROM user_settings
             WHERE user_id = :user_id
@@ -54,6 +55,7 @@ class UserSettingsService:
                     preferred_model=None,
                     enable_thinking=None,
                     thinking_level=None,
+                    phone_number_override=None,
                 )
 
             return UserSettings(
@@ -65,6 +67,7 @@ class UserSettingsService:
                 preferred_model=row["preferred_model"],
                 enable_thinking=row["enable_thinking"],
                 thinking_level=row["thinking_level"],
+                phone_number_override=row["phone_number_override"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
@@ -83,6 +86,7 @@ class UserSettingsService:
         preferred_model: str | None = _UNSET,
         enable_thinking: bool | None = _UNSET,
         thinking_level: OrchestratorThinkingLevel | None = _UNSET,
+        phone_number_override: str | None = _UNSET,
     ) -> UserSettings:
         """Create or update user settings.
 
@@ -117,12 +121,19 @@ class UserSettingsService:
         new_preferred_model = preferred_model if preferred_model is not _UNSET else current.preferred_model
         new_enable_thinking = enable_thinking if enable_thinking is not _UNSET else current.enable_thinking
         new_thinking_level = thinking_level if thinking_level is not _UNSET else current.thinking_level
+        new_phone_number_override = (
+            phone_number_override if phone_number_override is not _UNSET else current.phone_number_override
+        )
 
         query = text("""
             INSERT INTO user_settings (user_id, language, timezone, custom_prompt, mcp_tools, 
-                                      preferred_model, enable_thinking, thinking_level, created_at, updated_at)
+                                      preferred_model, enable_thinking, thinking_level,
+                                      phone_number_override,
+                                      created_at, updated_at)
             VALUES (:user_id, :language, :timezone, :custom_prompt, CAST(:mcp_tools AS jsonb), 
-                    :preferred_model, :enable_thinking, :thinking_level, :now, :now)
+                    :preferred_model, :enable_thinking, :thinking_level,
+                    :phone_number_override,
+                    :now, :now)
             ON CONFLICT (user_id) DO UPDATE SET
                 language = EXCLUDED.language,
                 timezone = EXCLUDED.timezone,
@@ -131,9 +142,12 @@ class UserSettingsService:
                 preferred_model = EXCLUDED.preferred_model,
                 enable_thinking = EXCLUDED.enable_thinking,
                 thinking_level = EXCLUDED.thinking_level,
+                phone_number_override = EXCLUDED.phone_number_override,
                 updated_at = EXCLUDED.updated_at
             RETURNING user_id, language, timezone, custom_prompt, mcp_tools, 
-                      preferred_model, enable_thinking, thinking_level, created_at, updated_at
+                      preferred_model, enable_thinking, thinking_level,
+                      phone_number_override,
+                      created_at, updated_at
         """)
 
         try:
@@ -148,6 +162,7 @@ class UserSettingsService:
                     "preferred_model": new_preferred_model,
                     "enable_thinking": new_enable_thinking,
                     "thinking_level": new_thinking_level,
+                    "phone_number_override": new_phone_number_override,
                     "now": now,
                 },
             )
@@ -166,6 +181,7 @@ class UserSettingsService:
                 preferred_model=row["preferred_model"],
                 enable_thinking=row["enable_thinking"],
                 thinking_level=row["thinking_level"],
+                phone_number_override=row["phone_number_override"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )

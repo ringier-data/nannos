@@ -266,7 +266,7 @@ params = {
     "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
     "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
     "audience": target_client_id,  # Target service's OAuth2 client ID
-    "scope": "openid profile email",  # Requested scopes
+    "scope": "openid profile email phone",  # Requested scopes
 }
 ```
 

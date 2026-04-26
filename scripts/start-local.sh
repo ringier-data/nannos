@@ -52,6 +52,14 @@ set -euo pipefail
 #   CATALOG_THUMBNAILS_S3_BUCKET    - S3 bucket for catalog thumbnails
 #   GOOGLE_OAUTH_CLIENT_ID          - Google OAuth client ID for Drive sync
 #   GOOGLE_OAUTH_CLIENT_SECRET      - Google OAuth client secret for Drive sync
+#
+# Twilio (fetched from SSM when AWS_PROFILE is set):
+#   TWILIO_ACCOUNT_SID        - Twilio Account SID (voice agent + phone verification)
+#   TWILIO_API_KEY             - Twilio API Key (voice agent)
+#   TWILIO_API_SECRET           - Twilio API Secret (voice agent)
+#   TWILIO_VERIFY_SERVICE_SID  - Twilio Verify Service SID (phone verification)
+#   TWILIO_VERIFY_API_KEY      - Twilio Verify API Key (phone verification)
+#   TWILIO_VERIFY_API_SECRET   - Twilio Verify API Secret (phone verification)
 # ───────────────────────────────────────────────────────────────────
 
 # ─── 0. Parse flags ────────────────────────────────────────────────
@@ -223,6 +231,7 @@ if [[ -n "$_DEBUG_MODE" ]]; then
   printf "${CYAN}│${RESET}  Debugging:                                            ${CYAN}│${RESET}\n"
   printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} debugpy enabled ${DIM}(attach via VS Code launch.json)${RESET}\n"
   printf "${CYAN}│${RESET}    ${DIM}  backend=5678 orchestrator=5679 creator=5680${RESET}\n"
+  printf "${CYAN}│${RESET}    ${DIM}  runner=5682 voice-agent=5683${RESET}\n"
   printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 fi
 
@@ -341,6 +350,12 @@ CATALOG_VECTOR_BUCKET_NAME="${CATALOG_VECTOR_BUCKET_NAME:-}"
 CATALOG_THUMBNAILS_S3_BUCKET="${CATALOG_THUMBNAILS_S3_BUCKET:-}"
 GOOGLE_OAUTH_CLIENT_ID="${GOOGLE_OAUTH_CLIENT_ID:-}"
 GOOGLE_OAUTH_CLIENT_SECRET="${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+TWILIO_ACCOUNT_SID="${TWILIO_ACCOUNT_SID:-}"
+TWILIO_API_KEY="${TWILIO_API_KEY:-}"
+TWILIO_API_SECRET="${TWILIO_API_SECRET:-}"
+TWILIO_VERIFY_SERVICE_SID="${TWILIO_VERIFY_SERVICE_SID:-}"
+TWILIO_VERIFY_API_KEY="${TWILIO_VERIFY_API_KEY:-}"
+TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 
 if [[ "$_HAS_AWS" == true ]]; then
   log "Fetching secrets from AWS SSM (profile: $AWS_PROFILE)..."
@@ -397,6 +412,29 @@ if [[ "$_HAS_AWS" == true ]]; then
     ok "Google OAuth client secret loaded from SSM"
   else
     warn "Could not fetch Google OAuth client secret from SSM"
+  fi
+
+  # Twilio credentials (optional — needed for voice agent + phone verification)
+  if _TWILIO_SID=$(aws ssm get-parameter --name /nannos/twilio/account-sid --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+    TWILIO_ACCOUNT_SID="$_TWILIO_SID"
+    ok "Twilio Account SID loaded from SSM"
+  else
+    warn "Could not fetch Twilio Account SID from SSM — voice calls and phone verification disabled"
+  fi
+  if _TWILIO_KEY=$(aws ssm get-parameter --name /nannos/twilio/api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+    TWILIO_API_KEY="$_TWILIO_KEY"
+  fi
+  if _TWILIO_SECRET=$(aws ssm get-parameter --name /nannos/twilio/api-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+    TWILIO_API_SECRET="$_TWILIO_SECRET"
+  fi
+  if _TWILIO_VSID=$(aws ssm get-parameter --name /nannos/twilio/verify-service-sid --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+    TWILIO_VERIFY_SERVICE_SID="$_TWILIO_VSID"
+  fi
+  if _TWILIO_VKEY=$(aws ssm get-parameter --name /nannos/twilio/verify-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+    TWILIO_VERIFY_API_KEY="$_TWILIO_VKEY"
+  fi
+  if _TWILIO_VSECRET=$(aws ssm get-parameter --name /nannos/twilio/verify-api-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+    TWILIO_VERIFY_API_SECRET="$_TWILIO_VSECRET"
   fi
 
   ok "AWS resources configured (dev environment)"
@@ -600,6 +638,7 @@ cd "$ROOT_DIR"
 for pkg in orchestrator-agent agent-creator agent-runner console-backend; do
   (cd "packages/$pkg" && uv sync --quiet) &
 done
+(cd "packages/voice-agent" && uv sync --quiet) &
 wait
 ok "Python dependencies installed"
 
@@ -632,6 +671,12 @@ export CATALOG_VECTOR_BUCKET_NAME="${CATALOG_VECTOR_BUCKET_NAME:-}"
 export CATALOG_THUMBNAILS_S3_BUCKET="${CATALOG_THUMBNAILS_S3_BUCKET:-}"
 export GOOGLE_OAUTH_CLIENT_ID="${GOOGLE_OAUTH_CLIENT_ID:-}"
 export GOOGLE_OAUTH_CLIENT_SECRET="${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+export TWILIO_ACCOUNT_SID="${TWILIO_ACCOUNT_SID:-}"
+export TWILIO_API_KEY="${TWILIO_API_KEY:-}"
+export TWILIO_API_SECRET="${TWILIO_API_SECRET:-}"
+export TWILIO_VERIFY_SERVICE_SID="${TWILIO_VERIFY_SERVICE_SID:-}"
+export TWILIO_VERIFY_API_KEY="${TWILIO_VERIFY_API_KEY:-}"
+export TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 
 # ── Generate mprocs config ──
 MPROCS_CFG=$(mktemp /tmp/nannos-mprocs-XXXXXX)
@@ -682,6 +727,7 @@ if [[ -n "$_DEBUG_MODE" ]]; then
     orchestrator ..... localhost:5679
     creator .......... localhost:5680
     runner ........... localhost:5682
+    voice-agent ...... localhost:5683
 "
 fi
 
@@ -710,6 +756,7 @@ cat <<'EOF'
     Orchestrator ...... http://localhost:10001
     Agent Creator ..... http://localhost:8080
     Agent Runner ...... http://localhost:5005
+    Voice Agent ....... http://localhost:8002
     Keycloak .......... $_KC_BASE_URL
     PostgreSQL (console) . localhost:5401
     PostgreSQL (docstore)  localhost:5402
@@ -783,6 +830,7 @@ procs:
       CHECKPOINT_DYNAMODB_TABLE_NAME: "$CHECKPOINT_DYNAMODB_TABLE_NAME"
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
       FILES_S3_BUCKET: "$FILES_S3_BUCKET"
+      VOICE_AGENT_URL: "http://localhost:8002"
       AGENT_CREATOR_URL: "http://localhost:8080"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
@@ -797,6 +845,10 @@ procs:
       GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:5001/api/v1/catalogs/connect/callback"
       GCP_KEY: '$GCP_KEY'
       GCP_PROJECT_ID: "$GCP_PROJECT_ID"
+      TWILIO_ACCOUNT_SID: "$TWILIO_ACCOUNT_SID"
+      TWILIO_VERIFY_SERVICE_SID: "$TWILIO_VERIFY_SERVICE_SID"
+      TWILIO_VERIFY_API_KEY: "$TWILIO_VERIFY_API_KEY"
+      TWILIO_VERIFY_API_SECRET: "$TWILIO_VERIFY_API_SECRET"
 
   orchestrator:
     cwd: "$ROOT_DIR/packages/orchestrator-agent"
@@ -906,6 +958,33 @@ procs:
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
       CHECKPOINT_AWS_REGION: "$CHECKPOINT_AWS_REGION"
       DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
+
+  voice-agent:
+    cwd: "$ROOT_DIR/packages/voice-agent"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5683} main.py  --reload 2>&1 | tee $_LOG_DIR/voice-agent.log"
+    env:
+      HOST: "localhost"
+      PORT: "8002"
+      OIDC_ISSUER: "$_OIDC_ISSUER"
+      OIDC_CLIENT_ID: "voice-agent"
+      VOICE_AGENT_BASE_URL: "http://localhost:8002"
+      PLAYGROUND_BACKEND_URL: "http://localhost:5001"
+      PUBLIC_URL: "${PUBLIC_URL:-}"
+      GCP_KEY: '$GCP_KEY'
+      GCP_PROJECT_ID: "$GCP_PROJECT_ID"
+      GCP_LOCATION: "$GCP_LOCATION"
+      CALL_TIMEOUT_SECONDS: "600"
+      TWILIO_ACCOUNT_SID: "$TWILIO_ACCOUNT_SID"
+      TWILIO_API_KEY: "$TWILIO_API_KEY"
+      TWILIO_API_SECRET: "$TWILIO_API_SECRET"
+      TWILIO_PHONE_NUMBER: "+358454917751"
+      TWILIO_REGION: "ie1"
+      TWILIO_EDGE: "dublin"
+      LANGSMITH_TRACING: "$LANGSMITH_TRACING"
+      LANGSMITH_API_KEY: "$LANGSMITH_API_KEY"
+      LANGSMITH_PROJECT: "$LANGSMITH_PROJECT"
+      LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
+      LOG_LEVEL: "INFO"
 
   frontend:
     cwd: "$ROOT_DIR/packages/console-frontend"

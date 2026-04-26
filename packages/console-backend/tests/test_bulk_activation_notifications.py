@@ -69,13 +69,13 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
     await pg_session.execute(
         text(f"""
             INSERT INTO sub_agents (id, name, owner_user_id, type, current_version, default_version)
-            VALUES (1, 'Test Agent', {test_user.id!r}, 'local', 1, 1)
+            VALUES (99, 'Test Agent', {test_user.id!r}, 'local', 1, 1)
         """)
     )
     await pg_session.execute(
         text(f"""
             INSERT INTO sub_agent_config_versions (sub_agent_id, version, description, system_prompt, model, status, approved_by_user_id)
-            VALUES (1, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', {test_user.id!r})
+            VALUES (99, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', {test_user.id!r})
         """)
     )
 
@@ -83,7 +83,7 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
     await pg_session.execute(
         text("""
             INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions)
-            VALUES (1, 1, ARRAY['read', 'write']::TEXT[])
+            VALUES (99, 1, ARRAY['read', 'write']::TEXT[])
         """)
     )
 
@@ -91,7 +91,7 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
     await pg_session.execute(
         text(f"""
             INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_at, activated_by)
-            VALUES ({test_user.id!r}, 1, NOW(), 'user')
+            VALUES ({test_user.id!r}, 99, NOW(), 'user')
         """)
     )
 
@@ -106,7 +106,7 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
     await user_group_service.add_group_default_agent(
         db=pg_session,
         group_id=1,
-        sub_agent_id=1,
+        sub_agent_id=99,
         actor=test_user,
     )
     await pg_session.commit()
@@ -176,13 +176,13 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, owner_user_id, type, current_version, default_version)
-            VALUES (1, 'Test Agent', 'user-1', 'local', 1, 1)
+            VALUES (99, 'Test Agent', 'user-1', 'local', 1, 1)
         """)
     )
     await pg_session.execute(
         text("""
             INSERT INTO sub_agent_config_versions (sub_agent_id, version, description, system_prompt, model, status, approved_by_user_id)
-            VALUES (1, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', 'user-1')
+            VALUES (99, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', 'user-1')
         """)
     )
 
@@ -190,7 +190,7 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
     await pg_session.execute(
         text("""
             INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions)
-            VALUES (1, 1, ARRAY['read', 'write']::TEXT[])
+            VALUES (99, 1, ARRAY['read', 'write']::TEXT[])
         """)
     )
 
@@ -198,8 +198,8 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
     await pg_session.execute(
         text("""
             INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_at, activated_by, activated_by_groups)
-            VALUES ('user-2', 1, NOW(), 'group', '[1]'::jsonb),
-                   ('user-3', 1, NOW(), 'group', '[1]'::jsonb)
+            VALUES ('user-2', 99, NOW(), 'group', '[1]'::jsonb),
+                   ('user-3', 99, NOW(), 'group', '[1]'::jsonb)
         """)
     )
 
@@ -207,7 +207,7 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
     await pg_session.execute(
         text("""
             INSERT INTO user_group_default_agents (user_group_id, sub_agent_id, created_by_user_id)
-            VALUES (1, 1, 'user-1')
+            VALUES (1, 99, 'user-1')
         """)
     )
 
@@ -222,7 +222,7 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
     await user_group_service.remove_group_default_agent(
         db=pg_session,
         group_id=1,
-        sub_agent_id=1,
+        sub_agent_id=99,
         actor=test_user,
     )
     await pg_session.commit()
@@ -291,13 +291,13 @@ async def test_add_members_only_notifies_members_with_new_activations(pg_session
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, owner_user_id, type, current_version, default_version)
-            VALUES (1, 'Test Agent', 'user-1', 'local', 1, 1)
+            VALUES (99, 'Test Agent', 'user-1', 'local', 1, 1)
         """)
     )
     await pg_session.execute(
         text("""
             INSERT INTO sub_agent_config_versions (sub_agent_id, version, description, system_prompt, model, status, approved_by_user_id)
-            VALUES (1, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', 'user-1')
+            VALUES (99, 1, 'Test agent', 'test prompt', 'gpt-4', 'approved', 'user-1')
         """)
     )
 
@@ -305,7 +305,7 @@ async def test_add_members_only_notifies_members_with_new_activations(pg_session
     await pg_session.execute(
         text("""
             INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions)
-            VALUES (1, 1, ARRAY['read', 'write']::TEXT[])
+            VALUES (99, 1, ARRAY['read', 'write']::TEXT[])
         """)
     )
 
@@ -313,7 +313,7 @@ async def test_add_members_only_notifies_members_with_new_activations(pg_session
     await pg_session.execute(
         text("""
             INSERT INTO user_group_default_agents (user_group_id, sub_agent_id, created_by_user_id)
-            VALUES (1, 1, 'user-1')
+            VALUES (1, 99, 'user-1')
         """)
     )
 
@@ -321,7 +321,7 @@ async def test_add_members_only_notifies_members_with_new_activations(pg_session
     await pg_session.execute(
         text("""
             INSERT INTO user_sub_agent_activations (user_id, sub_agent_id, activated_at, activated_by)
-            VALUES ('user-2', 1, NOW(), 'user')
+            VALUES ('user-2', 99, NOW(), 'user')
         """)
     )
 

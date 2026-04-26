@@ -155,6 +155,8 @@ export interface ScheduledJobCreateExtended {
   /** Registered delivery channel ID. */
   delivery_channel_id?: number;
   max_failures?: number;
+  /** When true, the agent response is delivered as a voice call. */
+  voice_call?: boolean;
 }
 
 export async function createScheduledJob(body: ScheduledJobCreateExtended): Promise<ScheduledJob> {

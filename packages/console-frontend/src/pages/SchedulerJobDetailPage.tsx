@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import {
@@ -288,6 +289,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : '',
   );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [voiceCall, setVoiceCall] = useState((job as any).voice_call ?? false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aiQuery, setAiQuery] = useState('');
@@ -336,6 +339,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
     setExpectedValue(job.expected_value ?? '');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     setDeliveryChannel((job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : '');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    setVoiceCall((job as any).voice_call ?? false);
     setDirty(false);
     setError(null);
   }
@@ -407,7 +412,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
         condition_expr: conditionExpr || undefined,
         expected_value: expectedValue || undefined,
       }),
-      delivery_channel_id: deliveryChannel ? parseInt(deliveryChannel) : null,
+      ...(deliveryChannel && { delivery_channel_id: parseInt(deliveryChannel) }),
+      voice_call: voiceCall,
     };
 
     mutation.mutate(body);
@@ -513,7 +519,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
                     No sub-agents found
                   </div>
                 ) : (
-                  subAgents.map((sa) => (
+                  subAgents.filter((sa) => sa.name !== 'voice-agent').map((sa) => (
                     <SelectItem key={sa.id} value={String(sa.id)}>
                       <span>{sa.name}</span>
                       {sa.type === 'automated' && (
@@ -676,6 +682,23 @@ function EditForm({ job }: { job: ScheduledJob }) {
           <p className="text-xs text-muted-foreground">
             Custom notification message delivered when the condition is met. If left empty, an LLM will generate a message based on the check result.
           </p>
+        </div>
+      )}
+
+      {/* Voice call toggle (task jobs) */}
+      {job.job_type === 'task' && (
+        <div className="flex items-center gap-3 rounded-lg border px-3 py-2">
+          <Switch
+            id="voice-call-edit"
+            checked={voiceCall}
+            onCheckedChange={(v) => { setVoiceCall(v); touch(); }}
+          />
+          <Label htmlFor="voice-call-edit" className="cursor-pointer text-sm">
+            Deliver via voice call
+          </Label>
+          <span className="text-xs text-muted-foreground">
+            When enabled, the agent response is delivered as a phone call instead of a text message.
+          </span>
         </div>
       )}
 

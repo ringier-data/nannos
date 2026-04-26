@@ -148,6 +148,8 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 user_token = context.call_context.state.get("user_token")
                 # sub_agent_id is optional - used for cost tracking attribution
                 sub_agent_id = context.call_context.state.get("sub_agent_id")
+                # phone_number is optional - may be used by voice agents, but not all agents or flows
+                phone_number = context.call_context.state.get("phone_number")
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
                 raise ServerError(error=InvalidParamsError()) from e
@@ -155,7 +157,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             logger.error("[ZERO-TRUST] No user context found in call_context - authentication may have failed")
             raise ServerError(error=InvalidParamsError())
 
-        logger.info(f"[ZERO-TRUST] Executing with verified user_sub: {user_sub}, sub_agent_id: {sub_agent_id}")
+        logger.debug(f"[ZERO-TRUST] Executing with verified user_sub: {user_sub}, sub_agent_id: {sub_agent_id}")
 
         # --- Continuous Interaction Turn: route to active stream if one exists ---
         async with _active_streams_lock:
@@ -229,6 +231,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 email=user_email,
                 sub_agent_id=sub_agent_id,  # For cost tracking attribution
                 scheduled_job_id=scheduled_job_id_from_meta,  # For scheduled-job cost attribution
+                phone_number=phone_number,
             )
             steering_reinvocations = 0
             messages: list[Message] = [message]

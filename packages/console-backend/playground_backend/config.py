@@ -102,6 +102,22 @@ class AutoApproveConfig(BaseModel):
     max_mcp_tools_count: int = Field(default_factory=lambda: int(os.getenv("AUTO_APPROVE_MAX_MCP_TOOLS_COUNT", "3")))
 
 
+class TwilioVerifyConfig(BaseModel):
+    """Twilio Verify configuration for phone number verification."""
+
+    account_sid: str = Field(default_factory=lambda: os.getenv("TWILIO_ACCOUNT_SID", ""))
+    api_key: str = Field(default_factory=lambda: os.getenv("TWILIO_VERIFY_API_KEY", ""))
+    api_secret: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("TWILIO_VERIFY_API_SECRET", "")))
+    verify_service_sid: str = Field(default_factory=lambda: os.getenv("TWILIO_VERIFY_SERVICE_SID", ""))
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Twilio Verify is fully configured."""
+        return bool(
+            self.account_sid and self.api_key and self.api_secret.get_secret_value() and self.verify_service_sid
+        )
+
+
 class CatalogConfig(BaseModel):
     """Catalog system configuration."""
 
@@ -163,6 +179,8 @@ class Config(BaseModel):
     file_storage: FileStorageConfig = Field(default_factory=FileStorageConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
+    twilio_verify: TwilioVerifyConfig = Field(default_factory=TwilioVerifyConfig)
+    catalog: CatalogConfig = Field(default_factory=CatalogConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"
