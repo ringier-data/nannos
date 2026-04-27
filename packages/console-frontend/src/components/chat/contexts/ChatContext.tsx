@@ -535,9 +535,9 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       if (data.status) {
         const normalizedStatus = getTaskState(data.status?.state);
 
-        // Finalize streaming message when task completes or fails
+        // Finalize streaming message when task completes, fails, or requires input
         let finalizedFromStream = false;
-        if (normalizedStatus === 'completed' || normalizedStatus === 'failed' || normalizedStatus === 'canceled') {
+        if (normalizedStatus === 'completed' || normalizedStatus === 'failed' || normalizedStatus === 'canceled' || normalizedStatus === 'input-required') {
           const streamedText = streamingMapRef.current.get(resolvedConversationId);
           const thoughts = subagentThoughtsMapRef.current.get(resolvedConversationId);
           // Mark all thoughts as complete — task is done

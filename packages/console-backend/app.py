@@ -609,87 +609,88 @@ async def _process_a2a_response(
                                 f"buffer: {len(_intermediate_buffers[buf_key])} chars"
                             )
 
-                # Persist accumulated content when the artifact stream closes
+                # ── Flush buffers when the conversation turn ends ──
+                # A turn ends when: last_chunk arrives (normal streaming completion),
+                # or a non-streaming status indicates no more artifacts are coming.
+                _TURN_ENDING_STATES = ("completed", "failed", "canceled", "input-required")
+                is_turn_ending = is_last_chunk or (not is_artifact_append and status_state in _TURN_ENDING_STATES)
+
                 safety_net_saved = False
-                if is_last_chunk and effective_context_id in _streaming_buffers:
-                    accumulated = _streaming_buffers.pop(effective_context_id)
+                if is_turn_ending:
+                    task_id = response_data.get("taskId", "")
+
                     # Flush intermediate-output buffers (sub-agent thoughts) BEFORE
-                    # the final response so DB ordering matches logical order
+                    # the final response so DB ordering matches logical order.
                     await _flush_intermediate_buffers(
                         effective_context_id,
                         messages_service,
                         socket_session.user_id,
-                        task_id=response_data.get("taskId", ""),
+                        task_id=task_id,
                     )
-                    if accumulated.strip():
-                        logger.info(
-                            f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) for context {effective_context_id}"
-                        )
-                        await messages_service.insert_message(
-                            conversation_id=effective_context_id,
-                            user_id=socket_session.user_id,
-                            role="assistant",
-                            parts=[{"kind": "text", "text": accumulated}],
-                            task_id=response_data.get("taskId", ""),
-                            state=TaskState.completed,
-                            kind="artifact-update",
-                        )
-                    else:
-                        logger.warning(
-                            f"[STREAMING] last_chunk=True but accumulated content is empty for context {effective_context_id}"
-                        )
-                elif is_last_chunk:
-                    logger.warning(
-                        f"[STREAMING] last_chunk=True but no buffer found for context {effective_context_id}. "
-                        f"kind={response_data.get('kind')}, append={response_data.get('append')}"
-                    )
-                # Safety net: persist any buffered content on terminal failure
-                # in case last_chunk was never sent (e.g. unhandled error)
-                elif not is_artifact_append:
-                    if status_state in ("failed", "canceled") and effective_context_id in _streaming_buffers:
-                        accumulated = _streaming_buffers.pop(effective_context_id)
+
+                    # Flush main streaming buffer if present.
+                    accumulated = _streaming_buffers.pop(effective_context_id, None)
+                    if accumulated is not None:
                         if accumulated.strip():
-                            await messages_service.insert_message(
-                                conversation_id=effective_context_id,
-                                user_id=socket_session.user_id,
-                                role="assistant",
-                                parts=[{"kind": "text", "text": accumulated}],
-                                task_id=response_data.get("taskId", ""),
-                                state=TaskState(status_state),
-                                kind="status-update",
+                            if is_last_chunk:
+                                # Normal completion: save assembled artifact content
+                                logger.info(
+                                    f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) "
+                                    f"for context {effective_context_id}"
+                                )
+                                await messages_service.insert_message(
+                                    conversation_id=effective_context_id,
+                                    user_id=socket_session.user_id,
+                                    role="assistant",
+                                    parts=[{"kind": "text", "text": accumulated}],
+                                    task_id=task_id,
+                                    state=TaskState.completed,
+                                    kind="artifact-update",
+                                )
+                            else:
+                                # Safety net: last_chunk never arrived (e.g. input-required,
+                                # unhandled error). Save what we had so content isn't lost.
+                                logger.info(
+                                    f"[STREAMING] Safety-net save ({len(accumulated)} chars, state={status_state}) "
+                                    f"for context {effective_context_id}"
+                                )
+                                await messages_service.insert_message(
+                                    conversation_id=effective_context_id,
+                                    user_id=socket_session.user_id,
+                                    role="assistant",
+                                    parts=[{"kind": "text", "text": accumulated}],
+                                    task_id=task_id,
+                                    state=TaskState(status_state),
+                                    kind="status-update",
+                                )
+                                safety_net_saved = True
+                        elif is_last_chunk:
+                            logger.warning(
+                                f"[STREAMING] last_chunk=True but accumulated content is empty "
+                                f"for context {effective_context_id}"
                             )
-                            safety_net_saved = True
-                        # Also flush intermediate-output buffers on failure
-                        await _flush_intermediate_buffers(
-                            effective_context_id,
-                            messages_service,
-                            socket_session.user_id,
-                            task_id=response_data.get("taskId", ""),
+                    elif is_last_chunk:
+                        logger.warning(
+                            f"[STREAMING] last_chunk=True but no buffer found for context {effective_context_id}. "
+                            f"kind={response_data.get('kind')}, append={response_data.get('append')}"
                         )
 
-                # Save non-streaming responses to database
-                # Skip if:
-                # 1. is_work_plan - transient state updates
-                # 2. is_artifact_append - streaming chunks (saved when last_chunk arrives)
-                # 3. Terminal status without content - pure completion signal after streaming finished
-                # 4. safety_net_saved - buffer already flushed for this failed/canceled event
-                is_terminal_status_only = (
+                # ── Persist non-streaming responses ──
+                # Skip: work-plan (transient), artifact chunks (accumulated above),
+                # bare completion signals (no content to save), safety-net (already saved).
+                is_bare_completion_signal = (
                     response_data.get("kind") == "status-update"
                     and status_obj
                     and status_obj.get("state") in ("completed", "failed", "canceled")
-                    and not status_obj.get("message")  # No nested message content
+                    and not status_obj.get("message")
                 )
 
-                # Flush intermediate-output buffers on any terminal status
-                if is_terminal_status_only:
-                    await _flush_intermediate_buffers(
-                        effective_context_id,
-                        messages_service,
-                        socket_session.user_id,
-                        task_id=response_data.get("taskId", ""),
-                    )
-
-                if not is_work_plan and not is_artifact_append and not is_terminal_status_only and not safety_net_saved:
+                if (
+                    not is_work_plan
+                    and not is_artifact_append
+                    and not is_bare_completion_signal
+                    and not safety_net_saved
+                ):
                     await messages_service.save_agent_response(
                         response_data=response_data,
                         conversation_id=effective_context_id,
