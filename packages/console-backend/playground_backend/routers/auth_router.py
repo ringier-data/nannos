@@ -353,7 +353,7 @@ async def confirm_phone_verification(
             logger.warning(f"Failed to sync phone override to Keycloak for user {user.id}: {e}")
             # Non-blocking: log but don't fail the request
 
-    logger.info("Phone number %s verified and saved for user %s", request_body.phone_number, user.id)
+    logger.info("Phone number verified and saved for user %s", user.id)
     return {
         "phone_number": settings.phone_number_override or user.phone_number_idp,
         "phone_number_idp": user.phone_number_idp,

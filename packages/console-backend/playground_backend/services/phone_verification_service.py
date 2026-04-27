@@ -20,6 +20,16 @@ class PhoneVerificationService:
     def __init__(self) -> None:
         self._client: Client | None = None
 
+    @staticmethod
+    def _mask_phone_number(phone_number: str) -> str:
+        """Mask phone number for safe logging."""
+        if not phone_number:
+            return "***"
+        visible_digits = 4
+        if len(phone_number) <= visible_digits:
+            return "*" * len(phone_number)
+        return f"{'*' * (len(phone_number) - visible_digits)}{phone_number[-visible_digits:]}"
+
     @property
     def client(self) -> Client:
         """Lazy-init Twilio client.
@@ -69,7 +79,12 @@ class PhoneVerificationService:
             verification = self.client.verify.v2.services(config.twilio_verify.verify_service_sid).verifications.create(
                 to=phone_number, channel=channel
             )
-            logger.debug(f"Verification sent to {phone_number} via {channel} (status={verification.status})")
+            logger.debug(
+                "Verification sent to %s via %s (status=%s)",
+                self._mask_phone_number(phone_number),
+                channel,
+                verification.status,
+            )
             return verification.status == "pending"
         except TwilioRestException as e:
             logger.error(f"Twilio Verify send failed: {e}")
@@ -92,7 +107,11 @@ class PhoneVerificationService:
             check = self.client.verify.v2.services(config.twilio_verify.verify_service_sid).verification_checks.create(
                 to=phone_number, code=code
             )
-            logger.debug(f"Verification check for {phone_number}: status={check.status}")
+            logger.debug(
+                "Verification check for %s: status=%s",
+                self._mask_phone_number(phone_number),
+                check.status,
+            )
             return check.status == "approved"
         except TwilioRestException as e:
             logger.error(f"Twilio Verify check failed: {e}")
