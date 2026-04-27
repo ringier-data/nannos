@@ -753,6 +753,23 @@ async def health_check() -> JSONResponse:
     )
 
 
+# Pre-compute frontend config at module load — values come from env vars
+# and never change during the process lifetime.
+_frontend_config_response = config.frontend.build_response(
+    oidc_issuer=config.oidc.issuer,
+    orchestrator_base_domain=config.orchestrator.base_domain,
+)
+
+
+@app.get("/api/v1/config")
+async def get_frontend_config() -> JSONResponse:
+    """Public endpoint serving runtime configuration for the frontend SPA."""
+    return JSONResponse(
+        content=_frontend_config_response,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
 @app.post("/api/internal/catalog-sync-progress")
 async def catalog_sync_progress(request: Request) -> JSONResponse:
     """Internal webhook for the catalog-worker to relay sync progress via Socket.IO.

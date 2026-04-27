@@ -854,6 +854,8 @@ procs:
       TWILIO_VERIFY_SERVICE_SID: "$TWILIO_VERIFY_SERVICE_SID"
       TWILIO_VERIFY_API_KEY: "$TWILIO_VERIFY_API_KEY"
       TWILIO_VERIFY_API_SECRET: "$TWILIO_VERIFY_API_SECRET"
+      AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH: "500"
+      AUTO_APPROVE_MAX_MCP_TOOLS_COUNT: "3"
 
   catalog-worker:
     cwd: "$ROOT_DIR/packages/console-backend"
@@ -1026,13 +1028,6 @@ procs:
   frontend:
     cwd: "$ROOT_DIR/packages/console-frontend"
     shell: "npx vite --host 0.0.0.0 --port 5173 2>&1 | tee $_LOG_DIR/frontend.log"
-    env:
-      VITE_API_BASE_URL: "http://localhost:5001"
-      VITE_ORCHESTRATOR_BASE_DOMAIN: "localhost:10001"
-      VITE_KEYCLOAK_BASE_URL: "$_KC_BASE_URL"
-      VITE_KEYCLOAK_REALM: "$_KC_REALM"
-      VITE_AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH: "500"
-      VITE_AUTO_APPROVE_MAX_MCP_TOOLS_COUNT: "3"
 
   infra-logs:
     cwd: "$LOCAL_DEV_DIR"

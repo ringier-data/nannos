@@ -118,6 +118,56 @@ class TwilioVerifyConfig(BaseModel):
         )
 
 
+class LangsmithConfig(BaseModel):
+    """LangSmith configuration for frontend trace links."""
+
+    organization_id: str = Field(default_factory=lambda: os.getenv("LANGSMITH_ORGANIZATION_ID", ""))
+    project_id: str = Field(default_factory=lambda: os.getenv("LANGSMITH_PROJECT_ID", ""))
+
+
+class FrontendConfig(BaseModel):
+    """Configuration served to the frontend via GET /api/v1/config."""
+
+    langsmith: LangsmithConfig = Field(default_factory=LangsmithConfig)
+    auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
+
+    def build_response(self, *, oidc_issuer: str, orchestrator_base_domain: str) -> dict:
+        """Build the JSON response for GET /api/v1/config.
+
+        Derives keycloak and orchestrator URLs from existing backend config
+        so no additional env vars are needed.
+        """
+        # Derive keycloak base URL and realm from OIDC_ISSUER
+        # e.g. "https://login.example.com/realms/nannos" → base="https://login.example.com", realm="nannos"
+        keycloak_base_url = ""
+        keycloak_realm = ""
+        if "/realms/" in oidc_issuer:
+            base, realm = oidc_issuer.rsplit("/realms/", 1)
+            keycloak_base_url = base
+            keycloak_realm = realm
+
+        # Derive orchestrator URL with protocol detection (http for localhost, https otherwise)
+        domain = orchestrator_base_domain
+        if "localhost" in domain or "127.0.0.1" in domain:
+            orchestrator_url = f"http://{domain}"
+        else:
+            orchestrator_url = f"https://{domain}"
+
+        return {
+            "orchestratorUrl": orchestrator_url,
+            "keycloakBaseUrl": keycloak_base_url,
+            "keycloakRealm": keycloak_realm,
+            "langsmith": {
+                "organizationId": self.langsmith.organization_id,
+                "projectId": self.langsmith.project_id,
+            },
+            "autoApprove": {
+                "maxSystemPromptLength": self.auto_approve.max_system_prompt_length,
+                "maxMcpToolsCount": self.auto_approve.max_mcp_tools_count,
+            },
+        }
+
+
 class CatalogConfig(BaseModel):
     """Catalog system configuration."""
 
@@ -181,6 +231,7 @@ class Config(BaseModel):
     auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
     twilio_verify: TwilioVerifyConfig = Field(default_factory=TwilioVerifyConfig)
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
+    frontend: FrontendConfig = Field(default_factory=FrontendConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"
