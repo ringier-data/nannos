@@ -446,6 +446,7 @@ _OIDC_SECRET_BACKEND="local-secret"
 _OIDC_SECRET_ORCHESTRATOR="local-secret"
 _OIDC_SECRET_CREATOR="local-secret"
 _OIDC_SECRET_ADMIN="local-secret"
+_OIDC_SECRET_AGENT_RUNNER="local-secret"
 _KC_BASE_URL="http://localhost:8180"
 _KC_REALM="nannos"
 
@@ -481,6 +482,13 @@ if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
     _OIDC_SECRET_ADMIN=""
   fi
 
+  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/agent-runner-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
+    _OIDC_SECRET_AGENT_RUNNER="$_secret"
+  else
+    warn "Could not fetch agent-runner secret — agent runner will use backend secret"
+    _OIDC_SECRET_AGENT_RUNNER=""
+  fi
+
   ok "OIDC secrets loaded from SSM"
 
 elif [[ "$_OIDC_MODE" == "remote-manual" ]]; then
@@ -497,6 +505,7 @@ elif [[ "$_OIDC_MODE" == "remote-manual" ]]; then
   _OIDC_SECRET_ORCHESTRATOR="$_shared_secret"
   _OIDC_SECRET_CREATOR="$_shared_secret"
   _OIDC_SECRET_ADMIN="$_shared_secret"
+  _OIDC_SECRET_AGENT_RUNNER="$_shared_secret"
   ok "OIDC configured with shared secret"
 fi
 
@@ -954,9 +963,8 @@ procs:
     shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5682} main.py --host 0.0.0.0 --port 5005 --reload 2>&1 | tee $_LOG_DIR/runner.log"
     env:
       OIDC_ISSUER: "$_OIDC_ISSUER"
-      OIDC_CLIENT_ID: "orchestrator"
-      OIDC_CLIENT_SECRET: "$_OIDC_SECRET_ORCHESTRATOR"
-      SCHEDULER_SERVICE_CLIENT_ID: "agent-console"
+      OIDC_CLIENT_ID: "agent-runner"
+      OIDC_CLIENT_SECRET: "$_OIDC_SECRET_AGENT_RUNNER"
       AGENT_BASE_URL: "http://localhost:5005"
       PLAYGROUND_BACKEND_URL: "http://localhost:5001"
       POSTGRES_HOST: "localhost"

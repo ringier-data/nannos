@@ -1052,10 +1052,10 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
     def _get_oauth2_client(self) -> OidcOAuth2Client:
         """Lazily create an OAuth2 client for outbound A2A agent communication.
 
-        Uses OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_ISSUER — the same
-        orchestrator Keycloak client used for inbound JWT validation. This
-        client is authorised for the token-exchange grant that
-        SmartTokenInterceptor needs when calling remote A2A agents.
+        Uses OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_ISSUER — the dedicated
+        agent-runner Keycloak client. This client is authorised for the
+        token-exchange grant that SmartTokenInterceptor needs when calling
+        remote A2A agents (e.g. voice-agent).
         """
         if self._oauth2_client is None:
             self._oauth2_client = OidcOAuth2Client(

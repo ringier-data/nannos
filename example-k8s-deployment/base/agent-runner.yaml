@@ -38,10 +38,10 @@ spec:
           value: "INFO"
         - name: LOG_SET_EXCEPTHOOK
           value: "1"
+        - name: OIDC_CLIENT_ID
+          value: "agent-runner"
         - name: OIDC_ISSUER
           value: "https://login.my-issuer.com/realms/nannos"
-        - name: SCHEDULER_SERVICE_CLIENT_ID
-          value: "agent-console"
         - name: AGENT_BASE_URL
           value: "https://agent-runner.${BASE_DOMAIN}"
         - name: PLAYGROUND_BACKEND_URL

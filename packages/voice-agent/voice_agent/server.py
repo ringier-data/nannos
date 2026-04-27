@@ -172,10 +172,16 @@ def create_app():
         # Middleware is added last-first; execution order: JWT → SubAgentId → UserContext
         app.add_middleware(UserContextFromRequestStateMiddleware)
         app.add_middleware(SubAgentIdMiddleware)
+        # Accept tokens from both orchestrator (direct A2A calls) and
+        # agent-runner (scheduled jobs via SmartTokenInterceptor).
+        _allowed_azp = [
+            os.getenv("ORCHESTRATOR_CLIENT_ID", "orchestrator"),
+            os.getenv("AGENT_RUNNER_CLIENT_ID", "agent-runner"),
+        ]
         app.add_middleware(
             _VoiceAgentJWTMiddleware,
             issuer=oidc_issuer,
-            expected_azp=os.getenv("ORCHESTRATOR_CLIENT_ID"),
+            expected_azp=_allowed_azp,
         )
         logger.info("JWT authentication enabled (issuer=%s)", oidc_issuer)
     else:

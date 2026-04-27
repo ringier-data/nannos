@@ -145,8 +145,8 @@ def create_app():
     app.add_middleware(SubAgentIdMiddleware)
 
     # JWTValidatorMiddleware validates the caller's JWT.
-    # The scheduler (agent-console) calls agent-runner using an orchestrator-scoped
-    # token, so expected_azp must match the orchestrator client ID.
+    # The scheduler (agent-console) exchanges the user token for agent-runner
+    # audience, so expected_azp matches the scheduler's client ID.
     app.add_middleware(
         JWTValidatorMiddleware,
         issuer=oidc_issuer,

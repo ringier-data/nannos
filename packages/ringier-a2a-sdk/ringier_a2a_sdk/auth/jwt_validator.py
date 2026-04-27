@@ -143,7 +143,7 @@ class JWTValidator:
     def __init__(
         self,
         issuer: str,
-        expected_azp: Optional[str] = None,
+        expected_azp: Optional[str | list[str]] = None,
         expected_aud: Optional[str] = None,
         jwks_fetcher: Optional[JWKSFetcher] = None,
     ):
@@ -152,12 +152,17 @@ class JWTValidator:
 
         Args:
             issuer: Expected issuer URL
-            expected_azp: Expected authorized party (client ID that requested the token)
+            expected_azp: Expected authorized party — single string or list of allowed values
             expected_aud: Expected audience (client ID that should accept the token)
             jwks_fetcher: Optional JWKSFetcher instance (creates new if not provided)
         """
         self.issuer = issuer.rstrip("/")
-        self.expected_azp = expected_azp
+        if isinstance(expected_azp, str):
+            self._expected_azp_set: set[str] | None = {expected_azp}
+        elif expected_azp:
+            self._expected_azp_set = set(expected_azp)
+        else:
+            self._expected_azp_set = None
         self.expected_aud = expected_aud
         self.jwks_fetcher = jwks_fetcher or JWKSFetcher(issuer)
 
@@ -206,13 +211,13 @@ class JWTValidator:
                 raise InvalidIssuerError(f"Invalid issuer. Expected '{self.issuer}', got '{token_issuer}'")
 
             # Verify authorized party (azp) if expected
-            if self.expected_azp:
+            if self._expected_azp_set:
                 token_azp = payload.get("azp")
                 if not token_azp:
                     raise MissingClaimError("Token missing 'azp' (authorized party) claim")
-                if token_azp != self.expected_azp:
+                if token_azp not in self._expected_azp_set:
                     raise InvalidAudienceError(
-                        f"Invalid authorized party. Expected '{self.expected_azp}', got '{token_azp}'"
+                        f"Invalid authorized party. Expected one of {self._expected_azp_set}, got '{token_azp}'"
                     )
 
             # Verify audience (aud) if expected
