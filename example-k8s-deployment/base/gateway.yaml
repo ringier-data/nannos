@@ -27,6 +27,9 @@ spec:
         - path:
             type: PathPrefix
             value: /api
+        - path:
+            type: PathPrefix
+            value: /mcp
       backendRefs:
         - name: console
           port: 8080
