@@ -1,4 +1,4 @@
-# instantiate postgres database for playground-backend
+# instantiate postgres database for agent-console backend
 
 set -e
 

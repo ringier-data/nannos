@@ -12,8 +12,16 @@ from ..controllers.auth_controller import AuthController, register_oauth_provide
 from ..db.session import get_db_session
 from ..dependencies import require_auth, require_auth_or_bearer_token
 from ..models.audit import AuditAction, AuditEntityType
-from ..models.user import User, UserSettingsResponse, UserSettingsUpdate
+from ..models.user import (
+    PhoneVerificationCheckRequest,
+    PhoneVerificationRequest,
+    User,
+    UserSettingsResponse,
+    UserSettingsUpdate,
+)
 from ..services.audit_service import AuditService
+from ..services.keycloak_admin_service import KeycloakAdminService, KeycloakSyncError
+from ..services.phone_verification_service import PhoneVerificationService
 from ..services.session_service import SessionService
 from ..services.user_group_service import UserGroupService
 from ..services.user_service import UserService
@@ -23,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 # Create router
 router: APIRouter = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+# Singleton phone verification service
+_phone_verification_service = PhoneVerificationService()
 
 
 def get_user_settings_service(request: Request) -> UserSettingsService:
@@ -50,14 +61,24 @@ def get_user_group_service(request: Request) -> UserGroupService:
     return request.app.state.user_group_service
 
 
+def get_keycloak_admin_service(request: Request) -> KeycloakAdminService | None:
+    """Get Keycloak admin service from app state if configured.
+
+    Returns None if Keycloak sync is not configured (e.g., in local dev).
+    """
+    return getattr(request.app.state, "keycloak_admin_service", None)
+
+
 def get_auth_controller(request: Request) -> AuthController:
     session_service = get_session_service(request)
     user_service = get_user_service(request)
     scheduler_token_service = getattr(request.app.state, "scheduler_token_service", None)
+    keycloak_admin_service = getattr(request.app.state, "keycloak_admin_service", None)
     auth_controller = AuthController(
         session_service=session_service,
         user_service=user_service,
         scheduler_token_service=scheduler_token_service,
+        keycloak_admin_service=keycloak_admin_service,
     )
     return auth_controller
 
@@ -140,8 +161,12 @@ async def get_current_user(
         401 Unauthorized: If the user is not authenticated.
     """
     user_group_service = get_user_group_service(request)
+    user_settings_service = get_user_settings_service(request)
     # Get user's group memberships with their roles
     groups = await user_group_service.get_user_group_memberships(db, user.id)
+    # Get settings for phone_number_override (lives in user_settings)
+    settings = await user_settings_service.get_settings(db, user.id)
+    effective_phone = settings.phone_number_override or user.phone_number_idp
 
     return {
         "id": user.id,
@@ -152,6 +177,9 @@ async def get_current_user(
         "is_administrator": user.is_administrator,
         "role": user.role.value,  # Add user's system role
         "groups": groups,  # Add user's group memberships
+        "phone_number": effective_phone,
+        "phone_number_idp": user.phone_number_idp,
+        "phone_number_override": settings.phone_number_override,
     }
 
 
@@ -183,6 +211,7 @@ async def update_current_user_settings(
     request: Request,
     db: DbSession,
     user: User = Depends(require_auth),
+    keycloak_admin_service: KeycloakAdminService | None = Depends(get_keycloak_admin_service),
 ) -> UserSettingsResponse:
     """Update the current authenticated user's settings.
 
@@ -199,6 +228,18 @@ async def update_current_user_settings(
     """
 
     user_settings_service = get_user_settings_service(request)
+
+    # Guard: block direct phone_number_override via PATCH when Verify is configured
+    if (
+        "phone_number_override" in update_request.model_fields_set
+        and update_request.phone_number_override is not None
+        and _phone_verification_service.is_configured
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Phone number override can only be set through the verified phone flow. "
+            "Use POST /me/phone/verify and /me/phone/confirm instead.",
+        )
 
     # Use model_fields_set to detect which fields were explicitly provided
     # If field is in model_fields_set, pass its value (including None)
@@ -217,9 +258,139 @@ async def update_current_user_settings(
         if "enable_thinking" in update_request.model_fields_set
         else _UNSET,
         thinking_level=update_request.thinking_level if "thinking_level" in update_request.model_fields_set else _UNSET,
+        phone_number_override=update_request.phone_number_override
+        if "phone_number_override" in update_request.model_fields_set
+        else _UNSET,
     )
     await db.commit()
+
+    # Sync phone override to Keycloak if it was updated
+    if "phone_number_override" in update_request.model_fields_set and keycloak_admin_service is not None:
+        try:
+            await keycloak_admin_service.sync_phone_number_override(user.sub, update_request.phone_number_override)
+        except KeycloakSyncError as e:
+            logger.warning(f"Failed to sync phone override to Keycloak for user {user.id}: {e}")
+            # Non-blocking: log but don't fail the request
+
     return UserSettingsResponse(data=settings)
+
+
+@router.post("/me/phone/verify")
+async def send_phone_verification(
+    request_body: PhoneVerificationRequest,
+    user: User = Depends(require_auth),
+) -> dict:
+    """Send a verification code to the given phone number.
+
+    Args:
+        request_body: Phone number and channel (sms or call).
+
+    Returns:
+        Status confirmation.
+
+    Raises:
+        400: If phone number format is invalid.
+        503: If Twilio Verify is not configured.
+    """
+    if not _phone_verification_service.is_configured:
+        raise HTTPException(status_code=503, detail="Phone verification is not configured")
+
+    if not PhoneVerificationService.validate_e164(request_body.phone_number):
+        raise HTTPException(status_code=400, detail="Invalid phone number. Use E.164 format (e.g. +41791234567).")
+
+    if request_body.channel not in ("sms", "call"):
+        raise HTTPException(status_code=400, detail="Channel must be 'sms' or 'call'.")
+
+    try:
+        sent = await _phone_verification_service.send_verification(request_body.phone_number, request_body.channel)
+        if not sent:
+            raise HTTPException(status_code=500, detail="Failed to send verification code")
+        return {"status": "pending", "phone_number": request_body.phone_number}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Phone verification send error: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to send verification code")
+
+
+@router.post("/me/phone/confirm")
+async def confirm_phone_verification(
+    request_body: PhoneVerificationCheckRequest,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+    keycloak_admin_service: KeycloakAdminService | None = Depends(get_keycloak_admin_service),
+) -> dict:
+    """Verify the code and save the phone number as the user's override.
+
+    Args:
+        request_body: Phone number and the 6-digit code.
+
+    Returns:
+        Updated user with the verified phone number.
+
+    Raises:
+        400: If the code is incorrect.
+        503: If Twilio Verify is not configured.
+    """
+    if not _phone_verification_service.is_configured:
+        raise HTTPException(status_code=503, detail="Phone verification is not configured")
+
+    approved = await _phone_verification_service.check_verification(request_body.phone_number, request_body.code)
+    if not approved:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code")
+
+    # Code verified — save the phone number override in user settings
+    user_settings_service = get_user_settings_service(request)
+    settings = await user_settings_service.upsert_settings(db, user.id, phone_number_override=request_body.phone_number)
+    await db.commit()
+
+    # Sync phone override to Keycloak
+    if keycloak_admin_service is not None:
+        try:
+            await keycloak_admin_service.sync_phone_number_override(user.sub, request_body.phone_number)
+        except KeycloakSyncError as e:
+            logger.warning(f"Failed to sync phone override to Keycloak for user {user.id}: {e}")
+            # Non-blocking: log but don't fail the request
+
+    logger.info("Phone number verified and saved for user %s", user.id)
+    return {
+        "phone_number": settings.phone_number_override or user.phone_number_idp,
+        "phone_number_idp": user.phone_number_idp,
+        "phone_number_override": settings.phone_number_override,
+    }
+
+
+@router.delete("/me/phone/override")
+async def clear_phone_override(
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth),
+    keycloak_admin_service: KeycloakAdminService | None = Depends(get_keycloak_admin_service),
+) -> dict:
+    """Clear the user's phone number override, reverting to the IdP number.
+
+    Returns:
+        Updated phone number fields.
+    """
+    user_settings_service = get_user_settings_service(request)
+    await user_settings_service.upsert_settings(db, user.id, phone_number_override=None)
+    await db.commit()
+
+    # Sync phone override to Keycloak — reset to IdP phone so the attribute is never empty.
+    # The direct attribute mapper requires phoneNumberOverride to always be populated.
+    if keycloak_admin_service is not None:
+        try:
+            await keycloak_admin_service.sync_phone_number_override(user.sub, user.phone_number_idp)
+        except KeycloakSyncError as e:
+            logger.warning(f"Failed to sync phone override reset to Keycloak for user {user.id}: {e}")
+            # Non-blocking: log but don't fail the request
+
+    return {
+        "phone_number": user.phone_number_idp,
+        "phone_number_idp": user.phone_number_idp,
+        "phone_number_override": None,
+    }
 
 
 class AdminModeToggleRequest(BaseModel):

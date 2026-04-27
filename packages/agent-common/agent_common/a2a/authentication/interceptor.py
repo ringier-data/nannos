@@ -211,11 +211,11 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
         # Determine target client ID based on agent requirements
         # agent-creator needs playground access, others use reduced-scope orchestrator token
-        if scheme_name == "agent-creator":
+        if scheme_name in ("agent-creator", "voice-agent"):
             # NOTE: the agent-creator client is provisioned manually to allow playground access
-            target_client_id = "agent-creator"
+            target_client_id = scheme_name
             requested_scopes = ["openid", "profile", "email"]  # Preserve playground access
-            token_description = "agent-creator token (playground access)"
+            token_description = f"{scheme_name} token"
         elif scheme_name == "alloy-agent":
             # TOOD: shall we establish a convention that agents needing MCP gateway access should use a specific scheme name?
             # For now, we assume only the alloy-agent needs it and hardcode the logic here

@@ -204,6 +204,10 @@ Full reference: [`packages/console-backend/.env.template`](packages/console-back
 | `POSTGRES_USER` | Database user |
 | `POSTGRES_PASSWORD` | Database password |
 | `POSTGRES_SCHEMA` | Schema name (required for migrations to work) |
+| `LANGSMITH_ORGANIZATION_ID` | LangSmith organization ID for frontend trace links (optional) |
+| `LANGSMITH_PROJECT_ID` | LangSmith project ID for frontend trace links (optional) |
+| `AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH` | Max chars for auto-approve system prompt (default: `500`) |
+| `AUTO_APPROVE_MAX_MCP_TOOLS_COUNT` | Max MCP tools for auto-approve (default: `3`) |
 
 ---
 
@@ -281,16 +285,10 @@ Full reference: [`packages/client-email/.env.example`](packages/client-email/.en
 
 ---
 
-### `nannos-console-frontend` (build-time)
+### `nannos-console-frontend`
 
-These variables must be set **at image build time** (Vite bakes them into the bundle).
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `VITE_API_BASE_URL` | URL of the console-backend API | `http://localhost:5001` |
-| `VITE_KEYCLOAK_BASE_URL` | Keycloak base URL | `https://login.p.nannos.rcplus.io` |
-| `VITE_KEYCLOAK_REALM` | Keycloak realm name | `nannos` |
-| `VITE_ORCHESTRATOR_BASE_DOMAIN` | Orchestrator host | `orchestrator.d.nannos.ringier.ch` |
+The frontend is a static SPA served by nginx. It requires **no build-time environment variables** —
+all configuration is loaded at runtime from the console-backend via `GET /api/v1/config`.
 
 ---
 

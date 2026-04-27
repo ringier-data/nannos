@@ -1,13 +1,13 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { Download, ChevronDown, ChevronRight, MessageSquare, Copy, Check, Calendar, X, Filter, ExternalLink } from 'lucide-react';
+import { Download, ChevronDown, ChevronRight, MessageSquare, Copy, Check, Calendar, X, Filter, ExternalLink, Database } from 'lucide-react';
 import {
   getMyUsageSummaryApiV1UsageMySummaryGetOptions,
   getMyDetailedUsageApiV1UsageMyDetailedGetOptions,
   getMyUsageLogsApiV1UsageMyLogsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { UsageBySubAgent, BillingUnitBreakdown, UsageLog } from '@/api/generated';
+import type { UsageBySubAgent, UsageByService, BillingUnitBreakdown, UsageLog } from '@/api/generated';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -33,7 +33,7 @@ import {
   TableHeader,
   TableRow
 } from "@/components/ui/table";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts";
+import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from "recharts";
 import {
   isTokenType,
   categorizeTokenType,
@@ -96,16 +96,24 @@ export function UsagePage() {
   const logs = logsData?.logs ?? [];
   const meta = logsData ?? { page: 1, limit: logLimit, total: 0 };
 
-  // Group logs by conversation
+  // Group logs by conversation or catalog
   const conversationGroups = useMemo(() => {
     const groups = new Map<string, UsageLog[]>();
     
     logs.forEach((log: UsageLog) => {
-      const conversationKey = log.conversation_id || '_no_conversation';
-      if (!groups.has(conversationKey)) {
-        groups.set(conversationKey, []);
+      // Prefer catalog grouping for catalog-attributed logs without a conversation
+      let groupKey: string;
+      if (log.conversation_id) {
+        groupKey = log.conversation_id;
+      } else if (log.catalog_id) {
+        groupKey = `_catalog_${log.catalog_id}`;
+      } else {
+        groupKey = '_no_conversation';
       }
-      groups.get(conversationKey)!.push(log);
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, []);
+      }
+      groups.get(groupKey)!.push(log);
     });
     
     // Sort each group by invoked_at (most recent first)
@@ -127,6 +135,8 @@ export function UsagePage() {
         oldestCall: new Date(logs[logs.length - 1].invoked_at),
         scheduledJobName: logs[0]?.scheduled_job_name ?? null,
         scheduledJobId: logs[0]?.scheduled_job_id ?? null,
+        catalogName: logs[0]?.catalog_name ?? null,
+        catalogId: logs[0]?.catalog_id ?? null,
       }))
       .sort((a, b) => b.mostRecent.getTime() - a.mostRecent.getTime());
   }, [logs]);
@@ -188,6 +198,27 @@ export function UsagePage() {
       name: item.sub_agent_name || 'Unknown',
       cost: parseFloat(item.total_cost_usd || '0'),
       tokens: (item.total_input_tokens || 0) + (item.total_output_tokens || 0),
+    })) || [];
+  }, [detailed]);
+
+  const SERVICE_LABELS: Record<string, string> = {
+    orchestrator: 'Orchestrator',
+    catalog: 'Catalog',
+    scheduler: 'Scheduler',
+  };
+
+  const SERVICE_COLORS: Record<string, string> = {
+    orchestrator: '#8b5cf6',
+    catalog: '#f59e0b',
+    scheduler: '#10b981',
+  };
+
+  const byServiceChartData = useMemo(() => {
+    return detailed?.by_service?.map((item: UsageByService) => ({
+      name: SERVICE_LABELS[item.service] || item.service,
+      cost: parseFloat(item.total_cost_usd || '0'),
+      requests: item.total_requests,
+      fill: SERVICE_COLORS[item.service] || '#6b7280',
     })) || [];
   }, [detailed]);
 
@@ -299,6 +330,31 @@ export function UsagePage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Cost by Service Chart */}
+      {byServiceChartData.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Cost by Service</CardTitle>
+            <CardDescription>Orchestrator vs Catalog vs Scheduler</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={byServiceChartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="name" />
+                <YAxis tickFormatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(2)}` : '$0'} />
+                <RechartsTooltip formatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(4)}` : '$0'} />
+                <Bar dataKey="cost" name="Cost (USD)">
+                  {byServiceChartData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.fill} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Cost by Sub-Agent Chart */}
       {bySubAgentChartData.length > 0 && (
@@ -459,9 +515,10 @@ export function UsagePage() {
                   </TableCell>
                 </TableRow>
               ) : (
-                conversationGroups.map(({ conversationId, logs, totalCost, totalUnits, callCount, mostRecent, oldestCall, scheduledJobName, scheduledJobId }) => {
+                conversationGroups.map(({ conversationId, logs, totalCost, totalUnits, callCount, mostRecent, oldestCall, scheduledJobName, scheduledJobId, catalogName, catalogId }) => {
                   const isExpanded = expandedConversations.has(conversationId);
                   const isNoConversation = conversationId === '_no_conversation';
+                  const isCatalogGroup = conversationId.startsWith('_catalog_');
                   const isCopied = copiedConversationId === conversationId;
                   
                   const copyConversationId = () => {
@@ -488,10 +545,16 @@ export function UsagePage() {
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
-                            <MessageSquare className="w-4 h-4 text-muted-foreground" />
+                            {isCatalogGroup ? (
+                              <Database className="w-4 h-4 text-muted-foreground" />
+                            ) : (
+                              <MessageSquare className="w-4 h-4 text-muted-foreground" />
+                            )}
                             <div className="flex-1">
                               <div className="flex items-center gap-2">
-                                {isNoConversation ? (
+                                {isCatalogGroup ? (
+                                  <span className="text-muted-foreground">Catalog: {catalogName || catalogId}</span>
+                                ) : isNoConversation ? (
                                   <span className="text-muted-foreground">Direct API Calls</span>
                                 ) : (
                                   <>
@@ -552,7 +615,7 @@ export function UsagePage() {
                         <TableCell className="text-right font-bold">${totalCost.toFixed(4)}</TableCell>
                         {isAdmin && (
                           <TableCell className="text-center">
-                            {!isNoConversation && (
+                            {!isNoConversation && !isCatalogGroup && (
                               <a
                                 href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${conversationId}`}
                                 target="_blank"

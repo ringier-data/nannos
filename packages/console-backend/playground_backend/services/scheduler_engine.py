@@ -1,6 +1,6 @@
 """Scheduler engine — tick loop that claims due jobs and dispatches them to agent-runner.
 
-The engine runs inside the playground-backend process as a background asyncio task.
+The engine runs inside the agent-console backend process as a background asyncio task.
 It owns:
   - Job claiming (FOR UPDATE SKIP LOCKED)
   - User token resolution (KMS → Keycloak refresh)
@@ -246,11 +246,32 @@ class SchedulerEngine:
         else:
             message_text = job.notification_message or ""
 
+        # Voice-call dispatch: override target to voice-agent and build
+        # DataPart (sub_agent_id config) + TextPart (prompt) message.
+        if job.voice_call and job.job_type.value == "task":
+            voice_agent_id = await self._resolve_voice_agent_id(db)
+            if voice_agent_id is not None:
+                metadata["sub_agent_id"] = voice_agent_id
+            else:
+                logger.warning("voice_call=True for job %d but voice-agent not found in DB", job.id)
+
+            parts: list[dict[str, Any]] = [
+                {
+                    "kind": "data",
+                    "data": {"sub_agent_id": job.sub_agent_id},
+                    "metadata": {"mimeType": "application/json"},
+                },
+            ]
+            if message_text and message_text != "Execute the task you are designed for.":
+                parts.append({"kind": "text", "text": message_text})
+        else:
+            parts = [{"kind": "text", "text": message_text}]
+
         params: dict[str, Any] = {
             "message": {
                 "messageId": str(uuid.uuid4()),
                 "role": "user",
-                "parts": [{"kind": "text", "text": message_text}],
+                "parts": parts,
                 "metadata": metadata,
             }
         }
@@ -274,6 +295,16 @@ class SchedulerEngine:
             "id": f"scheduler-job-{job.id}",
             "params": params,
         }
+
+    async def _resolve_voice_agent_id(self, db: Any) -> int | None:
+        """Look up the voice-agent sub_agent_id from the DB (system-owned)."""
+        result = await db.execute(
+            text(
+                "SELECT id FROM sub_agents WHERE name = 'voice-agent' AND owner_user_id = 'system' AND deleted_at IS NULL LIMIT 1"
+            )
+        )
+        row = result.scalar_one_or_none()
+        return row
 
     async def _send_streaming_request(self, payload: dict[str, Any], access_token: str) -> dict[str, Any]:
         """POST to agent-runner using message/stream (SSE), consume events, return a

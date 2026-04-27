@@ -20,6 +20,7 @@ class AuditEntityType(str, Enum):
     RATE_CARD = "rate_card"  # For LLM pricing rate cards
     SCHEDULED_JOB = "scheduled_job"  # For scheduler job CRUD operations
     DELIVERY_CHANNEL = "delivery_channel"  # For delivery channel registration/management
+    CATALOG = "catalog"  # For catalog management operations
 
 
 class AuditAction(str, Enum):

@@ -1819,7 +1819,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "0.7.0"
+version = "0.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -1832,6 +1832,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+google-embeddings = [
+    { name = "google-auth" },
+    { name = "google-genai" },
+    { name = "langchain-core" },
+]
 langgraph = [
     { name = "boto3" },
     { name = "deepagents" },
@@ -1876,10 +1881,13 @@ requires-dist = [
     { name = "cryptography", specifier = ">=43.0.0" },
     { name = "deepagents", marker = "extra == 'langgraph'", specifier = ">=0.2.0" },
     { name = "deepagents", marker = "extra == 'langgraph-google'", specifier = ">=0.2.0" },
+    { name = "google-auth", marker = "extra == 'google-embeddings'", specifier = ">=2.25.0" },
+    { name = "google-genai", marker = "extra == 'google-embeddings'", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langchain", marker = "extra == 'langgraph'", specifier = ">=0.3.18" },
     { name = "langchain", marker = "extra == 'langgraph-google'", specifier = ">=0.3.18" },
     { name = "langchain-aws", marker = "extra == 'langgraph'", specifier = ">=1.4.3" },
+    { name = "langchain-core", marker = "extra == 'google-embeddings'", specifier = ">=0.3.0" },
     { name = "langchain-google-genai", marker = "extra == 'langgraph-google'", specifier = ">=0.1.0" },
     { name = "langchain-mcp-adapters", marker = "extra == 'langgraph'", specifier = ">=0.0.6" },
     { name = "langchain-mcp-adapters", marker = "extra == 'langgraph-google'", specifier = ">=0.0.6" },
@@ -1890,7 +1898,7 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.10.1" },
     { name = "starlette", specifier = ">=0.46.2" },
 ]
-provides-extras = ["langgraph", "langgraph-google"]
+provides-extras = ["langgraph", "langgraph-google", "google-embeddings"]
 
 [package.metadata.requires-dev]
 dev = [

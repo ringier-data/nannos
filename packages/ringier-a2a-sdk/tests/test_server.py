@@ -78,6 +78,43 @@ class TestAuthRequestContextBuilder:
             # Should add user info
             assert context.call_context.state["user_sub"] == "sub-123"
 
+    @pytest.mark.asyncio
+    async def test_build_propagates_phone_number(self):
+        """Test that phone_number from user context is set in call_context.state."""
+        builder = AuthRequestContextBuilder()
+
+        user_context = {
+            "user_sub": "sub-123",
+            "email": "test@example.com",
+            "name": "Test User",
+            "phone_number": "+41791234567",
+            "token": "jwt-token",
+        }
+
+        with patch("ringier_a2a_sdk.server.context_builder.current_user_context") as mock_context:
+            mock_context.get.return_value = user_context
+
+            context = await builder.build(context_id="ctx-123")
+            assert context.call_context.state["phone_number"] == "+41791234567"
+
+    @pytest.mark.asyncio
+    async def test_build_phone_number_none_when_absent(self):
+        """Test that phone_number is None when not in user context."""
+        builder = AuthRequestContextBuilder()
+
+        user_context = {
+            "user_sub": "sub-123",
+            "email": "test@example.com",
+            "name": "Test User",
+            "token": "jwt-token",
+        }
+
+        with patch("ringier_a2a_sdk.server.context_builder.current_user_context") as mock_context:
+            mock_context.get.return_value = user_context
+
+            context = await builder.build(context_id="ctx-123")
+            assert context.call_context.state.get("phone_number") is None
+
 
 class TestBaseAgentExecutor:
     """Tests for BaseAgentExecutor."""

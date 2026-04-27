@@ -14,7 +14,10 @@
 # Compatible with bash 3.2+ (macOS default).
 #
 
-ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk client-slack client-slack-frontend client-email"
+ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk client-slack client-slack-frontend client-email voice-agent"
+
+# Packages that only build Docker images but share another package's version (not independently released)
+VIRTUAL_PACKAGES="catalog-worker"
 
 # ── Package metadata (case-based, bash 3.2 compatible) ──────────────
 
@@ -24,11 +27,13 @@ pkg_dir() {
     agent-runner)            echo "packages/agent-runner" ;;
     orchestrator-agent)      echo "packages/orchestrator-agent" ;;
     console-backend)         echo "packages/console-backend" ;;
+    catalog-worker)          echo "packages/console-backend" ;;
     console-frontend)        echo "packages/console-frontend" ;;
     ringier-a2a-sdk)         echo "packages/ringier-a2a-sdk" ;;
     client-slack)            echo "packages/client-slack" ;;
     client-slack-frontend)   echo "packages/client-slack-frontend" ;;
     client-email)           echo "packages/client-email" ;;
+    voice-agent)            echo "packages/voice-agent" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }
@@ -36,7 +41,7 @@ pkg_dir() {
 pkg_type() {
   case "$1" in
     console-frontend|client-slack-frontend|client-slack|client-email) echo "node" ;;
-    agent-creator|agent-runner|orchestrator-agent|console-backend|ringier-a2a-sdk) echo "python" ;;
+    agent-creator|agent-runner|orchestrator-agent|console-backend|catalog-worker|ringier-a2a-sdk|voice-agent) echo "python" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }

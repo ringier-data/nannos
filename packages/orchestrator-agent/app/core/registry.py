@@ -1,5 +1,6 @@
 """Registry service for fetching approved sub-agents from the playground backend."""
 
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -72,7 +73,7 @@ class SubAgentConfigVersion(BaseModel):
 
     change_summary: str | None = None
     status: str
-    approved_by_user_id: str | None = None  # References playground-backend users.id (database PK)
+    approved_by_user_id: str | None = None  # References agent-console backend users.id (database PK)
     approved_at: datetime | None = None
     rejection_reason: str | None = None
     created_at: datetime
@@ -88,7 +89,7 @@ class SubAgent(BaseModel):
 
     id: int
     name: str
-    owner_user_id: str  # References playground-backend users.id (database PK)
+    owner_user_id: str  # References agent-console backend users.id (database PK)
     type: str
     current_version: int = 1
     default_version: int | None = None
@@ -121,6 +122,7 @@ class User(BaseModel):
     language: str = "en"  # User's preferred language
     custom_prompt: str | None = None  # User's custom prompt addendum
     local_subagents: list[LocalSubAgentConfig] = Field(default_factory=list)  # Local sub-agents
+    catalog_ids: list[str] = Field(default_factory=list)  # Accessible catalog IDs for catalog_search
     sub_agent_config_hash: str | None = None  # Playground mode: version hash for testing
     playground_subagent_name: str | None = None  # Playground mode: name for system prompt
     preferred_model: str | None = None  # User-level preferred model override
@@ -252,18 +254,15 @@ class RegistryService:
             client = await self._get_client()
             headers = {"Authorization": f"Bearer {access_token}"}
 
-            sub_agents = await self.get_sub_agents(
-                client,
-                headers,
-                user_sub,
-                sub_agent_config_hash,
+            # Fetch user various user-specific data concurrently
+            sub_agents, settings, catalog_ids = await asyncio.gather(
+                self.get_sub_agents(client, headers, user_sub, sub_agent_config_hash),
+                self._fetch_user_settings(client, headers, user_sub),
+                self._fetch_accessible_catalog_ids(client, headers, user_sub),
             )
 
-            # Fetch user settings for language and custom_prompt
-            settings = await self._fetch_user_settings(client, headers, user_sub)
-
             # Convert to User model format with settings
-            user = self._to_user(user_sub, sub_agents, settings)
+            user = self._to_user(user_sub, sub_agents, settings, catalog_ids)
 
             # Add playground mode info if applicable
             if sub_agent_config_hash is not None and sub_agents:
@@ -293,6 +292,21 @@ class RegistryService:
             logger.error(f"Unexpected error fetching sub-agents for user sub {user_sub}: {e}", exc_info=True)
             return None
 
+    async def _fetch_accessible_catalog_ids(
+        self, client: httpx.AsyncClient, headers: dict[str, str], user_sub: str
+    ) -> list[str]:
+        """Fetch IDs of catalogs the user can access."""
+        try:
+            response = await client.get("/api/v1/catalogs", headers=headers)
+            if response.status_code != 200:
+                logger.warning(f"Failed to fetch catalogs for user {user_sub}: status={response.status_code}")
+                return []
+            data = response.json()
+            return [item["id"] for item in data.get("items", []) if item.get("id")]
+        except Exception:
+            logger.exception(f"Error fetching accessible catalogs for user {user_sub}")
+            return []
+
     async def _fetch_user_settings(
         self, client: httpx.AsyncClient, headers: dict[str, str], user_sub: str
     ) -> UserSettings:
@@ -312,12 +326,19 @@ class RegistryService:
         settings_data = data.get("data", {})
         return UserSettings.model_validate(settings_data)
 
-    def _to_user(self, user_sub: str, sub_agents: list[SubAgent], settings: UserSettings) -> User:
+    def _to_user(
+        self,
+        user_sub: str,
+        sub_agents: list[SubAgent],
+        settings: UserSettings,
+        catalog_ids: list[str] | None = None,
+    ) -> User:
         """Convert sub-agents from the backend response to User model format.
 
         Args:
             sub_agents: List of SubAgent objects from the backend
             settings: UserSettings object with 'language' and 'custom_prompt' attributes
+            catalog_ids: List of accessible catalog IDs
 
         Returns:
             User object with agent_metadata, local_subagents, language, and custom_prompt
@@ -398,6 +419,7 @@ class RegistryService:
             agent_metadata=agent_metadata,  # Include metadata for remote agents
             tool_names=settings.mcp_tools,  # MCP tools from user settings
             local_subagents=local_subagents,
+            catalog_ids=catalog_ids or [],
             language=settings.language,
             custom_prompt=settings.custom_prompt,
             preferred_model=settings.preferred_model,

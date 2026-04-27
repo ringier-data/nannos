@@ -68,6 +68,7 @@ class TestOrchestratorThinkingConfig:
         mock_user.agent_metadata = {}
         mock_user.tool_names = []
         mock_user.local_subagents = []
+        mock_user.catalog_ids = []
         mock_user.enable_thinking = True
         mock_user.thinking_level = "high"
 
@@ -114,6 +115,7 @@ class TestOrchestratorThinkingConfig:
         mock_user.agent_metadata = {}
         mock_user.tool_names = []
         mock_user.local_subagents = []
+        mock_user.catalog_ids = []
         mock_user.enable_thinking = True
         mock_user.thinking_level = "low"  # User preference is "low"
 
@@ -235,6 +237,7 @@ class TestExecutorThinkingFlow:
         mock_user.agent_metadata = {}
         mock_user.tool_names = []
         mock_user.local_subagents = []
+        mock_user.catalog_ids = []
         mock_user.enable_thinking = True
         mock_user.thinking_level = "medium"
         mock_user.preferred_model = "claude-sonnet-4.5"

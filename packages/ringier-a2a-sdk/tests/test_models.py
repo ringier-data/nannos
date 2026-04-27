@@ -161,3 +161,16 @@ class TestUserConfig:
 
         assert config.sub_agents is None
         assert config.tools is None
+        assert config.phone_number is None
+
+    def test_user_config_with_phone_number(self):
+        """Test creating user config with phone_number."""
+        config = UserConfig(
+            user_sub="sub-123",
+            access_token=SecretStr("token"),
+            name="Test User",
+            email="test@example.com",
+            phone_number="+41791234567",
+        )
+
+        assert config.phone_number == "+41791234567"

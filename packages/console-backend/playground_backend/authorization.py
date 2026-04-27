@@ -14,6 +14,7 @@ SYSTEM_ROLE_CAPABILITIES = {
         "members": {"read", "write"},  # View/manage members (intersection applies)
         "sub_agents": {"read", "write"},  # View/manage sub-agents (intersection applies)
         "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
+        "catalogs": {"read", "write"},  # View/manage catalogs (intersection applies)
     },
     "approver": {
         "groups": {"read"},  # View groups they're in (intersection applies)
@@ -24,6 +25,7 @@ SYSTEM_ROLE_CAPABILITIES = {
             "approve",  # Approve sub-agents in accessible groups (intersection applies, requires admin-mode)
         },
         "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
+        "catalogs": {"read", "write"},  # View/manage catalogs (intersection applies)
     },
     "admin": {
         "groups": {
@@ -54,6 +56,12 @@ SYSTEM_ROLE_CAPABILITIES = {
             "read.admin",  # View all secrets system-wide (bypasses intersection, requires admin-mode)
             "write.admin",  # Modify all secrets system-wide (bypasses intersection, requires admin-mode)
         },
+        "catalogs": {
+            "read",
+            "write",
+            "read.admin",  # View all catalogs system-wide (bypasses intersection, requires admin-mode)
+            "write.admin",  # Modify all catalogs system-wide (bypasses intersection, requires admin-mode)
+        },
     },
 }
 
@@ -68,16 +76,19 @@ GROUP_ROLE_CAPABILITIES = {
         "sub_agents": {"read"},  # Read-only access to sub-agents
         "members": {"read"},  # Can view group members
         "secrets": {"read"},  # Read-only access to secrets
+        "catalogs": {"read"},  # Read-only access to catalogs
     },
     "write": {
         "sub_agents": {"read", "write"},  # Full sub-agent access
         "members": {"read"},  # Can view group members
         "secrets": {"read"},  # Read access to secrets
+        "catalogs": {"read", "write"},  # Read/write access to catalogs
     },
     "manager": {
         "sub_agents": {"read", "write"},  # Full sub-agent access
         "members": {"read", "write"},  # Can view and manage group membership
         "secrets": {"read", "write"},  # Read/write access to secrets
+        "catalogs": {"read", "write"},  # Read/write access to catalogs
     },
 }
 

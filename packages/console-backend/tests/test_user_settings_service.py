@@ -588,3 +588,79 @@ class TestUserSettingsThinkingConfiguration:
 
         assert disabled.enable_thinking is False
         assert disabled.preferred_model == "claude-sonnet-4.5"  # Still preserved
+
+    async def test_upsert_phone_number_override(
+        self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession
+    ):
+        """Test setting phone_number_override via upsert_settings."""
+        user = await user_service.upsert_user(
+            db=pg_session,
+            sub="phone-user",
+            email="phone@example.com",
+            first_name="Phone",
+            last_name="User",
+        )
+        await pg_session.commit()
+
+        settings = await user_settings_service.upsert_settings(
+            pg_session,
+            user.id,
+            phone_number_override="+41791234567",
+        )
+        await pg_session.commit()
+
+        assert settings.phone_number_override == "+41791234567"
+
+    async def test_clear_phone_number_override(
+        self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession
+    ):
+        """Test clearing phone_number_override falls back to None."""
+        user = await user_service.upsert_user(
+            db=pg_session,
+            sub="phone-user-2",
+            email="phone2@example.com",
+            first_name="Phone",
+            last_name="User",
+        )
+        await pg_session.commit()
+
+        # Set override
+        await user_settings_service.upsert_settings(
+            pg_session,
+            user.id,
+            phone_number_override="+41792222222",
+        )
+        await pg_session.commit()
+
+        # Clear override
+        settings = await user_settings_service.upsert_settings(
+            pg_session,
+            user.id,
+            phone_number_override=None,
+        )
+        await pg_session.commit()
+
+        assert settings.phone_number_override is None
+
+    async def test_get_settings_returns_phone_override(
+        self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession
+    ):
+        """Test that get_settings returns phone_number_override field."""
+        user = await user_service.upsert_user(
+            db=pg_session,
+            sub="phone-user-3",
+            email="phone3@example.com",
+            first_name="Phone",
+            last_name="User",
+        )
+        await pg_session.commit()
+
+        await user_settings_service.upsert_settings(
+            pg_session,
+            user.id,
+            phone_number_override="+41794444444",
+        )
+        await pg_session.commit()
+
+        fetched = await user_settings_service.get_settings(pg_session, user.id)
+        assert fetched.phone_number_override == "+41794444444"

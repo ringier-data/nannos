@@ -419,3 +419,72 @@ class TestJWTValidatorMiddleware:
             call_kwargs = mock_validator_class.call_args[1]
             assert call_kwargs["expected_azp"] == "orchestrator-client-id"
             assert call_kwargs["expected_aud"] == "agent-1"
+
+    def test_phone_number_extracted_from_jwt(self, valid_jwt_token):
+        """Test that phone_number claim is extracted from JWT."""
+        mock_validator = Mock()
+        mock_validator.validate = AsyncMock(
+            return_value={
+                "sub": "user-123",
+                "email": "test@example.com",
+                "name": "Test User",
+                "phone_number": "+41791234567",
+                "exp": 9999999999,
+                "iat": 1000000000,
+            }
+        )
+
+        with patch("ringier_a2a_sdk.middleware.jwt_validator_middleware.JWTValidator") as mock_validator_class:
+            mock_validator_class.return_value = mock_validator
+
+            def endpoint(request):
+                assert request.state.user["phone_number"] == "+41791234567"
+                return PlainTextResponse("OK")
+
+            app = Starlette(
+                routes=[Route("/test", endpoint, methods=["POST"])],
+                middleware=[
+                    Middleware(
+                        JWTValidatorMiddleware,
+                        issuer="https://login.example.com/realms/test",
+                    )
+                ],
+            )
+
+            client = TestClient(app)
+            response = client.post("/test", headers={"Authorization": f"Bearer {valid_jwt_token}"})
+            assert response.status_code == 200
+
+    def test_phone_number_none_when_not_in_jwt(self, valid_jwt_token):
+        """Test that phone_number is None when JWT doesn't contain the claim."""
+        mock_validator = Mock()
+        mock_validator.validate = AsyncMock(
+            return_value={
+                "sub": "user-123",
+                "email": "test@example.com",
+                "name": "Test User",
+                "exp": 9999999999,
+                "iat": 1000000000,
+            }
+        )
+
+        with patch("ringier_a2a_sdk.middleware.jwt_validator_middleware.JWTValidator") as mock_validator_class:
+            mock_validator_class.return_value = mock_validator
+
+            def endpoint(request):
+                assert request.state.user["phone_number"] is None
+                return PlainTextResponse("OK")
+
+            app = Starlette(
+                routes=[Route("/test", endpoint, methods=["POST"])],
+                middleware=[
+                    Middleware(
+                        JWTValidatorMiddleware,
+                        issuer="https://login.example.com/realms/test",
+                    )
+                ],
+            )
+
+            client = TestClient(app)
+            response = client.post("/test", headers={"Authorization": f"Bearer {valid_jwt_token}"})
+            assert response.status_code == 200

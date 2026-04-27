@@ -43,7 +43,7 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
         self,
         app,
         issuer: str,
-        expected_azp: Optional[str] = None,
+        expected_azp: Optional[str | list[str]] = None,
         expected_aud: Optional[str] = None,
         additional_public_paths: Optional[list[str]] = None,
     ):
@@ -53,7 +53,7 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
         Args:
             app: The ASGI application
             issuer: OIDC issuer URL (e.g., https://login.p.nannos.rcplus.io/realms/nannos)
-            expected_azp: Expected authorized party claim (optional)
+            expected_azp: Expected authorized party claim — single string or list of allowed values
             expected_aud: Expected audience claim (optional, not validated if None)
             additional_public_paths: Extra paths to skip authentication for (optional)
         """
@@ -119,6 +119,7 @@ class JWTValidatorMiddleware(BaseHTTPMiddleware):
                 "sub": payload.get("sub"),
                 "email": payload.get("email"),
                 "name": payload.get("name"),
+                "phone_number": payload.get("phone_number"),
                 "token": token,
                 "groups": payload.get("groups", []),
             }

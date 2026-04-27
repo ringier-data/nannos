@@ -25,7 +25,7 @@ dependencies = [
     "authlib>=1.6.5",
     # Shared SDKs
     "rcplus-alloy-common>=8.6.1",
-    "ringier-a2a-sdk>=0.1.0",
+    "ringier-a2a-sdk[langgraph]>=0.1.0",
     "agent-common[openai,google]>=0.7.0",
     # Utilities
     "python-dotenv>=1.1.0",

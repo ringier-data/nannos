@@ -41,6 +41,7 @@ def _row_to_scheduled_job(row: Any) -> ScheduledJob:
         destroy_after_trigger=row.get("destroy_after_trigger", True),
         last_check_result=row["last_check_result"],
         delivery_channel_id=row["delivery_channel_id"],
+        voice_call=row.get("voice_call", False),
         enabled=row["enabled"],
         max_failures=row["max_failures"],
         consecutive_failures=row["consecutive_failures"],

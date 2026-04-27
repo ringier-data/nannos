@@ -132,7 +132,7 @@ class AgentDiscoveryService:
 
         agent = CompiledSubAgent(
             name=agent_name,
-            description=agent_card.description,
+            description=base_runnable.description,
             runnable=base_runnable,
         )
         logger.debug(f"Sub-agent created: name={agent['name']}, description={agent['description']}")
@@ -346,8 +346,8 @@ class ToolDiscoveryService:
                 logger.warning("No valid server connections created, returning empty tool list")
                 return []
 
-            # Add playground-backend as an additional MCP server
-            # Playground-backend MCP endpoints require Gatana token for calling Gatana gateway
+            # Add agent-console backend as an additional MCP server
+            # Agent-console backend MCP endpoints require Gatana token for calling Gatana gateway
             if self.config.PLAYGROUND_BACKEND_URL:
                 playground_mcp_url = f"{self.config.PLAYGROUND_BACKEND_URL}/mcp"
                 connections["playground"] = StreamableHttpConnection(
@@ -355,7 +355,7 @@ class ToolDiscoveryService:
                     url=playground_mcp_url,
                     headers={"Authorization": f"Bearer {mcp_gateway_token}"},
                 )
-                logger.debug(f"Added playground MCP connection: {playground_mcp_url}")
+                logger.debug(f"Added agent-console MCP connection: {playground_mcp_url}")
 
             logger.debug(f"Created {len(connections)} MCP server connections: {list(connections.keys())}")
 

@@ -58,16 +58,15 @@ class SubAgentResponseSchema(BaseModel):
 
 # System prompt addendum that instructs the agent to use structured output
 A2A_PROTOCOL_ADDENDUM = """
-**Response Protocol:**
-You are a sub-agent communicating with an orchestrator. You MUST determine the appropriate task state:
+<response_protocol>
+You are a sub-agent communicating with an orchestrator. You must determine the appropriate task state for every response:
 
-1. **completed** - Use when you have successfully completed the requested task. Provide a clear summary of what was accomplished.
+- completed: You have successfully completed the requested task. Provide a clear summary of what was accomplished.
+- input_required: You need additional information from the user to proceed. Ask a specific, clear question.
+- failed: You encountered an error that prevents completion. Explain what went wrong and any potential remediation steps.
 
-2. **input_required** - Use when you need additional information from the user to proceed. Ask a specific, clear question about what information you need.
-
-3. **failed** - Use when you encounter an error that prevents you from completing the task. Explain what went wrong and any potential remediation steps.
-
-IMPORTANT: You must explicitly choose one of these states for every response. Do not leave the task state ambiguous.
+Do not leave the task state ambiguous.
+</response_protocol>
 """
 
 

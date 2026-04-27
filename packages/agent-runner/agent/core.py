@@ -13,7 +13,7 @@ Follows the same A2A pattern as agent-creator and alloy-agent:
 Execution flow per call:
 1. Extract scheduler metadata from the A2A message (task.history)
 2. For watch jobs: call the check_tool via MCP and evaluate the JSONPath condition
-3. If condition met (or task job): fetch sub-agent config from playground-backend,
+3. If condition met (or task job): fetch sub-agent config from agent-console backend and
    dispatch to the appropriate agent runner (LangGraph / Foundry / remote A2A),
    capture result
 4. Yield AgentStreamResponse with JSON-encoded result metadata
@@ -46,8 +46,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langchain_mcp_adapters.tools import load_mcp_tools
-from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph_checkpoint_aws import DynamoDBSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -55,6 +55,7 @@ from pydantic import BaseModel as PydanticBaseModel
 from ringier_a2a_sdk.agent import BaseAgent
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
+from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,24 @@ def _extract_text_from_message(message: Message) -> str:
     return "\n".join(texts).strip()
 
 
+def _a2a_messages_to_human_messages(messages: list[Message]) -> list[HumanMessage]:
+    """Convert A2A Messages to LangChain HumanMessages preserving all part types.
+
+    Delegates to ``a2a_parts_to_content(text_only=False)`` from the SDK which maps:
+    - TextPart → TextContentBlock
+    - DataPart → NonStandardContentBlock (enables lossless A2A round-tripping)
+    - FilePart → ImageContentBlock / AudioContentBlock / VideoContentBlock / FileContentBlock
+    """
+    result = []
+    for msg in messages:
+        if not msg.parts:
+            continue
+        blocks = a2a_parts_to_content(msg.parts, text_only=False)
+        if blocks:
+            result.append(HumanMessage(content=blocks))
+    return result
+
+
 def _extract_message_metadata(task: Task) -> dict[str, Any]:
     """Extract scheduler metadata from the A2A task's message history.
 
@@ -139,7 +158,7 @@ def _extract_message_metadata(task: Task) -> dict[str, Any]:
     These end up in task.history[-1].metadata when the message is processed.
 
     SECURITY NOTE: user_id is NOT extracted from message metadata as it would be
-    unverified user input. Instead, fetch it from playground-backend using the
+    unverified user input. Instead, fetch it from agent-console backend using the
     verified user_sub from JWT authentication.
 
     Args:
@@ -415,6 +434,7 @@ class AgentRunner(BaseAgent):
                 agent_message = await self._execute_sub_agent(
                     sub_agent_id=sub_agent_id,
                     prompt=prompt,
+                    raw_a2a_messages=messages,
                     user_access_token=user_access_token,
                     scheduled_job_id=scheduled_job_id,
                     scheduled_job_run_id=scheduled_job_run_id,
@@ -448,7 +468,7 @@ class AgentRunner(BaseAgent):
         )
 
     async def _fetch_user_id_from_backend(self, user_access_token: str) -> str | None:
-        """Fetch the verified user_id from playground-backend using JWT authentication.
+        """Fetch the verified user_id from agent-console backend using JWT authentication.
 
         SECURITY: This method ensures we use the database user ID that corresponds
         to the verified JWT user_sub, preventing privilege escalation attacks where
@@ -661,7 +681,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             return f"Watch condition triggered. Result: {json.dumps(check_result, default=str)[:200]}"
 
     async def _fetch_sub_agent_config(self, sub_agent_id: int, user_access_token: str) -> dict:
-        """Fetch sub-agent configuration from the playground-backend API.
+        """Fetch sub-agent configuration from the agent-console API.
 
         Returns the full sub-agent record including type and config_version fields
         so the dispatcher can route to the correct execution strategy.
@@ -717,18 +737,20 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         user_config: UserConfig,
         user_id: str | None = None,
         context_id: str | None = None,
+        raw_a2a_messages: list[Message] | None = None,
     ) -> str | None:
         """Fetch sub-agent config and dispatch to the appropriate execution method.
 
         Args:
             sub_agent_id: ID of the sub-agent to run.
-            prompt: The user message to process.
+            prompt: The user message to process (used for local/foundry agents).
             user_access_token: Token passed through for authentication.
             scheduled_job_id: The ID of the scheduled job.
             scheduled_job_run_id: The ID of the scheduled job run, used for checkpoint isolation and logging.
             user_config: Authenticated user context.
             user_id: Verified database user UUID (fetched from backend, not from message metadata).
             context_id: Natural A2A context_id for thread isolation (conversation_id).
+            raw_a2a_messages: Original A2A messages (used for remote agents to preserve DataParts).
 
         Returns:
             agent_message (str | None)
@@ -756,12 +778,9 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 scheduled_job_run_id=scheduled_job_run_id,
             )
         elif agent_type == "remote":
-            # TODO: we could just pass the a2a message without the need of the whole A2AClientRunnable machinery,
-            #       the A2AClientRunnable is needed just for the orchestrator in order work as a deepagents
-            #       sub-agent. In case we would completely migrate the orchestrator to use the agent-runner, we need
-            #       to consider this aspect carefully.
             return await self._run_remote_agent(
                 sub_agent_cfg=sub_agent_cfg,
+                raw_a2a_messages=raw_a2a_messages or [],
                 prompt=prompt,
                 user_access_token=user_access_token,
                 scheduled_job_id=scheduled_job_id,
@@ -940,9 +959,6 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 headers={"Authorization": f"Bearer {gatana_access_token}"},
                 timeout=mcp_timeout,
                 sse_read_timeout=mcp_timeout,
-                # session_kwargs={
-                #     "read_timeout_seconds": mcp_timeout,
-                # },
             )
             mcp_client = MultiServerMCPClient({"gateway": connection})
             async with mcp_client.session("gateway") as session:
@@ -1036,10 +1052,10 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
     def _get_oauth2_client(self) -> OidcOAuth2Client:
         """Lazily create an OAuth2 client for outbound A2A agent communication.
 
-        Uses OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_ISSUER — the same
-        orchestrator Keycloak client used for inbound JWT validation. This
-        client is authorised for the token-exchange grant that
-        SmartTokenInterceptor needs when calling remote A2A agents.
+        Uses OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_ISSUER — the dedicated
+        agent-runner Keycloak client. This client is authorised for the
+        token-exchange grant that SmartTokenInterceptor needs when calling
+        remote A2A agents (e.g. voice-agent).
         """
         if self._oauth2_client is None:
             self._oauth2_client = OidcOAuth2Client(
@@ -1053,6 +1069,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
     async def _run_remote_agent(
         self,
         sub_agent_cfg: dict,
+        raw_a2a_messages: list[Message],
         prompt: str,
         user_access_token: str,
         scheduled_job_id: int,
@@ -1060,9 +1077,18 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
     ) -> str | None:
         """Run a remote A2A agent by discovering its agent card and invoking it.
 
+        Uses lossless A2A→HumanMessage conversion so DataParts and TextParts
+        from the scheduler engine are preserved end-to-end.  Falls back to
+        plain text prompt when no raw messages are available.
+
+        TODO: we could just pass the a2a message without the need of the whole A2AClientRunnable machinery,
+              the A2AClientRunnable is needed just for the orchestrator in order work as a deepagents
+              sub-agent. In case we would completely migrate the orchestrator to use the agent-runner, we need
+              to consider this aspect carefully.
         Args:
             sub_agent_cfg: Result of _fetch_sub_agent_config() with agent_url.
-            prompt: The user message to process.
+            raw_a2a_messages: Original A2A messages with DataParts/TextParts intact.
+            prompt: Fallback text prompt (used when raw_a2a_messages is empty).
             user_access_token: User's token for auth (passed to SmartTokenInterceptor).
             scheduled_job_id: For logging.
             scheduled_job_run_id: ID of the scheduled job run.
@@ -1098,10 +1124,18 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             config=config,
         )
 
-        # Invoke via the A2A SubAgentInput interface
-        # The remote agent will use its natural A2A context_id as thread_id.
+        # Build HumanMessages from raw A2A messages (preserves DataParts + TextParts).
+        # _from_human_messages_to_a2a in A2AClientRunnable natively converts
+        # non_standard blocks → DataPart, text blocks → TextPart.
+        human_messages = _a2a_messages_to_human_messages(raw_a2a_messages)
+        if human_messages:
+            messages_input: list = human_messages
+        else:
+            # Fallback to plain text prompt
+            messages_input = [{"role": "user", "content": prompt}]
+
         input_data = SubAgentInput(
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages_input,
             scheduled_job_id=scheduled_job_id,
         )
         result_summary = await _collect_stream_text(runnable, input_data)

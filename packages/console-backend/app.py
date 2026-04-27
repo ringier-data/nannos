@@ -37,6 +37,7 @@ from rcplus_alloy_common.logging import (
     configure_existing_logger,
     configure_logger,
 )
+from sqlalchemy import text as sa_text
 from starlette.middleware.sessions import SessionMiddleware
 
 from playground_backend.config import config
@@ -51,6 +52,7 @@ from playground_backend.routers.admin_audit_router import router as admin_audit_
 from playground_backend.routers.admin_group_router import router as admin_group_router
 from playground_backend.routers.admin_user_router import router as admin_user_router
 from playground_backend.routers.auth_router import router as auth_router
+from playground_backend.routers.catalog_router import router as catalog_router
 from playground_backend.routers.conversation_router import router as conversation_router
 from playground_backend.routers.delivery_channel_router import router as delivery_channel_router
 from playground_backend.routers.file_router import router as file_router
@@ -135,6 +137,46 @@ async def shutdown_handler() -> None:
         logger.error(f"Error during shutdown: {e}", exc_info=True)
 
 
+# ── Agent URL sync at startup ────────────────────────────────────────────────
+# Maps env var → agent name seeded in migration 040.
+_REMOTE_AGENT_ENV_MAP: dict[str, str] = {
+    "VOICE_AGENT_URL": "voice-agent",
+    "AGENT_CREATOR_URL": "agent-creator",
+}
+
+
+async def _sync_remote_agent_urls() -> None:
+    """Update agent_url for system-owned remote agents from environment variables.
+
+    Called once during startup so that migration-seeded placeholder URLs are
+    replaced with the real service URLs configured in the environment.
+    """
+
+    session_factory = get_async_session_factory()
+    async with session_factory() as db:
+        for env_var, agent_name in _REMOTE_AGENT_ENV_MAP.items():
+            url = os.environ.get(env_var)
+            if not url:
+                logger.debug("Skipping agent URL sync for %s (env %s not set)", agent_name, env_var)
+                continue
+            result = await db.execute(
+                sa_text("""
+                    UPDATE sub_agent_config_versions cv
+                    SET agent_url = :url
+                    FROM sub_agents sa
+                    WHERE cv.sub_agent_id = sa.id
+                      AND sa.name = :name
+                      AND sa.owner_user_id = 'system'
+                      AND cv.version = sa.default_version
+                      AND cv.agent_url IS DISTINCT FROM :url
+                """),
+                {"url": url, "name": agent_name},
+            )
+            if result.rowcount:
+                logger.info("Synced agent_url for '%s' → %s", agent_name, url)
+        await db.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Lifespan context manager for startup and shutdown events."""
@@ -145,12 +187,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     logger.info("PostgreSQL database initialized")
 
+    # Sync system-owned remote agent URLs from environment variables
+    await _sync_remote_agent_urls()
+
     # Initialize services and store in app.state
     await initialize_services(app)
     logger.info("Services initialized")
 
     # Start scheduler engine
     await app.state.scheduler_engine.start()
+
+    # Start internal cost logger for catalog sync cost tracking
+    from playground_backend.services.llm_cost_tracking import _internal_cost_logger
+
+    if _internal_cost_logger is not None:
+        await _internal_cost_logger.start()
+        logger.info("Internal cost logger started")
 
     # Start connection pool cleanup task
     connection_pool.start_cleanup_task()
@@ -165,6 +217,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if hasattr(app.state, "scheduler_engine"):
         await app.state.scheduler_engine.stop()
         logger.info("Scheduler engine stopped")
+    if _internal_cost_logger is not None:
+        await _internal_cost_logger.shutdown()
+        logger.info("Internal cost logger stopped")
     await shutdown_handler()
     await cleanup_services(app)
     await close_db()
@@ -199,15 +254,15 @@ if config.is_local() or config.is_dev():
     )
 
 # Add Starlette's SessionMiddleware for OAuth state management
-# This is required by Authlib to store temporary OAuth state
-# Restricted to /api/v1/auth/ path since it's only used during OAuth flow
+# This is required by Authlib to store temporary OAuth state during login,
+# and by the catalog Google OAuth connect flow.
 app.add_middleware(
     SessionMiddleware,
     secret_key=config.secret_key,
     max_age=600,  # OAuth state expires in 10 minutes
     same_site="lax",
     https_only=not config.is_local(),
-    path="/api/v1/auth/",
+    path="/api/v1/",
 )
 
 # Add custom session middleware to load user from cookies
@@ -232,6 +287,7 @@ app.include_router(notification_router)
 # Scheduler router MUST be registered before FastApiMCP instantiation below
 app.include_router(scheduler_router)
 app.include_router(delivery_channel_router)
+app.include_router(catalog_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.
@@ -297,6 +353,11 @@ active_tasks: dict[str, ActiveTaskInfo] = {}
 # single message when the completion status arrives.
 # Intermediate output (with urn:nannos:a2a:intermediate-output:1.0 extensions) are NOT accumulated.
 _streaming_buffers: dict[str, str] = {}
+
+# Buffer for accumulating intermediate-output chunks (sub-agent thoughts) per conversation.
+# Keyed by "{context_id}:{agent_name}". Persisted when the conversation turn ends
+# (terminal status or main artifact last_chunk) so reasoning blocks survive page reload.
+_intermediate_buffers: dict[str, str] = {}
 
 
 # ==============================================================================
@@ -366,6 +427,54 @@ async def _deferred_connection_cleanup(sid: str) -> None:
 async def _emit_debug_log(sid: str, event_id: str, log_type: str, data: Any) -> None:
     """Helper to emit a structured debug log event to the client."""
     await sio.emit(SocketEvents.DEBUG_LOG, {"type": log_type, "data": data, "id": event_id}, to=sid)
+
+
+async def _flush_intermediate_buffers(
+    context_id: str,
+    messages_service: Any,
+    user_id: str,
+    task_id: str = "",
+) -> None:
+    """Persist accumulated intermediate-output buffers for a conversation.
+
+    Flushes all agent thought buffers matching the context_id prefix,
+    saving each as an artifact-update message with the intermediate-output
+    extension so the frontend can reconstruct reasoning blocks from history.
+    """
+    prefix = f"{context_id}:"
+    keys_to_flush = [k for k in _intermediate_buffers if k.startswith(prefix)]
+    for buf_key in keys_to_flush:
+        content = _intermediate_buffers.pop(buf_key)
+        if not content.strip():
+            continue
+        agent_name = buf_key.split(":", 1)[1] if ":" in buf_key else "unknown"
+        logger.info(
+            f"[STREAMING] Persisting intermediate output ({len(content)} chars) from {agent_name} "
+            f"for context {context_id}"
+        )
+        # Build a synthetic artifact-update payload with the intermediate-output extension
+        # so reconstructTimelineFromMessage can reconstruct the reasoning block
+        synthetic_payload = json.dumps(
+            {
+                "kind": "artifact-update",
+                "artifact": {
+                    "parts": [{"kind": "text", "text": content}],
+                    "extensions": ["urn:nannos:a2a:intermediate-output:1.0"],
+                    "metadata": {"agent_name": agent_name},
+                },
+            }
+        )
+        await messages_service.insert_message(
+            conversation_id=context_id,
+            user_id=user_id,
+            role="assistant",
+            parts=[{"kind": "text", "text": content}],
+            task_id=task_id,
+            state=TaskState.completed,
+            kind="artifact-update",
+            raw_payload=synthetic_payload,
+            metadata={"agent_name": agent_name},
+        )
 
 
 async def _process_a2a_response(
@@ -488,68 +597,100 @@ async def _process_a2a_response(
                                 f"Buffer size: {len(_streaming_buffers[effective_context_id])} chars"
                             )
                     else:
-                        # Log intermediate output for debugging
+                        # Accumulate intermediate output for persistence at turn end
                         parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
                         chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
-                        logger.info(
-                            f"[STREAMING] Intermediate output chunk ({len(chunk_text)} chars, last_chunk={is_last_chunk}): "
-                            f"{artifact_metadata.get('agent_name', 'unknown')} - preview: {chunk_text[:50]}..."
-                        )
-
-                # Persist accumulated content when the artifact stream closes
-                if is_last_chunk and effective_context_id in _streaming_buffers:
-                    accumulated = _streaming_buffers.pop(effective_context_id)
-                    if accumulated.strip():
-                        logger.info(
-                            f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) for context {effective_context_id}"
-                        )
-                        await messages_service.insert_message(
-                            conversation_id=effective_context_id,
-                            user_id=socket_session.user_id,
-                            role="assistant",
-                            parts=[{"kind": "text", "text": accumulated}],
-                            task_id=response_data.get("taskId", ""),
-                            state=TaskState.completed,
-                            kind="artifact-update",
-                        )
-                    else:
-                        logger.warning(
-                            f"[STREAMING] last_chunk=True but accumulated content is empty for context {effective_context_id}"
-                        )
-                elif is_last_chunk:
-                    logger.warning(
-                        f"[STREAMING] last_chunk=True but no buffer found for context {effective_context_id}. "
-                        f"kind={response_data.get('kind')}, append={response_data.get('append')}"
-                    )
-                # Safety net: persist any buffered content on terminal failure
-                # in case last_chunk was never sent (e.g. unhandled error)
-                elif not is_artifact_append:
-                    if status_state in ("failed", "canceled") and effective_context_id in _streaming_buffers:
-                        accumulated = _streaming_buffers.pop(effective_context_id)
-                        if accumulated.strip():
-                            await messages_service.insert_message(
-                                conversation_id=effective_context_id,
-                                user_id=socket_session.user_id,
-                                role="assistant",
-                                parts=[{"kind": "text", "text": accumulated}],
-                                task_id=response_data.get("taskId", ""),
-                                state=TaskState(status_state),
-                                kind="status-update",
+                        if chunk_text:
+                            agent_name = artifact_metadata.get("agent_name", "unknown")
+                            buf_key = f"{effective_context_id}:{agent_name}"
+                            _intermediate_buffers[buf_key] = _intermediate_buffers.get(buf_key, "") + chunk_text
+                            logger.info(
+                                f"[STREAMING] Intermediate output chunk ({len(chunk_text)} chars) from {agent_name}, "
+                                f"buffer: {len(_intermediate_buffers[buf_key])} chars"
                             )
 
-                # Save non-streaming responses to database
-                # Skip if:
-                # 1. is_work_plan - transient state updates
-                # 2. is_artifact_append - streaming chunks (saved when last_chunk arrives)
-                # 3. Terminal status without content - pure completion signal after streaming finished
-                is_terminal_status_only = (
+                # ── Flush buffers when the conversation turn ends ──
+                # A turn ends when: last_chunk arrives (normal streaming completion),
+                # or a non-streaming status indicates no more artifacts are coming.
+                _TURN_ENDING_STATES = ("completed", "failed", "canceled", "input-required")
+                is_turn_ending = is_last_chunk or (not is_artifact_append and status_state in _TURN_ENDING_STATES)
+
+                safety_net_saved = False
+                if is_turn_ending:
+                    task_id = response_data.get("taskId", "")
+
+                    # Flush intermediate-output buffers (sub-agent thoughts) BEFORE
+                    # the final response so DB ordering matches logical order.
+                    await _flush_intermediate_buffers(
+                        effective_context_id,
+                        messages_service,
+                        socket_session.user_id,
+                        task_id=task_id,
+                    )
+
+                    # Flush main streaming buffer if present.
+                    accumulated = _streaming_buffers.pop(effective_context_id, None)
+                    if accumulated is not None:
+                        if accumulated.strip():
+                            if is_last_chunk:
+                                # Normal completion: save assembled artifact content
+                                logger.info(
+                                    f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) "
+                                    f"for context {effective_context_id}"
+                                )
+                                await messages_service.insert_message(
+                                    conversation_id=effective_context_id,
+                                    user_id=socket_session.user_id,
+                                    role="assistant",
+                                    parts=[{"kind": "text", "text": accumulated}],
+                                    task_id=task_id,
+                                    state=TaskState.completed,
+                                    kind="artifact-update",
+                                )
+                            else:
+                                # Safety net: last_chunk never arrived (e.g. input-required,
+                                # unhandled error). Save what we had so content isn't lost.
+                                logger.info(
+                                    f"[STREAMING] Safety-net save ({len(accumulated)} chars, state={status_state}) "
+                                    f"for context {effective_context_id}"
+                                )
+                                await messages_service.insert_message(
+                                    conversation_id=effective_context_id,
+                                    user_id=socket_session.user_id,
+                                    role="assistant",
+                                    parts=[{"kind": "text", "text": accumulated}],
+                                    task_id=task_id,
+                                    state=TaskState(status_state),
+                                    kind="status-update",
+                                )
+                                safety_net_saved = True
+                        elif is_last_chunk:
+                            logger.warning(
+                                f"[STREAMING] last_chunk=True but accumulated content is empty "
+                                f"for context {effective_context_id}"
+                            )
+                    elif is_last_chunk:
+                        logger.warning(
+                            f"[STREAMING] last_chunk=True but no buffer found for context {effective_context_id}. "
+                            f"kind={response_data.get('kind')}, append={response_data.get('append')}"
+                        )
+
+                # ── Persist non-streaming responses ──
+                # Skip: work-plan (transient), artifact chunks (accumulated above),
+                # bare completion signals (no content to save), safety-net (already saved).
+                is_bare_completion_signal = (
                     response_data.get("kind") == "status-update"
                     and status_obj
                     and status_obj.get("state") in ("completed", "failed", "canceled")
-                    and not status_obj.get("message")  # No nested message content
+                    and not status_obj.get("message")
                 )
 
-                if not is_work_plan and not is_artifact_append and not is_terminal_status_only:
+                if (
+                    not is_work_plan
+                    and not is_artifact_append
+                    and not is_bare_completion_signal
+                    and not safety_net_saved
+                ):
                     await messages_service.save_agent_response(
                         response_data=response_data,
                         conversation_id=effective_context_id,
@@ -610,6 +751,42 @@ async def health_check() -> JSONResponse:
         },
         status_code=200,
     )
+
+
+# Pre-compute frontend config at module load — values come from env vars
+# and never change during the process lifetime.
+_frontend_config_response = config.frontend.build_response(
+    oidc_issuer=config.oidc.issuer,
+    orchestrator_base_domain=config.orchestrator.base_domain,
+)
+
+
+@app.get("/api/v1/config")
+async def get_frontend_config() -> JSONResponse:
+    """Public endpoint serving runtime configuration for the frontend SPA."""
+    return JSONResponse(
+        content=_frontend_config_response,
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.post("/api/internal/catalog-sync-progress")
+async def catalog_sync_progress(request: Request) -> JSONResponse:
+    """Internal webhook for the catalog-worker to relay sync progress via Socket.IO.
+
+    Not routed through the Gateway — only reachable within the K8s cluster.
+    No authentication required (internal service-to-service communication).
+    """
+    data = await request.json()
+    user_id = data.get("user_id")
+    if not user_id:
+        return JSONResponse(content={"error": "user_id required"}, status_code=400)
+
+    socket_mgr = getattr(request.app.state, "socket_notification_manager", None)
+    if socket_mgr:
+        await socket_mgr.emit_to_user(user_id, "catalog_sync_progress", data)
+
+    return JSONResponse(content={"ok": True}, status_code=200)
 
 
 @app.get("/api/v1/")

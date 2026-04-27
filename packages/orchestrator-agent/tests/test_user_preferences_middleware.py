@@ -87,27 +87,29 @@ class TestUserPreferencesMiddleware:
         """Should build addendum with English language preference."""
         addendum = middleware._build_preferences_addendum(user_context_en)
 
-        assert "**User Preferences:**" in addendum
+        assert "<user_preferences>" in addendum
+        assert "<language>" in addendum
         assert "English" in addendum
         assert "(en)" in addendum
-        assert "MUST respond in English" in addendum
+        assert "Respond in English" in addendum
 
     def test_build_preferences_addendum_with_german(self, middleware, user_context_de):
         """Should build addendum with German language preference."""
         addendum = middleware._build_preferences_addendum(user_context_de)
 
-        assert "**User Preferences:**" in addendum
+        assert "<user_preferences>" in addendum
+        assert "<language>" in addendum
         assert "German" in addendum
         assert "(de)" in addendum
-        assert "MUST respond in German" in addendum
+        assert "Respond in German" in addendum
 
     def test_build_preferences_addendum_with_empty_language(self, middleware, user_context_no_language):
         """Should return addendum with timezone but no language when language is empty."""
         addendum = middleware._build_preferences_addendum(user_context_no_language)
         # Should still include timezone info even without language
-        assert "**User Preferences:**" in addendum
-        assert "User Timezone" in addendum
-        assert "Response Language" not in addendum  # Language part should be skipped
+        assert "<user_preferences>" in addendum
+        assert "<timezone>" in addendum
+        assert "<language>" not in addendum  # Language part should be skipped
 
     def test_build_preferences_addendum_with_custom_prompt(self, middleware):
         """Should include custom_prompt in addendum when set."""
@@ -121,16 +123,16 @@ class TestUserPreferencesMiddleware:
         )
         addendum = middleware._build_preferences_addendum(user_context)
 
-        assert "**User Preferences:**" in addendum
-        assert "**Custom Instructions**" in addendum
+        assert "<user_preferences>" in addendum
+        assert "<custom_instructions>" in addendum
         assert "Always be concise and use bullet points." in addendum
 
     def test_build_preferences_addendum_without_custom_prompt(self, middleware, user_context_en):
         """Should not include custom_prompt section when not set."""
         addendum = middleware._build_preferences_addendum(user_context_en)
 
-        assert "**User Preferences:**" in addendum
-        assert "Custom Instructions" not in addendum
+        assert "<user_preferences>" in addendum
+        assert "<custom_instructions>" not in addendum
 
     def test_build_preferences_addendum_with_empty_custom_prompt(self, middleware):
         """Should not include custom_prompt section when set to empty string."""
@@ -144,8 +146,8 @@ class TestUserPreferencesMiddleware:
         )
         addendum = middleware._build_preferences_addendum(user_context)
 
-        assert "**User Preferences:**" in addendum
-        assert "Custom Instructions" not in addendum
+        assert "<user_preferences>" in addendum
+        assert "<custom_instructions>" not in addendum
 
     def test_wrap_model_call_appends_to_existing_prompt(self, middleware, user_context_de):
         """Should append preferences to existing system prompt."""
@@ -165,7 +167,7 @@ class TestUserPreferencesMiddleware:
         content_str = str(new_system_message.content)
         assert original_prompt in content_str
         assert "German" in content_str
-        assert "**User Preferences:**" in content_str
+        assert "<user_preferences>" in content_str
 
         # Verify handler was called with the modified request
         mock_handler.assert_called_once_with(mock_request.override.return_value)
@@ -243,7 +245,7 @@ class TestUserPreferencesMiddleware:
         """Should include note about preserving technical terms."""
         addendum = middleware._build_preferences_addendum(user_context_de)
 
-        assert "technical terms" in addendum
+        assert "Technical terms" in addendum
         assert "code" in addendum
         assert "tool names" in addendum
         assert "original form" in addendum

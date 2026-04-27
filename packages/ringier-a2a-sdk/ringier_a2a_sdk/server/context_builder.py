@@ -77,6 +77,7 @@ class AuthRequestContextBuilder(RequestContextBuilder):
             call_context.state["user_groups"] = user_context.get("groups", [])  # Groups for authorization
             call_context.state["sub_agent_config_hash"] = user_context.get("sub_agent_config_hash")  # For playground
             call_context.state["sub_agent_id"] = user_context.get("sub_agent_id")  # For cost tracking attribution
+            call_context.state["phone_number"] = user_context.get("phone_number")
 
             logger.debug(
                 "[ZERO-TRUST] Building RequestContext for verified "

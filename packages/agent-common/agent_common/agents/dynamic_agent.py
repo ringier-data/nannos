@@ -43,7 +43,11 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
-from ringier_a2a_sdk.utils.streaming import StreamBuffer, StructuredResponseStreamer, extract_text_from_content
+from ringier_a2a_sdk.utils.streaming import (
+    StreamBuffer,
+    StructuredResponseStreamer,
+    extract_text_from_content,
+)
 
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
@@ -274,26 +278,30 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if self.user_language:
             language_name = get_language_display_name(self.user_language)
             preferences_parts.append(
-                f"- **Response Language**: You MUST respond in {language_name} ({self.user_language}). "
-                f"All your responses, explanations, and communications with the user should be in {language_name}. "
-                f"However, technical terms, code, tool names, and API calls should remain in their original form."
+                f"<language>\n"
+                f"Respond in {language_name} ({self.user_language}). "
+                f"All responses, explanations, and communications should be in {language_name}. "
+                f"Technical terms, code, tool names, and API calls should remain in their original form.\n"
+                f"</language>"
             )
 
         # Timezone preference
         if self.user_timezone:
             preferences_parts.append(
-                f"- **User Timezone**: The user's timezone is {self.user_timezone}. "
-                f"When using the get_current_time tool, pass timezone='{self.user_timezone}' to get times in their local timezone."
+                f"<timezone>\n"
+                f"The user's timezone is {self.user_timezone}. "
+                f"When using the get_current_time tool, pass timezone='{self.user_timezone}' to get times in their local timezone.\n"
+                f"</timezone>"
             )
 
         # Custom prompt addendum from user settings
         if self.custom_prompt:
-            preferences_parts.append(f"- **Custom Instructions**: {self.custom_prompt}")
+            preferences_parts.append(f"<custom_instructions>\n{self.custom_prompt}\n</custom_instructions>")
 
         if not preferences_parts:
             return ""
 
-        addendum = "\n\n**User Preferences:**\n" + "\n".join(preferences_parts)
+        addendum = "\n\n<user_preferences>\n" + "\n".join(preferences_parts) + "\n</user_preferences>"
 
         logger.debug(
             f"DynamicLocalAgentRunnable: Built preferences addendum for {self.name}: "
@@ -420,6 +428,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         - read_personal_file: For accessing personal workspace files
         - docstore_export: For exporting files to S3
         - create_presigned_url: For creating S3 presigned URLs
+        - catalog_search: For searching Google Drive catalogs
 
         All tools are validated to ensure they have proper OpenAI schema format.
 
@@ -433,6 +442,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             "read_personal_file",
             "docstore_export",
             "create_presigned_url",
+            "catalog_search",
         ]
         essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
 

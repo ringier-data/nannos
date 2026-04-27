@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Save, Loader2, Settings as SettingsIcon, Shield, Bot, Wrench, Globe, Key } from 'lucide-react';
+import { Save, Loader2, Settings as SettingsIcon, Shield, Bot, Wrench, Globe, Key, Phone, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
+  getCurrentUserApiV1AuthMeGetOptions,
+  getCurrentUserApiV1AuthMeGetQueryKey,
   getCurrentUserSettingsApiV1AuthMeSettingsGetOptions,
   updateCurrentUserSettingsApiV1AuthMeSettingsPatchMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
@@ -18,7 +20,8 @@ import { UserPermissionsTable } from '@/components/settings/UserPermissionsTable
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
 import { SecretsVaultList } from '@/components/settings/SecretsVaultList';
 import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
-import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
+import { PhoneVerificationDialog } from '@/components/settings/PhoneVerificationDialog';
+import { MODEL_OPTIONS, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
 
 const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
@@ -44,7 +47,7 @@ const tabs: Tab[] = [
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
-  const { models: availableModels } = useAvailableModels();
+  const availableModels = MODEL_OPTIONS;
   const [activeTab, setActiveTab] = useState<TabId>('preferences');
   const [language, setLanguage] = useState<string>('en');
   const [timezone, setTimezone] = useState<string>('Europe/Zurich');
@@ -53,11 +56,19 @@ export function SettingsPage() {
   const [preferredModel, setPreferredModel] = useState<string | null>(null);
   const [enableThinking, setEnableThinking] = useState<boolean | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<OrchestratorThinkingLevel | null>(null);
+  const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
 
   const { data: settingsData, isLoading } = useQuery({
     ...getCurrentUserSettingsApiV1AuthMeSettingsGetOptions(),
   });
+
+  const { data: userData } = useQuery({
+    ...getCurrentUserApiV1AuthMeGetOptions(),
+  });
+
+  // Cast to access phone fields not yet in generated types
+  const currentUser = userData as Record<string, unknown> | undefined;
 
   const settings = settingsData?.data;
 
@@ -183,6 +194,7 @@ export function SettingsPage() {
         preferred_model: preferredModel,
         enable_thinking: shouldUseDefaults ? null : enableThinking,
         thinking_level: shouldUseDefaults ? null : thinkingLevel,
+
       },
     });
   };
@@ -315,6 +327,64 @@ export function SettingsPage() {
                 Select your timezone for accurate time-based queries (e.g., "tomorrow", "next week").
               </p>
             </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="phone-number" className="flex items-center gap-2">
+              <Phone className="h-4 w-4" />
+              Phone Number
+            </Label>
+            <div className="flex items-center gap-2 max-w-xs">
+              {currentUser?.phone_number ? (
+                <>
+                  <span className="text-sm font-mono">{currentUser.phone_number as string}</span>
+                  {currentUser?.phone_number_override && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      title="Remove override and use IdP number"
+                      onClick={async () => {
+                        try {
+                          const { client } = await import('@/api/generated/client.gen');
+                          await client.delete({ url: '/api/v1/auth/me/phone/override' });
+                          toast.success('Phone number override removed');
+                          queryClient.invalidateQueries({ queryKey: getCurrentUserApiV1AuthMeGetQueryKey() });
+                        } catch {
+                          toast.error('Failed to remove phone number override');
+                        }
+                      }}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  )}
+                  <Button variant="outline" size="sm" onClick={() => setVerifyDialogOpen(true)}>
+                    Change
+                  </Button>
+                </>
+              ) : (
+                <Button variant="outline" size="sm" onClick={() => setVerifyDialogOpen(true)}>
+                  Verify Phone Number
+                </Button>
+              )}
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Your phone number in E.164 format. Used by the voice agent to call you.
+              {currentUser?.phone_number_idp ? (
+                <span className="block mt-1 text-xs">
+                  Synced from your identity provider: {String(currentUser.phone_number_idp)}
+                  {currentUser.phone_number_override ? ' (overridden)' : ''}
+                </span>
+              ) : null}
+            </p>
+          </div>
+
+          <PhoneVerificationDialog
+            open={verifyDialogOpen}
+            onOpenChange={setVerifyDialogOpen}
+            onVerified={() => {
+              queryClient.invalidateQueries({ queryKey: getCurrentUserApiV1AuthMeGetQueryKey() });
+            }}
+          />
 
             <div className="space-y-2">
               <Label htmlFor="custom-prompt">Custom Prompt</Label>

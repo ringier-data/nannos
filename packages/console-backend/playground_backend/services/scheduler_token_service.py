@@ -162,9 +162,10 @@ class SchedulerTokenService:
 
         logger.debug("Refreshed access token for user %s", user_id)
         access_token = data["access_token"]
-        # exchange the token for orchestrator audience so agent-runner can call MCP tools on behalf of the user
-        # TODO: shall we provision an agent-runner specific client in Keycloak and use that client_id as audience here for better isolation?
-        token = await self.exchange_token(access_token, audience="orchestrator")
+        # Exchange for agent-runner audience so agent-runner's own OAuth client
+        # (OIDC_CLIENT_ID=agent-runner) can perform downstream token exchanges
+        # (e.g. agent-runner → voice-agent via SmartTokenInterceptor).
+        token = await self.exchange_token(access_token, audience="agent-runner")
         return token
 
     async def exchange_token(self, access_token: str, audience: str) -> str:

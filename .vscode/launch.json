@@ -11,7 +11,7 @@
       },
       "pathMappings": [
         {
-          "localRoot": "${workspaceFolder}/app/playground-backend",
+          "localRoot": "${workspaceFolder}/packages/console-backend",
           "remoteRoot": "."
         }
       ],
@@ -28,7 +28,7 @@
       },
       "pathMappings": [
         {
-          "localRoot": "${workspaceFolder}/app/orchestrator-agent",
+          "localRoot": "${workspaceFolder}/packages/orchestrator-agent",
           "remoteRoot": "."
         }
       ],
@@ -44,23 +44,7 @@
       },
       "pathMappings": [
         {
-          "localRoot": "${workspaceFolder}/app/agent-creator",
-          "remoteRoot": "."
-        }
-      ],
-      "justMyCode": false
-    },
-    {
-      "name": "Attach: Alloy Agent",
-      "type": "debugpy",
-      "request": "attach",
-      "connect": {
-        "host": "localhost",
-        "port": 5681
-      },
-      "pathMappings": [
-        {
-          "localRoot": "${workspaceFolder}/app/alloy-agent",
+          "localRoot": "${workspaceFolder}/packages/agent-creator",
           "remoteRoot": "."
         }
       ],
@@ -76,7 +60,23 @@
       },
       "pathMappings": [
         {
-          "localRoot": "${workspaceFolder}/app/agent-runner",
+          "localRoot": "${workspaceFolder}/packages/agent-runner",
+          "remoteRoot": "."
+        }
+      ],
+      "justMyCode": false
+    },
+    {
+      "name": "Attach: Voice Agent",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5683
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}/packages/voice-agent",
           "remoteRoot": "."
         }
       ],
@@ -87,7 +87,7 @@
       "type": "chrome",
       "request": "launch",
       "url": "http://localhost:5173",
-      "webRoot": "${workspaceFolder}/app/playground-frontend/src",
+      "webRoot": "${workspaceFolder}/packages/console-frontend/src",
       "sourceMapPathOverrides": {
         "webpack:///src/*": "${webRoot}/*"
       }
@@ -100,8 +100,8 @@
         "Attach: Backend",
         "Attach: Orchestrator",
         "Attach: Agent Creator",
-        "Attach: Alloy Agent",
         "Attach: Agent Runner",
+        "Attach: Voice Agent",
         "Attach: Frontend"
       ],
       "stopAll": true,
@@ -121,8 +121,8 @@
         "Attach: Backend",
         "Attach: Orchestrator",
         "Attach: Agent Creator",
-        "Attach: Alloy Agent",
-        "Attach: Agent Runner"
+        "Attach: Agent Runner",
+        "Attach: Voice Agent"
       ],
       "stopAll": true
     }

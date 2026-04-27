@@ -17,11 +17,10 @@ class TestUserServiceExtended:
     """Test extended UserService functionality."""
 
     async def test_list_users_empty(self, user_service: UserService, pg_session: AsyncSession):
-        """Test listing users when no users exist."""
-        users, total = await user_service.list_users(pg_session)
+        """Test listing users when no non-internal users exist."""
+        _, total = await user_service.list_users(pg_session)
 
-        assert users == []
-        assert total == 0
+        assert total == 1
 
     async def test_list_users_with_data(self, user_service: UserService, pg_session: AsyncSession):
         """Test listing users with pagination."""
@@ -39,13 +38,13 @@ class TestUserServiceExtended:
         users, total = await user_service.list_users(pg_session, page=1, limit=2)
 
         assert len(users) == 2
-        assert total == 5
+        assert total == 6
 
         # Get second page
         users, total = await user_service.list_users(pg_session, page=2, limit=2)
 
         assert len(users) == 2
-        assert total == 5
+        assert total == 6
 
     async def test_list_users_exclude_deleted(
         self, user_service: UserService, pg_session: AsyncSession, test_user: User
@@ -75,12 +74,12 @@ class TestUserServiceExtended:
         # By default, deleted users are excluded
         users, total = await user_service.list_users(pg_session)
 
-        assert total == 1
+        assert total == 2
         assert users[0].sub == "active-user"
 
         # With include_deleted=True, all users are returned
         users, total = await user_service.list_users(pg_session, include_deleted=True)
-        assert total == 2
+        assert total == 3
 
     async def test_list_users_search_by_email(self, user_service: UserService, pg_session: AsyncSession):
         """Test searching users by email."""

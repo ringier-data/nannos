@@ -19,6 +19,7 @@ from langchain_core.messages import (
     ContentBlock,
     FileContentBlock,
     ImageContentBlock,
+    NonStandardContentBlock,
     TextContentBlock,
     VideoContentBlock,
 )
@@ -102,7 +103,29 @@ def a2a_parts_to_content(
             continue
 
         if isinstance(inner, DataPart):
-            blocks.append(TextContentBlock(type="text", text=json.dumps(inner.data)))
+            # TODO: we assume is always application/json, but could be any structured data —
+            #       consider allowing explicit mime_type in DataPart
+            
+            # Try to JSON-serialise the data to ensure it's valid JSON; if this fails, fall back to a text block
+            try:
+                json.dumps(inner.data)
+            except (TypeError, ValueError):
+                blocks.append(
+                    TextContentBlock(
+                        type="text",
+                        text=str(inner.data),
+                    )
+                )
+                continue
+            blocks.append(
+                NonStandardContentBlock(
+                    type="non_standard",
+                    value={
+                        "media_type": "application/json",
+                        "data": inner.data,
+                    },
+                )
+            )
             continue
 
     return blocks

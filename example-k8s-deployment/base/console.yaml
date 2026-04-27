@@ -79,6 +79,20 @@ spec:
           value: "nannos-admin"
         - name: KEYCLOAK_GROUP_NAME_PREFIX # Freetext/optional:To support dev/stg/prod environments in 1 KeyCloak
           value: "${ENV}-"
+        - name: VOICE_AGENT_URL
+          value: "https://voice-agent.${BASE_DOMAIN}"
+        - name: AGENT_RUNNER_URL
+          value: "https://agent-runner.${BASE_DOMAIN}"
+        - name: AGENT_CREATOR_URL
+          value: "https://agent-creator.${BASE_DOMAIN}"
+        - name: LANGSMITH_ORGANIZATION_ID
+          value: ""
+        - name: LANGSMITH_PROJECT_ID
+          value: ""
+        - name: AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH
+          value: "500"
+        - name: AUTO_APPROVE_MAX_MCP_TOOLS_COUNT
+          value: "3"
         envFrom:
         - secretRef:
             name: console-secrets

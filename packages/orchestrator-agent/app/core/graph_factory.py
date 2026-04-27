@@ -63,10 +63,15 @@ logger = logging.getLogger(__name__)
 # This agent is invoked when the orchestrator delegates a "general-purpose" task.
 # It has access to MCP tools filtered by ToolsetSelectorMiddleware.
 GP_SYSTEM_PROMPT = (
+    "<role>\n"
     "You are a helpful general-purpose assistant with access to a curated set of tools "
-    "that have been selected as relevant to the current task. Use these tools to accomplish "
-    "the user's request thoroughly and accurately. When you're done, provide a clear and "
-    "complete summary of what was accomplished."
+    "that have been selected as relevant to the current task.\n"
+    "</role>\n"
+    "\n"
+    "<instructions>\n"
+    "Use the available tools to accomplish the user's request thoroughly and accurately. "
+    "When you're done, provide a clear and complete summary of what was accomplished.\n"
+    "</instructions>"
 )
 
 
@@ -597,7 +602,7 @@ class GraphFactory:
                 requires_response_tool = True
             else:
                 response_format = AutoStrategy(schema=FinalResponseSchema)
-        elif model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+        elif model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
             # Gemini models: use explicit FinalResponseSchema tool instead of AutoStrategy/ToolStrategy
             # because Gemini outputs structured JSON in content text rather than via tool_call_chunks
             response_format = None
@@ -610,7 +615,7 @@ class GraphFactory:
         # Add Google built-in tools for Gemini models
         # These are passed via the tools parameter so create_deep_agent can bind them
         # (bind_tools on the model directly returns a RunnableBinding which isn't a BaseChatModel)
-        if model_type in ("gemini-3-pro-preview", "gemini-3-flash-preview"):
+        if model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
             logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
             static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 

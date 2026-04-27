@@ -114,11 +114,33 @@ class TestMultiModal:
         assert result[0]["type"] == "image"
         assert result[0]["base64"] == "aW1hZ2VkYXRh"
 
-    def test_data_part_serialized_as_text_block(self):
+    def test_data_part_returns_non_standard_block(self):
         parts = [A2APart(root=DataPart(data={"key": "value"}))]
         result = a2a_parts_to_content(parts)
         assert isinstance(result, list)
-        assert result[0] == {"type": "text", "text": '{"key": "value"}'}
+        assert result[0] == {
+            "type": "non_standard",
+            "value": {"media_type": "application/json", "data": {"key": "value"}},
+        }
+    # TODO: currently it always becomes application/json, noted in a2a_parts_to_content
+    # def test_data_part_preserves_metadata_media_type(self):
+    #     parts = [A2APart(root=DataPart(data={"k": 1}, metadata={"media_type": "application/x-custom"}))]
+    #     result = a2a_parts_to_content(parts)
+    #     assert result[0] == {
+    #         "type": "non_standard",
+    #         "value": {"media_type": "application/x-custom", "data": {"k": 1}},
+    #     }
+
+    def test_data_part_non_serializable_falls_back_to_text(self):
+        """DataPart whose data cannot be JSON-serialised should become a TextContentBlock."""
+        from datetime import datetime
+
+        non_serializable = {"ts": datetime(2026, 1, 1)}
+        parts = [A2APart(root=DataPart(data=non_serializable))]
+        result = a2a_parts_to_content(parts)
+        assert len(result) == 1
+        assert result[0]["type"] == "text"
+        assert "2026" in result[0]["text"]
 
     def test_mixed_text_and_file(self):
         parts = [

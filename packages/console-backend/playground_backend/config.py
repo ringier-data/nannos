@@ -10,7 +10,7 @@ class OidcConfig(BaseModel):
 
     client_id: str = Field(default_factory=lambda: os.getenv("OIDC_CLIENT_ID", ""))
     client_secret: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("OIDC_CLIENT_SECRET", "")))
-    issuer: str = Field(default_factory=lambda: os.environ["OIDC_ISSUER"])
+    issuer: str = Field(default_factory=lambda: os.getenv("OIDC_ISSUER", ""))
     scope: str = Field(default="openid profile email offline_access")
 
 
@@ -102,6 +102,116 @@ class AutoApproveConfig(BaseModel):
     max_mcp_tools_count: int = Field(default_factory=lambda: int(os.getenv("AUTO_APPROVE_MAX_MCP_TOOLS_COUNT", "3")))
 
 
+class TwilioVerifyConfig(BaseModel):
+    """Twilio Verify configuration for phone number verification."""
+
+    account_sid: str = Field(default_factory=lambda: os.getenv("TWILIO_ACCOUNT_SID", ""))
+    api_key: str = Field(default_factory=lambda: os.getenv("TWILIO_VERIFY_API_KEY", ""))
+    api_secret: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("TWILIO_VERIFY_API_SECRET", "")))
+    verify_service_sid: str = Field(default_factory=lambda: os.getenv("TWILIO_VERIFY_SERVICE_SID", ""))
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Twilio Verify is fully configured."""
+        return bool(
+            self.account_sid and self.api_key and self.api_secret.get_secret_value() and self.verify_service_sid
+        )
+
+
+class LangsmithConfig(BaseModel):
+    """LangSmith configuration for frontend trace links."""
+
+    organization_id: str = Field(default_factory=lambda: os.getenv("LANGSMITH_ORGANIZATION_ID", ""))
+    project_id: str = Field(default_factory=lambda: os.getenv("LANGSMITH_PROJECT_ID", ""))
+
+
+class FrontendConfig(BaseModel):
+    """Configuration served to the frontend via GET /api/v1/config."""
+
+    langsmith: LangsmithConfig = Field(default_factory=LangsmithConfig)
+    auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
+
+    def build_response(self, *, oidc_issuer: str, orchestrator_base_domain: str) -> dict:
+        """Build the JSON response for GET /api/v1/config.
+
+        Derives keycloak and orchestrator URLs from existing backend config
+        so no additional env vars are needed.
+        """
+        # Derive keycloak base URL and realm from OIDC_ISSUER
+        # e.g. "https://login.example.com/realms/nannos" → base="https://login.example.com", realm="nannos"
+        keycloak_base_url = ""
+        keycloak_realm = ""
+        if "/realms/" in oidc_issuer:
+            base, realm = oidc_issuer.rsplit("/realms/", 1)
+            keycloak_base_url = base
+            keycloak_realm = realm
+
+        # Derive orchestrator URL with protocol detection (http for localhost, https otherwise)
+        domain = orchestrator_base_domain
+        if "localhost" in domain or "127.0.0.1" in domain:
+            orchestrator_url = f"http://{domain}"
+        else:
+            orchestrator_url = f"https://{domain}"
+
+        return {
+            "orchestratorUrl": orchestrator_url,
+            "keycloakBaseUrl": keycloak_base_url,
+            "keycloakRealm": keycloak_realm,
+            "langsmith": {
+                "organizationId": self.langsmith.organization_id,
+                "projectId": self.langsmith.project_id,
+            },
+            "autoApprove": {
+                "maxSystemPromptLength": self.auto_approve.max_system_prompt_length,
+                "maxMcpToolsCount": self.auto_approve.max_mcp_tools_count,
+            },
+        }
+
+
+class CatalogConfig(BaseModel):
+    """Catalog system configuration."""
+
+    google_oauth_client_id: str = Field(default_factory=lambda: os.getenv("GOOGLE_OAUTH_CLIENT_ID", ""))
+    google_oauth_client_secret: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", ""))
+    )
+    google_oauth_redirect_uri: str = Field(
+        default_factory=lambda: os.getenv(
+            "GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:5001/api/v1/catalogs/connect/callback"
+        )
+    )
+    thumbnails_s3_bucket: str = Field(
+        default_factory=lambda: os.getenv("CATALOG_THUMBNAILS_S3_BUCKET", "dev-nannos-catalog-thumbnails")
+    )
+    vector_bucket_name: str = Field(
+        default_factory=lambda: os.getenv("CATALOG_VECTOR_BUCKET_NAME", "dev-nannos-catalog-vectors")
+    )
+    vector_store_backend: str = Field(default_factory=lambda: os.getenv("CATALOG_VECTOR_STORE_BACKEND", "s3_vectors"))
+    kms_key_id: str = Field(
+        default_factory=lambda: os.getenv(
+            "CATALOG_TOKEN_KMS_KEY_ID", os.getenv("KMS_VAULT_KEY_ID", "alias/dev-nannos-sensitive-data-kms-key")
+        )
+    )
+    summarization_model_id: str = Field(
+        default_factory=lambda: os.getenv(
+            "CATALOG_SUMMARIZATION_MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
+    )
+    sync_interval_seconds: int = Field(default_factory=lambda: int(os.getenv("CATALOG_SYNC_INTERVAL_SECONDS", "86400")))
+    sync_tick_interval_seconds: int = Field(
+        default_factory=lambda: int(os.getenv("CATALOG_SYNC_TICK_INTERVAL_SECONDS", "300"))
+    )
+    sync_max_concurrent: int = Field(default_factory=lambda: int(os.getenv("CATALOG_SYNC_MAX_CONCURRENT", "3")))
+    auto_sync_enabled: bool = Field(
+        default_factory=lambda: os.getenv("CATALOG_AUTO_SYNC_ENABLED", "true").lower() == "true"
+    )
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if Google OAuth is fully configured for catalog connections."""
+        return bool(self.google_oauth_client_id and self.google_oauth_client_secret.get_secret_value())
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -119,6 +229,9 @@ class Config(BaseModel):
     file_storage: FileStorageConfig = Field(default_factory=FileStorageConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
+    twilio_verify: TwilioVerifyConfig = Field(default_factory=TwilioVerifyConfig)
+    catalog: CatalogConfig = Field(default_factory=CatalogConfig)
+    frontend: FrontendConfig = Field(default_factory=FrontendConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"

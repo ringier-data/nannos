@@ -29,6 +29,7 @@ class UsageRepository:
         sub_agent_config_version_id: int | None = None,
         langsmith_run_id: str | None = None,
         langsmith_trace_id: str | None = None,
+        catalog_id: str | None = None,
     ) -> int:
         """
         Create a usage log with billing unit details.
@@ -56,12 +57,12 @@ class UsageRepository:
             INSERT INTO usage_logs (
                 user_id, conversation_id, sub_agent_id, scheduled_job_id, sub_agent_config_version_id,
                 provider, model_name, total_cost_usd,
-                langsmith_run_id, langsmith_trace_id, invoked_at
+                langsmith_run_id, langsmith_trace_id, invoked_at, catalog_id
             )
             VALUES (
                 :user_id, :conversation_id, :sub_agent_id, :scheduled_job_id, :sub_agent_config_version_id,
                 :provider, :model_name, :total_cost_usd,
-                :langsmith_run_id, :langsmith_trace_id, :invoked_at
+                :langsmith_run_id, :langsmith_trace_id, :invoked_at, :catalog_id
             )
             RETURNING id
         """)
@@ -80,6 +81,7 @@ class UsageRepository:
                 "langsmith_run_id": langsmith_run_id,
                 "langsmith_trace_id": langsmith_trace_id,
                 "invoked_at": invoked_at,
+                "catalog_id": catalog_id,
             },
         )
         usage_log_id = result.scalar_one()
@@ -394,6 +396,50 @@ class UsageRepository:
         result = await db.execute(query, params)
         return [dict(row) for row in result.mappings()]
 
+    async def get_usage_by_service(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Get usage breakdown by service type (orchestrator, catalog, scheduler).
+
+        Classification logic:
+        - scheduled_job_id IS NOT NULL → 'scheduler'
+        - catalog_id IS NOT NULL AND conversation_id IS NULL → 'catalog'
+        - otherwise → 'orchestrator'
+        """
+        where_conditions = ["user_id = :user_id"]
+        params: dict[str, Any] = {"user_id": user_id}
+
+        if start_date:
+            where_conditions.append("invoked_at >= :start_date")
+            params["start_date"] = start_date
+
+        if end_date:
+            where_conditions.append("invoked_at < :end_date")
+            params["end_date"] = end_date
+
+        query = text(f"""
+            SELECT
+                CASE
+                    WHEN scheduled_job_id IS NOT NULL THEN 'scheduler'
+                    WHEN catalog_id IS NOT NULL AND conversation_id IS NULL THEN 'catalog'
+                    ELSE 'orchestrator'
+                END as service,
+                SUM(total_cost_usd) as total_cost_usd,
+                COUNT(*) as total_requests
+            FROM usage_logs
+            WHERE {" AND ".join(where_conditions)}
+            GROUP BY service
+            ORDER BY total_cost_usd DESC
+        """)
+
+        result = await db.execute(query, params)
+        return [dict(row) for row in result.mappings()]
+
     async def list_usage_logs(
         self,
         db: AsyncSession,
@@ -463,6 +509,7 @@ class UsageRepository:
                 u.*,
                 sa.name as sub_agent_name,
                 sj.name as scheduled_job_name,
+                c.name as catalog_name,
                 COALESCE(
                     json_agg(
                         json_build_object('billing_unit', t.billing_unit, 'unit_count', t.unit_count)
@@ -474,8 +521,9 @@ class UsageRepository:
             LEFT JOIN usage_billing_units t ON u.id = t.usage_log_id
             LEFT JOIN sub_agents sa ON u.sub_agent_id = sa.id AND sa.deleted_at IS NULL
             LEFT JOIN scheduled_jobs sj ON u.scheduled_job_id = sj.id
+            LEFT JOIN catalogs c ON u.catalog_id = c.id
             {where_clause}
-            GROUP BY u.id, sa.name, sj.name
+            GROUP BY u.id, sa.name, sj.name, c.name
             ORDER BY u.invoked_at DESC
             LIMIT :limit OFFSET :offset
         """)

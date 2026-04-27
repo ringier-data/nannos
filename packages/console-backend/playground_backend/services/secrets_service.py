@@ -205,7 +205,7 @@ class SecretsService:
                     Tags=[
                         {"Key": "owner_user_id", "Value": actor.id},
                         {"Key": "secret_type", "Value": data.secret_type.value},
-                        {"Key": "managed_by", "Value": "playground-backend"},
+                        {"Key": "managed_by", "Value": "agent-console-backend"},
                     ],
                 )
             logger.info(f"Created SSM parameter {ssm_parameter_name} for user {actor.id}")

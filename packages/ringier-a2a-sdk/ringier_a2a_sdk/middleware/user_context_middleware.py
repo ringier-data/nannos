@@ -79,6 +79,7 @@ class UserContextFromRequestStateMiddleware:
                 "user_sub": user_sub,  # OIDC subject identifier (can change with IDP migration)
                 "email": user_data.get("email"),
                 "name": user_data.get("name"),
+                "phone_number": user_data.get("phone_number"),
                 "token": user_data.get("token"),
                 "scopes": user_data.get("scopes", []),
                 "groups": user_data.get("groups", []),  # Groups from OIDC middleware

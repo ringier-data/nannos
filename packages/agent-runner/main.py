@@ -1,6 +1,6 @@
 """Agent Runner A2A Server - Entry point for executing scheduled sub-agent jobs.
 
-This service is called by the playground-backend scheduler engine to execute
+This service is called by the agent-console scheduler engine to execute
 automated sub-agent jobs. It follows the same A2A pattern as agent-creator and
 alloy-agent for consistency and zero-trust security.
 """
@@ -99,7 +99,7 @@ def create_app():
         name="Agent Runner",
         description=(
             "Internal service for executing scheduled automated sub-agent jobs. "
-            "Called by the playground-backend scheduler engine to perform watch "
+            "Called by the agent-console scheduler engine to perform watch "
             "condition evaluation, LangGraph agent execution, and push-notification "
             "delivery of results. Not intended for direct end-user interaction."
         ),
@@ -145,8 +145,8 @@ def create_app():
     app.add_middleware(SubAgentIdMiddleware)
 
     # JWTValidatorMiddleware validates the caller's JWT.
-    # The scheduler (playground-backend) calls agent-runner using an orchestrator-scoped
-    # token, so expected_azp must match the orchestrator client ID.
+    # The scheduler (agent-console) exchanges the user token for agent-runner
+    # audience, so expected_azp matches the scheduler's client ID.
     app.add_middleware(
         JWTValidatorMiddleware,
         issuer=oidc_issuer,

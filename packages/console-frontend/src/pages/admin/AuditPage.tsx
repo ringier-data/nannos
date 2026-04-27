@@ -51,6 +51,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   rate_card: 'Rate Card',
   scheduled_job: 'Scheduled Job',
   delivery_channel: 'Delivery Channel',
+  catalog: 'Catalog',
 };
 
 export function AuditPage() {
