@@ -384,119 +384,132 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
           in parallel.  Since the full folder tree is known, every folder
           can be queried simultaneously (bounded by a concurrency semaphore).
 
-        Each concurrent task builds its own Drive ``service`` because
-        ``httplib2.Http`` (used internally) is **not** thread-safe.
+        A fixed-size pool of Drive service objects is shared across tasks
+        so that at most ``_DRIVE_POOL_SIZE`` ``httplib2.Http`` instances
+        exist at any time, preventing OOM on large folder trees.
         """
         credentials = config["credentials"]
         folder_id = config["folder_id"]
         folder_name = config.get("folder_name", "")
         exclude_patterns = [p.lower() for p in config.get("exclude_folder_patterns", [])]
 
-        # Limit concurrent Drive API calls to avoid rate-limiting
-        sem = asyncio.Semaphore(10)
+        # Pool of reusable Drive service objects.  Each httplib2.Http is NOT
+        # thread-safe, so we let at most _DRIVE_POOL_SIZE tasks use the API
+        # concurrently — one service per task while it holds the slot.
+        _DRIVE_POOL_SIZE = 10
+        svc_pool: asyncio.Queue[Any] = asyncio.Queue(maxsize=_DRIVE_POOL_SIZE)
+        for _ in range(_DRIVE_POOL_SIZE):
+            svc_pool.put_nowait(_build_drive_service(credentials))
 
-        # -- Phase 1: BFS folder discovery (parallel per level) ------------
-        # folder_map maps every folder_id → its human-readable path
-        folder_map: dict[str, str] = {folder_id: folder_name}
-        current_level = [folder_id]
+        try:
+            # -- Phase 1: BFS folder discovery (parallel per level) --------
+            # folder_map maps every folder_id → its human-readable path
+            folder_map: dict[str, str] = {folder_id: folder_name}
+            current_level = [folder_id]
 
-        while current_level:
+            while current_level:
 
-            async def _list_child_folders(parent_id: str) -> list[dict]:
-                """Return child folder dicts for one parent."""
-                children: list[dict] = []
+                async def _list_child_folders(parent_id: str) -> list[dict]:
+                    """Return child folder dicts for one parent."""
+                    children: list[dict] = []
+                    page_token = None
+                    svc = await svc_pool.get()
+                    try:
+                        while True:
+                            request = svc.files().list(
+                                q=(
+                                    f"mimeType='application/vnd.google-apps.folder' "
+                                    f"and '{parent_id}' in parents and trashed=false"
+                                ),
+                                includeItemsFromAllDrives=True,
+                                supportsAllDrives=True,
+                                fields="nextPageToken, files(id, name)",
+                                pageSize=1000,
+                                pageToken=page_token,
+                            )
+                            result = await _run_in_executor(request.execute)
+                            children.extend(result.get("files", []))
+                            page_token = result.get("nextPageToken")
+                            if not page_token:
+                                break
+                    finally:
+                        svc_pool.put_nowait(svc)
+                    return children
+
+                # Query all parents in this level in parallel (bounded by pool size)
+                level_results = await asyncio.gather(*[_list_child_folders(pid) for pid in current_level])
+
+                next_level: list[str] = []
+                for parent_id, children in zip(current_level, level_results):
+                    parent_path = folder_map[parent_id]
+                    for child in children:
+                        name_lower = child["name"].lower()
+                        if exclude_patterns and any(pat in name_lower for pat in exclude_patterns):
+                            logger.debug("Excluding folder %s (matched exclusion pattern)", child["name"])
+                            continue
+                        child_path = f"{parent_path}/{child['name']}" if parent_path else child["name"]
+                        folder_map[child["id"]] = child_path
+                        next_level.append(child["id"])
+                current_level = next_level
+
+                if progress_callback:
+                    await progress_callback(f"Discovering folders... ({len(folder_map):,} found)")
+
+            logger.info(
+                "Discovered %d folders under %s (%s)",
+                len(folder_map),
+                folder_name,
+                folder_id,
+            )
+
+            # -- Phase 2: List files from ALL folders in parallel ----------
+            mime_clauses = " or ".join(f"mimeType='{mt}'" for mt in SUPPORTED_MIME_TYPES)
+            file_count = 0  # shared counter — safe because only one asyncio task runs at a time
+
+            async def _list_files_in_folder(fid: str) -> list[SourceFile]:
+                """List eligible (non-folder) files in a single folder."""
+                nonlocal file_count
+                fpath = folder_map[fid]
+                found: list[SourceFile] = []
                 page_token = None
-                # Each concurrent task gets its own service (httplib2 is not thread-safe)
-                svc = _build_drive_service(credentials)
-                while True:
-                    async with sem:
+                svc = await svc_pool.get()
+                try:
+                    while True:
                         request = svc.files().list(
-                            q=(
-                                f"mimeType='application/vnd.google-apps.folder' "
-                                f"and '{parent_id}' in parents and trashed=false"
-                            ),
+                            q=f"({mime_clauses}) and '{fid}' in parents and trashed=false",
                             includeItemsFromAllDrives=True,
                             supportsAllDrives=True,
-                            fields="nextPageToken, files(id, name)",
-                            pageSize=1000,
+                            fields=f"nextPageToken, files({_DRIVE_FILE_FIELDS})",
+                            pageSize=100,
                             pageToken=page_token,
                         )
                         result = await _run_in_executor(request.execute)
-                    children.extend(result.get("files", []))
-                    page_token = result.get("nextPageToken")
-                    if not page_token:
-                        break
-                return children
+                        for f in result.get("files", []):
+                            found.append(self._make_source_file(f, fpath))
+                        page_token = result.get("nextPageToken")
+                        if not page_token:
+                            break
+                finally:
+                    svc_pool.put_nowait(svc)
+                file_count += len(found)
+                if progress_callback:
+                    await progress_callback(f"Listing files... ({file_count:,} found)")
+                return found
 
-            # Query all parents in this level in parallel
-            level_results = await asyncio.gather(*[_list_child_folders(pid) for pid in current_level])
+            file_results = await asyncio.gather(*[_list_files_in_folder(fid) for fid in folder_map])
+            all_files = [f for batch in file_results for f in batch]
 
-            next_level: list[str] = []
-            for parent_id, children in zip(current_level, level_results):
-                parent_path = folder_map[parent_id]
-                for child in children:
-                    name_lower = child["name"].lower()
-                    if exclude_patterns and any(pat in name_lower for pat in exclude_patterns):
-                        logger.debug("Excluding folder %s (matched exclusion pattern)", child["name"])
-                        continue
-                    child_path = f"{parent_path}/{child['name']}" if parent_path else child["name"]
-                    folder_map[child["id"]] = child_path
-                    next_level.append(child["id"])
-            current_level = next_level
-
-            if progress_callback:
-                await progress_callback(f"Discovering folders... ({len(folder_map):,} found)")
-
-        logger.info(
-            "Discovered %d folders under %s (%s)",
-            len(folder_map),
-            folder_name,
-            folder_id,
-        )
-
-        # -- Phase 2: List files from ALL folders in parallel --------------
-        mime_clauses = " or ".join(f"mimeType='{mt}'" for mt in SUPPORTED_MIME_TYPES)
-        file_count = 0  # shared counter — safe because only one asyncio task runs at a time
-
-        async def _list_files_in_folder(fid: str) -> list[SourceFile]:
-            """List eligible (non-folder) files in a single folder."""
-            nonlocal file_count
-            fpath = folder_map[fid]
-            found: list[SourceFile] = []
-            page_token = None
-            # Each concurrent task gets its own service (httplib2 is not thread-safe)
-            svc = _build_drive_service(credentials)
-            while True:
-                async with sem:
-                    request = svc.files().list(
-                        q=f"({mime_clauses}) and '{fid}' in parents and trashed=false",
-                        includeItemsFromAllDrives=True,
-                        supportsAllDrives=True,
-                        fields=f"nextPageToken, files({_DRIVE_FILE_FIELDS})",
-                        pageSize=100,
-                        pageToken=page_token,
-                    )
-                    result = await _run_in_executor(request.execute)
-                for f in result.get("files", []):
-                    found.append(self._make_source_file(f, fpath))
-                page_token = result.get("nextPageToken")
-                if not page_token:
-                    break
-            file_count += len(found)
-            if progress_callback:
-                await progress_callback(f"Listing files... ({file_count:,} found)")
-            return found
-
-        file_results = await asyncio.gather(*[_list_files_in_folder(fid) for fid in folder_map])
-        all_files = [f for batch in file_results for f in batch]
-
-        logger.info(
-            "Listed %d files from shared folder %s (%s)",
-            len(all_files),
-            folder_name,
-            folder_id,
-        )
-        return all_files
+            logger.info(
+                "Listed %d files from shared folder %s (%s)",
+                len(all_files),
+                folder_name,
+                folder_id,
+            )
+            return all_files
+        finally:
+            # Close all pooled service objects to release HTTP connections.
+            while not svc_pool.empty():
+                svc_pool.get_nowait().close()
 
     @staticmethod
     def _make_source_file(f: dict, folder_path: str) -> SourceFile:
