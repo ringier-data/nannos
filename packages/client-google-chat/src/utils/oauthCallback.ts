@@ -2,6 +2,15 @@ import { Logger } from '../utils/logger.js';
 import { UserAuthService } from '../services/userAuthService.js';
 import type { IOAuthStateStore } from '../storage/types.js';
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Handle OAuth callback
  */
@@ -77,6 +86,7 @@ export async function handleOAuthCallback(
  * Generate HTML response for OAuth callback
  */
 export function generateCallbackHTML(success: boolean, message: string): string {
+  const safeMessage = escapeHtml(message);
   if (success) {
     return `
 <!DOCTYPE html>
@@ -90,7 +100,7 @@ export function generateCallbackHTML(success: boolean, message: string): string 
   <pre>
 ✅ Authorization Successful!
 
-${message}
+${safeMessage}
 
 You can close this window now. It will close automatically in 5 seconds.
 
@@ -136,7 +146,7 @@ Puoi chiudere questa finestra ora. Si chiuderà automaticamente tra 5 secondi.
   <pre>
 ❌ Authorization Failed
 
-${message}
+${safeMessage}
 
 Please try again by sending another email.
 
@@ -144,7 +154,7 @@ Please try again by sending another email.
 
 ❌ Autorisierung fehlgeschlagen
 
-${message}
+${safeMessage}
 
 Bitte versuchen Sie es erneut, indem Sie eine neue E-Mail senden.
 
@@ -152,7 +162,7 @@ Bitte versuchen Sie es erneut, indem Sie eine neue E-Mail senden.
 
 ❌ Échec de l'autorisation
 
-${message}
+${safeMessage}
 
 Veuillez réessayer en envoyant un autre e-mail.
 
@@ -160,7 +170,7 @@ Veuillez réessayer en envoyant un autre e-mail.
 
 ❌ Autorizzazione fallita
 
-${message}
+${safeMessage}
 
 Riprova inviando un'altra e-mail.
   </pre>
