@@ -66,6 +66,10 @@ _AWS_REGION = os.environ.get("AWS_REGION", "eu-central-1")
 FILE_CONCURRENCY = int(os.environ.get("CATALOG_FILE_CONCURRENCY", "5"))
 THUMB_CONCURRENCY = int(os.environ.get("CATALOG_THUMB_CONCURRENCY", "10"))
 S3_CONCURRENCY = int(os.environ.get("CATALOG_S3_CONCURRENCY", "10"))
+# Maximum concurrent thumbnail render pipelines (download + soffice + poppler).
+# Each pipeline can consume 300-800 MB (file bytes + LibreOffice + PIL rendering),
+# so this must be lower than FILE_CONCURRENCY to avoid OOM.
+RENDER_CONCURRENCY = int(os.environ.get("CATALOG_RENDER_CONCURRENCY", "2"))
 
 # --- File size limits ---
 # Files exceeding these limits are marked as "skipped" and not processed.
@@ -202,6 +206,9 @@ class CatalogSyncPipeline:
         )
         self._s3_session = aiobotocore.session.get_session()
         self._cost_logger = cost_logger
+        # Render semaphore — bounds how many files do the heavy
+        # download + soffice + poppler thumbnail pipeline concurrently.
+        self._render_semaphore = asyncio.Semaphore(RENDER_CONCURRENCY)
         # Per-job state — keyed by sync_job_id to isolate concurrent syncs
         self._job_state: dict[str, _SyncJobState] = {}
         # Bedrock client for summarization (Claude Haiku)
@@ -878,13 +885,14 @@ class CatalogSyncPipeline:
         t0 = time.monotonic()
         changed_page_list = [page for page, _ in changed_pages_info]
         all_thumbnails: dict[int, bytes] = {}
-        try:
-            all_thumbnails = await _retry_async(
-                lambda: self._adapter.get_all_thumbnails(file, changed_page_list, credentials),
-                operation=f"get_all_thumbnails({file.name})",
-            )
-        except Exception:
-            logger.warning("Failed to get thumbnails for %s, continuing without", file.name, exc_info=True)
+        async with self._render_semaphore:
+            try:
+                all_thumbnails = await _retry_async(
+                    lambda: self._adapter.get_all_thumbnails(file, changed_page_list, credentials),
+                    operation=f"get_all_thumbnails({file.name})",
+                )
+            except Exception:
+                logger.warning("Failed to get thumbnails for %s, continuing without", file.name, exc_info=True)
         logger.info("thumbnails(%s): %d thumbs in %.1fs", file.name, len(all_thumbnails), time.monotonic() - t0)
 
         # --- Concurrent S3 thumbnail uploads ---
@@ -913,6 +921,10 @@ class CatalogSyncPipeline:
         upload_results = await asyncio.gather(
             *[_upload_thumbnail_for_page(page, ch) for page, ch in changed_pages_info]
         )
+
+        # Free the bulk thumbnail dict — individual bytes are still
+        # referenced in upload_results tuples for vector indexing.
+        del all_thumbnails
 
         # --- Batch DB upserts (single multi-row INSERT) ---
         await self._batch_upsert_catalog_pages(

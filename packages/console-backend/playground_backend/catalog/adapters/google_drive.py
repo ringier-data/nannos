@@ -598,6 +598,7 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
                     try:
                         pptx_bytes = await self._export_as_pptx(file.id, credentials)
                         pdf_bytes = await _convert_office_to_pdf(pptx_bytes, suffix=".pptx")
+                        del pptx_bytes  # free PPTX buffer before rendering
                     except Exception as pptx_exc:
                         logger.warning(
                             "PPTX fallback also failed for %s, because of `%s`, falling back to Slides API thumbnails",
@@ -618,6 +619,7 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         elif file.mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
             pptx_bytes = await self._download_file(file.id, credentials)
             pdf_bytes = await _convert_office_to_pdf(pptx_bytes, suffix=".pptx")
+            del pptx_bytes  # free PPTX buffer before rendering
         else:
             pdf_bytes = await self._download_file(file.id, credentials)
 
@@ -628,6 +630,7 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         try:
             pdf_tmpfile.write(pdf_bytes)
             pdf_tmpfile.close()
+            del pdf_bytes  # free PDF buffer before poppler rendering
 
             # Render pages in batches to bound peak memory.
             # Each batch spawns poppler for a page range, converts to PIL,
