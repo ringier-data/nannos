@@ -434,6 +434,30 @@ deploy-prod pkg="":
       exit 1
     fi
 
+    # Validate gitops repo is on main and up-to-date
+    pushd "$GITOPS_DIR" > /dev/null
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$CURRENT_BRANCH" != "main" ]]; then
+      printf "${RED}❌ gitops repo is on branch '%s', expected 'main'${RESET}\n" "$CURRENT_BRANCH"
+      exit 1
+    fi
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+      printf "${RED}❌ gitops repo has uncommitted changes${RESET}\n"
+      printf "   Run: ${DIM}cd %s && git status${RESET}\n" "$GITOPS_DIR"
+      exit 1
+    fi
+    git fetch origin main --quiet
+    LOCAL_SHA=$(git rev-parse HEAD)
+    REMOTE_SHA=$(git rev-parse origin/main)
+    if [[ "$LOCAL_SHA" != "$REMOTE_SHA" ]]; then
+      printf "${RED}❌ gitops repo is not up-to-date with origin/main${RESET}\n"
+      printf "   Local:  %s\n" "$LOCAL_SHA"
+      printf "   Remote: %s\n" "$REMOTE_SHA"
+      printf "   Run: ${DIM}cd %s && git pull${RESET}\n" "$GITOPS_DIR"
+      exit 1
+    fi
+    popd > /dev/null
+
     # Determine packages to deploy
     if [[ -n "{{ pkg }}" ]]; then
       PACKAGES=("{{ pkg }}")
