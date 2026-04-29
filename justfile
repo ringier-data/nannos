@@ -200,6 +200,12 @@ release bump="":
       done
     done
 
+    # Phase 4: Push git commit and tags to remote
+    trap - ERR  # Clear rollback — images are already pushed
+    printf "${CYAN}🚀 Pushing release commit and tags...${RESET}"
+    git push && git push --tags
+    printf "${GREEN} ✓${RESET}\n"
+
 # Release a single package (bump version, commit, tag, build, push)
 release-pkg pkg bump="":
     #!/usr/bin/env bash
@@ -256,6 +262,12 @@ release-pkg pkg bump="":
     if [[ -n "$IMAGE" ]]; then
       just push=true build-pkg "$PKG"
     fi
+
+    # Phase 4: Push git commit and tag to remote
+    trap - ERR  # Clear rollback — image is already pushed
+    printf "${CYAN}🚀 Pushing release commit and tag...${RESET}"
+    git push && git push --tags
+    printf "${GREEN} ✓${RESET}\n"
 
 # ─── Docker Build & Push ──────────────────────────────────────────
 
