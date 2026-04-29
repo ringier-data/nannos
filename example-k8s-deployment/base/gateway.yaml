@@ -110,6 +110,20 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
+  name: client-google-chat-route
+spec:
+  parentRefs:
+    - name: nannos-gateway
+  hostnames:
+    - "google-chat.${BASE_DOMAIN}"
+  rules:
+    - backendRefs:
+        - name: client-google-chat
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
   name: client-slack-route
 spec:
   parentRefs:

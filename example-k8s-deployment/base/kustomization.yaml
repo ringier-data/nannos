@@ -11,3 +11,4 @@ resources:
   - ./orchestrator.yaml
   - ./client-slack.yaml
   - ./client-email.yaml
+  - ./client-google-chat.yaml

@@ -1,0 +1,30 @@
+{
+  "extends": "@tsconfig/node20/tsconfig.json",
+  "compilerOptions": {
+    "incremental": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "allowJs": false,
+    "declaration": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "checkJs": false,
+    "esModuleInterop": true,
+    "sourceMap": true,
+    "module": "NodeNext",
+    "resolveJsonModule": true,
+    "moduleResolution": "NodeNext",
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "useUnknownInCatchVariables": false,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noImplicitAny": false,
+    "noFallthroughCasesInSwitch": true,
+    "rootDir": ".",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*", "test/**/*", "./jest.config.ts"]
+}
