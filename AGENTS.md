@@ -22,7 +22,7 @@ This is a monorepo for **Nannos** — a multi-agent AI orchestration platform bu
 ### Architecture
 
 ```
-Clients (console-frontend, client-slack, client-email)
+Clients (console-frontend, client-slack, client-email, client-google-chat)
     │ REST/WS/A2A
     ▼
 Console Backend (admin hub, API, scheduler)
@@ -48,6 +48,7 @@ Sub-Agents (agent-creator, agent-runner, user-created agents)
 | `client-slack` | Node/TS | A2A Svc | 3000 | Slack bot (Bolt framework + Koa REST). Per-user OIDC auth, thread context forwarding |
 | `client-slack-frontend` | React/TS | SPA | 8080 | Slack admin config UI |
 | `client-email` | Node/TS | A2A Svc | 3001 | Email client via AWS SES/SNS. Express 5 |
+| `client-google-chat` | Node/TS | A2A Svc | 3000 | Google Chat bot. Express 5, per-user OIDC auth |
 | `playground-frontend` | — | — | — | Placeholder/unused |
 
 ### Dependency Chain
@@ -57,7 +58,7 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
                                               ↕ A2A
                                       console-backend
                                      ↕ REST        ↕ A2A
-                              console-frontend    client-slack, client-email
+                              console-frontend    client-slack, client-email, client-google-chat
 ```
 
 ### Key Design Decisions
@@ -71,8 +72,8 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
 
 ### Infrastructure Requirements
 
-- **PostgreSQL**: `console` schema (pgcrypto), `docstore` schema (pgvector) shared by agents, `slack_client` and `email_client` schemas
-- **Auth**: Keycloak (or any OIDC provider). Per-service OIDC clients: `orchestrator`, `agent-console`, `slack-client`, `email-client`
+- **PostgreSQL**: `console` schema (pgcrypto), `docstore` schema (pgvector) shared by agents, `slack_client`, `email_client`, and `google_chat_client` schemas
+- **Auth**: Keycloak (or any OIDC provider). Per-service OIDC clients: `orchestrator`, `agent-console`, `slack-client`, `email-client`, `google-chat-client`
 - **AWS** (production): DynamoDB (checkpoints), S3 (files), SES (email), Secrets Manager, SSM
 - **LLM providers**: Local (OpenAI-compatible), AWS Bedrock, Azure OpenAI, Google Vertex AI — configurable via env vars
 - **Optional**: MCP Gateway (tool extensions), LangSmith (tracing)

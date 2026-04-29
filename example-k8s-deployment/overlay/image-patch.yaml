@@ -67,3 +67,14 @@ spec:
       containers:
       - name: backend
         image: ghcr.io/ringier-data/nannos-client-email:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-google-chat
+spec:
+  template:
+    spec:
+      containers:
+      - name: backend
+        image: ghcr.io/ringier-data/nannos-client-google-chat:latest

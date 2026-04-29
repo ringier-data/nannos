@@ -3,22 +3,22 @@
 An enterprise-grade multi-agent AI platform built on the [Agent-to-Agent (A2A) protocol](https://google.github.io/A2A/). Users interact through web or messaging clients; a central orchestrator plans tasks and delegates work to specialized sub-agents.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Clients                                                        │
-│  ┌──────────────────┐   ┌──────────────┐   ┌───────────────┐    │
-│  │  Console Frontend│   │ Client Slack │   │ Client Email  │    │
-│  └────────┬─────────┘   └──────┬───────┘   └──────┬────────┘    │
-└───────────┼────────────────────┼──────────────────┼─────────────┘
-            │ REST / WS          │ A2A              │ A2A
-            ▼                   ▼                 ▼
-┌───────────────────┐A2A ┌──────────────────────────────────────┐
-│  Console Backend  │◄─--│          Orchestrator Agent          │
-│  (API + Scheduler)│    │  (LangGraph — plans & delegates)     │
-└───────────────────┘    └──────────────┬───────────────────────┘
-                                        │ A2A    
-                              ┌─────────▼───┐  
-                              │ Sub Agents  │   
-                              └─────────────┘ 
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│  Clients                                                                         │
+│  ┌──────────────────┐   ┌──────────────┐   ┌───────────────┐  ┌───────────────┐  │
+│  │  Console Frontend│   │ Client Slack │   │ Client Email  │  │ Google Chat   │  │
+│  └────────┬─────────┘   └──────┬───────┘   └──────┬────────┘  └──────┬────────┘  │
+└───────────┼────────────────────┼──────────────────┼──────────────────┼───────────┘
+            │ REST / WS          │ A2A              │ A2A              │ A2A
+            ▼                    ▼                  ▼                  ▼
+┌───────────────────┐A2A ┌────────────────────────────────────────────────┐
+│  Console Backend  │◄─--│                  Orchestrator Agent            │
+│  (API + Scheduler)│    │            (LangGraph — plans & delegates)     │
+└───────────────────┘    └──────────────────────────┬─────────────────────┘
+                                                    │ A2A    
+                                          ┌─────────▼───┐  
+                                          │ Sub Agents  │   
+                                          └─────────────┘ 
 
 ```
 
@@ -82,6 +82,16 @@ just start-local
     + AWS SES
   </td>
 </tr>
+<tr>
+  <td valign="top">+ Google Chat</td>
+  <td valign="top">
+    • Google Chat Client
+  </td>
+  <td valign="top">
+    + Google Chat Client OIDC Client<br>
+    + GCP Service Account
+  </td>
+</tr>
 </table>
 
 ## External Dependencies
@@ -118,6 +128,7 @@ The following components executes SQL DB migrations on start-up and we recommend
 * Console Backend
 * Slack Client
 * Email Client
+* Google Chat Client
 
 | Component | PG database/schema | Shared | Need Schema Owner |
 | - | - | - |- |
@@ -127,6 +138,7 @@ The following components executes SQL DB migrations on start-up and we recommend
 | Console | console | | ✅ |
 | Slack Client | slack client  | | ✅ |
 | Email Client | email client | | ✅ |
+| Google Chat Client | google chat client | | ✅ |
 
 
 ## Components
@@ -149,6 +161,7 @@ The following components executes SQL DB migrations on start-up and we recommend
 | `ghcr.io/ringier-data/nannos-client-slack` | Slack A2A Client | 3000 |
 | `ghcr.io/ringier-data/nannos-client-slack-frontend` | Slack Admin Management Frontend (React SPA) | 8080 |
 | `ghcr.io/ringier-data/nannos-client-email` | Email A2A Client | 3000 |
+| `ghcr.io/ringier-data/nannos-client-google-chat` | Google Chat A2A Client | 3000 |
 
 ### Sub-Agents
 | Image | Purpose | Port |
@@ -282,6 +295,28 @@ Full reference: [`packages/client-email/.env.example`](packages/client-email/.en
 | `OIDC_CLIENT_ID` | Keycloak client ID for this service |
 | `OIDC_CLIENT_SECRET` | Client secret |
 | `A2A_SERVER_URL` | Full URL of the orchestrator A2A endpoint |
+
+---
+
+### `nannos-client-google-chat`
+
+Full reference: [`packages/client-google-chat/.env.example`](packages/client-google-chat/.env.example)
+
+| Variable | Description |
+|----------|-------------|
+| `ENVIRONMENT` | Deployment environment: `local`, `dev`, `stg`, or `prod` |
+| `BASE_URL` | Google chat serve url |
+| `OIDC_ISSUER_URL` | OIDC issuer URL |
+| `OIDC_CLIENT_ID` | Keycloak client ID for this service |
+| `OIDC_CLIENT_SECRET` | Client secret |
+| `A2A_SERVER_URL` | Full URL of the orchestrator A2A endpoint |
+| `GCP_CHAT_PROJECTS` | JSON array of Google Chat project configs |
+| `GCP_SA_JSON_KEY_*` | GCP service account key JSON (one per project) |
+| `GOOGLE_CHAT_TOKEN_EXPECTED_AUDIENCE` | Google chat expected audience in events token |
+| `POSTGRES_HOST` | PostgreSQL hostname |
+| `POSTGRES_PASSWORD` | Postgres password |
+| `POSTGRES_USER` | Postgres user |
+| `POSTGRES_DB` | Postgres database |
 
 ---
 

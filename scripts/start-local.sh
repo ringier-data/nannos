@@ -222,6 +222,7 @@ else
 fi
 printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} DB migrations   ${DIM}(Rambler, auto-applied)${RESET}\n"
 printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slack (FE+BE)   ${DIM}(Docker)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Google Chat     ${DIM}(Node.js)${RESET}\n"
 
 printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 
@@ -1037,6 +1038,11 @@ procs:
   slack:
     cwd: "$ROOT_DIR/packages/client-slack"
     shell: "just start 2>&1 | tee $_LOG_DIR/slack.log"
+    stop: "SIGKILL"
+
+  google-chat:
+    cwd: "$ROOT_DIR/packages/client-google-chat"
+    shell: "npm run dev"
     stop: "SIGKILL"
 YAML
 

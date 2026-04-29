@@ -1,0 +1,93 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: client-google-chat
+  labels:
+    app: client-google-chat
+    app.kubernetes.io/part-of: nannos
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-google-chat
+  labels:
+    app: client-google-chat
+    app.kubernetes.io/part-of: nannos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: client-google-chat
+  template:
+    metadata:
+      labels:
+        app: client-google-chat
+    spec:
+      serviceAccountName: client-google-chat
+      containers:
+      - name: backend
+        ports:
+        - containerPort: 8080
+        env:
+        - name: "ENVIRONMENT"
+          value: "${ENV}"
+        - name: "APP_PORT"
+          value: "8080"
+        - name: "HTTP_IDLE_CONNECTION_KEEP_ALIVE_TIMEOUT"
+          value: "60"
+        - name: "BASE_URL"
+          value: "https://google-chat.${BASE_DOMAIN}"
+        - name: "STORAGE_PROVIDER"
+          value: "postgres"
+        - name: "POSTGRES_HOST"
+          value: "${POSTGRES_HOST}"
+        - name: "POSTGRES_PORT"
+          value: "5432"
+        - name: "POSTGRES_USER"
+          value: "googlechat_client"
+        - name: "POSTGRES_DB"
+          value: "nannos"
+        - name: "POSTGRES_USE_SSL"
+          value: "true"
+        - name: "OIDC_ISSUER_URL"
+          value: "https://login.my-issuer.com/realms/nannos"
+        - name: "OIDC_CLIENT_ID"
+          value: "google-chat-client"
+        - name: "A2A_SERVER_URL"
+          value: "https://orchestrator.${BASE_DOMAIN}"
+        - name: "GOOGLE_CHAT_TOKEN_EXPECTED_AUDIENCE"
+          value: "https://google-chat.${BASE_DOMAIN}/api/v1/chat/events"
+        - name: "GCP_CHAT_PROJECTS"
+          value: "[{\"name\": \"gcp-project-name\", \"google_chat_app_id\": \"your-project-number\"}]"
+        envFrom:
+        - secretRef:
+            name: client-google-chat-secrets
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 60
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: client-google-chat
+  labels:
+    app: client-google-chat
+    app.kubernetes.io/part-of: nannos
+spec:
+  selector:
+    app: client-google-chat
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

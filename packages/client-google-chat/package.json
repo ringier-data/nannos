@@ -1,0 +1,56 @@
+{
+  "name": "rcplus-nannos-a2a-google-chat-client",
+  "version": "0.1.0",
+  "description": "RC+/Nannos A2A Google Chat Client",
+  "type": "module",
+  "exports": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "author": "Ringier AG",
+  "license": "SEE LICENSE IN LICENSE",
+  "readmeFilename": "README.md",
+  "dependencies": {
+    "@a2a-js/sdk": "^0.3.5",
+    "@aws-sdk/client-s3": "^3.940.0",
+    "@aws-sdk/client-secrets-manager": "^3.662.0",
+    "@aws-sdk/client-ssm": "^3.662.0",
+    "@aws-sdk/s3-request-presigner": "^3.940.0",
+    "@types/express": "^5.0.0",
+    "@types/pg": "^8.16.0",
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "google-auth-library": "^9.15.1",
+    "googleapis": "^148.0.0",
+    "lodash": "^4.17.21",
+    "openid-client": "^6.8.1",
+    "pg": "^8.17.2",
+    "pino": "^9.4.0",
+    "pino-pretty": "^13.1.2",
+    "prettier": "^3.7.4",
+    "sql-template-strings": "^2.2.2"
+  },
+  "devDependencies": {
+    "@tsconfig/node20": "^20.1.4",
+    "@types/lodash": "^4.17.10",
+    "@types/node": "^24.7.4",
+    "aws-sdk-client-mock": "^4.0.0",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.5",
+    "ts-jest-resolver": "^2.0.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.6.2"
+  },
+  "scripts": {
+    "build": "rm -rf dist && npx tsc",
+    "test": "NODE_ENV=development NODE_OPTIONS=\"--no-warnings --experimental-vm-modules\" npx jest --collectCoverage --detectOpenHandles --errorOnDeprecated --logHeapUsage --forceExit --runInBand --passWithNoTests",
+    "test:watch": "NODE_ENV=development NODE_OPTIONS=\"--no-warnings --experimental-vm-modules\" npx jest --watch",
+    "test:coverage": "NODE_ENV=development NODE_OPTIONS=\"--no-warnings --experimental-vm-modules\" npx jest --collectCoverage",
+    "lint": "npx eslint .",
+    "lint:fix": "npx eslint . --fix",
+    "start": "rm -rf dist && npx tsc && node --env-file=.env dist/src/app.js",
+    "dev": "NODE_ENV=local tsx --env-file .env --watch src/app.ts"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
