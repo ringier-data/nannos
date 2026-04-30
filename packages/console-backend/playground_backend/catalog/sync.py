@@ -10,7 +10,7 @@ Full sync:
   7. Complete sync job
 
 Performance:
-  - Files processed concurrently (FILE_CONCURRENCY)
+  - Files processed concurrently (bounded by RENDER_SLIDE_BUDGET weighted semaphore)
   - Thumbnails fetched & uploaded concurrently (THUMB_CONCURRENCY)
   - Content hashes checked in batch (single query per file)
   - All external calls have retry with exponential backoff
@@ -29,6 +29,8 @@ import logging
 import os
 import random
 import time
+from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
@@ -43,7 +45,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..catalog.adapters.base import CatalogSourceAdapter, ExtractedPage, SourceFile
-from ..catalog.adapters.google_drive import ExportTimeoutError
+from ..catalog.adapters.google_drive import _PPTX_THUMBNAILS_ENABLED, PPTX_MIME, ExportTimeoutError
 from ..catalog.executor import get_sync_executor, run_in_sync_executor
 from ..catalog.task_queue import (
     FileTaskPayload,
@@ -63,13 +65,41 @@ logger = logging.getLogger(__name__)
 _AWS_REGION = os.environ.get("AWS_REGION", "eu-central-1")
 
 # --- Concurrency limits ---
-FILE_CONCURRENCY = int(os.environ.get("CATALOG_FILE_CONCURRENCY", "5"))
 THUMB_CONCURRENCY = int(os.environ.get("CATALOG_THUMB_CONCURRENCY", "10"))
-S3_CONCURRENCY = int(os.environ.get("CATALOG_S3_CONCURRENCY", "10"))
-# Maximum concurrent thumbnail render pipelines (download + soffice + poppler).
-# Each pipeline can consume 300-800 MB (file bytes + LibreOffice + PIL rendering),
-# so this must be lower than FILE_CONCURRENCY to avoid OOM.
-RENDER_CONCURRENCY = int(os.environ.get("CATALOG_RENDER_CONCURRENCY", "2"))
+# Slide-weighted budget for file processing.  Each file consumes its page
+# count from this budget — many small decks can run in parallel, while a
+# single very large deck runs alone.  Gates the entire heavy pipeline
+# (extraction + summarization + thumbnail render + indexing).  Choose this
+# so the worst-case total live set fits comfortably in the pod's memory
+# limit (e.g. 100 slides at ~10 MB peak each ≈ 1 GB).
+RENDER_SLIDE_BUDGET = int(os.environ.get("CATALOG_RENDER_SLIDE_BUDGET", "100"))
+
+# --- Memory instrumentation ---
+# Set CATALOG_LOG_MEMORY=1 to log RSS at key pipeline stages.
+_LOG_MEMORY = os.environ.get("CATALOG_LOG_MEMORY", "0") == "1"
+
+
+def _log_memory(stage: str, detail: str = "") -> None:
+    """Log current process RSS for memory debugging.
+
+    Reads /proc/self/status on Linux. Silent no-op on other platforms.
+    Enabled only when CATALOG_LOG_MEMORY=1 to avoid log noise.
+    """
+    if not _LOG_MEMORY:
+        return
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_mb = int(line.split()[1]) // 1024
+                    if detail:
+                        logger.info("MEM[%s] %s: RSS=%d MB", stage, detail, rss_mb)
+                    else:
+                        logger.info("MEM[%s]: RSS=%d MB", stage, rss_mb)
+                    return
+    except Exception:
+        pass
+
 
 # --- File size limits ---
 # Files exceeding these limits are marked as "skipped" and not processed.
@@ -77,10 +107,115 @@ RENDER_CONCURRENCY = int(os.environ.get("CATALOG_RENDER_CONCURRENCY", "2"))
 MAX_FILE_SIZE_MB = int(os.environ.get("CATALOG_MAX_FILE_SIZE_MB", "100"))
 MAX_PAGE_COUNT = int(os.environ.get("CATALOG_MAX_PAGE_COUNT", "500"))
 
+# Budget floor for unknown files (prev_page_count=0).  With budget=100 and
+# floor=20, at most 5 unknown files run concurrently — keeps the DB pool and
+# memory footprint bounded during initial sync.
+_BUDGET_FLOOR = 20
+
 # --- Retry configuration ---
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.0  # seconds
 RETRY_MAX_DELAY = 30.0  # seconds
+
+
+class _WeightedSemaphore:
+    """FIFO weighted semaphore.
+
+    Each ``acquire(weight)`` removes ``weight`` units from a fixed
+    ``capacity``.  If ``weight`` exceeds the capacity it is capped, so a
+    single oversized job runs alone (no other waiters can be granted
+    while it holds the full budget).  Waiters are served strictly in
+    FIFO order to prevent starvation of large jobs by an endless trickle
+    of small ones.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = max(1, capacity)
+        self._available = self._capacity
+        self._waiters: deque[tuple[int, asyncio.Future[None]]] = deque()
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    @property
+    def available(self) -> int:
+        return self._available
+
+    async def acquire(self, weight: int) -> int:
+        """Acquire ``weight`` units (capped at capacity).
+
+        Returns the number of units actually held — callers must pass
+        the same value back to :meth:`release`.
+        """
+        effective = max(1, min(int(weight), self._capacity))
+        # Fast path: room is available and no one is queued ahead of us.
+        if not self._waiters and self._available >= effective:
+            self._available -= effective
+            return effective
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        entry = (effective, fut)
+        self._waiters.append(entry)
+        try:
+            await fut
+        except BaseException:
+            # Cancelled or otherwise interrupted before being granted.
+            if entry in self._waiters:
+                self._waiters.remove(entry)
+            elif fut.done() and not fut.cancelled():
+                # Already granted but the await raised — give back the units.
+                self.release(effective)
+            # Releasing may have unblocked the next waiter.
+            self._wake_waiters()
+            raise
+        return effective
+
+    def release(self, weight: int) -> None:
+        self._available += weight
+        if self._available > self._capacity:
+            # Defensive: keep available bounded.
+            self._available = self._capacity
+        self._wake_waiters()
+
+    def adjust(self, current_held: int, new_weight: int) -> int:
+        """Non-blocking budget adjustment.
+
+        If *new_weight* < *current_held*, releases the excess immediately
+        (letting other tasks start sooner).  If *new_weight* >= *current_held*,
+        keeps the current hold unchanged — the budget only gates how many
+        extractions START concurrently; once pages are in memory, blocking
+        for more units would risk deadlock (all slots occupied, nobody can
+        upgrade).
+
+        Returns the new held amount.
+        """
+        effective_new = max(1, min(int(new_weight), self._capacity))
+        if effective_new < current_held:
+            self.release(current_held - effective_new)
+            return effective_new
+        return current_held
+
+    def _wake_waiters(self) -> None:
+        while self._waiters:
+            head_weight, head_fut = self._waiters[0]
+            if head_fut.done():
+                # Cancelled while queued — drop and continue.
+                self._waiters.popleft()
+                continue
+            if self._available < head_weight:
+                break
+            self._waiters.popleft()
+            self._available -= head_weight
+            head_fut.set_result(None)
+
+    @asynccontextmanager
+    async def slot(self, weight: int):
+        held = await self.acquire(weight)
+        try:
+            yield held
+        finally:
+            self.release(held)
 
 
 class FileSkippedError(Exception):
@@ -168,6 +303,8 @@ def normalize_source_config(source_config: dict[str, Any]) -> list[dict[str, Any
 
 # --- Cooperative state check polling ---
 _STATE_CHECK_INTERVAL = 2.0  # seconds between checks when paused
+_STATE_CHECK_THROTTLE = 5.0  # minimum seconds between DB checks when running
+_MAX_PAUSE_DURATION = 3600.0  # seconds (1 hour) — auto-cancel if paused longer
 
 
 class SyncCancelled(Exception):
@@ -201,14 +338,14 @@ class CatalogSyncPipeline:
     ) -> None:
         self._adapter = adapter
         self._db_session_factory = db_session_factory
-        self._file_processor: FileTaskProcessor = file_processor or InMemoryFileTaskProcessor(
-            max_concurrency=FILE_CONCURRENCY
-        )
+        self._file_processor: FileTaskProcessor = file_processor or InMemoryFileTaskProcessor()
         self._s3_session = aiobotocore.session.get_session()
         self._cost_logger = cost_logger
-        # Render semaphore — bounds how many files do the heavy
-        # download + soffice + poppler thumbnail pipeline concurrently.
-        self._render_semaphore = asyncio.Semaphore(RENDER_CONCURRENCY)
+        # Slide-weighted budget — gates the entire heavy pipeline
+        # (extraction + summarization + thumbnail render + indexing) by
+        # total slides in flight.  A large deck (>= budget) runs alone;
+        # many small decks can run in parallel.
+        self._render_budget = _WeightedSemaphore(RENDER_SLIDE_BUDGET)
         # Per-job state — keyed by sync_job_id to isolate concurrent syncs
         self._job_state: dict[str, _SyncJobState] = {}
         # Bedrock client for summarization (Claude Haiku)
@@ -254,11 +391,24 @@ class CatalogSyncPipeline:
     async def _check_should_continue(self, sync_job_id: str) -> None:
         """Check the DB for pause/cancel requests. Called between files.
 
+        Throttled: skips the DB query if less than _STATE_CHECK_THROTTLE
+        seconds have passed since the last check (avoids excessive DB
+        round-trips when processing hundreds of files quickly).
+
         - running → continue
-        - paused  → poll until resumed (running) or cancelled
+        - paused  → poll until resumed (running) or cancelled (max 1 hour)
         - cancelling/cancelled → raise SyncCancelled
         """
+        now = time.monotonic()
+        state = self._job_state.get(sync_job_id)
+        if state is not None:
+            last_check = getattr(state, "_last_state_check", 0.0)
+            if now - last_check < _STATE_CHECK_THROTTLE:
+                return  # recently checked, skip DB query
+            state._last_state_check = now  # type: ignore[attr-defined]
+
         async with self._db_session_factory() as db:
+            pause_started: float | None = None
             while True:
                 result = await db.execute(
                     text("SELECT status FROM catalog_sync_jobs WHERE id = :id"),
@@ -275,6 +425,15 @@ class CatalogSyncPipeline:
                 if status in ("cancelling", "cancelled"):
                     raise SyncCancelled()
                 if status == "paused":
+                    if pause_started is None:
+                        pause_started = time.monotonic()
+                    elif time.monotonic() - pause_started > _MAX_PAUSE_DURATION:
+                        logger.warning(
+                            "Sync job %s paused for > %ds, auto-cancelling",
+                            sync_job_id,
+                            int(_MAX_PAUSE_DURATION),
+                        )
+                        raise SyncCancelled()
                     logger.info("Sync job %s paused, waiting for resume...", sync_job_id)
                     await asyncio.sleep(_STATE_CHECK_INTERVAL)
                     continue
@@ -355,46 +514,65 @@ class CatalogSyncPipeline:
                 # Build file-level payloads
                 payloads = [FileTaskPayload.from_source_file(catalog_id, sync_job_id, f) for f in all_files]
 
-                # Handler closure — captures credentials and db factory
+                # Handler closure — captures credentials and db factory.
+                # Budget is acquired BEFORE opening a DB session so that at
+                # most budget/_BUDGET_FLOOR files hold a connection at once,
+                # preventing QueuePool exhaustion.
                 async def _handle_file(payload: FileTaskPayload) -> FileTaskResult:
                     file = payload.to_source_file()
+                    held = await self._render_budget.acquire(_BUDGET_FLOOR)
                     try:
-                        async with self._db_session_factory() as file_db:
-                            await self._set_file_sync_status(file_db, catalog_id, file.id, "syncing")
-                            await self._process_file(file_db, catalog_id, file, credentials, sync_job_id)
-                            await self._set_file_sync_status(file_db, catalog_id, file.id, "synced")
-                    except FileSkippedError as skip_exc:
-                        logger.warning(
-                            "File %s skipped: %s",
-                            file.name,
-                            skip_exc.reason,
-                        )
-                        async with self._db_session_factory() as skip_db:
-                            await self._set_file_sync_status(
-                                skip_db,
-                                catalog_id,
-                                file.id,
-                                "skipped",
-                                skip_reason=skip_exc.reason,
+                        try:
+                            async with self._db_session_factory() as file_db:
+                                await self._set_file_sync_status(file_db, catalog_id, file.id, "syncing")
+                                held = await self._process_file(
+                                    file_db, catalog_id, file, credentials, sync_job_id, held
+                                )
+                                await self._set_file_sync_status(file_db, catalog_id, file.id, "synced")
+                        except FileSkippedError as skip_exc:
+                            logger.warning(
+                                "File %s skipped: %s",
+                                file.name,
+                                skip_exc.reason,
                             )
-                        # Not a failure — file was intentionally skipped
+                            async with self._db_session_factory() as skip_db:
+                                await self._set_file_sync_status(
+                                    skip_db,
+                                    catalog_id,
+                                    file.id,
+                                    "skipped",
+                                    skip_reason=skip_exc.reason,
+                                )
+                            # Not a failure — file was intentionally skipped
+                            return FileTaskResult(
+                                file_id=payload.source_file_id,
+                                file_name=payload.source_file_name,
+                                success=True,
+                            )
+                        except Exception:
+                            async with self._db_session_factory() as err_db:
+                                await self._set_file_sync_status(err_db, catalog_id, file.id, "failed")
+                            raise
                         return FileTaskResult(
                             file_id=payload.source_file_id,
                             file_name=payload.source_file_name,
                             success=True,
                         )
-                    except Exception:
-                        async with self._db_session_factory() as err_db:
-                            await self._set_file_sync_status(err_db, catalog_id, file.id, "failed")
-                        raise
-                    return FileTaskResult(
-                        file_id=payload.source_file_id,
-                        file_name=payload.source_file_name,
-                        success=True,
-                    )
+                    finally:
+                        self._render_budget.release(held)
 
-                # Progress callback
+                # Throttled progress callback — emit at most every 0.5s to
+                # avoid flooding the DB and Socket.IO when many files complete
+                # rapidly on the fast-path.
+                _progress_last_emit = 0.0
+                _PROGRESS_EMIT_INTERVAL = 0.5  # seconds
+
                 async def _on_progress(processed: int, failed: int) -> None:
+                    nonlocal _progress_last_emit
+                    now = time.monotonic()
+                    if now - _progress_last_emit < _PROGRESS_EMIT_INTERVAL:
+                        return  # skip — will catch up on next call
+                    _progress_last_emit = now
                     await self._update_sync_job(
                         db,
                         sync_job_id,
@@ -408,6 +586,13 @@ class CatalogSyncPipeline:
                     handler=_handle_file,
                     on_progress=_on_progress,
                     check_cancelled=lambda: self._check_should_continue(sync_job_id),
+                )
+
+                # Emit final accurate count (throttle may have skipped the last update)
+                await self._emit_sync_progress(
+                    sync_job_id,
+                    processed_files=batch.processed,
+                    failed_files=batch.failed,
                 )
 
                 # Remove catalog_files that are no longer in the source
@@ -496,45 +681,61 @@ class CatalogSyncPipeline:
                 # Build file-level payloads
                 payloads = [FileTaskPayload.from_source_file(catalog_id, sync_job_id, f) for f in all_changed]
 
-                # Handler closure
+                # Handler closure — acquires budget BEFORE opening a DB session
+                # so that at most budget/_BUDGET_FLOOR files hold a connection
+                # at once, preventing QueuePool exhaustion.
                 async def _handle_file(payload: FileTaskPayload) -> FileTaskResult:
                     file = payload.to_source_file()
+                    held = await self._render_budget.acquire(_BUDGET_FLOOR)
                     try:
-                        async with self._db_session_factory() as file_db:
-                            await self._set_file_sync_status(file_db, catalog_id, file.id, "syncing")
-                            await self._process_file(file_db, catalog_id, file, credentials, sync_job_id)
-                            await self._set_file_sync_status(file_db, catalog_id, file.id, "synced")
-                    except FileSkippedError as skip_exc:
-                        logger.warning(
-                            "File %s skipped: %s",
-                            file.name,
-                            skip_exc.reason,
-                        )
-                        async with self._db_session_factory() as skip_db:
-                            await self._set_file_sync_status(
-                                skip_db,
-                                catalog_id,
-                                file.id,
-                                "skipped",
-                                skip_reason=skip_exc.reason,
+                        try:
+                            async with self._db_session_factory() as file_db:
+                                await self._set_file_sync_status(file_db, catalog_id, file.id, "syncing")
+                                held = await self._process_file(
+                                    file_db, catalog_id, file, credentials, sync_job_id, held
+                                )
+                                await self._set_file_sync_status(file_db, catalog_id, file.id, "synced")
+                        except FileSkippedError as skip_exc:
+                            logger.warning(
+                                "File %s skipped: %s",
+                                file.name,
+                                skip_exc.reason,
                             )
+                            async with self._db_session_factory() as skip_db:
+                                await self._set_file_sync_status(
+                                    skip_db,
+                                    catalog_id,
+                                    file.id,
+                                    "skipped",
+                                    skip_reason=skip_exc.reason,
+                                )
+                            return FileTaskResult(
+                                file_id=payload.source_file_id,
+                                file_name=payload.source_file_name,
+                                success=True,
+                            )
+                        except Exception:
+                            async with self._db_session_factory() as err_db:
+                                await self._set_file_sync_status(err_db, catalog_id, file.id, "failed")
+                            raise
                         return FileTaskResult(
                             file_id=payload.source_file_id,
                             file_name=payload.source_file_name,
                             success=True,
                         )
-                    except Exception:
-                        async with self._db_session_factory() as err_db:
-                            await self._set_file_sync_status(err_db, catalog_id, file.id, "failed")
-                        raise
-                    return FileTaskResult(
-                        file_id=payload.source_file_id,
-                        file_name=payload.source_file_name,
-                        success=True,
-                    )
+                    finally:
+                        self._render_budget.release(held)
 
-                # Progress callback
+                # Throttled progress callback — emit at most every 0.5s
+                _progress_last_emit = 0.0
+                _PROGRESS_EMIT_INTERVAL = 0.5
+
                 async def _on_progress(processed: int, failed: int) -> None:
+                    nonlocal _progress_last_emit
+                    now = time.monotonic()
+                    if now - _progress_last_emit < _PROGRESS_EMIT_INTERVAL:
+                        return
+                    _progress_last_emit = now
                     await self._update_sync_job(
                         db,
                         sync_job_id,
@@ -649,98 +850,105 @@ class CatalogSyncPipeline:
         thumb_semaphore = asyncio.Semaphore(THUMB_CONCURRENCY)
         bucket = config.catalog.thumbnails_s3_bucket
 
-        async def _load_thumbnail(s3_key: str) -> bytes | None:
-            """Load a single thumbnail from S3 with concurrency limiting."""
-            async with thumb_semaphore:
-                try:
-                    async with self._s3_session.create_client("s3", region_name=_AWS_REGION) as s3:
-                        resp = await s3.get_object(Bucket=bucket, Key=s3_key)
+        # Reuse a single S3 client for all thumbnail loads to avoid
+        # per-request TLS handshake overhead (O(n) connections → 1).
+        async with self._s3_session.create_client("s3", region_name=_AWS_REGION) as s3_client:
+
+            async def _load_thumbnail(s3_key: str) -> bytes | None:
+                """Load a single thumbnail from S3 with concurrency limiting."""
+                async with thumb_semaphore:
+                    try:
+                        resp = await s3_client.get_object(Bucket=bucket, Key=s3_key)
                         return await resp["Body"].read()
+                    except Exception:
+                        logger.warning("Failed to load thumbnail for re-index: %s", s3_key)
+                        return None
+
+            for i in range(0, total, batch_size):
+                batch_rows = rows[i : i + batch_size]
+
+                # Load thumbnails concurrently for this batch
+                thumb_coros = []
+                for row in batch_rows:
+                    if row["thumbnail_s3_key"]:
+                        thumb_coros.append(_load_thumbnail(row["thumbnail_s3_key"]))
+                    else:
+                        fut: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+                        fut.set_result(None)
+                        thumb_coros.append(fut)
+                thumb_results = await asyncio.gather(*thumb_coros)
+
+                # Build documents for this batch
+                batch_docs: list[Document] = []
+                batch_keys: list[tuple[str, int]] = []
+                for row, thumb_bytes in zip(batch_rows, thumb_results):
+                    parts = [
+                        f'Document: "{row["source_file_name"]}" ({row["folder_path"]})',
+                        f"Summary: {row['summary'] or ''}",
+                        "",
+                        f'Page {row["page_number"]} of {row["page_count"] or "?"}: "{row["title"] or ""}"',
+                        "",
+                        row["text_content"] or "",
+                    ]
+                    if row["speaker_notes"]:
+                        parts.append(f"\nSpeaker notes: {row['speaker_notes']}")
+                    contextualized = "\n".join(parts)
+
+                    meta = {
+                        "catalog_id": catalog_id,
+                        "file_id": str(row["file_id"]),
+                        "page_number": row["page_number"],
+                        "mime_type": row["mime_type"],
+                        "folder_path": row["folder_path"],
+                        "source_file_name": row["source_file_name"],
+                        "document_summary": row["summary"] or "",
+                        "page_count": row["page_count"] or 0,
+                        "title": row["title"] or "",
+                        "content": row["text_content"] or "",
+                        "speaker_notes": row["speaker_notes"] or "",
+                        "thumbnail_s3_key": row["thumbnail_s3_key"] or "",
+                        "source_ref": json.dumps(row["source_ref"]) if row["source_ref"] else "{}",
+                        "content_hash": row["content_hash"] or "",
+                    }
+
+                    if thumb_bytes:
+                        meta[IMAGE_METADATA_KEY] = thumb_bytes
+
+                    doc = Document(
+                        id=f"{row['source_file_id']}#page_{row['page_number']}",
+                        page_content=contextualized,
+                        metadata=meta,
+                    )
+                    batch_docs.append(doc)
+                    batch_keys.append((str(row["file_id"]), row["page_number"]))
+
+                # Index batch and update DB
+                try:
+                    await vector_store.aadd_documents(batch_docs)
+                    now = datetime.now(timezone.utc)
+                    # Batch-update indexed_at grouped by file_id
+                    async with self._db_session_factory() as idx_db:
+                        by_file: dict[str, list[int]] = {}
+                        for file_id, page_number in batch_keys:
+                            by_file.setdefault(file_id, []).append(page_number)
+                        for file_id, page_numbers in by_file.items():
+                            await idx_db.execute(
+                                text("""
+                                    UPDATE catalog_pages SET indexed_at = :now
+                                    WHERE file_id = :file_id AND page_number = ANY(:page_numbers)
+                                """),
+                                {"now": now, "file_id": file_id, "page_numbers": page_numbers},
+                            )
+                        await idx_db.commit()
+                    indexed += len(batch_docs)
+                    logger.info("Re-indexed batch %d-%d of %d", i + 1, i + len(batch_docs), total)
+                    if progress_callback:
+                        await progress_callback({"indexed": indexed, "failed": failed_count, "total": total})
                 except Exception:
-                    logger.warning("Failed to load thumbnail for re-index: %s", s3_key)
-                    return None
-
-        for i in range(0, total, batch_size):
-            batch_rows = rows[i : i + batch_size]
-
-            # Load thumbnails concurrently for this batch
-            thumb_coros = []
-            for row in batch_rows:
-                if row["thumbnail_s3_key"]:
-                    thumb_coros.append(_load_thumbnail(row["thumbnail_s3_key"]))
-                else:
-                    fut: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
-                    fut.set_result(None)
-                    thumb_coros.append(fut)
-            thumb_results = await asyncio.gather(*thumb_coros)
-
-            # Build documents for this batch
-            batch_docs: list[Document] = []
-            batch_keys: list[tuple[str, int]] = []
-            for row, thumb_bytes in zip(batch_rows, thumb_results):
-                parts = [
-                    f'Document: "{row["source_file_name"]}" ({row["folder_path"]})',
-                    f"Summary: {row['summary'] or ''}",
-                    "",
-                    f'Page {row["page_number"]} of {row["page_count"] or "?"}: "{row["title"] or ""}"',
-                    "",
-                    row["text_content"] or "",
-                ]
-                if row["speaker_notes"]:
-                    parts.append(f"\nSpeaker notes: {row['speaker_notes']}")
-                contextualized = "\n".join(parts)
-
-                meta = {
-                    "catalog_id": catalog_id,
-                    "file_id": str(row["file_id"]),
-                    "page_number": row["page_number"],
-                    "mime_type": row["mime_type"],
-                    "folder_path": row["folder_path"],
-                    "source_file_name": row["source_file_name"],
-                    "document_summary": row["summary"] or "",
-                    "page_count": row["page_count"] or 0,
-                    "title": row["title"] or "",
-                    "content": row["text_content"] or "",
-                    "speaker_notes": row["speaker_notes"] or "",
-                    "thumbnail_s3_key": row["thumbnail_s3_key"] or "",
-                    "source_ref": json.dumps(row["source_ref"]) if row["source_ref"] else "{}",
-                    "content_hash": row["content_hash"] or "",
-                }
-
-                if thumb_bytes:
-                    meta[IMAGE_METADATA_KEY] = thumb_bytes
-
-                doc = Document(
-                    id=f"{row['source_file_id']}#page_{row['page_number']}",
-                    page_content=contextualized,
-                    metadata=meta,
-                )
-                batch_docs.append(doc)
-                batch_keys.append((str(row["file_id"]), row["page_number"]))
-
-            # Index batch and update DB
-            try:
-                await vector_store.aadd_documents(batch_docs)
-                now = datetime.now(timezone.utc)
-                async with self._db_session_factory() as idx_db:
-                    for file_id, page_number in batch_keys:
-                        await idx_db.execute(
-                            text("""
-                                UPDATE catalog_pages SET indexed_at = :now
-                                WHERE file_id = :file_id AND page_number = :page_number
-                            """),
-                            {"now": now, "file_id": file_id, "page_number": page_number},
-                        )
-                    await idx_db.commit()
-                indexed += len(batch_docs)
-                logger.info("Re-indexed batch %d-%d of %d", i + 1, i + len(batch_docs), total)
-                if progress_callback:
-                    await progress_callback({"indexed": indexed, "failed": failed_count, "total": total})
-            except Exception:
-                logger.exception("Failed to re-index batch %d-%d", i + 1, i + len(batch_docs))
-                failed_count += len(batch_docs)
-                if progress_callback:
-                    await progress_callback({"indexed": indexed, "failed": failed_count, "total": total})
+                    logger.exception("Failed to re-index batch %d-%d", i + 1, i + len(batch_docs))
+                    failed_count += len(batch_docs)
+                    if progress_callback:
+                        await progress_callback({"indexed": indexed, "failed": failed_count, "total": total})
 
         logger.info(
             "Re-index complete for catalog %s: %d total, %d indexed, %d failed",
@@ -758,16 +966,20 @@ class CatalogSyncPipeline:
         file: SourceFile,
         credentials: Any,
         sync_job_id: str | None = None,
-    ) -> None:
+        held: int = _BUDGET_FLOOR,
+    ) -> int:
         """Process a single file with concurrent thumbnails and batch DB ops.
 
         **Fast-path for unchanged files**: if ``source_modified_at`` has not
         changed since the last sync AND pages are already stored, the file
         is skipped without calling the Google API or Bedrock — saving ~2-3 s
         per file.
+
+        Returns the (possibly upgraded) budget weight held, so the caller can
+        release the correct amount.
         """
         # Upsert catalog_files record (also tells us if the source changed)
-        file_db_id, content_changed, existing_summary = await self._upsert_catalog_file(
+        file_db_id, content_changed, existing_summary, prev_page_count = await self._upsert_catalog_file(
             db,
             catalog_id,
             file,
@@ -782,11 +994,20 @@ class CatalogSyncPipeline:
             if existing_hashes:
                 # Also check if any pages are missing thumbnails — if so, fall
                 # through to full processing so thumbnails can be retried.
+                # Skip retry for PPTX when thumbnails are disabled — they'll
+                # never be generated so retrying is pointless.
                 all_have_thumbs = all(has_thumb for _, has_thumb in existing_hashes.values())
+                if not all_have_thumbs and file.mime_type == PPTX_MIME and not _PPTX_THUMBNAILS_ENABLED:
+                    logger.info(
+                        "File %s unchanged, %d pages missing thumbnails but PPTX thumbnails disabled, skipping",
+                        file.name,
+                        sum(1 for _, has_thumb in existing_hashes.values() if not has_thumb),
+                    )
+                    all_have_thumbs = True
                 if all_have_thumbs:
                     logger.info("File %s unchanged (source_modified_at match), skipping", file.name)
                     await db.commit()
-                    return
+                    return held
                 logger.info(
                     "File %s unchanged but %d pages missing thumbnails, retrying",
                     file.name,
@@ -806,38 +1027,94 @@ class CatalogSyncPipeline:
             if size_mb > MAX_FILE_SIZE_MB:
                 raise FileSkippedError(f"File size {size_mb:.0f} MB exceeds limit of {MAX_FILE_SIZE_MB} MB")
 
+        # --- Budget is already held by the caller (_handle_file) -----------
+        # Release excess if prev_page_count is actually smaller than the floor.
+        # Never block for more — avoids deadlock when all slots are occupied.
+        if prev_page_count and prev_page_count < held:
+            held = self._render_budget.adjust(held, prev_page_count)
+        _log_memory("budget_acquired", f"{file.name} held={held}/{self._render_budget.capacity}")
+
         # Extract pages (with retry)
         t0 = time.monotonic()
         pages = await _retry_async(
             lambda: self._adapter.extract_pages(file, credentials),
             operation=f"extract_pages({file.name})",
         )
-        logger.info("extract_pages(%s): %d pages in %.1fs", file.name, len(pages), time.monotonic() - t0)
+        page_count = len(pages)
+        logger.info("extract_pages(%s): %d pages in %.1fs", file.name, page_count, time.monotonic() - t0)
+        _log_memory("after_extract", file.name)
+        _log_memory("after_extract_trim", file.name)
+
+        if page_count == 0:
+            raise FileSkippedError("Extraction returned 0 pages (empty or corrupted file)")
+
+        # Adjust budget hold to actual page_count — only releases excess.
+        # Never blocks for more: pages are already in memory, so waiting
+        # would risk deadlock without saving any memory.
+        if page_count < held:
+            held = self._render_budget.adjust(held, page_count)
+            _log_memory("budget_adjusted", f"{file.name} held={held}/{self._render_budget.capacity}")
 
         # Gate 2: page-count check (works for all file types including Google-native)
-        if len(pages) > MAX_PAGE_COUNT:
-            # Still write the page_count so the UI can display it
+        if page_count > MAX_PAGE_COUNT:
             await db.execute(
                 text("UPDATE catalog_files SET page_count = :pc, updated_at = :now WHERE id = :fid"),
-                {"pc": len(pages), "now": datetime.now(timezone.utc), "fid": file_db_id},
+                {"pc": page_count, "now": datetime.now(timezone.utc), "fid": file_db_id},
             )
             await db.commit()
-            raise FileSkippedError(f"Page count {len(pages)} exceeds limit of {MAX_PAGE_COUNT}")
+            raise FileSkippedError(f"Page count {page_count} exceeds limit of {MAX_PAGE_COUNT}")
 
         # Update page_count now that we know it
         await db.execute(
             text("UPDATE catalog_files SET page_count = :pc, updated_at = :now WHERE id = :fid"),
-            {"pc": len(pages), "now": datetime.now(timezone.utc), "fid": file_db_id},
+            {"pc": page_count, "now": datetime.now(timezone.utc), "fid": file_db_id},
         )
 
         if sync_job_id:
             await self._emit_sync_progress(
                 sync_job_id,
                 current_file_name=file.name,
-                current_file_pages_total=len(pages),
+                current_file_pages_total=page_count,
                 current_file_pages_done=0,
             )
 
+        await self._process_file_inner(
+            db,
+            catalog_id,
+            file_db_id,
+            file,
+            credentials,
+            sync_job_id,
+            pages,
+            page_count,
+            existing_summary,
+        )
+
+        logger.info(
+            "Processed file %s (%d pages) in %.1fs",
+            file.name,
+            page_count,
+            time.monotonic() - t_file_start,
+        )
+
+        return held
+
+    async def _process_file_inner(
+        self,
+        db: AsyncSession,
+        catalog_id: str,
+        file_db_id: str,
+        file: SourceFile,
+        credentials: Any,
+        sync_job_id: str | None,
+        pages: list[ExtractedPage],
+        page_count: int,
+        existing_summary: str | None,
+    ) -> None:
+        """Run summarization, thumbnail render, uploads, and indexing.
+
+        Called inside the slide-budget context manager so memory is bounded.
+        """
         # --- Batch fetch existing content hashes (1 query instead of N) ---
         existing_hashes = await self._get_all_page_hashes(db, file_db_id)
 
@@ -856,7 +1133,7 @@ class CatalogSyncPipeline:
             changed_pages_info.append((page, content_hash))
 
         if not changed_pages_info:
-            logger.info("All %d pages of %s unchanged, skipping", len(pages), file.name)
+            logger.info("All %d pages of %s unchanged, skipping", page_count, file.name)
             # Re-use existing summary if available (no Bedrock call needed)
             if not existing_summary:
                 summary = await _retry_async(
@@ -864,12 +1141,11 @@ class CatalogSyncPipeline:
                     operation=f"summary({file.name})",
                 )
                 await self._update_file_summary(db, file_db_id, summary)
-            await self._remove_extra_pages(db, file_db_id, len(pages))
+            await self._remove_extra_pages(db, file_db_id, page_count)
             await db.commit()
             return
 
         # --- Pass 1: Document summary (once per file, with retry) ---
-        # Only regenerate if content actually changed.
         t0 = time.monotonic()
         summary = await _retry_async(
             lambda: self._generate_document_summary(file, pages, sync_job_id),
@@ -878,22 +1154,22 @@ class CatalogSyncPipeline:
         await self._update_file_summary(db, file_db_id, summary)
         await db.commit()  # Release row lock before the long thumbnail pipeline
         logger.info("summary(%s): %.1fs", file.name, time.monotonic() - t0)
+        _log_memory("after_summary", file.name)
+        _log_memory("after_summary_trim", file.name)
 
         # --- Batch fetch all thumbnails (download PDF/PPTX once, render all) ---
-        # Gate through the render semaphore — only N files do the heavy
-        # PDF-download + soffice + PIL rendering at the same time.
         t0 = time.monotonic()
         changed_page_list = [page for page, _ in changed_pages_info]
         all_thumbnails: dict[int, bytes] = {}
-        async with self._render_semaphore:
-            try:
-                all_thumbnails = await _retry_async(
-                    lambda: self._adapter.get_all_thumbnails(file, changed_page_list, credentials),
-                    operation=f"get_all_thumbnails({file.name})",
-                )
-            except Exception:
-                logger.warning("Failed to get thumbnails for %s, continuing without", file.name, exc_info=True)
+        try:
+            all_thumbnails = await _retry_async(
+                lambda: self._adapter.get_all_thumbnails(file, changed_page_list, credentials),
+                operation=f"get_all_thumbnails({file.name})",
+            )
+        except Exception:
+            logger.warning("Failed to get thumbnails for %s, continuing without", file.name, exc_info=True)
         logger.info("thumbnails(%s): %d thumbs in %.1fs", file.name, len(all_thumbnails), time.monotonic() - t0)
+        _log_memory("after_thumbnails", file.name)
 
         # --- Concurrent S3 thumbnail uploads ---
         thumb_semaphore = asyncio.Semaphore(THUMB_CONCURRENCY)
@@ -925,6 +1201,7 @@ class CatalogSyncPipeline:
         # Free the bulk thumbnail dict — individual bytes are still
         # referenced in upload_results tuples for vector indexing.
         del all_thumbnails
+        _log_memory("after_s3_upload", file.name)
 
         # --- Batch DB upserts (single multi-row INSERT) ---
         await self._batch_upsert_catalog_pages(
@@ -940,13 +1217,13 @@ class CatalogSyncPipeline:
                 sync_job_id,
                 current_file_name=file.name,
                 current_file_pages_done=len(upload_results),
-                current_file_pages_total=len(pages),
+                current_file_pages_total=page_count,
             )
 
         changed_pages = upload_results
 
         # Remove pages that no longer exist (e.g. slides were deleted)
-        await self._remove_extra_pages(db, file_db_id, len(pages))
+        await self._remove_extra_pages(db, file_db_id, page_count)
         await db.commit()
 
         # --- Pass 2: Contextualize & index changed pages into vector store ---
@@ -955,7 +1232,7 @@ class CatalogSyncPipeline:
             docs: list[Document] = []
 
             for page, content_hash, thumbnail_s3_key, thumbnail_bytes in changed_pages:
-                contextualized = self._build_contextualized_content(file, summary, page, len(pages))
+                contextualized = self._build_contextualized_content(file, summary, page, page_count)
 
                 meta = {
                     # Filterable metadata
@@ -968,7 +1245,7 @@ class CatalogSyncPipeline:
                     # Non-filterable metadata (large text fields)
                     "source_file_name": file.name,
                     "document_summary": summary,
-                    "page_count": len(pages),
+                    "page_count": page_count,
                     "title": (page.title or "")[:500],
                     "content": page.text_content,
                     "speaker_notes": page.speaker_notes,
@@ -989,31 +1266,24 @@ class CatalogSyncPipeline:
                 )
                 docs.append(doc)
 
-            # Batch add documents to vector store
             try:
                 await vector_store.aadd_documents(docs)
-                # Mark pages as indexed
+                # Mark pages as indexed (single batch UPDATE)
                 now = datetime.now(timezone.utc)
+                page_numbers = [page.page_number for page, _, _, _ in changed_pages]
                 async with self._db_session_factory() as index_db:
-                    for page, _, _, _ in changed_pages:
-                        await index_db.execute(
-                            text("""
-                                UPDATE catalog_pages SET indexed_at = :now
-                                WHERE file_id = :file_id AND page_number = :page_number
-                            """),
-                            {"now": now, "file_id": file_db_id, "page_number": page.page_number},
-                        )
+                    await index_db.execute(
+                        text("""
+                            UPDATE catalog_pages SET indexed_at = :now
+                            WHERE file_id = :file_id AND page_number = ANY(:page_numbers)
+                        """),
+                        {"now": now, "file_id": file_db_id, "page_numbers": page_numbers},
+                    )
                     await index_db.commit()
                 logger.info("Indexed %d pages from %s into vector store", len(docs), file.name)
             except Exception:
                 logger.exception("Failed to index pages from %s into vector store", file.name)
-
-        logger.info(
-            "Processed file %s (%d changed pages) in %.1fs",
-            file.name,
-            len(changed_pages_info),
-            time.monotonic() - t_file_start,
-        )
+            _log_memory("after_index", file.name)
 
     async def _bulk_register_files(
         self,
@@ -1107,19 +1377,20 @@ class CatalogSyncPipeline:
         catalog_id: str,
         file: SourceFile,
         page_count: int,
-    ) -> tuple[str, bool, str | None]:
+    ) -> tuple[str, bool, str | None, int]:
         """Upsert a catalog_files record.
 
-        Returns ``(db_id, content_changed, existing_summary)`` where
-        *content_changed* is ``True`` when the file's ``source_modified_at``
-        differs from the value already stored in the DB (i.e. the source
-        has been modified since the last sync).
+        Returns ``(db_id, content_changed, existing_summary, prev_page_count)``
+        where *content_changed* is ``True`` when the file's
+        ``source_modified_at`` differs from the value already stored in the
+        DB (i.e. the source has been modified since the last sync).
+        *prev_page_count* is the previously-stored page count (0 for new files).
         """
         # Fetch the existing row (if any) BEFORE upserting so we can detect
         # whether source_modified_at actually changed.
         existing = await db.execute(
             text(
-                "SELECT id, source_modified_at, summary FROM catalog_files WHERE catalog_id = :cid AND source_file_id = :sfid"
+                "SELECT id, source_modified_at, summary, page_count FROM catalog_files WHERE catalog_id = :cid AND source_file_id = :sfid"
             ),
             {"cid": catalog_id, "sfid": file.id},
         )
@@ -1163,13 +1434,14 @@ class CatalogSyncPipeline:
 
         if existing_row is None:
             # Brand new file — always process
-            return db_id, True, None
+            return db_id, True, None, 0
 
         existing_summary: str | None = existing_row["summary"]
+        prev_page_count: int = existing_row["page_count"] or 0
         prev_modified = existing_row["source_modified_at"]
         # Compare timestamps: if source reports the same modified_at, file is unchanged
         content_changed = prev_modified is None or prev_modified != file.modified_at
-        return db_id, content_changed, existing_summary
+        return db_id, content_changed, existing_summary, prev_page_count
 
     async def _upsert_catalog_page(
         self,
@@ -1368,7 +1640,7 @@ class CatalogSyncPipeline:
         if vector_ids_to_delete:
             try:
                 vector_store = self._get_vector_store(catalog_id)
-                vector_store.delete(ids=vector_ids_to_delete)
+                await vector_store.adelete(ids=vector_ids_to_delete)
                 logger.info("Deleted %d vectors for removed files in catalog %s", len(vector_ids_to_delete), catalog_id)
             except Exception:
                 logger.warning("Failed to delete vectors for removed files in catalog %s", catalog_id, exc_info=True)
@@ -1397,7 +1669,7 @@ class CatalogSyncPipeline:
         if vector_ids:
             try:
                 vector_store = self._get_vector_store(catalog_id)
-                vector_store.delete(ids=vector_ids)
+                await vector_store.adelete(ids=vector_ids)
                 logger.info("Deleted %d vectors for file %s in catalog %s", len(vector_ids), source_file_id, catalog_id)
             except Exception:
                 logger.warning(

@@ -3,8 +3,9 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # --- Enums ---
 
@@ -94,6 +95,13 @@ class CatalogPermission(BaseModel):
     user_group_id: int
     permissions: list[str] = Field(default_factory=lambda: ["read"])
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("catalog_id", mode="before")
+    @classmethod
+    def coerce_uuid_to_str(cls, v: Any) -> str:
+        if isinstance(v, UUID):
+            return str(v)
+        return v
 
 
 class CatalogConnection(BaseModel):

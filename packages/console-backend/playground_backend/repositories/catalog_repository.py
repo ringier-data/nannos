@@ -380,7 +380,7 @@ class CatalogRepository(AuditedRepository):
             """),
             {"catalog_id": catalog_id},
         )
-        return [dict(row) for row in result.mappings().all()]
+        return [self._stringify_uuids(dict(row)) for row in result.mappings().all()]
 
     async def set_permissions(
         self,

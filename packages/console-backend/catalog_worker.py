@@ -34,8 +34,12 @@ SYNC_INTERVAL = int(os.getenv("CATALOG_SYNC_INTERVAL_SECONDS", "86400"))
 MAX_CONCURRENT = int(os.getenv("CATALOG_SYNC_MAX_CONCURRENT", "3"))
 AUTO_SYNC_ENABLED = os.getenv("CATALOG_AUTO_SYNC_ENABLED", "true").lower() == "true"
 REINDEX_HEAL_INTERVAL = int(os.getenv("CATALOG_REINDEX_HEAL_INTERVAL_SECONDS", "600"))
+HEARTBEAT_INTERVAL = int(os.getenv("CATALOG_HEARTBEAT_INTERVAL_SECONDS", "10"))
 CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://console:8080")
 HEARTBEAT_PATH = "/tmp/worker-heartbeat"
+
+# Module-level cost logger — initialized in main(), used by sync/reindex jobs.
+_cost_logger = None
 
 
 # ---------------------------------------------------------------------------
@@ -44,11 +48,32 @@ HEARTBEAT_PATH = "/tmp/worker-heartbeat"
 
 
 async def main() -> None:
+    global _cost_logger
+
     from playground_backend.catalog.executor import shutdown_sync_executor
-    from playground_backend.db.connection import close_db, init_db
+    from playground_backend.db.connection import close_db, get_async_session_factory, init_db
+    from playground_backend.repositories.rate_card_repository import RateCardRepository
+    from playground_backend.repositories.usage_repository import UsageRepository
+    from playground_backend.services.llm_cost_tracking import InternalCostLogger
+    from playground_backend.services.rate_card_service import RateCardService
+    from playground_backend.services.usage_service import UsageService
 
     await init_db()
     logger.info("Database initialized")
+
+    # Set up internal cost logger for LLM usage tracking during syncs
+    rate_card_service = RateCardService()
+    rate_card_service.set_repository(RateCardRepository())
+    usage_service = UsageService()
+    usage_service.set_repository(UsageRepository())
+    usage_service.set_rate_card_service(rate_card_service)
+
+    _cost_logger = InternalCostLogger(
+        usage_service=usage_service,
+        db_session_factory=get_async_session_factory(),
+    )
+    await _cost_logger.start()
+    logger.info("Internal cost logger started")
 
     await _heal_stuck_jobs()
 
@@ -62,6 +87,7 @@ async def main() -> None:
     poll_task = asyncio.create_task(_poll_loop(semaphore, shutdown_event), name="poll-loop")
     tick_task = asyncio.create_task(_scheduler_tick_loop(shutdown_event), name="tick-loop")
     heal_task = asyncio.create_task(_reindex_heal_loop(shutdown_event), name="reindex-heal")
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(shutdown_event), name="heartbeat-loop")
 
     logger.info(
         "Catalog worker started (poll=%ds, tick=%ds, heal=%ds, max_concurrent=%d)",
@@ -77,12 +103,15 @@ async def main() -> None:
     poll_task.cancel()
     tick_task.cancel()
     heal_task.cancel()
-    await asyncio.gather(poll_task, tick_task, heal_task, return_exceptions=True)
+    heartbeat_task.cancel()
+    await asyncio.gather(poll_task, tick_task, heal_task, heartbeat_task, return_exceptions=True)
 
     # Wait for in-flight sync tasks (bounded by semaphore)
     for _ in range(MAX_CONCURRENT):
         await semaphore.acquire()
 
+    await _cost_logger.shutdown()
+    logger.info("Internal cost logger stopped")
     shutdown_sync_executor()
     await close_db()
     logger.info("Catalog worker stopped")
@@ -102,10 +131,6 @@ async def _poll_loop(semaphore: asyncio.Semaphore, shutdown: asyncio.Event) -> N
 
     while not shutdown.is_set():
         try:
-            # Touch heartbeat first — even when all slots are busy, the poll
-            # loop is alive and kubelet must not kill us.
-            _touch_heartbeat()
-
             session_factory = get_async_session_factory()
             async with session_factory() as db:
                 jobs = await repo.claim_pending_jobs(db, limit=MAX_CONCURRENT)
@@ -155,6 +180,7 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     pipeline = CatalogSyncPipeline(
         adapter=GoogleDriveAdapter(),
         db_session_factory=session_factory,
+        cost_logger=_cost_logger,
     )
 
     token_service = CatalogTokenService(
@@ -292,9 +318,16 @@ async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
     pipeline = CatalogSyncPipeline(
         adapter=GoogleDriveAdapter(),
         db_session_factory=session_factory,
+        cost_logger=_cost_logger,
     )
 
     progress_callback = _make_reindex_progress_callback(catalog_id, sync_job_id, catalog.owner_user_id)
+
+    pipeline.setup_job(
+        sync_job_id=sync_job_id,
+        user_sub=catalog.owner_user_id,
+        catalog_id=catalog_id,
+    )
 
     try:
         result = await pipeline.reindex_unindexed_pages(
@@ -570,6 +603,22 @@ def _touch_heartbeat() -> None:
             f.write(str(datetime.now(timezone.utc).isoformat()))
     except Exception:
         pass
+
+
+async def _heartbeat_loop(shutdown: asyncio.Event) -> None:
+    """Refresh the liveness heartbeat independently of job scheduling.
+
+    Runs as a dedicated task so the kubelet probe stays green even when
+    the poll loop is blocked acquiring a busy concurrency slot or waiting
+    on slow Drive API calls.
+    """
+    while not shutdown.is_set():
+        _touch_heartbeat()
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=HEARTBEAT_INTERVAL)
+            break  # shutdown was set
+        except asyncio.TimeoutError:
+            pass  # normal tick
 
 
 # ---------------------------------------------------------------------------

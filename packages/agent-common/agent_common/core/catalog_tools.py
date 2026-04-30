@@ -62,6 +62,12 @@ def _create_vector_store(
     )
 
 
+# MIME type for native Google Slides. Used as a filter when callers need
+# results that can be programmatically reconstructed via the Google Slides
+# API (binary .pptx and PDFs cannot be turned back into editable decks).
+GOOGLE_SLIDES_MIME = "application/vnd.google-apps.presentation"
+
+
 async def search_catalogs(
     query: str,
     catalog_ids: list[str],
@@ -70,16 +76,28 @@ async def search_catalogs(
     vector_store_backend: str,
     thumbnails_s3_bucket: str,
     cost_logger: Any | None = None,
+    slides_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Search across multiple catalogs and merge results by score.
 
     Returns a list of dicts with 'page_content', 'metadata', and 'score' keys,
     sorted by descending score, capped at top_k.
+
+    When ``slides_only=True`` the search is restricted to pages whose source
+    file is a native Google Slides deck. ``mime_type`` is indexed as
+    filterable metadata at sync time, so the filter is pushed down to S3
+    Vectors rather than being applied client-side.
     """
     all_results: list[tuple[Document, float]] = []
 
+    search_filter: dict[str, Any] | None = None
+    if slides_only:
+        search_filter = {"mime_type": GOOGLE_SLIDES_MIME}
+
     async def _search_one(catalog_id: str) -> list[tuple[Document, float]]:
         vs = _create_vector_store(catalog_id, vector_bucket_name, cost_logger=cost_logger)
+        if search_filter is not None:
+            return await vs.asimilarity_search_with_score(query, top_k, filter=search_filter)
         return await vs.asimilarity_search_with_score(query, top_k)
 
     # Search all catalogs concurrently
@@ -153,6 +171,7 @@ def create_catalog_search_tool(
         query: str,
         catalog_ids: list[str],
         top_k: int,
+        slides_only: bool,
     ) -> list[dict[str, Any]]:
         """Retriever function traced in LangSmith."""
         return await search_catalogs(
@@ -163,11 +182,13 @@ def create_catalog_search_tool(
             vector_store_backend=vector_store_backend,
             thumbnails_s3_bucket=thumbnails_s3_bucket,
             cost_logger=cost_logger,
+            slides_only=slides_only,
         )
 
     async def catalog_search(
         query: str,
         top_k: int = 10,
+        slides_only: bool = False,
     ) -> str:
         """Search across your document catalogs for relevant slides, pages, and content.
 
@@ -187,6 +208,11 @@ def create_catalog_search_tool(
                    you're looking for (e.g., "Q1 revenue breakdown by region",
                    "product roadmap timeline", "customer testimonials slide").
             top_k: Maximum number of results to return (default 10).
+            slides_only: If True, restrict results to native Google Slides
+                   decks only. Use this when you need to construct a new deck
+                   programmatically via the Google Slides API, since binary
+                   .pptx and PDF pages cannot be reconstructed as editable
+                   slides. Default False (returns all matching content).
 
         Returns:
             Formatted search results with relevance scores and extraction references.
@@ -195,6 +221,7 @@ def create_catalog_search_tool(
             query=query,
             catalog_ids=accessible_catalog_ids,
             top_k=top_k,
+            slides_only=slides_only,
         )
 
         if not results:
@@ -228,6 +255,8 @@ def create_catalog_search_tool(
         description=(
             "Search across your document catalogs for relevant slides, pages, and content. "
             "Use for finding specific presentations, slides, or document pages. "
-            "Returns results with file info, content, thumbnails, and extraction references."
+            "Returns results with file info, content, thumbnails, and extraction references. "
+            "Pass slides_only=true to restrict results to native Google Slides decks (required "
+            "when reconstructing slides programmatically via the Google Slides API)."
         ),
     )

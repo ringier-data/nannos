@@ -2,14 +2,16 @@
 
 **File-level** – ``FileTaskProcessor`` / ``InMemoryFileTaskProcessor``
     Fan-out/fan-in processor for individual files *within* a single sync
-    job.  The in-memory implementation uses ``asyncio.Semaphore`` +
-    ``asyncio.as_completed``.  A distributed replacement (SQS + DynamoDB
-    atomic counter, Celery chord, …) only needs to satisfy the same ABC.
+    job.  The in-memory implementation uses ``asyncio.as_completed`` for
+    task orchestration; actual concurrency is bounded externally by the
+    caller's slide-weighted budget.  A distributed replacement (SQS +
+    DynamoDB atomic counter, Celery chord, …) only needs to satisfy the
+    same ABC.
 
 Usage::
 
     # File processor (inside a job handler)
-    processor = InMemoryFileTaskProcessor(max_concurrency=3)
+    processor = InMemoryFileTaskProcessor()
     payloads = [FileTaskPayload.from_source_file("cat-1", "job-1", f) for f in files]
     result = await processor.process_batch(payloads, handler=process_one_file)
 """
@@ -167,14 +169,10 @@ class FileTaskProcessor(ABC):
 class InMemoryFileTaskProcessor(FileTaskProcessor):
     """Process-local file processor using ``asyncio`` concurrency.
 
-    Parameters
-    ----------
-    max_concurrency:
-        Maximum number of files processed in parallel.
+    Concurrency is bounded externally by the caller (e.g. the
+    slide-weighted budget in `CatalogSyncPipeline`).  This processor
+    just orchestrates task fan-out, error collection, and progress.
     """
-
-    def __init__(self, max_concurrency: int = 3) -> None:
-        self._max_concurrency = max_concurrency
 
     async def process_batch(
         self,
@@ -186,25 +184,23 @@ class InMemoryFileTaskProcessor(FileTaskProcessor):
         if not tasks:
             return BatchResult(processed=0, failed=0, errors=[])
 
-        semaphore = asyncio.Semaphore(self._max_concurrency)
         processed = 0
         failed = 0
         errors: list[dict[str, str]] = []
 
         async def _run_one(payload: FileTaskPayload) -> FileTaskResult:
-            async with semaphore:
-                if check_cancelled:
-                    await check_cancelled()  # raises on cancellation
-                try:
-                    return await handler(payload)
-                except Exception as exc:
-                    logger.exception("File task failed: %s", payload)
-                    return FileTaskResult(
-                        file_id=payload.source_file_id,
-                        file_name=payload.source_file_name,
-                        success=False,
-                        error=str(exc),
-                    )
+            if check_cancelled:
+                await check_cancelled()  # raises on cancellation
+            try:
+                return await handler(payload)
+            except Exception as exc:
+                logger.exception("File task failed: %s", payload)
+                return FileTaskResult(
+                    file_id=payload.source_file_id,
+                    file_name=payload.source_file_name,
+                    success=False,
+                    error=str(exc),
+                )
 
         running = [asyncio.create_task(_run_one(p)) for p in tasks]
 

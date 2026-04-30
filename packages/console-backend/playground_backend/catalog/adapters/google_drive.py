@@ -97,6 +97,13 @@ GOOGLE_NATIVE_TYPES = {
     "application/vnd.google-apps.document",
 }
 
+# Binary .pptx thumbnails require spawning soffice (~700 MB subprocess RSS)
+# on top of python-pptx's lxml fragmentation, which has historically pushed
+# the worker into OOM under the cgroup memory limit. Off by default; set
+# CATALOG_PPTX_THUMBNAILS=1 to re-enable once the worker has enough headroom.
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_PPTX_THUMBNAILS_ENABLED = os.environ.get("CATALOG_PPTX_THUMBNAILS", "0") == "1"
+
 # Fields to request from Drive API
 _DRIVE_FILE_FIELDS = "id, name, mimeType, modifiedTime, parents, size, owners, webViewLink"
 
@@ -151,8 +158,12 @@ def _find_soffice() -> str | None:
     return path if path else None
 
 
-async def _convert_office_to_pdf(file_bytes: bytes, suffix: str = ".pptx") -> bytes:
+async def _convert_office_to_pdf_to_path(input_path: str, output_dir: str) -> str:
     """Convert an Office document to PDF using LibreOffice headless.
+
+    Reads from ``input_path`` and writes the PDF into ``output_dir``.
+    Returns the path of the produced PDF. Avoids loading the file into the
+    Python heap on either side of the soffice call.
 
     Raises RuntimeError if LibreOffice is not available.
     """
@@ -160,22 +171,16 @@ async def _convert_office_to_pdf(file_bytes: bytes, suffix: str = ".pptx") -> by
     if not soffice:
         raise RuntimeError("LibreOffice (soffice) not found — cannot convert PPTX to PDF for thumbnails")
 
-    def _convert() -> bytes:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            input_path = os.path.join(tmpdir, f"input{suffix}")
-            with open(input_path, "wb") as f:
-                f.write(file_bytes)
-
-            subprocess.run(
-                [soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", tmpdir, input_path],
-                check=True,
-                timeout=120,
-                capture_output=True,
-            )
-
-            pdf_path = os.path.join(tmpdir, "input.pdf")
-            with open(pdf_path, "rb") as f:
-                return f.read()
+    def _convert() -> str:
+        subprocess.run(
+            [soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", output_dir, input_path],
+            check=True,
+            timeout=120,
+            capture_output=True,
+        )
+        # soffice names the output after the input basename
+        base = os.path.splitext(os.path.basename(input_path))[0]
+        return os.path.join(output_dir, f"{base}.pdf")
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(get_sync_executor(), _convert)
@@ -542,14 +547,23 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
             return []
 
     async def get_thumbnail(self, file: SourceFile, page: ExtractedPage, credentials: Any) -> bytes | None:
-        """Get thumbnail for a page/slide."""
+        """Get thumbnail for a page/slide.
+
+        Binary .pptx thumbnails are gated behind ``CATALOG_PPTX_THUMBNAILS=1``
+        because rendering them requires spawning soffice (~700 MB subprocess
+        RSS) on top of python-pptx's lxml fragmentation, which can push the
+        worker into OOM under tight cgroup memory limits. When disabled,
+        text and summary extraction still run; users who want thumbnails
+        should upload as Google Slides.
+        """
         if file.mime_type == "application/vnd.google-apps.presentation":
             return await self._get_slides_thumbnail(file, page, credentials)
         elif file.mime_type in (
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "application/pdf",
             "application/vnd.google-apps.document",
         ):
+            return await self._get_pdf_page_thumbnail(file, page, credentials)
+        elif file.mime_type == PPTX_MIME and _PPTX_THUMBNAILS_ENABLED:
             return await self._get_pdf_page_thumbnail(file, page, credentials)
         return None
 
@@ -559,13 +573,19 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         pages: list[ExtractedPage],
         credentials: Any,
     ) -> dict[int, bytes]:
-        """Get thumbnails for all pages, downloading PDF-based files only once."""
-        if file.mime_type in (
+        """Get thumbnails for all pages, downloading PDF-based files only once.
+
+        Binary .pptx is gated behind ``CATALOG_PPTX_THUMBNAILS=1``; see
+        :meth:`get_thumbnail` for the rationale.
+        """
+        thumbnail_types = {
             "application/vnd.google-apps.presentation",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "application/pdf",
             "application/vnd.google-apps.document",
-        ):
+        }
+        if _PPTX_THUMBNAILS_ENABLED:
+            thumbnail_types.add(PPTX_MIME)
+        if file.mime_type in thumbnail_types:
             return await self._get_all_pdf_thumbnails(file, pages, credentials)
 
         return {}
@@ -576,73 +596,85 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         pages: list[ExtractedPage],
         credentials: Any,
     ) -> dict[int, bytes]:
-        """Download file once, render all page thumbnails from the cached PDF bytes.
+        """Download file once, render all page thumbnails from disk.
 
-        For Google Slides that exceed the 10 MB PDF export limit, falls back
-        to per-slide Slides API thumbnails (rate-limited but avoids the cap).
+        Streams the file directly to disk (never buffered in Python heap) and
+        runs soffice / poppler on the on-disk path. For Google Slides that
+        exceed the 10 MB PDF export limit, falls back to per-slide Slides API
+        thumbnails (rate-limited but avoids the cap).
         """
-
-        if file.mime_type in GOOGLE_NATIVE_TYPES:
-            try:
-                pdf_bytes = await self._export_as_pdf(file.id, credentials)
-            except (HttpError, ExportTimeoutError) as exc:
-                is_size_limit = isinstance(exc, HttpError) and "exportSizeLimitExceeded" in str(exc)
-                is_timeout = isinstance(exc, ExportTimeoutError)
-                if file.mime_type == "application/vnd.google-apps.presentation" and (is_size_limit or is_timeout):
-                    reason = "timeout" if is_timeout else "size limit"
-                    logger.info(
-                        "File %s PDF export failed (%s), trying PPTX export fallback",
-                        file.name,
-                        reason,
-                    )
-                    try:
-                        pptx_bytes = await self._export_as_pptx(file.id, credentials)
-                        pdf_bytes = await _convert_office_to_pdf(pptx_bytes, suffix=".pptx")
-                        del pptx_bytes  # free PPTX buffer before rendering
-                    except Exception as pptx_exc:
-                        logger.warning(
-                            "PPTX fallback also failed for %s, because of `%s`, falling back to Slides API thumbnails",
-                            file.name,
-                            str(pptx_exc),
-                        )
-                        return await self._get_all_slides_thumbnails(file, pages, credentials)
-                elif is_timeout:
-                    # Non-Slides Google-native file (e.g. Docs) that timed out:
-                    # skip thumbnails entirely rather than retrying forever.
-                    logger.warning(
-                        "File %s export timed out, skipping thumbnails",
-                        file.name,
-                    )
-                    return {}
-                else:
-                    raise
-        elif file.mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-            pptx_bytes = await self._download_file(file.id, credentials)
-            pdf_bytes = await _convert_office_to_pdf(pptx_bytes, suffix=".pptx")
-            del pptx_bytes  # free PPTX buffer before rendering
-        else:
-            pdf_bytes = await self._download_file(file.id, credentials)
-
-        # Write PDF to a temp file so we can render pages from disk
-        # instead of holding bytes + PIL images simultaneously.
-
-        pdf_tmpfile = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        # Single temp directory for the file's whole render lifecycle.
+        # All downloads / soffice output / poppler input stay on disk inside it.
+        tmpdir = tempfile.mkdtemp(prefix="catalog-render-")
         try:
-            pdf_tmpfile.write(pdf_bytes)
-            pdf_tmpfile.close()
-            del pdf_bytes  # free PDF buffer before poppler rendering
+            pdf_path: str | None = None
+
+            if file.mime_type in GOOGLE_NATIVE_TYPES:
+                pdf_path = os.path.join(tmpdir, "input.pdf")
+                try:
+                    await self._export_to_path(file.id, "application/pdf", credentials, pdf_path)
+                except (HttpError, ExportTimeoutError) as exc:
+                    is_size_limit = isinstance(exc, HttpError) and "exportSizeLimitExceeded" in str(exc)
+                    is_timeout = isinstance(exc, ExportTimeoutError)
+                    if file.mime_type == "application/vnd.google-apps.presentation" and (is_size_limit or is_timeout):
+                        # Drive's files.export enforces a 10 MB cap on Slides
+                        # PDF exports. Try the exportLinks URL first — same
+                        # endpoint the Drive web UI uses, no size cap, streams
+                        # straight to disk so peak memory stays bounded.
+                        # Only fall back to the per-slide Slides API path
+                        # (rate-limited at 58/min) if exportLinks also fails.
+                        reason = "timeout" if is_timeout else "size limit"
+                        try:
+                            logger.info(
+                                "File %s PDF export failed (%s), retrying via exportLinks",
+                                file.name,
+                                reason,
+                            )
+                            await self._export_via_link_to_path(file.id, credentials, pdf_path)
+                        except Exception as link_exc:
+                            logger.info(
+                                "File %s exportLinks fallback failed (%s), using Slides API thumbnails",
+                                file.name,
+                                link_exc,
+                            )
+                            return await self._get_all_slides_thumbnails(file, pages, credentials)
+                    elif is_timeout:
+                        # Non-Slides Google-native file (e.g. Docs) that timed out:
+                        # skip thumbnails entirely rather than retrying forever.
+                        logger.warning(
+                            "File %s export timed out, skipping thumbnails",
+                            file.name,
+                        )
+                        return {}
+                    else:
+                        raise
+            elif file.mime_type == PPTX_MIME:
+                # Reached only when CATALOG_PPTX_THUMBNAILS=1; otherwise the
+                # dispatch in get_all_thumbnails() short-circuits with {}.
+                pptx_path = os.path.join(tmpdir, "input.pptx")
+                await self._download_file_to_path(file.id, credentials, pptx_path)
+                pdf_path = await _convert_office_to_pdf_to_path(pptx_path, tmpdir)
+                os.unlink(pptx_path)
+            else:
+                pdf_path = os.path.join(tmpdir, "input.pdf")
+                await self._download_file_to_path(file.id, credentials, pdf_path)
+
+            assert pdf_path is not None
 
             # Render pages in batches to bound peak memory.
             # Each batch spawns poppler for a page range, converts to PIL,
             # extracts needed PNGs, then frees the PIL objects before next batch.
             _BATCH_SIZE = 10
-            _THUMB_DPI = 100  # 100 DPI ≈ 1333×750 px (sufficient for 800px-wide thumbnails)
+            # 72 DPI ≈ 960×540 px for 16:9 slides — sufficient for 800px-wide thumbnails.
+            # PIL holds RGB bitmaps in memory: 960×540×3 = ~1.5 MB per page × batch=10 = ~15 MB peak.
+            # Doubling DPI quadruples PIL memory, so 72 is the sweet spot for our use case.
+            _THUMB_DPI = 72
 
             result: dict[int, bytes] = {}
             needed = {p.page_number for p in pages}
 
             info = await run_in_sync_executor(
-                lambda: pdfinfo_from_path(pdf_tmpfile.name),
+                lambda: pdfinfo_from_path(pdf_path),
             )
             total_pages = info.get("Pages", 0)
             if total_pages == 0:
@@ -659,9 +691,10 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
 
                 _s = batch_start
                 _e = batch_end
+                _path = pdf_path
                 images = await run_in_sync_executor(
                     lambda: convert_from_path(
-                        pdf_tmpfile.name,
+                        _path,
                         dpi=_THUMB_DPI,
                         fmt="png",
                         first_page=_s,
@@ -678,7 +711,7 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
                     img.close()
 
         finally:
-            os.unlink(pdf_tmpfile.name)
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
         return result
 
@@ -989,122 +1022,153 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         return pages
 
     async def _extract_pptx(self, file: SourceFile, credentials: Credentials) -> list[ExtractedPage]:
-        """Extract pages from a PPTX file using python-pptx."""
+        """Extract pages from a PPTX file using python-pptx.
+
+        Streams the download directly to a temp file and lets python-pptx open
+        the path. Avoids holding the full file as a Python ``bytes`` plus an
+        ``io.BytesIO`` copy in heap (which fragments the lxml allocator and
+        retains 400+ MB of RSS even after parsing completes).
+        """
         from pptx import Presentation
 
-        file_bytes = await self._download_file(file.id, credentials)
+        tmpdir = tempfile.mkdtemp(prefix="catalog-pptx-")
+        pptx_path = os.path.join(tmpdir, "input.pptx")
+        try:
+            await self._download_file_to_path(file.id, credentials, pptx_path)
 
-        def _parse() -> list[ExtractedPage]:
-            prs = Presentation(io.BytesIO(file_bytes))
+            def _parse() -> list[ExtractedPage]:
+                prs = Presentation(pptx_path)
 
-            pages: list[ExtractedPage] = []
-            visible_idx = 0
-            for original_idx, slide in enumerate(prs.slides):
-                # Skip hidden slides — LibreOffice omits them from the PDF,
-                # so page numbering must match to keep thumbnails aligned.
-                if slide._element.get("show") == "0":
-                    continue
-                visible_idx += 1
+                pages: list[ExtractedPage] = []
+                visible_idx = 0
+                for original_idx, slide in enumerate(prs.slides):
+                    # Skip hidden slides — LibreOffice omits them from the PDF,
+                    # so page numbering must match to keep thumbnails aligned.
+                    if slide._element.get("show") == "0":
+                        continue
+                    visible_idx += 1
 
-                text_parts: list[str] = []
-                title = ""
+                    text_parts: list[str] = []
+                    title = ""
 
-                for shape in slide.shapes:
-                    if shape.has_text_frame:
-                        text = shape.text_frame.text.strip()
-                        if (
-                            shape.shape_id == slide.shapes.title
-                            and hasattr(slide.shapes, "title")
-                            and slide.shapes.title == shape
-                        ):
-                            title = text
-                        elif text:
-                            text_parts.append(text)
+                    for shape in slide.shapes:
+                        if shape.has_text_frame:
+                            text = shape.text_frame.text.strip()
+                            if (
+                                shape.shape_id == slide.shapes.title
+                                and hasattr(slide.shapes, "title")
+                                and slide.shapes.title == shape
+                            ):
+                                title = text
+                            elif text:
+                                text_parts.append(text)
 
-                # Try to get title from placeholders
-                if not title and slide.shapes.title:
-                    title = slide.shapes.title.text.strip()
+                    # Try to get title from placeholders
+                    if not title and slide.shapes.title:
+                        title = slide.shapes.title.text.strip()
 
-                # Speaker notes
-                notes = ""
-                if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
-                    notes = slide.notes_slide.notes_text_frame.text.strip()
+                    # Speaker notes
+                    notes = ""
+                    if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+                        notes = slide.notes_slide.notes_text_frame.text.strip()
 
-                pages.append(
-                    ExtractedPage(
-                        page_number=visible_idx,
-                        title=title or f"Slide {visible_idx}",
-                        text_content="\n".join(text_parts),
-                        speaker_notes=notes,
-                        source_ref={
-                            "type": "pptx",
-                            "file_id": file.id,
-                            "slide_index": original_idx,  # 0-based original index (including hidden slides)
-                        },
+                    pages.append(
+                        ExtractedPage(
+                            page_number=visible_idx,
+                            title=title or f"Slide {visible_idx}",
+                            text_content="\n".join(text_parts),
+                            speaker_notes=notes,
+                            source_ref={
+                                "type": "pptx",
+                                "file_id": file.id,
+                                "slide_index": original_idx,  # 0-based original index (including hidden slides)
+                            },
+                        )
                     )
-                )
 
-            return pages
+                return pages
 
-        return await run_in_sync_executor(_parse)
+            return await run_in_sync_executor(_parse)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def _extract_pdf(self, file: SourceFile, credentials: Credentials) -> list[ExtractedPage]:
-        """Extract pages from a PDF file."""
+        """Extract pages from a PDF file.
+
+        Streams the download directly to a temp file and lets pypdf open the
+        path. Avoids holding the full file as a Python ``bytes`` plus an
+        ``io.BytesIO`` copy in heap.
+        """
         import pypdf
 
-        file_bytes = await self._download_file(file.id, credentials)
+        tmpdir = tempfile.mkdtemp(prefix="catalog-pdf-")
+        pdf_path = os.path.join(tmpdir, "input.pdf")
+        try:
+            await self._download_file_to_path(file.id, credentials, pdf_path)
 
-        def _parse() -> list[ExtractedPage]:
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+            def _parse() -> list[ExtractedPage]:
+                reader = pypdf.PdfReader(pdf_path)
 
-            pages: list[ExtractedPage] = []
-            for idx, pdf_page in enumerate(reader.pages, start=1):
-                text = pdf_page.extract_text() or ""
-                pages.append(
-                    ExtractedPage(
-                        page_number=idx,
-                        title=f"Page {idx}",
-                        text_content=text.strip(),
-                        source_ref={
-                            "type": "pdf",
-                            "file_id": file.id,
-                            "page_number": idx,
-                        },
+                pages: list[ExtractedPage] = []
+                for idx, pdf_page in enumerate(reader.pages, start=1):
+                    text = pdf_page.extract_text() or ""
+                    pages.append(
+                        ExtractedPage(
+                            page_number=idx,
+                            title=f"Page {idx}",
+                            text_content=text.strip(),
+                            source_ref={
+                                "type": "pdf",
+                                "file_id": file.id,
+                                "page_number": idx,
+                            },
+                        )
                     )
-                )
 
-            return pages
+                return pages
 
-        return await run_in_sync_executor(_parse)
+            return await run_in_sync_executor(_parse)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def _extract_google_doc(self, file: SourceFile, credentials: Credentials) -> list[ExtractedPage]:
-        """Extract pages from Google Docs by exporting as PDF."""
+        """Extract pages from Google Docs by exporting as PDF.
+
+        Streams the PDF export directly to a temp file and lets pypdf open the
+        path. Avoids holding the full PDF as a Python ``bytes`` plus an
+        ``io.BytesIO`` copy in heap.
+        """
         import pypdf
 
-        pdf_bytes = await self._export_as_pdf(file.id, credentials)
+        tmpdir = tempfile.mkdtemp(prefix="catalog-gdoc-")
+        pdf_path = os.path.join(tmpdir, "input.pdf")
+        try:
+            await self._export_to_path(file.id, "application/pdf", credentials, pdf_path)
 
-        def _parse() -> list[ExtractedPage]:
-            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            def _parse() -> list[ExtractedPage]:
+                reader = pypdf.PdfReader(pdf_path)
 
-            pages: list[ExtractedPage] = []
-            for idx, pdf_page in enumerate(reader.pages, start=1):
-                text = pdf_page.extract_text() or ""
-                pages.append(
-                    ExtractedPage(
-                        page_number=idx,
-                        title=f"Page {idx}",
-                        text_content=text.strip(),
-                        source_ref={
-                            "type": "google_docs_pdf",
-                            "file_id": file.id,
-                            "page_number": idx,
-                        },
+                pages: list[ExtractedPage] = []
+                for idx, pdf_page in enumerate(reader.pages, start=1):
+                    text = pdf_page.extract_text() or ""
+                    pages.append(
+                        ExtractedPage(
+                            page_number=idx,
+                            title=f"Page {idx}",
+                            text_content=text.strip(),
+                            source_ref={
+                                "type": "google_docs_pdf",
+                                "file_id": file.id,
+                                "page_number": idx,
+                            },
+                        )
                     )
-                )
 
-            return pages
+                return pages
 
-        return await run_in_sync_executor(_parse)
+            return await run_in_sync_executor(_parse)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def _get_slides_thumbnail(
         self, file: SourceFile, page: ExtractedPage, credentials: Credentials
@@ -1181,6 +1245,24 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
 
         return await _run_in_executor(_download)
 
+    async def _download_file_to_path(self, file_id: str, credentials: Credentials, dest_path: str) -> None:
+        """Stream a binary file from Google Drive directly to disk.
+
+        Avoids buffering the entire file in Python heap (BytesIO). Each
+        ``next_chunk()`` write goes straight to the file descriptor.
+        """
+        service = _build_drive_service(credentials, timeout=_DRIVE_EXPORT_TIMEOUT)
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+
+        def _download() -> None:
+            with open(dest_path, "wb") as fh:
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+
+        await _run_in_executor(_download)
+
     async def _export_as_pdf(self, file_id: str, credentials: Credentials) -> bytes:
         """Export a Google-native file as PDF."""
         async with _get_export_semaphore():
@@ -1200,24 +1282,74 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
 
             return await _run_in_executor(_download)
 
-    async def _export_as_pptx(self, file_id: str, credentials: Credentials) -> bytes:
-        """Export a Google Slides presentation as PPTX (no 10 MB size cap)."""
+    async def _export_to_path(
+        self,
+        file_id: str,
+        mime_type: str,
+        credentials: Credentials,
+        dest_path: str,
+    ) -> None:
+        """Stream an export of a Google-native file directly to disk.
+
+        Avoids buffering the entire export in Python heap.
+        """
         async with _get_export_semaphore():
             service = _build_drive_service(credentials, timeout=_DRIVE_EXPORT_TIMEOUT)
-            request = service.files().export_media(
-                fileId=file_id,
-                mimeType="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            request = service.files().export_media(fileId=file_id, mimeType=mime_type)
+
+            def _download() -> None:
+                with open(dest_path, "wb") as fh:
+                    downloader = MediaIoBaseDownload(fh, request)
+                    done = False
+                    while not done:
+                        _, done = downloader.next_chunk()
+
+            await _run_in_executor(_download)
+
+    async def _export_via_link_to_path(
+        self,
+        file_id: str,
+        credentials: Credentials,
+        dest_path: str,
+    ) -> None:
+        """Export a Google-native file as PDF via the ``exportLinks`` URL.
+
+        ``files.export`` enforces a 10 MB cap on Google Slides PDF exports.
+        ``exportLinks`` returns the same download URL the Drive web UI uses
+        for "Download as PDF", which has no such cap. We stream the response
+        straight to disk to keep the file out of the Python heap.
+
+        The Drive metadata fetch is performed via the authenticated client,
+        which transparently refreshes ``credentials.token`` if expired —
+        the freshly-minted bearer token is then reused for the raw HTTPS
+        download below.
+        """
+        async with _get_export_semaphore():
+            service = _build_drive_service(credentials, timeout=_DRIVE_EXPORT_TIMEOUT)
+            meta = await _run_in_executor(
+                service.files().get(fileId=file_id, fields="exportLinks", supportsAllDrives=True).execute
             )
-            buf = io.BytesIO()
+            export_links = meta.get("exportLinks") or {}
+            pdf_url = export_links.get("application/pdf")
+            if not pdf_url:
+                raise RuntimeError(f"File {file_id} has no application/pdf exportLinks URL")
 
-            def _download() -> bytes:
-                downloader = MediaIoBaseDownload(buf, request)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                return buf.getvalue()
+            headers = {"Authorization": f"Bearer {credentials.token}"}
+            timeout = httpx.Timeout(float(_DRIVE_EXPORT_TIMEOUT), connect=10.0)
 
-            return await _run_in_executor(_download)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                async with client.stream("GET", pdf_url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    ctype = resp.headers.get("content-type", "").lower()
+                    # The unrestricted endpoint occasionally returns an HTML
+                    # interstitial (e.g. virus-scan warning, redirect page).
+                    # Reject anything that isn't a PDF so the caller can fall
+                    # back to the per-slide Slides API path.
+                    if "pdf" not in ctype:
+                        raise RuntimeError(f"exportLinks URL returned non-PDF content-type: {ctype}")
+                    with open(dest_path, "wb") as fh:
+                        async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                            fh.write(chunk)
 
     async def _build_folder_map(self, service: Any, shared_drive_id: str) -> dict[str, dict]:
         """Build a map of folder_id -> {name, parent_id} for path resolution."""

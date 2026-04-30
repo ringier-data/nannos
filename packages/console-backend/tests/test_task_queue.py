@@ -70,13 +70,13 @@ class TestFileTaskPayload:
 class TestInMemoryFileTaskProcessor:
     @pytest.mark.asyncio
     async def test_empty_batch(self):
-        proc = InMemoryFileTaskProcessor(max_concurrency=2)
+        proc = InMemoryFileTaskProcessor()
         result = await proc.process_batch([], handler=self._noop_handler)
         assert result == BatchResult(processed=0, failed=0, errors=[])
 
     @pytest.mark.asyncio
     async def test_all_success(self):
-        proc = InMemoryFileTaskProcessor(max_concurrency=2)
+        proc = InMemoryFileTaskProcessor()
         payloads = [_make_payload(file_id=f"f-{i}") for i in range(5)]
 
         result = await proc.process_batch(payloads, handler=self._success_handler)
@@ -87,7 +87,7 @@ class TestInMemoryFileTaskProcessor:
     @pytest.mark.asyncio
     async def test_handler_failure_captured(self):
         """Exceptions from handler are turned into FileTaskResult(success=False)."""
-        proc = InMemoryFileTaskProcessor(max_concurrency=2)
+        proc = InMemoryFileTaskProcessor()
         payloads = [_make_payload(file_id="f-1"), _make_payload(file_id="f-2")]
 
         async def failing_handler(p: FileTaskPayload) -> FileTaskResult:
@@ -103,7 +103,7 @@ class TestInMemoryFileTaskProcessor:
 
     @pytest.mark.asyncio
     async def test_progress_callback(self):
-        proc = InMemoryFileTaskProcessor(max_concurrency=1)
+        proc = InMemoryFileTaskProcessor()
         payloads = [_make_payload(file_id=f"f-{i}") for i in range(3)]
         progress_calls: list[tuple[int, int]] = []
 
@@ -118,7 +118,7 @@ class TestInMemoryFileTaskProcessor:
     @pytest.mark.asyncio
     async def test_cancellation(self):
         """check_cancelled raising aborts the batch and propagates."""
-        proc = InMemoryFileTaskProcessor(max_concurrency=1)
+        proc = InMemoryFileTaskProcessor()
         payloads = [_make_payload(file_id=f"f-{i}") for i in range(5)]
         call_count = 0
 
@@ -139,9 +139,9 @@ class TestInMemoryFileTaskProcessor:
             )
 
     @pytest.mark.asyncio
-    async def test_concurrency_respected(self):
-        """At most max_concurrency files run in parallel."""
-        proc = InMemoryFileTaskProcessor(max_concurrency=2)
+    async def test_processes_all_tasks(self):
+        """Processor fans every task out; concurrency is bounded externally."""
+        proc = InMemoryFileTaskProcessor()
         payloads = [_make_payload(file_id=f"f-{i}") for i in range(6)]
         peak = 0
         current = 0
@@ -158,12 +158,13 @@ class TestInMemoryFileTaskProcessor:
                 current -= 1
             return FileTaskResult(file_id=p.source_file_id, file_name=p.source_file_name, success=True)
 
-        await proc.process_batch(payloads, handler=tracking_handler)
-        assert peak <= 2
+        result = await proc.process_batch(payloads, handler=tracking_handler)
+        assert result.processed == 6
+        assert peak >= 1
 
     @pytest.mark.asyncio
     async def test_mixed_success_and_failure(self):
-        proc = InMemoryFileTaskProcessor(max_concurrency=3)
+        proc = InMemoryFileTaskProcessor()
         payloads = [_make_payload(file_id=f"f-{i}") for i in range(4)]
 
         async def mixed_handler(p: FileTaskPayload) -> FileTaskResult:
