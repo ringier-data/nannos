@@ -56,7 +56,7 @@ function driveUrl(sourceFileId: string): string {
   return `https://drive.google.com/file/d/${sourceFileId}`;
 }
 
-function mimeIcon(mimeType: string | null | undefined, className = 'h-4 w-4') {
+function mimeIcon(mimeType: string | null | undefined, className = 'h-4 w-4 shrink-0') {
   if (mimeType?.includes('presentation') || mimeType?.includes('google-apps.presentation')) {
     return <FileText className={`${className} text-orange-500`} />;
   }
@@ -138,7 +138,7 @@ export function CatalogFileBrowser({ catalogId, canEdit, isReindexing }: Catalog
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       {/* File list */}
-      <div className="lg:col-span-1 border rounded-lg">
+      <div className="lg:col-span-1 border rounded-lg overflow-hidden">
         <div className="p-3 border-b bg-muted/50 space-y-2">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-medium">Files ({totalFiles.toLocaleString()})</h3>
@@ -182,7 +182,7 @@ export function CatalogFileBrowser({ catalogId, canEdit, isReindexing }: Catalog
             ))}
           </div>
         </div>
-        <ScrollArea className="h-[calc(100vh-20rem)]">
+        <ScrollArea className="h-[calc(100vh-20rem)] [&_[data-slot=scroll-area-viewport]]:!overflow-x-hidden [&_[data-slot=scroll-area-viewport]>div]:!block">
           {isLoading ? (
             <div className="flex items-center justify-center h-32">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -192,14 +192,19 @@ export function CatalogFileBrowser({ catalogId, canEdit, isReindexing }: Catalog
               {debouncedSearch || statusFilter ? 'No files match your filters' : 'No files'}
             </div>
           ) : (
-          <div className="p-2">
+          <div className="p-2 overflow-hidden">
             {sortedFolders.map(([folder, folderFiles]) => (
               <div key={folder} className="mb-2">
                 {folder !== '/' && (
-                  <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground font-medium">
-                    <FolderOpen className="h-3 w-3" />
-                    {folder}
-                  </div>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground font-medium min-w-0">
+                        <FolderOpen className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{folder}</span>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" align="start" className="max-w-xs break-all">{folder}</TooltipContent>
+                  </Tooltip>
                 )}
                 {folderFiles.map((file) => (
                   <button
