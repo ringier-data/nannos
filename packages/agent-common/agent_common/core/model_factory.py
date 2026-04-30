@@ -20,7 +20,7 @@ import os
 
 from langchain_core.language_models import BaseChatModel
 
-from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel, get_resolved_default_model
+from agent_common.models.base import ModelType, ThinkingLevel, get_resolved_default_model
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ _MODEL_METADATA: dict[str, dict] = {
 # Provider-credential detection helpers
 # ---------------------------------------------------------------------------
 
-# All possible model entries – keyed by provider so each group can be toggled.
+# All possible model entries - keyed by provider so each group can be toggled.
 _AZURE_MODELS: dict[str, dict] = {
     "gpt-4o": {
         "api_version": "2024-08-01-preview",
@@ -103,6 +103,7 @@ _GEMINI_MODELS: dict[str, dict] = {
         "model_id": "gemini-3.1-pro-preview",
         "input_modes": ["text", "image", "audio", "video", "file"],
         "backend": "google",
+        "location": "global",
         "display_name": "Gemini 3.1 Pro (Preview)",
         "description": "Google's advanced model for complex reasoning, supports multimodal input including audio and video, supports thinking mode",
     },
@@ -110,6 +111,7 @@ _GEMINI_MODELS: dict[str, dict] = {
         "model_id": "gemini-3-flash-preview",
         "input_modes": ["text", "image", "audio", "video", "file"],
         "backend": "google",
+        "location": "global",
         "display_name": "Gemini 3 Flash (Preview)",
         "description": "Google's fast and efficient model, supports multimodal input including audio and video, supports thinking mode",
     },
@@ -172,21 +174,21 @@ def _build_model_config() -> dict[str, dict]:
 
     if _has_azure_credentials():
         config.update(_AZURE_MODELS)
-        logger.info("Azure OpenAI credentials detected – registered models: %s", list(_AZURE_MODELS))
+        logger.info("Azure OpenAI credentials detected - registered models: %s", list(_AZURE_MODELS))
     else:
-        logger.info("Azure OpenAI credentials not found – GPT models unavailable")
+        logger.info("Azure OpenAI credentials not found - GPT models unavailable")
 
     if _has_aws_credentials():
         config.update(_BEDROCK_MODELS)
-        logger.info("AWS credentials detected – registered models: %s", list(_BEDROCK_MODELS))
+        logger.info("AWS credentials detected - registered models: %s", list(_BEDROCK_MODELS))
     else:
-        logger.info("AWS credentials not found – Claude models unavailable")
+        logger.info("AWS credentials not found - Claude models unavailable")
 
     if _has_gcp_credentials():
         config.update(_GEMINI_MODELS)
-        logger.info("GCP credentials detected – registered models: %s", list(_GEMINI_MODELS))
+        logger.info("GCP credentials detected - registered models: %s", list(_GEMINI_MODELS))
     else:
-        logger.info("GCP credentials not found – Gemini models unavailable")
+        logger.info("GCP credentials not found - Gemini models unavailable")
 
     if _has_local_provider():
         base_url_raw = os.getenv("OPENAI_COMPATIBLE_BASE_URL", "").rstrip("/")
@@ -204,7 +206,7 @@ def _build_model_config() -> dict[str, dict]:
                     "is_local": True,
                 }
             logger.info(
-                "Local OpenAI-compatible provider – registered %d model(s): %s",
+                "Local OpenAI-compatible provider - registered %d model(s): %s",
                 len(local_model_ids),
                 local_model_ids,
             )
@@ -218,12 +220,12 @@ def _build_model_config() -> dict[str, dict]:
                 "is_local": True,
             }
             logger.info(
-                "Local OpenAI-compatible provider – base_url=%s, model=%s (could not reach /v1/models)",
+                "Local OpenAI-compatible provider - base_url=%s, model=%s (could not reach /v1/models)",
                 base_url_raw,
                 model_name,
             )
     else:
-        logger.info("OPENAI_COMPATIBLE_BASE_URL not set – local model unavailable")
+        logger.info("OPENAI_COMPATIBLE_BASE_URL not set - local model unavailable")
 
     if not config:
         logger.warning(
@@ -234,7 +236,7 @@ def _build_model_config() -> dict[str, dict]:
     return config
 
 
-# Model-specific configuration – built dynamically from environment
+# Model-specific configuration - built dynamically from environment
 MODEL_CONFIG: dict[str, dict] = _build_model_config()
 
 
@@ -439,7 +441,7 @@ def create_model(
             raise ValueError(f"Failed to parse GCP_KEY as valid service account JSON: {e}")
 
         gcp_project = os.getenv("GCP_PROJECT_ID")
-        gcp_location = os.getenv("GCP_LOCATION", "europe-west4")
+        gcp_location = model_config.get("location") or os.getenv("GCP_LOCATION", "europe-west4")
 
         if not gcp_project:
             raise ValueError("GCP_PROJECT_ID environment variable is required for Gemini models")

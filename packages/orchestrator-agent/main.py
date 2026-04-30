@@ -27,6 +27,7 @@ from a2a.types import (
     OpenIdConnectSecurityScheme,
     SecurityScheme,
 )
+from agent_common.core.model_factory import MODEL_CONFIG, get_available_models_metadata, get_default_model
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.cost_tracking.logger import get_request_access_token
@@ -35,8 +36,6 @@ from ringier_a2a_sdk.middleware import (
     UserContextFromRequestStateMiddleware,
 )
 from ringier_a2a_sdk.server import AuthRequestContextBuilder
-
-from agent_common.core.model_factory import MODEL_CONFIG, get_available_models_metadata, get_default_model
 
 from app.core.a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
@@ -51,6 +50,7 @@ from app.models.config import AgentSettings
 logger = configure_logger("main")
 configure_existing_logger(logging.getLogger("app"))
 configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
+configure_existing_logger(logging.getLogger("agent_common"))
 # configure_existing_logger(logging.getLogger("a2a"), log_level=logging.DEBUG)
 
 
@@ -117,8 +117,7 @@ def create_app():
         logger.info("Default model: %s", get_default_model())
     else:
         logger.error(
-            "No LLM models available! Set cloud credentials or "
-            "OPENAI_COMPATIBLE_BASE_URL to enable at least one model."
+            "No LLM models available! Set cloud credentials or OPENAI_COMPATIBLE_BASE_URL to enable at least one model."
         )
 
     capabilities = AgentCapabilities(
@@ -251,17 +250,22 @@ async def list_available_models():
 
             if live_ids:
                 # Strip any stale local entries that were registered at import time
-                metadata = [m for m in metadata if not m.get("value", "").startswith("local")
-                            and m.get("provider") != "OpenAI Compatible"]
+                metadata = [
+                    m
+                    for m in metadata
+                    if not m.get("value", "").startswith("local") and m.get("provider") != "OpenAI Compatible"
+                ]
                 is_default_local = not any(m.get("is_default") for m in metadata)
                 for i, model_id in enumerate(live_ids):
-                    metadata.append({
-                        "value": model_id,
-                        "label": model_id,
-                        "provider": "OpenAI Compatible",
-                        "supports_thinking": False,
-                        "is_default": is_default_local and i == 0,
-                    })
+                    metadata.append(
+                        {
+                            "value": model_id,
+                            "label": model_id,
+                            "provider": "OpenAI Compatible",
+                            "supports_thinking": False,
+                            "is_default": is_default_local and i == 0,
+                        }
+                    )
         except Exception as e:
             logger.debug("Could not fetch live models from LLM server: %s", e)
 
