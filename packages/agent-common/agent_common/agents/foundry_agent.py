@@ -137,8 +137,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         """Return the agent name."""
         return self.config.name
 
-    @property
-    def input_modes(self) -> list[str]:
+    def get_supported_input_modes(self) -> list[str]:
         """Return the list of input modalities supported by this agent."""
         # Foundry agents are code execution agents, not multimodal
         return ["text"]
