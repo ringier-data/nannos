@@ -11,7 +11,6 @@ import io
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
@@ -28,7 +27,8 @@ from googleapiclient.http import MediaIoBaseDownload
 from pdf2image import convert_from_path
 from pdf2image.pdf2image import pdfinfo_from_path
 
-from ..executor import get_sync_executor, run_in_sync_executor
+from ..executor import get_io_executor, run_in_sync_executor
+from . import soffice_client
 from .base import (
     CatalogSourceAdapter,
     ChangeSet,
@@ -97,10 +97,8 @@ GOOGLE_NATIVE_TYPES = {
     "application/vnd.google-apps.document",
 }
 
-# Binary .pptx thumbnails require spawning soffice (~700 MB subprocess RSS)
-# on top of python-pptx's lxml fragmentation, which has historically pushed
-# the worker into OOM under the cgroup memory limit. Off by default; set
-# CATALOG_PPTX_THUMBNAILS=1 to re-enable once the worker has enough headroom.
+# Binary .pptx thumbnails require a round-trip to the soffice-worker pod.
+# Off by default; set CATALOG_PPTX_THUMBNAILS=1 to re-enable.
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _PPTX_THUMBNAILS_ENABLED = os.environ.get("CATALOG_PPTX_THUMBNAILS", "0") == "1"
 
@@ -127,63 +125,19 @@ def _get_export_semaphore() -> asyncio.Semaphore:
     return _export_semaphore
 
 
-# Path to LibreOffice/soffice binary for PPTX→PDF conversion.
-# Resolved once on first use.
-_SOFFICE_PATH: str | None | bool = None  # None = not resolved yet, False = not found
+async def _convert_office_to_pdf_to_path(pptx_path: str, output_dir: str) -> str:
+    """Convert an Office document to PDF via the soffice-worker pod.
 
+    Delegates to the soffice-worker service so the ~700 MB soffice RSS is
+    isolated in a separate cgroup.  Returns the path of the written PDF file.
 
-def _find_soffice() -> str | None:
-    """Find the LibreOffice soffice binary on this system."""
-    global _SOFFICE_PATH
-    if _SOFFICE_PATH is not None:
-        return _SOFFICE_PATH if _SOFFICE_PATH else None
-
-    # Check common locations
-    path = shutil.which("soffice") or shutil.which("libreoffice")
-    if not path:
-        # macOS app bundle (system-wide or user-local)
-        for mac_path in (
-            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-            os.path.expanduser("~/Applications/LibreOffice.app/Contents/MacOS/soffice"),
-        ):
-            if os.path.isfile(mac_path):
-                path = mac_path
-                break
-
-    _SOFFICE_PATH = path or False
-    if path:
-        logger.info("Found LibreOffice at %s", path)
-    else:
-        logger.warning("LibreOffice not found — PPTX thumbnails will be unavailable")
-    return path if path else None
-
-
-async def _convert_office_to_pdf_to_path(input_path: str, output_dir: str) -> str:
-    """Convert an Office document to PDF using LibreOffice headless.
-
-    Reads from ``input_path`` and writes the PDF into ``output_dir``.
-    Returns the path of the produced PDF. Avoids loading the file into the
-    Python heap on either side of the soffice call.
-
-    Raises RuntimeError if LibreOffice is not available.
+    Raises ExtractionResourceError if the service is unreachable or returns
+    an error (caller treats this as a skippable thumbnail failure).
     """
-    soffice = _find_soffice()
-    if not soffice:
-        raise RuntimeError("LibreOffice (soffice) not found — cannot convert PPTX to PDF for thumbnails")
-
-    def _convert() -> str:
-        subprocess.run(
-            [soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", output_dir, input_path],
-            check=True,
-            timeout=120,
-            capture_output=True,
-        )
-        # soffice names the output after the input basename
-        base = os.path.splitext(os.path.basename(input_path))[0]
-        return os.path.join(output_dir, f"{base}.pdf")
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(get_sync_executor(), _convert)
+    base = os.path.splitext(os.path.basename(pptx_path))[0]
+    pdf_path = os.path.join(output_dir, f"{base}.pdf")
+    await soffice_client.convert_pdf(pptx_path, pdf_path)
+    return pdf_path
 
 
 def _build_drive_service(credentials: Credentials, timeout: int = _DRIVE_API_TIMEOUT) -> Any:
@@ -222,7 +176,7 @@ async def _run_in_executor(func: Any, *args: Any) -> Any:
     fall back to an alternative strategy instead of retrying.
     """
     loop = asyncio.get_running_loop()
-    executor = get_sync_executor()
+    executor = get_io_executor()
     max_retries = 3
     timeout_count = 0
     for attempt in range(max_retries + 1):
@@ -547,25 +501,9 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
             return []
 
     async def get_thumbnail(self, file: SourceFile, page: ExtractedPage, credentials: Any) -> bytes | None:
-        """Get thumbnail for a page/slide.
-
-        Binary .pptx thumbnails are gated behind ``CATALOG_PPTX_THUMBNAILS=1``
-        because rendering them requires spawning soffice (~700 MB subprocess
-        RSS) on top of python-pptx's lxml fragmentation, which can push the
-        worker into OOM under tight cgroup memory limits. When disabled,
-        text and summary extraction still run; users who want thumbnails
-        should upload as Google Slides.
-        """
-        if file.mime_type == "application/vnd.google-apps.presentation":
-            return await self._get_slides_thumbnail(file, page, credentials)
-        elif file.mime_type in (
-            "application/pdf",
-            "application/vnd.google-apps.document",
-        ):
-            return await self._get_pdf_page_thumbnail(file, page, credentials)
-        elif file.mime_type == PPTX_MIME and _PPTX_THUMBNAILS_ENABLED:
-            return await self._get_pdf_page_thumbnail(file, page, credentials)
-        return None
+        """Get thumbnail for a page/slide. Delegates to get_all_thumbnails() in practice."""
+        thumbnails = await self.get_all_thumbnails(file, [page], credentials)
+        return thumbnails.get(page.page_number)
 
     async def get_all_thumbnails(
         self,
@@ -605,7 +543,9 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         """
         # Single temp directory for the file's whole render lifecycle.
         # All downloads / soffice output / poppler input stay on disk inside it.
-        tmpdir = tempfile.mkdtemp(prefix="catalog-render-")
+        # dir= routes files to the emptyDir volume, which is disk-backed and NOT
+        # counted toward the container cgroup memory limit (unlike overlay FS).
+        tmpdir = tempfile.mkdtemp(prefix="catalog-render-", dir="/tmp/catalog-render")
         try:
             pdf_path: str | None = None
 
@@ -780,7 +720,6 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         if folder_id and drive_id:
             folder_map = await self._build_folder_map(service, drive_id)
 
-        added: list[SourceFile] = []
         modified: list[SourceFile] = []
         deleted_ids: list[str] = []
         page_token = since_token
@@ -833,13 +772,12 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
             if not page_token:
                 new_token = result.get("newStartPageToken")
                 return ChangeSet(
-                    added=added,
                     modified=modified,
                     deleted_ids=deleted_ids,
                     new_page_token=new_token,
                 )
 
-        return ChangeSet(added=added, modified=modified, deleted_ids=deleted_ids)
+        return ChangeSet(modified=modified, deleted_ids=deleted_ids)
 
     @staticmethod
     def _is_direct_or_recursive_child(parent_ids: list[str], target_folder_id: str) -> bool:
@@ -1022,73 +960,22 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         return pages
 
     async def _extract_pptx(self, file: SourceFile, credentials: Credentials) -> list[ExtractedPage]:
-        """Extract pages from a PPTX file using python-pptx.
+        """Extract pages from a PPTX file via the soffice-worker pod.
 
-        Streams the download directly to a temp file and lets python-pptx open
-        the path. Avoids holding the full file as a Python ``bytes`` plus an
-        ``io.BytesIO`` copy in heap (which fragments the lxml allocator and
-        retains 400+ MB of RSS even after parsing completes).
+        Pipeline (all heavy work inside the soffice-worker cgroup):
+          1. Download .pptx to disk in the catalog-worker (streaming, no heap spike)
+          2. POST to soffice-worker /extract-text — worker runs soffice→ODP→stdlib
+             XML and returns picklable slide dicts
+          3. Convert dicts → ExtractedPage objects
+
+        An OOMKill in soffice-worker is received as a transport error here,
+        which becomes ExtractionResourceError → file skipped, pod continues.
         """
-        from pptx import Presentation
-
-        tmpdir = tempfile.mkdtemp(prefix="catalog-pptx-")
+        tmpdir = tempfile.mkdtemp(prefix="catalog-pptx-", dir="/tmp/catalog-render")
         pptx_path = os.path.join(tmpdir, "input.pptx")
         try:
             await self._download_file_to_path(file.id, credentials, pptx_path)
-
-            def _parse() -> list[ExtractedPage]:
-                prs = Presentation(pptx_path)
-
-                pages: list[ExtractedPage] = []
-                visible_idx = 0
-                for original_idx, slide in enumerate(prs.slides):
-                    # Skip hidden slides — LibreOffice omits them from the PDF,
-                    # so page numbering must match to keep thumbnails aligned.
-                    if slide._element.get("show") == "0":
-                        continue
-                    visible_idx += 1
-
-                    text_parts: list[str] = []
-                    title = ""
-
-                    for shape in slide.shapes:
-                        if shape.has_text_frame:
-                            text = shape.text_frame.text.strip()
-                            if (
-                                shape.shape_id == slide.shapes.title
-                                and hasattr(slide.shapes, "title")
-                                and slide.shapes.title == shape
-                            ):
-                                title = text
-                            elif text:
-                                text_parts.append(text)
-
-                    # Try to get title from placeholders
-                    if not title and slide.shapes.title:
-                        title = slide.shapes.title.text.strip()
-
-                    # Speaker notes
-                    notes = ""
-                    if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
-                        notes = slide.notes_slide.notes_text_frame.text.strip()
-
-                    pages.append(
-                        ExtractedPage(
-                            page_number=visible_idx,
-                            title=title or f"Slide {visible_idx}",
-                            text_content="\n".join(text_parts),
-                            speaker_notes=notes,
-                            source_ref={
-                                "type": "pptx",
-                                "file_id": file.id,
-                                "slide_index": original_idx,  # 0-based original index (including hidden slides)
-                            },
-                        )
-                    )
-
-                return pages
-
-            return await run_in_sync_executor(_parse)
+            return await soffice_client.extract_text(pptx_path, file.id)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1101,7 +988,7 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         """
         import pypdf
 
-        tmpdir = tempfile.mkdtemp(prefix="catalog-pdf-")
+        tmpdir = tempfile.mkdtemp(prefix="catalog-pdf-", dir="/tmp/catalog-render")
         pdf_path = os.path.join(tmpdir, "input.pdf")
         try:
             await self._download_file_to_path(file.id, credentials, pdf_path)
@@ -1140,7 +1027,7 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         """
         import pypdf
 
-        tmpdir = tempfile.mkdtemp(prefix="catalog-gdoc-")
+        tmpdir = tempfile.mkdtemp(prefix="catalog-gdoc-", dir="/tmp/catalog-render")
         pdf_path = os.path.join(tmpdir, "input.pdf")
         try:
             await self._export_to_path(file.id, "application/pdf", credentials, pdf_path)
@@ -1200,50 +1087,7 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
         resp.raise_for_status()
         return resp.content
 
-    async def _get_pdf_page_thumbnail(
-        self, file: SourceFile, page: ExtractedPage, credentials: Credentials
-    ) -> bytes | None:
-        """Get thumbnail for a PDF page (or file exported as PDF) using pdf2image."""
-        from pdf2image import convert_from_bytes
-
-        if file.mime_type in GOOGLE_NATIVE_TYPES:
-            pdf_bytes = await self._export_as_pdf(file.id, credentials)
-        else:
-            pdf_bytes = await self._download_file(file.id, credentials)
-
-        images = await run_in_sync_executor(
-            lambda: convert_from_bytes(
-                pdf_bytes,
-                dpi=150,
-                fmt="png",
-                first_page=page.page_number,
-                last_page=page.page_number,
-            ),
-        )
-
-        if not images:
-            return None
-
-        buf = io.BytesIO()
-        images[0].save(buf, format="PNG")
-        return buf.getvalue()
-
     # --- Helpers ---
-
-    async def _download_file(self, file_id: str, credentials: Credentials) -> bytes:
-        """Download a binary file from Google Drive."""
-        service = _build_drive_service(credentials, timeout=_DRIVE_EXPORT_TIMEOUT)
-        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-        buf = io.BytesIO()
-
-        def _download() -> bytes:
-            downloader = MediaIoBaseDownload(buf, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            return buf.getvalue()
-
-        return await _run_in_executor(_download)
 
     async def _download_file_to_path(self, file_id: str, credentials: Credentials, dest_path: str) -> None:
         """Stream a binary file from Google Drive directly to disk.
@@ -1262,25 +1106,6 @@ class GoogleDriveAdapter(CatalogSourceAdapter):
                     _, done = downloader.next_chunk()
 
         await _run_in_executor(_download)
-
-    async def _export_as_pdf(self, file_id: str, credentials: Credentials) -> bytes:
-        """Export a Google-native file as PDF."""
-        async with _get_export_semaphore():
-            service = _build_drive_service(credentials, timeout=_DRIVE_EXPORT_TIMEOUT)
-            request = service.files().export_media(
-                fileId=file_id,
-                mimeType="application/pdf",
-            )
-            buf = io.BytesIO()
-
-            def _download() -> bytes:
-                downloader = MediaIoBaseDownload(buf, request)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                return buf.getvalue()
-
-            return await _run_in_executor(_download)
 
     async def _export_to_path(
         self,

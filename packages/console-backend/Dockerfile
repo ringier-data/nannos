@@ -65,27 +65,19 @@ EXPOSE ${API_PORT}
 ENTRYPOINT ["./entrypoint.sh"]
 
 
-# --- Catalog worker runtime (with LibreOffice + poppler for PPTX/PDF processing) ---
+# --- Catalog worker runtime (poppler for PDF thumbnail rendering) ---
 FROM docker.rcplus.io/python:3.13-slim AS catalog-worker
 LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
 ARG WORKDIR
 
-# poppler-utils provides pdfinfo/pdftoppm for PPTX/PDF thumbnail rendering via pdf2image
-# libreoffice-impress-nogui provides soffice --headless for PPTX→PDF conversion without X11/GUI deps
-# libjemalloc2 replaces glibc malloc via LD_PRELOAD: drastically reduces RSS fragmentation
-#   from lxml/PIL/poppler small-allocation churn (glibc's main arena cannot release
-#   middle-of-heap holes; jemalloc actively purges dirty pages back to the OS).
+# poppler-utils provides pdfinfo/pdftoppm for PDF thumbnail rendering via pdf2image.
+# LibreOffice (soffice) is NOT installed here — all PPTX conversion is
+# delegated to the soffice-worker pod running in its own cgroup.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    poppler-utils libreoffice-impress-nogui libjemalloc2 && rm -rf /var/lib/apt/lists/*
+    poppler-utils && rm -rf /var/lib/apt/lists/*
 
 WORKDIR ${WORKDIR}
 COPY --from=backend-builder ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
 COPY --from=backend-builder ${WORKDIR} .
 
-# Preload jemalloc for the worker process. Using a glob+shell because the path
-# is arch-dependent (x86_64-linux-gnu vs aarch64-linux-gnu).
-# MALLOC_CONF tunes purge aggressiveness for our PPTX/PDF workload:
-#   - background_thread: dedicated thread purges dirty pages
-#   - dirty/muzzy_decay_ms=5000: return freed pages to OS within 5s
-ENV MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:5000,muzzy_decay_ms:5000"
-ENTRYPOINT ["/bin/sh", "-c", "export LD_PRELOAD=$(ls /usr/lib/*/libjemalloc.so.2 2>/dev/null | head -1) && exec .venv/bin/python catalog_worker.py"]
+ENTRYPOINT [".venv/bin/python", "catalog_worker.py"]

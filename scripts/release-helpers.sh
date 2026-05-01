@@ -14,7 +14,7 @@
 # Compatible with bash 3.2+ (macOS default).
 #
 
-ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk client-slack client-slack-frontend client-email voice-agent client-google-chat"
+ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk client-slack client-slack-frontend client-email voice-agent client-google-chat soffice-worker"
 
 # Packages that only build Docker images but share another package's version (not independently released)
 VIRTUAL_PACKAGES="catalog-worker"
@@ -35,6 +35,7 @@ pkg_dir() {
     client-email)           echo "packages/client-email" ;;
     voice-agent)            echo "packages/voice-agent" ;;
     client-google-chat)      echo "packages/client-google-chat" ;;
+    soffice-worker)          echo "packages/soffice-worker" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }
@@ -42,7 +43,7 @@ pkg_dir() {
 pkg_type() {
   case "$1" in
     console-frontend|client-slack-frontend|client-slack|client-email|client-google-chat) echo "node" ;;
-    agent-creator|agent-runner|orchestrator-agent|console-backend|catalog-worker|ringier-a2a-sdk|voice-agent) echo "python" ;;
+    agent-creator|agent-runner|orchestrator-agent|console-backend|catalog-worker|ringier-a2a-sdk|voice-agent|soffice-worker) echo "python" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }

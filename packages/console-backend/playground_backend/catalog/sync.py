@@ -44,9 +44,9 @@ from ringier_a2a_sdk.embeddings import GeminiEmbeddings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..catalog.adapters.base import CatalogSourceAdapter, ExtractedPage, SourceFile
+from ..catalog.adapters.base import CatalogSourceAdapter, ExtractedPage, ExtractionResourceError, SourceFile
 from ..catalog.adapters.google_drive import _PPTX_THUMBNAILS_ENABLED, PPTX_MIME, ExportTimeoutError
-from ..catalog.executor import get_sync_executor, run_in_sync_executor
+from ..catalog.executor import get_io_executor, run_in_sync_executor
 from ..catalog.task_queue import (
     FileTaskPayload,
     FileTaskProcessor,
@@ -80,23 +80,45 @@ _LOG_MEMORY = os.environ.get("CATALOG_LOG_MEMORY", "0") == "1"
 
 
 def _log_memory(stage: str, detail: str = "") -> None:
-    """Log current process RSS for memory debugging.
+    """Log current process RSS and total cgroup memory for memory debugging.
 
-    Reads /proc/self/status on Linux. Silent no-op on other platforms.
+    Reads /proc/self/status (Python-process VmRSS) and the cgroup memory
+    counter (all processes in the container, including pdftoppm / soffice
+    subprocesses) on Linux. Silent no-op on other platforms.
     Enabled only when CATALOG_LOG_MEMORY=1 to avoid log noise.
     """
     if not _LOG_MEMORY:
         return
     try:
+        rss_mb: int | None = None
         with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     rss_mb = int(line.split()[1]) // 1024
-                    if detail:
-                        logger.info("MEM[%s] %s: RSS=%d MB", stage, detail, rss_mb)
-                    else:
-                        logger.info("MEM[%s]: RSS=%d MB", stage, rss_mb)
-                    return
+                    break
+
+        # Try cgroup v2 first, fall back to v1.
+        cgroup_mb: int | None = None
+        for cgroup_path in (
+            "/sys/fs/cgroup/memory.current",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ):
+            try:
+                with open(cgroup_path) as f:
+                    cgroup_mb = int(f.read().strip()) // (1024 * 1024)
+                break
+            except OSError:
+                pass
+
+        if rss_mb is not None:
+            parts = [f"RSS={rss_mb} MB"]
+            if cgroup_mb is not None:
+                parts.append(f"CGROUP={cgroup_mb} MB")
+            mem_str = ", ".join(parts)
+            if detail:
+                logger.info("MEM[%s] %s: %s", stage, detail, mem_str)
+            else:
+                logger.info("MEM[%s]: %s", stage, mem_str)
     except Exception:
         pass
 
@@ -108,9 +130,10 @@ MAX_FILE_SIZE_MB = int(os.environ.get("CATALOG_MAX_FILE_SIZE_MB", "100"))
 MAX_PAGE_COUNT = int(os.environ.get("CATALOG_MAX_PAGE_COUNT", "500"))
 
 # Budget floor for unknown files (prev_page_count=0).  With budget=100 and
-# floor=20, at most 5 unknown files run concurrently — keeps the DB pool and
-# memory footprint bounded during initial sync.
-_BUDGET_FLOOR = 20
+# floor=50, at most 2 unknown files run concurrently, bounding the worst-case
+# memory when page counts are unknown (before the first extract completes).
+# After extract, upgrade() adjusts the hold to the real page count.
+_BUDGET_FLOOR = int(os.environ.get("CATALOG_BUDGET_FLOOR", "50"))
 
 # --- Retry configuration ---
 MAX_RETRIES = 3
@@ -119,20 +142,29 @@ RETRY_MAX_DELAY = 30.0  # seconds
 
 
 class _WeightedSemaphore:
-    """FIFO weighted semaphore.
+    """FIFO weighted semaphore with two-tier priority.
 
     Each ``acquire(weight)`` removes ``weight`` units from a fixed
     ``capacity``.  If ``weight`` exceeds the capacity it is capped, so a
     single oversized job runs alone (no other waiters can be granted
-    while it holds the full budget).  Waiters are served strictly in
-    FIFO order to prevent starvation of large jobs by an endless trickle
-    of small ones.
+    while it holds the full budget).
+
+    Two priority tiers:
+    - **High** (upgrade waiters): served first when budget is released.
+    - **Normal** (initial-acquire waiters): served only after all
+      high-priority waiters that can be satisfied are granted.
+
+    This prevents priority inversion where new tasks steal budget from
+    tasks that already have pages in memory and need to upgrade.
     """
 
     def __init__(self, capacity: int) -> None:
         self._capacity = max(1, capacity)
         self._available = self._capacity
+        # Normal-priority queue (initial acquires)
         self._waiters: deque[tuple[int, asyncio.Future[None]]] = deque()
+        # High-priority queue (upgrades — served first)
+        self._upgrade_waiters: deque[tuple[int, asyncio.Future[None]]] = deque()
 
     @property
     def capacity(self) -> int:
@@ -143,14 +175,14 @@ class _WeightedSemaphore:
         return self._available
 
     async def acquire(self, weight: int) -> int:
-        """Acquire ``weight`` units (capped at capacity).
+        """Acquire ``weight`` units (capped at capacity).  Normal priority.
 
         Returns the number of units actually held — callers must pass
         the same value back to :meth:`release`.
         """
         effective = max(1, min(int(weight), self._capacity))
-        # Fast path: room is available and no one is queued ahead of us.
-        if not self._waiters and self._available >= effective:
+        # Fast path: room is available and no higher-priority or same-priority waiter is queued.
+        if not self._upgrade_waiters and not self._waiters and self._available >= effective:
             self._available -= effective
             return effective
         loop = asyncio.get_event_loop()
@@ -160,13 +192,32 @@ class _WeightedSemaphore:
         try:
             await fut
         except BaseException:
-            # Cancelled or otherwise interrupted before being granted.
             if entry in self._waiters:
                 self._waiters.remove(entry)
             elif fut.done() and not fut.cancelled():
-                # Already granted but the await raised — give back the units.
                 self.release(effective)
-            # Releasing may have unblocked the next waiter.
+            self._wake_waiters()
+            raise
+        return effective
+
+    async def _acquire_priority(self, weight: int) -> int:
+        """Acquire ``weight`` units with HIGH priority (upgrade path)."""
+        effective = max(1, min(int(weight), self._capacity))
+        # Fast path: no upgrade waiter ahead of us and budget available.
+        if not self._upgrade_waiters and self._available >= effective:
+            self._available -= effective
+            return effective
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        entry = (effective, fut)
+        self._upgrade_waiters.append(entry)
+        try:
+            await fut
+        except BaseException:
+            if entry in self._upgrade_waiters:
+                self._upgrade_waiters.remove(entry)
+            elif fut.done() and not fut.cancelled():
+                self.release(effective)
             self._wake_waiters()
             raise
         return effective
@@ -174,21 +225,14 @@ class _WeightedSemaphore:
     def release(self, weight: int) -> None:
         self._available += weight
         if self._available > self._capacity:
-            # Defensive: keep available bounded.
             self._available = self._capacity
         self._wake_waiters()
 
-    def adjust(self, current_held: int, new_weight: int) -> int:
-        """Non-blocking budget adjustment.
+    def adjust_down(self, current_held: int, new_weight: int) -> int:
+        """Release excess budget immediately (non-blocking).
 
-        If *new_weight* < *current_held*, releases the excess immediately
-        (letting other tasks start sooner).  If *new_weight* >= *current_held*,
-        keeps the current hold unchanged — the budget only gates how many
-        extractions START concurrently; once pages are in memory, blocking
-        for more units would risk deadlock (all slots occupied, nobody can
-        upgrade).
-
-        Returns the new held amount.
+        Only decreases the hold — if *new_weight* >= *current_held*, the
+        hold is unchanged.  Returns the new held amount.
         """
         effective_new = max(1, min(int(new_weight), self._capacity))
         if effective_new < current_held:
@@ -196,11 +240,79 @@ class _WeightedSemaphore:
             return effective_new
         return current_held
 
+    async def upgrade(self, current_held: int, new_weight: int) -> int:
+        """Resize hold to *new_weight*, blocking with HIGH priority if more needed.
+
+        If *new_weight* <= *current_held*, releases the excess (non-blocking).
+        If *new_weight* > *current_held*, enqueues itself in the high-priority
+        queue FIRST, then releases the current hold.  This guarantees that when
+        release triggers _wake_waiters(), this upgrade entry is visible and
+        will be served before any normal-priority waiter.
+
+        High priority ensures that freed units flow to upgrading tasks (which
+        already have pages in memory) before new tasks that haven't started
+        extraction yet.  This prevents unbounded pile-up.
+
+        Deadlock-free because:
+        - Release-after-enqueue ensures units circulate among upgraders.
+        - High-priority queue ensures upgraders are served before new entrants.
+        - At least one upgrader can always be satisfied (FIFO within tier).
+
+        Returns the new held amount (equal to min(new_weight, capacity)).
+        """
+        effective_new = max(1, min(int(new_weight), self._capacity))
+        if effective_new <= current_held:
+            if effective_new < current_held:
+                self.release(current_held - effective_new)
+            return effective_new
+
+        # Enqueue in the high-priority queue BEFORE releasing current hold.
+        # This ensures _wake_waiters() (triggered by release below) sees
+        # this entry and serves it before any normal-priority waiter.
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        entry = (effective_new, fut)
+        self._upgrade_waiters.append(entry)
+
+        # Now release — _wake_waiters() will try to grant us immediately
+        # if enough budget is available after release.
+        self.release(current_held)
+
+        try:
+            await fut
+        except BaseException:
+            if entry in self._upgrade_waiters:
+                self._upgrade_waiters.remove(entry)
+            elif fut.done() and not fut.cancelled():
+                self.release(effective_new)
+            self._wake_waiters()
+            raise
+        return effective_new
+
     def _wake_waiters(self) -> None:
+        """Grant budget to waiters: upgrade (high-priority) first, then normal.
+
+        STRICT PRIORITY: if any unsatisfied upgrade waiter exists, normal
+        waiters are completely blocked — even if enough budget is available
+        for them.  This prevents new files from entering the pipeline while
+        existing files are waiting to upgrade after extraction.
+        """
+        # Serve upgrade waiters first (FIFO within tier)
+        while self._upgrade_waiters:
+            head_weight, head_fut = self._upgrade_waiters[0]
+            if head_fut.done():
+                self._upgrade_waiters.popleft()
+                continue
+            if self._available < head_weight:
+                # Can't satisfy the head upgrade waiter — block ALL normal waiters too.
+                return
+            self._upgrade_waiters.popleft()
+            self._available -= head_weight
+            head_fut.set_result(None)
+        # Only serve normal waiters when NO upgrade waiters are pending.
         while self._waiters:
             head_weight, head_fut = self._waiters[0]
             if head_fut.done():
-                # Cancelled while queued — drop and continue.
                 self._waiters.popleft()
                 continue
             if self._available < head_weight:
@@ -249,8 +361,8 @@ async def _retry_async(
     for attempt in range(max_retries + 1):
         try:
             return await coro_factory()
-        except ExportTimeoutError:
-            # Timeouts are structural (file too large) — retrying won't help.
+        except (ExportTimeoutError, ExtractionResourceError):
+            # These are structural failures — retrying the same file won't help.
             raise
         except Exception:
             if attempt == max_retries:
@@ -318,10 +430,10 @@ class _SyncJobState:
     user_sub: str | None = None
     catalog_id: str | None = None
     index_embeddings: GeminiEmbeddings = field(
-        default_factory=lambda: GeminiEmbeddings(role="document", executor=get_sync_executor())
+        default_factory=lambda: GeminiEmbeddings(role="document", executor=get_io_executor())
     )
     query_embeddings: GeminiEmbeddings = field(
-        default_factory=lambda: GeminiEmbeddings(role="query", executor=get_sync_executor())
+        default_factory=lambda: GeminiEmbeddings(role="query", executor=get_io_executor())
     )
     progress_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
 
@@ -372,14 +484,14 @@ class CatalogSyncPipeline:
                 cost_logger=self._cost_logger,
                 user_sub=user_sub,
                 catalog_id=catalog_id,
-                executor=get_sync_executor(),
+                executor=get_io_executor(),
             ),
             query_embeddings=GeminiEmbeddings(
                 role="query",
                 cost_logger=self._cost_logger,
                 user_sub=user_sub,
                 catalog_id=catalog_id,
-                executor=get_sync_executor(),
+                executor=get_io_executor(),
             ),
             progress_callback=progress_callback,
         )
@@ -444,8 +556,8 @@ class CatalogSyncPipeline:
     def _get_vector_store(self, catalog_id: str, sync_job_id: str | None = None) -> VectorStore:
         """Get or create a vector store for a catalog."""
         state = self._job_state.get(sync_job_id) if sync_job_id else None
-        index_emb = state.index_embeddings if state else GeminiEmbeddings(role="document", executor=get_sync_executor())
-        query_emb = state.query_embeddings if state else GeminiEmbeddings(role="query", executor=get_sync_executor())
+        index_emb = state.index_embeddings if state else GeminiEmbeddings(role="document", executor=get_io_executor())
+        query_emb = state.query_embeddings if state else GeminiEmbeddings(role="query", executor=get_io_executor())
         return CatalogVectorStoreFactory.create(
             catalog_id=catalog_id,
             index_embedding=index_emb,
@@ -836,14 +948,6 @@ class CatalogSyncPipeline:
 
         vector_store = self._get_vector_store(catalog_id, sync_job_id)
 
-        # # Delete old index so it gets recreated with current config
-        # # (correct nonFilterableMetadataKeys and embedding dimensions).
-        # try:
-        #     vector_store.delete()
-        #     logger.info("Deleted old vector index for catalog %s", catalog_id)
-        # except Exception:
-        #     logger.debug("No existing index to delete for catalog %s", catalog_id)
-
         batch_size = 20
         indexed = 0
         failed_count = 0
@@ -1029,31 +1133,35 @@ class CatalogSyncPipeline:
 
         # --- Budget is already held by the caller (_handle_file) -----------
         # Release excess if prev_page_count is actually smaller than the floor.
-        # Never block for more — avoids deadlock when all slots are occupied.
         if prev_page_count and prev_page_count < held:
-            held = self._render_budget.adjust(held, prev_page_count)
+            held = self._render_budget.adjust_down(held, prev_page_count)
         _log_memory("budget_acquired", f"{file.name} held={held}/{self._render_budget.capacity}")
 
-        # Extract pages (with retry)
+        # Extract pages (with retry).
+        # ExtractionResourceError (e.g. soffice not found, ODP parse failure)
+        # is not retryable — convert immediately to FileSkippedError.
         t0 = time.monotonic()
-        pages = await _retry_async(
-            lambda: self._adapter.extract_pages(file, credentials),
-            operation=f"extract_pages({file.name})",
-        )
+        try:
+            pages = await _retry_async(
+                lambda: self._adapter.extract_pages(file, credentials),
+                operation=f"extract_pages({file.name})",
+            )
+        except ExtractionResourceError as exc:
+            raise FileSkippedError(f"PPTX extraction failed (resource error): {exc}") from exc
         page_count = len(pages)
         logger.info("extract_pages(%s): %d pages in %.1fs", file.name, page_count, time.monotonic() - t0)
         _log_memory("after_extract", file.name)
-        _log_memory("after_extract_trim", file.name)
 
         if page_count == 0:
             raise FileSkippedError("Extraction returned 0 pages (empty or corrupted file)")
 
-        # Adjust budget hold to actual page_count — only releases excess.
-        # Never blocks for more: pages are already in memory, so waiting
-        # would risk deadlock without saving any memory.
-        if page_count < held:
-            held = self._render_budget.adjust(held, page_count)
-            _log_memory("budget_adjusted", f"{file.name} held={held}/{self._render_budget.capacity}")
+        # Upgrade budget hold to actual page_count.  Blocks if the budget
+        # doesn't have enough free units — this is the key mechanism that
+        # prevents too many large decks from being in memory simultaneously.
+        # Deadlock-free: files already holding their full budget continue to
+        # make forward progress (summary → render → release).
+        held = await self._render_budget.upgrade(held, page_count)
+        _log_memory("budget_upgraded", f"{file.name} held={held}/{self._render_budget.capacity}")
 
         # Gate 2: page-count check (works for all file types including Google-native)
         if page_count > MAX_PAGE_COUNT:
@@ -1155,12 +1263,12 @@ class CatalogSyncPipeline:
         await db.commit()  # Release row lock before the long thumbnail pipeline
         logger.info("summary(%s): %.1fs", file.name, time.monotonic() - t0)
         _log_memory("after_summary", file.name)
-        _log_memory("after_summary_trim", file.name)
 
         # --- Batch fetch all thumbnails (download PDF/PPTX once, render all) ---
         t0 = time.monotonic()
         changed_page_list = [page for page, _ in changed_pages_info]
         all_thumbnails: dict[int, bytes] = {}
+        _log_memory("before_thumbnails", file.name)
         try:
             all_thumbnails = await _retry_async(
                 lambda: self._adapter.get_all_thumbnails(file, changed_page_list, credentials),
@@ -1453,7 +1561,6 @@ class CatalogSyncPipeline:
         thumbnail_s3_key: str | None,
     ) -> str:
         """Upsert a catalog_pages record, returning the DB ID."""
-        import json
 
         now = datetime.now(timezone.utc)
         result = await db.execute(
@@ -1509,8 +1616,6 @@ class CatalogSyncPipeline:
         """
         if not rows:
             return
-
-        import json
 
         now = datetime.now(timezone.utc)
         params: list[dict] = []

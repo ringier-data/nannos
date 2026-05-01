@@ -645,7 +645,7 @@ log "Installing Python dependencies..."
 cd "$ROOT_DIR"
 
 # Sync all Python packages in parallel
-for pkg in orchestrator-agent agent-creator agent-runner console-backend; do
+for pkg in orchestrator-agent agent-creator agent-runner console-backend soffice-worker; do
   (cd "packages/$pkg" && uv sync --quiet) &
 done
 (cd "packages/voice-agent" && uv sync --quiet) &
@@ -767,6 +767,7 @@ cat <<'EOF'
     Agent Creator ..... http://localhost:8080
     Agent Runner ...... http://localhost:5005
     Voice Agent ....... http://localhost:8002
+    soffice-worker .... http://localhost:8090
     Keycloak .......... $_KC_BASE_URL
     PostgreSQL (console) . localhost:5401
     PostgreSQL (docstore)  localhost:5402
@@ -869,6 +870,7 @@ procs:
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
       CONSOLE_BACKEND_URL: "http://localhost:5001"
+      SOFFICE_WORKER_URL: "http://localhost:8090"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
       CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
@@ -887,6 +889,13 @@ procs:
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
       BEDROCK_MODEL_ID: "global.anthropic.claude-haiku-4-5-20251001-v1:0"
       OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
+      LOG_LEVEL: "INFO"
+
+  soffice-worker:
+    cwd: "$ROOT_DIR/packages/soffice-worker"
+    shell: "uv run uvicorn main:app --host 127.0.0.1 --port 8090 --reload 2>&1 | tee $_LOG_DIR/soffice-worker.log"
+    env:
+      PORT: "8090"
       LOG_LEVEL: "INFO"
 
   orchestrator:

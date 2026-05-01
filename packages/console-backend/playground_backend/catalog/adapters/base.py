@@ -12,6 +12,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class ExtractionResourceError(Exception):
+    """Raised when an extraction subprocess is killed due to memory limits.
+
+    The caller should treat the file as skipped rather than retrying, since
+    retrying will hit the same limit.
+    """
+
+
 @dataclass(slots=True)
 class SourceFile:
     """A file discovered from the source."""

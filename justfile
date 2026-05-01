@@ -38,6 +38,7 @@ img_client_email := registry + "/nannos-client-email"
 img_voice_agent := registry + "/nannos-voice-agent"
 img_catalog_worker := registry + "/nannos-catalog-worker"
 img_client_google_chat := registry + "/nannos-client-google-chat"
+img_soffice_worker := registry + "/nannos-soffice-worker"
 
 # Default build platform
 platform := "linux/arm64"
@@ -46,7 +47,7 @@ platform := "linux/arm64"
 build_ts := `date -u +%Y%m%d%H%M%S`
 
 # Packages that have Dockerfiles (used by build recipes)
-_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend catalog-worker console-frontend client-slack client-slack-frontend client-email voice-agent client-google-chat"
+_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend catalog-worker console-frontend client-slack client-slack-frontend client-email voice-agent client-google-chat soffice-worker"
 
 # Build flags (override on CLI, e.g. just push=true build)
 push := ""
@@ -79,6 +80,7 @@ pkg-image pkg:
       voice-agent)        echo "{{ img_voice_agent }}" ;;
       catalog-worker)     echo "{{ img_catalog_worker }}" ;;
       client-google-chat) echo "{{ img_client_google_chat }}" ;;
+      soffice-worker)     echo "{{ img_soffice_worker }}" ;;
       *) echo "" ;;
     esac
 

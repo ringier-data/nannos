@@ -50,7 +50,7 @@ _cost_logger = None
 async def main() -> None:
     global _cost_logger
 
-    from playground_backend.catalog.executor import shutdown_sync_executor
+    from playground_backend.catalog.executor import shutdown_executors
     from playground_backend.db.connection import close_db, get_async_session_factory, init_db
     from playground_backend.repositories.rate_card_repository import RateCardRepository
     from playground_backend.repositories.usage_repository import UsageRepository
@@ -112,7 +112,7 @@ async def main() -> None:
 
     await _cost_logger.shutdown()
     logger.info("Internal cost logger stopped")
-    shutdown_sync_executor()
+    shutdown_executors()
     await close_db()
     logger.info("Catalog worker stopped")
 
