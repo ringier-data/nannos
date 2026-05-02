@@ -111,7 +111,7 @@ class AutomatedSubAgentConfig(BaseModel):
         default=None,
         max_length=3,
         description=(
-            "List of MCP tool names that the agent is allowed to call. Leave empty if the task requires no tools. Call the playground_grep_mcp_tools API to get available tools and their input schemas."
+            "List of MCP tool names that the agent is allowed to call. Leave empty if the task requires no tools. Call the console_grep_mcp_tools API to get available tools and their input schemas."
         ),
     )
     # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)

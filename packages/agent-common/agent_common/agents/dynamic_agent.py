@@ -20,7 +20,7 @@ Architecture:
 - Uses structured output (SubAgentResponseSchema) for explicit task state
 
 Use Case:
-Users can configure personal sub-agents via playground backend with custom prompts and optional
+Users can configure personal sub-agents via console backend with custom prompts and optional
 tool whitelists, enabling specialized assistants without deploying separate A2A services.
 """
 
@@ -176,7 +176,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             user_language: User's preferred language (ISO 639-1 code)
             user_timezone: User's timezone (IANA timezone name)
             custom_prompt: User's custom prompt addendum
-            sub_agent_id: Optional playground backend sub_agent ID for tracking agent-created agents
+            sub_agent_id: Optional sub_agent ID for tracking agent-created agents
             store: Shared AsyncPostgresStore for document storage (enables FilesystemMiddleware persistence)
             backend_factory: Factory function for creating CompositeBackend (for FilesystemMiddleware)
             mcp_gateway_url: MCP gateway URL (defaults to MCP_GATEWAY_URL env var)
@@ -255,7 +255,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
     def get_sub_agent_identifier(self, input_data: SubAgentInput) -> str:
         """Return identifier for cost tracking.
 
-        Uses playground sub_agent_id if available, otherwise falls back to dynamic-{name}.
+        Uses sub_agent_id if available, otherwise falls back to dynamic-{name}.
         """
         if self.sub_agent_id:
             return str(self.sub_agent_id)

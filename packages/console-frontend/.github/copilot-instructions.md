@@ -1,4 +1,4 @@
-# Playground Frontend Copilot Instructions
+# Console Frontend Copilot Instructions
 
 ## Maintaining These Instructions
 

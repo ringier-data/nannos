@@ -148,19 +148,19 @@ def build_runtime_context(
         # Build task-scheduler's tool whitelist
         # Include specific tools needed for scheduling operations:
         # - All scheduler_* tools (validate, create, list, get, update, pause)
-        # - Only specific playground tools for sub-agent management and structured MCP tool discovery
-        allowed_playground_tools = {
-            "playground_list_sub_agents",
-            # "playground_create_sub_agent",  # The sub-agent normally can be created by the task-scheduler tool itself
-            "playground_update_sub_agent",  # TODO: in theory we should allow only to update automated sub-agents
+        # - Only specific console tools for sub-agent management and structured MCP tool discovery
+        allowed_console_tools = {
+            "console_list_sub_agents",
+            # "console_create_sub_agent",  # The sub-agent normally can be created by the task-scheduler tool itself
+            "console_update_sub_agent",  # TODO: in theory we should allow only to update automated sub-agents
             # MCP tool discovery - hierarchical navigation (servers -> tools -> details)
-            "playground_list_mcp_servers",  # List available MCP integration servers (GitHub, Jira, etc.)
-            "playground_grep_mcp_tools",  # Discover available MCP tools
+            "console_list_mcp_servers",  # List available MCP integration servers (GitHub, Jira, etc.)
+            "console_grep_mcp_tools",  # Discover available MCP tools
         }
         task_scheduler_tool_names = [
             t.name
             for t in (user_config.tools or [])
-            if t.name.startswith("scheduler_") or t.name in allowed_playground_tools
+            if t.name.startswith("scheduler_") or t.name in allowed_console_tools
         ]
         logger.debug(f"Task-scheduler tool whitelist: {task_scheduler_tool_names}")
 
@@ -194,13 +194,13 @@ def build_runtime_context(
     # Start with backend registry (user_config.tool_names)
     whitelisted_tool_names = set(user_config.tool_names or [])
 
-    # Auto-include scheduler tools and playground tools (always available from MCP)
+    # Auto-include scheduler tools and console tools (always available from MCP)
     # These are essential for the orchestrator to delegate to task-scheduler sub-agent
     allowed_orchestrator_tools = {
-        "playground_list_sub_agents",
-        "playground_update_sub_agent",
-        "playground_list_mcp_servers",
-        "playground_grep_mcp_tools",
+        "console_list_sub_agents",
+        "console_update_sub_agent",
+        "console_list_mcp_servers",
+        "console_grep_mcp_tools",
     }
     orchestrator_auto_tools = {
         name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
@@ -210,7 +210,7 @@ def build_runtime_context(
         orchestrator_auto_tools.add("catalog_search")
     whitelisted_tool_names.update(orchestrator_auto_tools)
     logger.debug(
-        f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/playground tools)"
+        f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/console tools)"
     )
 
     # Add dynamic local sub-agents from user configuration

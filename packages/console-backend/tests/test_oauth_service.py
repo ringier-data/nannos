@@ -4,8 +4,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-
-from playground_backend.services.oauth_service import (
+from console_backend.services.oauth_service import (
     OAuthService,
     TokenExchangeError,
     TokenRefreshError,

@@ -60,7 +60,7 @@ from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
 logger = logging.getLogger(__name__)
 
-_PLAYGROUND_BACKEND_URL = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
+_CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
 _MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
 _MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "300"))
 _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
@@ -90,7 +90,7 @@ def _build_postgres_conn() -> str | None:
     if not host:
         return None
     port = os.getenv("POSTGRES_PORT", "5432")
-    db = os.getenv("POSTGRES_DB", "playground")
+    db = os.getenv("POSTGRES_DB", "console")
     user = os.getenv("POSTGRES_USER", "postgres")
     password = os.getenv("POSTGRES_PASSWORD", "")
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
@@ -255,7 +255,7 @@ class AgentRunner(BaseAgent):
         # Enable cost tracking so get_langchain_callbacks() works for LangGraph runs.
         # report_usage() is overridden as a no-op below to avoid a spurious "requests: 1"
         # entry being logged for the agent-runner dispatcher itself.
-        backend_url = os.getenv("PLAYGROUND_BACKEND_URL")
+        backend_url = os.getenv("CONSOLE_BACKEND_URL")
         if backend_url:
             try:
                 self.enable_cost_tracking(backend_url=backend_url)
@@ -484,7 +484,7 @@ class AgentRunner(BaseAgent):
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
-                    f"{_PLAYGROUND_BACKEND_URL}/api/v1/auth/me",
+                    f"{_CONSOLE_BACKEND_URL}/api/v1/auth/me",
                     headers={"Authorization": f"Bearer {user_access_token}"},
                 )
                 response.raise_for_status()
@@ -695,7 +695,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             Dict with keys: type, name, config_version (dict with model, system_prompt,
             agent_url, mcp_tools, foundry_*, enable_thinking, thinking_level, etc.)
         """
-        url = f"{_PLAYGROUND_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}"
+        url = f"{_CONSOLE_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
                 url,
@@ -1033,7 +1033,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         compiled_subagent = create_foundry_local_subagent(
             config=foundry_config,
             user=user_dict,
-            backend_url=_PLAYGROUND_BACKEND_URL,
+            backend_url=_CONSOLE_BACKEND_URL,
             sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
         )
 

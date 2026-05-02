@@ -40,7 +40,7 @@ def get_sub_agent_service(request: Request) -> SubAgentService:
     return request.app.state.sub_agent_service
 
 
-@router.get("", response_model=SubAgentListResponse, tags=["MCP"], operation_id="playground_list_sub_agents")
+@router.get("", response_model=SubAgentListResponse, tags=["MCP"], operation_id="console_list_sub_agents")
 async def list_sub_agents(
     request: Request,
     db: DbSession,
@@ -169,7 +169,7 @@ async def get_sub_agent_by_config_version(
         raise HTTPException(status_code=500, detail="Failed to get sub-agent")
 
 
-@router.post("", response_model=SubAgent, status_code=201, tags=["MCP"], operation_id="playground_create_sub_agent")
+@router.post("", response_model=SubAgent, status_code=201, tags=["MCP"], operation_id="console_create_sub_agent")
 async def create_sub_agent(
     request: Request,
     data: SubAgentCreate,
@@ -231,7 +231,7 @@ async def get_sub_agent(
         raise HTTPException(status_code=500, detail="Failed to get sub-agent")
 
 
-@router.patch("/{sub_agent_id}", response_model=SubAgent, tags=["MCP"], operation_id="playground_update_sub_agent")
+@router.patch("/{sub_agent_id}", response_model=SubAgent, tags=["MCP"], operation_id="console_update_sub_agent")
 async def update_sub_agent(
     request: Request,
     sub_agent_id: int,

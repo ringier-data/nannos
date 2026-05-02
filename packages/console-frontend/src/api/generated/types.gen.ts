@@ -153,7 +153,7 @@ export type AutomatedSubAgentConfig = {
     /**
      * Mcp Tools
      *
-     * List of MCP tool names that the agent is allowed to call. Leave empty if the task requires no tools. Call the playground_grep_mcp_tools API to get available tools and their input schemas.
+     * List of MCP tool names that the agent is allowed to call. Leave empty if the task requires no tools. Call the console_grep_mcp_tools API to get available tools and their input schemas.
      */
     mcp_tools?: Array<string> | null;
     /**
@@ -3881,7 +3881,7 @@ export type ServeLocalFileApiV1FilesLocalFilePathGetResponses = {
     200: unknown;
 };
 
-export type PlaygroundGrepMcpToolsData = {
+export type ConsoleGrepMcpToolsData = {
     body?: never;
     path?: never;
     query: {
@@ -3901,25 +3901,25 @@ export type PlaygroundGrepMcpToolsData = {
     url: '/api/v1/mcp/tools/search';
 };
 
-export type PlaygroundGrepMcpToolsErrors = {
+export type ConsoleGrepMcpToolsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundGrepMcpToolsError = PlaygroundGrepMcpToolsErrors[keyof PlaygroundGrepMcpToolsErrors];
+export type ConsoleGrepMcpToolsError = ConsoleGrepMcpToolsErrors[keyof ConsoleGrepMcpToolsErrors];
 
-export type PlaygroundGrepMcpToolsResponses = {
+export type ConsoleGrepMcpToolsResponses = {
     /**
      * Successful Response
      */
     200: McpToolsResponse;
 };
 
-export type PlaygroundGrepMcpToolsResponse = PlaygroundGrepMcpToolsResponses[keyof PlaygroundGrepMcpToolsResponses];
+export type ConsoleGrepMcpToolsResponse = ConsoleGrepMcpToolsResponses[keyof ConsoleGrepMcpToolsResponses];
 
-export type PlaygroundListMcpToolsData = {
+export type ConsoleListMcpToolsData = {
     body?: never;
     path?: never;
     query?: {
@@ -3931,39 +3931,39 @@ export type PlaygroundListMcpToolsData = {
     url: '/api/v1/mcp/tools';
 };
 
-export type PlaygroundListMcpToolsErrors = {
+export type ConsoleListMcpToolsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundListMcpToolsError = PlaygroundListMcpToolsErrors[keyof PlaygroundListMcpToolsErrors];
+export type ConsoleListMcpToolsError = ConsoleListMcpToolsErrors[keyof ConsoleListMcpToolsErrors];
 
-export type PlaygroundListMcpToolsResponses = {
+export type ConsoleListMcpToolsResponses = {
     /**
      * Successful Response
      */
     200: McpToolsResponse;
 };
 
-export type PlaygroundListMcpToolsResponse = PlaygroundListMcpToolsResponses[keyof PlaygroundListMcpToolsResponses];
+export type ConsoleListMcpToolsResponse = ConsoleListMcpToolsResponses[keyof ConsoleListMcpToolsResponses];
 
-export type PlaygroundListMcpServersData = {
+export type ConsoleListMcpServersData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/mcp/servers';
 };
 
-export type PlaygroundListMcpServersResponses = {
+export type ConsoleListMcpServersResponses = {
     /**
      * Successful Response
      */
     200: McpServersResponse;
 };
 
-export type PlaygroundListMcpServersResponse = PlaygroundListMcpServersResponses[keyof PlaygroundListMcpServersResponses];
+export type ConsoleListMcpServersResponse = ConsoleListMcpServersResponses[keyof ConsoleListMcpServersResponses];
 
 export type ListSecretsApiV1SecretsGetData = {
     body?: never;
@@ -4128,7 +4128,7 @@ export type UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses =
 
 export type UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponse = UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses[keyof UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses];
 
-export type PlaygroundListSubAgentsData = {
+export type ConsoleListSubAgentsData = {
     body?: never;
     path?: never;
     query?: {
@@ -4154,48 +4154,48 @@ export type PlaygroundListSubAgentsData = {
     url: '/api/v1/sub-agents';
 };
 
-export type PlaygroundListSubAgentsErrors = {
+export type ConsoleListSubAgentsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundListSubAgentsError = PlaygroundListSubAgentsErrors[keyof PlaygroundListSubAgentsErrors];
+export type ConsoleListSubAgentsError = ConsoleListSubAgentsErrors[keyof ConsoleListSubAgentsErrors];
 
-export type PlaygroundListSubAgentsResponses = {
+export type ConsoleListSubAgentsResponses = {
     /**
      * Successful Response
      */
     200: SubAgentListResponse;
 };
 
-export type PlaygroundListSubAgentsResponse = PlaygroundListSubAgentsResponses[keyof PlaygroundListSubAgentsResponses];
+export type ConsoleListSubAgentsResponse = ConsoleListSubAgentsResponses[keyof ConsoleListSubAgentsResponses];
 
-export type PlaygroundCreateSubAgentData = {
+export type ConsoleCreateSubAgentData = {
     body: SubAgentCreate;
     path?: never;
     query?: never;
     url: '/api/v1/sub-agents';
 };
 
-export type PlaygroundCreateSubAgentErrors = {
+export type ConsoleCreateSubAgentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundCreateSubAgentError = PlaygroundCreateSubAgentErrors[keyof PlaygroundCreateSubAgentErrors];
+export type ConsoleCreateSubAgentError = ConsoleCreateSubAgentErrors[keyof ConsoleCreateSubAgentErrors];
 
-export type PlaygroundCreateSubAgentResponses = {
+export type ConsoleCreateSubAgentResponses = {
     /**
      * Successful Response
      */
     201: SubAgent;
 };
 
-export type PlaygroundCreateSubAgentResponse = PlaygroundCreateSubAgentResponses[keyof PlaygroundCreateSubAgentResponses];
+export type ConsoleCreateSubAgentResponse = ConsoleCreateSubAgentResponses[keyof ConsoleCreateSubAgentResponses];
 
 export type ListPendingApprovalsApiV1SubAgentsPendingGetData = {
     body?: never;
@@ -4340,7 +4340,7 @@ export type GetSubAgentApiV1SubAgentsSubAgentIdGetResponses = {
 
 export type GetSubAgentApiV1SubAgentsSubAgentIdGetResponse = GetSubAgentApiV1SubAgentsSubAgentIdGetResponses[keyof GetSubAgentApiV1SubAgentsSubAgentIdGetResponses];
 
-export type PlaygroundUpdateSubAgentData = {
+export type ConsoleUpdateSubAgentData = {
     body: SubAgentUpdate;
     path: {
         /**
@@ -4352,23 +4352,23 @@ export type PlaygroundUpdateSubAgentData = {
     url: '/api/v1/sub-agents/{sub_agent_id}';
 };
 
-export type PlaygroundUpdateSubAgentErrors = {
+export type ConsoleUpdateSubAgentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundUpdateSubAgentError = PlaygroundUpdateSubAgentErrors[keyof PlaygroundUpdateSubAgentErrors];
+export type ConsoleUpdateSubAgentError = ConsoleUpdateSubAgentErrors[keyof ConsoleUpdateSubAgentErrors];
 
-export type PlaygroundUpdateSubAgentResponses = {
+export type ConsoleUpdateSubAgentResponses = {
     /**
      * Successful Response
      */
     200: SubAgent;
 };
 
-export type PlaygroundUpdateSubAgentResponse = PlaygroundUpdateSubAgentResponses[keyof PlaygroundUpdateSubAgentResponses];
+export type ConsoleUpdateSubAgentResponse = ConsoleUpdateSubAgentResponses[keyof ConsoleUpdateSubAgentResponses];
 
 export type ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData = {
     body?: never;
@@ -7547,6 +7547,34 @@ export type HealthCheckApiV1HealthGetData = {
 };
 
 export type HealthCheckApiV1HealthGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type GetFrontendConfigApiV1ConfigGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/config';
+};
+
+export type GetFrontendConfigApiV1ConfigGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type CatalogSyncProgressApiInternalCatalogSyncProgressPostData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/internal/catalog-sync-progress';
+};
+
+export type CatalogSyncProgressApiInternalCatalogSyncProgressPostResponses = {
     /**
      * Successful Response
      */

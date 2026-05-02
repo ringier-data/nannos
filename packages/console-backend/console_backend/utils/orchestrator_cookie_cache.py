@@ -18,7 +18,7 @@ from weakref import WeakValueDictionary
 from cachetools import TTLCache
 
 if TYPE_CHECKING:
-    from playground_backend.services.session_service import SessionService
+    from console_backend.services.session_service import SessionService
 
 
 logger = logging.getLogger(__name__)

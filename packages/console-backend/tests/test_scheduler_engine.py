@@ -13,19 +13,18 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.scheduled_job import (
+from console_backend.models.scheduled_job import (
     JobRunStatus,
     JobType,
     ScheduledJob,
     ScheduleKind,
 )
-from playground_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
-from playground_backend.repositories.scheduled_job_repository import ScheduledJobRepository
-from playground_backend.services.scheduler_engine import SchedulerEngine
-from playground_backend.services.scheduler_token_service import SchedulerTokenService
+from console_backend.repositories.delivery_channel_repository import DeliveryChannelRepository
+from console_backend.repositories.scheduled_job_repository import ScheduledJobRepository
+from console_backend.services.scheduler_engine import SchedulerEngine
+from console_backend.services.scheduler_token_service import SchedulerTokenService
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _make_job(

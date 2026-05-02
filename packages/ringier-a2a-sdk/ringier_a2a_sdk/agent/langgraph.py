@@ -280,10 +280,10 @@ class LangGraphAgent(BaseAgent):
         return filtered_tools
 
     def _init_cost_tracking(self):
-        """Initialize cost tracking. Skipped if PLAYGROUND_BACKEND_URL is not set."""
-        backend_url = os.getenv("PLAYGROUND_BACKEND_URL")
+        """Initialize cost tracking. Skipped if CONSOLE_BACKEND_URL is not set."""
+        backend_url = os.getenv("CONSOLE_BACKEND_URL")
         if not backend_url:
-            logger.info("PLAYGROUND_BACKEND_URL not set, skipping cost tracking initialization")
+            logger.info("CONSOLE_BACKEND_URL not set, skipping cost tracking initialization")
             return
 
         try:

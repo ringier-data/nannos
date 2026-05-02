@@ -6,10 +6,9 @@ schema parity with production.
 
 import pytest
 import pytest_asyncio
+from console_backend.models.audit import AuditAction, AuditEntityType
+from console_backend.services.audit_service import AuditService
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.audit import AuditAction, AuditEntityType
-from playground_backend.services.audit_service import AuditService
 
 
 @pytest.fixture

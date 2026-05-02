@@ -4,7 +4,7 @@ import { Link } from 'react-router';
 import { Bot, ExternalLink, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import {
-  playgroundListSubAgentsOptions,
+  consoleListSubAgentsOptions,
   activateSubAgentApiV1SubAgentsSubAgentIdActivatePostMutation,
   deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
@@ -30,7 +30,7 @@ export function SubAgentActivationList() {
   const [searchQuery, setSearchQuery] = useState('');
 
   const { data: subAgentsData, isLoading } = useQuery({
-    ...playgroundListSubAgentsOptions({}),
+    ...consoleListSubAgentsOptions({}),
   });
 
   const activateMutation = useMutation({
@@ -38,7 +38,7 @@ export function SubAgentActivationList() {
     onSuccess: () => {
       toast.success('Sub-agent activated');
       queryClient.invalidateQueries({
-        queryKey: playgroundListSubAgentsOptions({}).queryKey,
+        queryKey: consoleListSubAgentsOptions({}).queryKey,
       });
     },
     onError: () => {
@@ -51,7 +51,7 @@ export function SubAgentActivationList() {
     onSuccess: () => {
       toast.success('Sub-agent deactivated');
       queryClient.invalidateQueries({
-        queryKey: playgroundListSubAgentsOptions({}).queryKey,
+        queryKey: consoleListSubAgentsOptions({}).queryKey,
       });
     },
     onError: () => {

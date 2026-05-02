@@ -50,13 +50,13 @@ _cost_logger = None
 async def main() -> None:
     global _cost_logger
 
-    from playground_backend.catalog.executor import shutdown_executors
-    from playground_backend.db.connection import close_db, get_async_session_factory, init_db
-    from playground_backend.repositories.rate_card_repository import RateCardRepository
-    from playground_backend.repositories.usage_repository import UsageRepository
-    from playground_backend.services.llm_cost_tracking import InternalCostLogger
-    from playground_backend.services.rate_card_service import RateCardService
-    from playground_backend.services.usage_service import UsageService
+    from console_backend.catalog.executor import shutdown_executors
+    from console_backend.db.connection import close_db, get_async_session_factory, init_db
+    from console_backend.repositories.rate_card_repository import RateCardRepository
+    from console_backend.repositories.usage_repository import UsageRepository
+    from console_backend.services.llm_cost_tracking import InternalCostLogger
+    from console_backend.services.rate_card_service import RateCardService
+    from console_backend.services.usage_service import UsageService
 
     await init_db()
     logger.info("Database initialized")
@@ -124,8 +124,8 @@ async def main() -> None:
 
 async def _poll_loop(semaphore: asyncio.Semaphore, shutdown: asyncio.Event) -> None:
     """Poll for pending sync jobs every POLL_INTERVAL seconds."""
-    from playground_backend.db.connection import get_async_session_factory
-    from playground_backend.repositories.catalog_repository import CatalogRepository
+    from console_backend.db.connection import get_async_session_factory
+    from console_backend.repositories.catalog_repository import CatalogRepository
 
     repo = CatalogRepository()
 
@@ -168,11 +168,11 @@ async def _run_job(catalog_id: str, sync_job_id: str, job_status: str, semaphore
 
 async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     """Core sync execution — mirrors the old CatalogService.handle_sync_task()."""
-    from playground_backend.catalog.adapters.google_drive import GoogleDriveAdapter
-    from playground_backend.catalog.sync import CatalogSyncPipeline, normalize_source_config
-    from playground_backend.catalog.token_service import CatalogTokenService
-    from playground_backend.config import config
-    from playground_backend.db.connection import get_async_session_factory
+    from console_backend.catalog.adapters.google_drive import GoogleDriveAdapter
+    from console_backend.catalog.sync import CatalogSyncPipeline, normalize_source_config
+    from console_backend.catalog.token_service import CatalogTokenService
+    from console_backend.config import config
+    from console_backend.db.connection import get_async_session_factory
 
     session_factory = get_async_session_factory()
 
@@ -190,7 +190,7 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     )
 
     # Look up catalog
-    from playground_backend.repositories.catalog_repository import CatalogRepository
+    from console_backend.repositories.catalog_repository import CatalogRepository
 
     repo = CatalogRepository()
     async with session_factory() as db:
@@ -289,10 +289,10 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
 
 async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
     """Re-index pages with indexed_at = NULL into the vector store."""
-    from playground_backend.catalog.adapters.google_drive import GoogleDriveAdapter
-    from playground_backend.catalog.sync import CatalogSyncPipeline
-    from playground_backend.db.connection import get_async_session_factory
-    from playground_backend.repositories.catalog_repository import CatalogRepository
+    from console_backend.catalog.adapters.google_drive import GoogleDriveAdapter
+    from console_backend.catalog.sync import CatalogSyncPipeline
+    from console_backend.db.connection import get_async_session_factory
+    from console_backend.repositories.catalog_repository import CatalogRepository
 
     session_factory = get_async_session_factory()
     repo = CatalogRepository()
@@ -430,8 +430,8 @@ async def _scheduler_tick_loop(shutdown: asyncio.Event) -> None:
         logger.info("Auto-sync disabled, scheduler tick loop not started")
         return
 
-    from playground_backend.db.connection import get_async_session_factory
-    from playground_backend.repositories.catalog_repository import CatalogRepository
+    from console_backend.db.connection import get_async_session_factory
+    from console_backend.repositories.catalog_repository import CatalogRepository
 
     repo = CatalogRepository()
 
@@ -483,8 +483,8 @@ async def _reindex_heal_loop(shutdown: asyncio.Event) -> None:
     - There are pages with indexed_at = NULL (indexing partially failed)
     - No active job is already running/pending/reindexing
     """
-    from playground_backend.db.connection import get_async_session_factory
-    from playground_backend.repositories.catalog_repository import CatalogRepository
+    from console_backend.db.connection import get_async_session_factory
+    from console_backend.repositories.catalog_repository import CatalogRepository
 
     repo = CatalogRepository()
 
@@ -545,7 +545,7 @@ async def _reindex_heal_loop(shutdown: asyncio.Event) -> None:
 
 async def _heal_stuck_jobs() -> None:
     """Mark all sync jobs stuck in active states as failed on startup."""
-    from playground_backend.db.connection import get_async_session_factory
+    from console_backend.db.connection import get_async_session_factory
 
     try:
         session_factory = get_async_session_factory()
@@ -576,7 +576,7 @@ async def _persist_change_tokens(
 ) -> None:
     """Write updated per-source change tokens back to source_config."""
     try:
-        from playground_backend.catalog.sync import normalize_source_config
+        from console_backend.catalog.sync import normalize_source_config
 
         sources = normalize_source_config(source_config)
         updated = False

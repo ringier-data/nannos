@@ -49,7 +49,6 @@ Sub-Agents (agent-creator, agent-runner, user-created agents)
 | `client-slack-frontend` | React/TS | SPA | 8080 | Slack admin config UI |
 | `client-email` | Node/TS | A2A Svc | 3001 | Email client via AWS SES/SNS. Express 5 |
 | `client-google-chat` | Node/TS | A2A Svc | 3000 | Google Chat bot. Express 5, per-user OIDC auth |
-| `playground-frontend` | — | — | — | Placeholder/unused |
 
 ### Dependency Chain
 

@@ -3,9 +3,9 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from playground_backend.models.sub_agent import SubAgentCreate, SubAgentType, SubAgentUpdate
-from playground_backend.models.user import User
-from playground_backend.services.sub_agent_service import SubAgentService
+from console_backend.models.sub_agent import SubAgentCreate, SubAgentType, SubAgentUpdate
+from console_backend.models.user import User
+from console_backend.services.sub_agent_service import SubAgentService
 
 
 @pytest.mark.asyncio
@@ -39,8 +39,8 @@ async def test_update_automated_agent_without_foundry_fields(
     # Update the agent without providing Foundry fields (this was failing before)
     update_data = SubAgentUpdate(
         description="Updated description",
-        system_prompt="Updated prompt about data engineering.",
-        change_summary="Updated configuration from playground",
+        system_prompt="Updated prompt about data enconsole",
+        change_summary="Updated configuration from console",
     )
 
     updated_agent = await sub_agent_service.update_sub_agent(

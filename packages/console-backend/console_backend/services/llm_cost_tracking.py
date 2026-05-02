@@ -1,4 +1,4 @@
-"""Cost tracking helper for LLM calls in the playground backend."""
+"""Cost tracking helper for LLM calls in the console backend."""
 
 import asyncio
 import logging
@@ -18,11 +18,11 @@ def get_cost_logger() -> CostLogger:
     """Get or create the global cost logger instance.
 
     Returns:
-        CostLogger instance configured for the playground backend.
+        CostLogger instance configured for the console backend.
     """
     global _cost_logger
     if _cost_logger is None:
-        backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
+        backend_url = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
         _cost_logger = CostLogger(
             backend_url=backend_url,
             batch_size=10,

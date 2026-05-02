@@ -1,13 +1,12 @@
 """Tests for bulk activation/deactivation methods."""
 
 import pytest
+from console_backend.models.sub_agent import ActivationSource
+from console_backend.models.user import User
+from console_backend.repositories.sub_agent_repository import SubAgentRepository
+from console_backend.services.audit_service import AuditService
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.sub_agent import ActivationSource
-from playground_backend.models.user import User
-from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-from playground_backend.services.audit_service import AuditService
 
 
 @pytest.mark.asyncio

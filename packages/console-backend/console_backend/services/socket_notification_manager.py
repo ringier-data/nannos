@@ -9,8 +9,7 @@ import logging
 from typing import Any
 
 import socketio
-
-from playground_backend.utils.socket_events import SocketEvents
+from console_backend.utils.socket_events import SocketEvents
 
 logger = logging.getLogger(__name__)
 

@@ -61,8 +61,8 @@ import {
   deleteJob,
 } from '@/api/scheduler';
 import {
-  playgroundListSubAgentsOptions,
-  playgroundListMcpToolsOptions,
+  consoleListSubAgentsOptions,
+  consoleListMcpToolsOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { config } from '@/config';
 
@@ -213,11 +213,11 @@ function CreateJobDialog({
 
   // ── Data queries ──────────────────────────────────────────────────────────
   const { data: subAgentsData } = useQuery(
-    playgroundListSubAgentsOptions({ query: { owned_only: true } }),
+    consoleListSubAgentsOptions({ query: { owned_only: true } }),
   );
   const subAgents = subAgentsData?.items ?? [];
 
-  const { data: mcpToolsData } = useQuery(playgroundListMcpToolsOptions());
+  const { data: mcpToolsData } = useQuery(consoleListMcpToolsOptions());
   const mcpTools = mcpToolsData?.tools ?? [];
 
   const { data: channels = [] } = useQuery<DeliveryChannel[]>({

@@ -9,9 +9,8 @@ from typing import Optional
 from uuid import uuid4
 
 from aiobotocore.session import get_session
+from console_backend.config import config
 from fastapi import UploadFile
-
-from playground_backend.config import config
 
 logger = logging.getLogger(__name__)
 

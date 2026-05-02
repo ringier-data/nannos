@@ -12,7 +12,7 @@ Architecture:
 - Supports OAuth2 authentication with Foundry
 
 Configuration Flow:
-1. User creates Foundry sub-agent via playground frontend
+1. User creates Foundry sub-agent via console frontend
 2. Client secret stored in SSM Parameter Store (via SecretsService)
 3. Secret reference ID stored in sub_agent_config_versions.foundry_client_secret_ref
 4. Orchestrator fetches secret at runtime when instantiating the agent

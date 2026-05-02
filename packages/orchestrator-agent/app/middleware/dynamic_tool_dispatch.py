@@ -413,7 +413,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     **sub_agent_id_prop,
                     "description": (
                         sub_agent_id_prop.get("description", "ID of an existing sub-agent to execute")
-                        + f"\n\nAvailable sub-agents (use playground_list_sub_agents to get IDs):\n{agent_list}"
+                        + f"\n\nAvailable sub-agents (use console_list_sub_agents to get IDs):\n{agent_list}"
                     ),
                 }
 

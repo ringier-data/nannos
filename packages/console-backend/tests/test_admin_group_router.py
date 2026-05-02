@@ -19,13 +19,13 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from playground_backend.models.user import User
-from playground_backend.models.user_group import (
+from console_backend.models.user import User
+from console_backend.models.user_group import (
     BulkGroupDelete,
     UserGroupCreate,
     UserGroupUpdate,
 )
-from playground_backend.routers import admin_group_router
+from console_backend.routers import admin_group_router
 
 
 @pytest.fixture(autouse=True)
@@ -60,24 +60,24 @@ def mock_keycloak_service(monkeypatch):
 
     # Patch the methods on the KeycloakAdminService class
     monkeypatch.setattr(
-        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.create_group", mock_create_group
+        "console_backend.services.keycloak_admin_service.KeycloakAdminService.create_group", mock_create_group
     )
     monkeypatch.setattr(
-        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.update_group", mock_update_group
+        "console_backend.services.keycloak_admin_service.KeycloakAdminService.update_group", mock_update_group
     )
     monkeypatch.setattr(
-        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.delete_group", mock_delete_group
+        "console_backend.services.keycloak_admin_service.KeycloakAdminService.delete_group", mock_delete_group
     )
     monkeypatch.setattr(
-        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.add_user_to_group",
+        "console_backend.services.keycloak_admin_service.KeycloakAdminService.add_user_to_group",
         mock_add_user_to_group,
     )
     monkeypatch.setattr(
-        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.remove_user_from_group",
+        "console_backend.services.keycloak_admin_service.KeycloakAdminService.remove_user_from_group",
         mock_remove_user_from_group,
     )
     monkeypatch.setattr(
-        "playground_backend.services.keycloak_admin_service.KeycloakAdminService.ensure_group_mapper_configured",
+        "console_backend.services.keycloak_admin_service.KeycloakAdminService.ensure_group_mapper_configured",
         mock_ensure_group_mapper_configured,
     )
 

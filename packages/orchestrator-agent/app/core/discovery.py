@@ -348,14 +348,14 @@ class ToolDiscoveryService:
 
             # Add agent-console backend as an additional MCP server
             # Agent-console backend MCP endpoints require Gatana token for calling Gatana gateway
-            if self.config.PLAYGROUND_BACKEND_URL:
-                playground_mcp_url = f"{self.config.PLAYGROUND_BACKEND_URL}/mcp"
-                connections["playground"] = StreamableHttpConnection(
+            if self.config.CONSOLE_BACKEND_URL:
+                console_mcp_url = f"{self.config.CONSOLE_BACKEND_URL}/mcp"
+                connections["console"] = StreamableHttpConnection(
                     transport="streamable_http",
-                    url=playground_mcp_url,
+                    url=console_mcp_url,
                     headers={"Authorization": f"Bearer {mcp_gateway_token}"},
                 )
-                logger.debug(f"Added agent-console MCP connection: {playground_mcp_url}")
+                logger.debug(f"Added agent-console MCP connection: {console_mcp_url}")
 
             logger.debug(f"Created {len(connections)} MCP server connections: {list(connections.keys())}")
 

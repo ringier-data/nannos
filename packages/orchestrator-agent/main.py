@@ -184,7 +184,7 @@ def create_app():
     )
 
     # Initialize cost logger for tracking LLM usage
-    backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
+    backend_url = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
     cost_logger = CostLogger(backend_url=backend_url, access_token_provider=get_request_access_token)
     logger.info(f"Cost logger initialized with backend: {backend_url}")
 

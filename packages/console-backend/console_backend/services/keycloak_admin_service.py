@@ -54,7 +54,7 @@ class KeycloakAdminService:
     """Service for synchronizing groups with Keycloak using Admin API.
 
     This service implements one-way sync (Backend → Keycloak) to ensure
-    that group memberships in Keycloak always reflect the playground backend state.
+    that group memberships in Keycloak always reflect the console backend state.
     Other systems can then trust the 'groups' claim in JWT tokens for authorization.
     """
 

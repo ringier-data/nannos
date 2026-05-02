@@ -40,54 +40,54 @@ from rcplus_alloy_common.logging import (
 from sqlalchemy import text as sa_text
 from starlette.middleware.sessions import SessionMiddleware
 
-from playground_backend.config import config
-from playground_backend.db import close_db, get_async_session_factory, init_db
-from playground_backend.dependencies import require_auth
-from playground_backend.exceptions import ConversationOwnershipError
-from playground_backend.middleware import OrchestratorAuth, ProxyHeadersMiddleware
-from playground_backend.middleware import SessionMiddleware as CustomSessionMiddleware
-from playground_backend.models.socket_session import SocketSession
-from playground_backend.models.user import User
-from playground_backend.routers.admin_audit_router import router as admin_audit_router
-from playground_backend.routers.admin_group_router import router as admin_group_router
-from playground_backend.routers.admin_user_router import router as admin_user_router
-from playground_backend.routers.auth_router import router as auth_router
-from playground_backend.routers.catalog_router import router as catalog_router
-from playground_backend.routers.conversation_router import router as conversation_router
-from playground_backend.routers.delivery_channel_router import router as delivery_channel_router
-from playground_backend.routers.file_router import router as file_router
-from playground_backend.routers.group_router import router as group_router
-from playground_backend.routers.mcp_router import router as mcp_router
-from playground_backend.routers.message_router import router as message_router
-from playground_backend.routers.models_router import router as models_router
-from playground_backend.routers.notification_router import router as notification_router
-from playground_backend.routers.rate_card_router import router as rate_card_router
-from playground_backend.routers.scheduler_router import router as scheduler_router
-from playground_backend.routers.secrets_router import router as secrets_router
-from playground_backend.routers.sub_agent_router import router as sub_agent_router
-from playground_backend.routers.usage_router import router as usage_router
-from playground_backend.service_instances import cleanup_services, initialize_services
-from playground_backend.services.conversation_service import ConversationService
-from playground_backend.services.messages_service import MessagesService
-from playground_backend.services.socket_notification_manager import SocketNotificationManager
-from playground_backend.utils.connection_pool import connection_pool
-from playground_backend.utils.cookie_signer import verify_cookie
-from playground_backend.utils.fastapi_mcp_patch import apply_patch
-from playground_backend.utils.socket_errors import (
+from console_backend.config import config
+from console_backend.db import close_db, get_async_session_factory, init_db
+from console_backend.dependencies import require_auth
+from console_backend.exceptions import ConversationOwnershipError
+from console_backend.middleware import OrchestratorAuth, ProxyHeadersMiddleware
+from console_backend.middleware import SessionMiddleware as CustomSessionMiddleware
+from console_backend.models.socket_session import SocketSession
+from console_backend.models.user import User
+from console_backend.routers.admin_audit_router import router as admin_audit_router
+from console_backend.routers.admin_group_router import router as admin_group_router
+from console_backend.routers.admin_user_router import router as admin_user_router
+from console_backend.routers.auth_router import router as auth_router
+from console_backend.routers.catalog_router import router as catalog_router
+from console_backend.routers.conversation_router import router as conversation_router
+from console_backend.routers.delivery_channel_router import router as delivery_channel_router
+from console_backend.routers.file_router import router as file_router
+from console_backend.routers.group_router import router as group_router
+from console_backend.routers.mcp_router import router as mcp_router
+from console_backend.routers.message_router import router as message_router
+from console_backend.routers.models_router import router as models_router
+from console_backend.routers.notification_router import router as notification_router
+from console_backend.routers.rate_card_router import router as rate_card_router
+from console_backend.routers.scheduler_router import router as scheduler_router
+from console_backend.routers.secrets_router import router as secrets_router
+from console_backend.routers.sub_agent_router import router as sub_agent_router
+from console_backend.routers.usage_router import router as usage_router
+from console_backend.service_instances import cleanup_services, initialize_services
+from console_backend.services.conversation_service import ConversationService
+from console_backend.services.messages_service import MessagesService
+from console_backend.services.socket_notification_manager import SocketNotificationManager
+from console_backend.utils.connection_pool import connection_pool
+from console_backend.utils.cookie_signer import verify_cookie
+from console_backend.utils.fastapi_mcp_patch import apply_patch
+from console_backend.utils.socket_errors import (
     SocketError,
     create_error_response,
     create_success_response,
 )
-from playground_backend.utils.socket_events import SocketEvents
-from playground_backend.utils.socketio_auth import require_auth as require_socket_auth
-from playground_backend.validators import validate_agent_card, validate_message
+from console_backend.utils.socket_events import SocketEvents
+from console_backend.utils.socketio_auth import require_auth as require_socket_auth
+from console_backend.validators import validate_agent_card, validate_message
 
 # NOTE: Apply fastapi_mcp patch (waiting for https://github.com/tadata-org/fastapi_mcp/pull/156)
 apply_patch()
 
 
 logger = configure_logger("chat-inspector")
-configure_existing_logger(logging.getLogger("playground_backend"))
+configure_existing_logger(logging.getLogger("console_backend"))
 
 
 # ==============================================================================
@@ -198,7 +198,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.scheduler_engine.start()
 
     # Start internal cost logger for catalog sync cost tracking
-    from playground_backend.services.llm_cost_tracking import _internal_cost_logger
+    from console_backend.services.llm_cost_tracking import _internal_cost_logger
 
     if _internal_cost_logger is not None:
         await _internal_cost_logger.start()
@@ -794,7 +794,7 @@ async def index() -> JSONResponse:
     """API root endpoint."""
     return JSONResponse(
         content={
-            "name": "Playground Backend API",
+            "name": "Console Backend API",
             "status": "running",
         },
         status_code=200,
@@ -989,7 +989,7 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
     agent_card_url = data.get("url")
     custom_headers = data.get("customHeaders", {})
 
-    # Playground UI supports all extensions — always request them from the orchestrator
+    # Console UI supports all extensions — always request them from the orchestrator
     custom_headers["X-A2A-Extensions"] = (
         "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0"
     )

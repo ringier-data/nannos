@@ -1,4 +1,4 @@
-diff a/packages/console-backend/playground_backend/routers/file_router.py b/packages/console-backend/playground_backend/routers/file_router.py	(rejected hunks)
+diff a/packages/console-backend/console_backend/routers/file_router.py b/packages/console-backend/console_backend/routers/file_router.py	(rejected hunks)
 @@ -1,16 +1,21 @@
  """Routes for managing file uploads for chat messages."""
  
@@ -8,10 +8,10 @@ diff a/packages/console-backend/playground_backend/routers/file_router.py b/pack
  from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
  from pydantic import BaseModel
  
- from playground_backend.dependencies import require_auth
- from playground_backend.models.user import User
-+from playground_backend.services.conversation_service import ConversationService
- from playground_backend.services.file_storage_service import FileStorageService
+ from console_backend.dependencies import require_auth
+ from console_backend.models.user import User
++from console_backend.services.conversation_service import ConversationService
+ from console_backend.services.file_storage_service import FileStorageService
  
  router = APIRouter(prefix="/api/v1/files", tags=["files"])
  

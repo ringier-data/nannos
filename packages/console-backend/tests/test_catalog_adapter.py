@@ -13,8 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from playground_backend.catalog.adapters.base import SourceFile
-from playground_backend.catalog.adapters.google_drive import (
+from console_backend.catalog.adapters.base import SourceFile
+from console_backend.catalog.adapters.google_drive import (
     GoogleDriveAdapter,
     _build_folder_path,
     _parse_drive_time,
@@ -98,11 +98,11 @@ class TestGoogleDriveAdapterListFiles:
 
         with (
             patch(
-                "playground_backend.catalog.adapters.google_drive._build_drive_service",
+                "console_backend.catalog.adapters.google_drive._build_drive_service",
                 return_value=mock_service,
             ),
             patch(
-                "playground_backend.catalog.adapters.google_drive._run_in_executor",
+                "console_backend.catalog.adapters.google_drive._run_in_executor",
                 side_effect=lambda func, *args: func(*args) if not args else func(),
             ),
         ):
@@ -204,11 +204,11 @@ class TestGoogleDriveAdapterExtractPages:
 
         with (
             patch(
-                "playground_backend.catalog.adapters.google_drive._build_slides_service",
+                "console_backend.catalog.adapters.google_drive._build_slides_service",
                 return_value=mock_slides_service,
             ),
             patch(
-                "playground_backend.catalog.adapters.google_drive._run_in_executor",
+                "console_backend.catalog.adapters.google_drive._run_in_executor",
                 side_effect=lambda func, *args: func(*args) if not args else func(),
             ),
         ):
@@ -251,11 +251,11 @@ class TestGoogleDriveAdapterSharedDrives:
 
         with (
             patch(
-                "playground_backend.catalog.adapters.google_drive._build_drive_service",
+                "console_backend.catalog.adapters.google_drive._build_drive_service",
                 return_value=mock_service,
             ),
             patch(
-                "playground_backend.catalog.adapters.google_drive._run_in_executor",
+                "console_backend.catalog.adapters.google_drive._run_in_executor",
                 side_effect=lambda func, *args: func(*args) if not args else func(),
             ),
         ):

@@ -1,11 +1,10 @@
 """Tests for UserSettingsService with PostgreSQL."""
 
 import pytest
+from console_backend.services.user_service import UserService
+from console_backend.services.user_settings_service import UserSettingsService
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.services.user_service import UserService
-from playground_backend.services.user_settings_service import UserSettingsService
 
 
 @pytest.mark.asyncio
@@ -501,7 +500,7 @@ class TestUserSettingsThinkingConfiguration:
         self, user_settings_service: UserSettingsService, user_service: UserService, pg_session: AsyncSession
     ):
         """Test setting all available thinking levels."""
-        from playground_backend.models.user import OrchestratorThinkingLevel
+        from console_backend.models.user import OrchestratorThinkingLevel
 
         levels = [
             OrchestratorThinkingLevel.MINIMAL,

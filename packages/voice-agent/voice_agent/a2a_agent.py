@@ -47,7 +47,7 @@ Usage patterns
     Schedule a job whose payload is
     ``{"phone_number": "…", "sub_agent_id": <N>}``.  Voice-agent fetches
     sub-agent N's ``system_prompt`` / ``voice_name`` / ``mcp_tools`` from
-    the playground backend and uses them for the Gemini Live session.
+    the console backend and uses them for the Gemini Live session.
 
 Audio-session path (browser WebSocket)
 ---------------------------------------
@@ -85,8 +85,8 @@ from voice_agent.call_bridge import (
     send_sms,
 )
 
-_PLAYGROUND_BACKEND_URL = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
-_PLAYGROUND_FRONTEND_URL = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
+_CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
+_CONSOLE_FRONTEND_URL = os.getenv("CONSOLE_FRONTEND_URL", "http://localhost:5173")
 _MCP_GATEWAY_URL: str | None = os.getenv("MCP_GATEWAY_URL") or None
 
 logger = logging.getLogger(__name__)
@@ -594,7 +594,7 @@ class VoiceAgent(BaseAgent):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
-                    f"{_PLAYGROUND_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}",
+                    f"{_CONSOLE_BACKEND_URL}/api/v1/sub-agents/{sub_agent_id}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 resp.raise_for_status()
@@ -729,7 +729,7 @@ class VoiceAgent(BaseAgent):
         if mcp_auth_failed:
             sms_body = (
                 "Your AI assistant is calling but couldn't connect to your tools. "
-                f"Please open {_PLAYGROUND_FRONTEND_URL} and authorize your tool "
+                f"Please open {_CONSOLE_FRONTEND_URL} and authorize your tool "
                 "connections, then try again."
             )
             try:

@@ -8,10 +8,9 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
 import pytest_asyncio
+from console_backend.dependencies import require_admin
+from console_backend.models.user import User, UserStatus
 from sqlalchemy import text
-
-from playground_backend.dependencies import require_admin
-from playground_backend.models.user import User, UserStatus
 
 
 @pytest_asyncio.fixture

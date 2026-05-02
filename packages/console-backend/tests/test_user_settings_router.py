@@ -34,7 +34,7 @@ async def test_user_in_db(db_session, user_service):
 @pytest.fixture
 def mock_user():
     """Return a mock user object."""
-    from playground_backend.models.user import User, UserRole, UserStatus
+    from console_backend.models.user import User, UserRole, UserStatus
 
     return User(
         id="test-user-id",
@@ -201,7 +201,7 @@ class TestUserSettingsEndpoints:
 
     async def test_patch_settings_phone_number_override(self, client_with_db):
         """Test PATCH /me/settings with phone_number_override (when Verify not configured)."""
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = False
 
             response = await client_with_db.patch(
@@ -215,7 +215,7 @@ class TestUserSettingsEndpoints:
 
     async def test_get_settings_includes_phone_override(self, client_with_db):
         """Test GET /me/settings returns phone_number_override in response."""
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = False
 
             # Set phone override

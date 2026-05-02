@@ -77,7 +77,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         Args:
             sub: The user's sub (OIDC subject identifier)
             access_token: The user's access token for authenticated API calls
-            sub_agent_config_hash: Optional config hash for playground testing mode
+            sub_agent_config_hash: Optional config hash for console testing mode
 
         Returns:
             User object with all user-specific data
@@ -120,7 +120,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             model_choice: Optional model preference
             message_formatting: Message formatting style
             slack_user_handle: Optional Slack user handle
-            sub_agent_config_hash: Optional playground mode config hash
+            sub_agent_config_hash: Optional console mode config hash
             preferred_model: Optional preferred model from registry
             enable_thinking: Optional thinking configuration from client
             thinking_level: Optional thinking level from client
@@ -300,7 +300,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 user_name = context.call_context.state["user_name"]
                 user_email = context.call_context.state["user_email"]
                 user_groups = context.call_context.state.get("user_groups", [])
-                # Optional: playground mode sub-agent config hash for isolated testing
+                # Optional: console mode sub-agent config hash for isolated testing
                 sub_agent_config_hash = context.call_context.state.get("sub_agent_config_hash")
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
@@ -313,7 +313,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         set_request_access_token(user_token)
         logger.info(f"[ZERO-TRUST] Using verified user_sub for graph retrieval: {user_sub}")
         if sub_agent_config_hash:
-            logger.info(f"[PLAYGROUND] Playground mode enabled for sub-agent config hash: {sub_agent_config_hash}")
+            logger.info(f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}")
 
         # Fetch user from registry to get stable database ID (user.id)
         # This allows us to use the database ID in config metadata instead of OIDC sub e.g. for docstore read/write

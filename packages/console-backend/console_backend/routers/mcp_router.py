@@ -61,7 +61,7 @@ class MCPToolsByServerResponse(BaseModel):
     servers: list[MCPToolsByServer]
 
 
-@router.get("/tools/search", response_model=MCPToolsResponse, tags=["MCP"], operation_id="playground_grep_mcp_tools")
+@router.get("/tools/search", response_model=MCPToolsResponse, tags=["MCP"], operation_id="console_grep_mcp_tools")
 async def grep_mcp_tools(
     request: Request,
     query: str,
@@ -271,7 +271,7 @@ async def _list_mcp_tools(
         return MCPToolsResponse(tools=tools)
 
 
-@router.get("/tools", response_model=MCPToolsResponse, operation_id="playground_list_mcp_tools")
+@router.get("/tools", response_model=MCPToolsResponse, operation_id="console_list_mcp_tools")
 async def list_mcp_tools(
     request: Request,
     user: User = Depends(require_auth_or_bearer_token),
@@ -461,9 +461,9 @@ async def _get_gatana_token(request: Request, user: User) -> str:
     description=(
         "Returns a list of available MCP servers (e.g., GitHub, Jira) with tool counts. "
         "Use this endpoint first to discover which servers are available, then use "
-        "playground_list_mcp_tools using the `server_slug` parameter to explore tools within a specific server."
+        "console_list_mcp_tools using the `server_slug` parameter to explore tools within a specific server."
     ),
-    operation_id="playground_list_mcp_servers",
+    operation_id="console_list_mcp_servers",
 )
 async def list_mcp_servers(
     request: Request,

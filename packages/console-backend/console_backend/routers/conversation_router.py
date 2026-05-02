@@ -96,7 +96,7 @@ async def debug_session(request: Request) -> dict:
     Only enabled in local mode to avoid leaking user data in production.
     """
     try:
-        from playground_backend.config import config as _config
+        from console_backend.config import config as _config
 
         if not _config.is_local():
             raise HTTPException(status_code=404, detail="Not found")

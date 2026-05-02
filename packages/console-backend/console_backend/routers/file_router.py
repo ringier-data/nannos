@@ -3,13 +3,12 @@
 import os
 from typing import Annotated
 
+from console_backend.dependencies import require_auth
+from console_backend.models.user import User
+from console_backend.services.file_storage_service import FileStorageService
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-
-from playground_backend.dependencies import require_auth
-from playground_backend.models.user import User
-from playground_backend.services.file_storage_service import FileStorageService
 
 router = APIRouter(prefix="/api/v1/files", tags=["files"])
 
@@ -190,7 +189,7 @@ async def serve_local_file(
 
     Only active when LocalFileStorageService is in use (no S3 bucket configured).
     """
-    from playground_backend.services.local_file_storage_service import LocalFileStorageService
+    from console_backend.services.local_file_storage_service import LocalFileStorageService
 
     storage = getattr(request.app.state, "file_storage_service", None)
     if not isinstance(storage, LocalFileStorageService):

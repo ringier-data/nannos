@@ -4,9 +4,8 @@ import json
 from decimal import Decimal
 
 import pytest
+from console_backend.services.rate_card_service import RateCardService
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.services.rate_card_service import RateCardService
 
 
 @pytest.mark.asyncio
@@ -60,7 +59,7 @@ async def test_agent_pricing_detailed_format(pg_session: AsyncSession):
     config_version_id = result.scalar_one()
 
     # Create service and test
-    from playground_backend.repositories.rate_card_repository import RateCardRepository
+    from console_backend.repositories.rate_card_repository import RateCardRepository
 
     service = RateCardService()
     service.set_repository(RateCardRepository())
@@ -132,7 +131,7 @@ async def test_agent_pricing_rate_card_entries_format(pg_session: AsyncSession):
     )
     config_version_id = result.scalar_one()
 
-    from playground_backend.repositories.rate_card_repository import RateCardRepository
+    from console_backend.repositories.rate_card_repository import RateCardRepository
 
     service = RateCardService()
     service.set_repository(RateCardRepository())
@@ -225,7 +224,7 @@ async def test_agent_pricing_fallback_to_system(pg_session: AsyncSession, caplog
     )
     config_version_id = result.scalar_one()
 
-    from playground_backend.repositories.rate_card_repository import RateCardRepository
+    from console_backend.repositories.rate_card_repository import RateCardRepository
 
     service = RateCardService()
     service.set_repository(RateCardRepository())
@@ -280,7 +279,7 @@ async def test_no_agent_pricing_uses_system(pg_session: AsyncSession):
     )
     await pg_session.commit()
 
-    from playground_backend.repositories.rate_card_repository import RateCardRepository
+    from console_backend.repositories.rate_card_repository import RateCardRepository
 
     service = RateCardService()
     service.set_repository(RateCardRepository())
@@ -349,7 +348,7 @@ async def test_agent_pricing_multiple_billing_units(pg_session: AsyncSession):
     )
     config_version_id = result.scalar_one()
 
-    from playground_backend.repositories.rate_card_repository import RateCardRepository
+    from console_backend.repositories.rate_card_repository import RateCardRepository
 
     service = RateCardService()
     service.set_repository(RateCardRepository())

@@ -27,10 +27,10 @@ class PostgresConfig(BaseModel):
 
     host: str = Field(default_factory=lambda: os.getenv("POSTGRES_HOST", "localhost"))
     port: int = Field(default_factory=lambda: int(os.getenv("POSTGRES_PORT", "5432")))
-    database: str = Field(default_factory=lambda: os.getenv("POSTGRES_DB", "playground"))
+    database: str = Field(default_factory=lambda: os.getenv("POSTGRES_DB", "console"))
     user: str = Field(default_factory=lambda: os.getenv("POSTGRES_USER", "postgres"))
     password: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("POSTGRES_PASSWORD", "password")))
-    default_schema: str = Field(default_factory=lambda: os.getenv("POSTGRES_SCHEMA", "playground"))
+    default_schema: str = Field(default_factory=lambda: os.getenv("POSTGRES_SCHEMA", "console"))
 
     @property
     def connection_url(self) -> str:

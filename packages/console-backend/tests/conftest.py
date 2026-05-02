@@ -15,28 +15,28 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from playground_backend.config import (
+from console_backend.config import (
     Config,
     OidcConfig,
     OrchestratorConfig,
 )
-from playground_backend.controllers.auth_controller import AuthController
-from playground_backend.db.session import get_db_session
-from playground_backend.dependencies import require_auth, require_auth_or_bearer_token
-from playground_backend.models.session import StoredSession
-from playground_backend.models.user import User, UserRole, UserStatus
-from playground_backend.repositories.secrets_repository import SecretsRepository
-from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-from playground_backend.repositories.user_group_repository import UserGroupRepository
-from playground_backend.repositories.user_repository import UserRepository
-from playground_backend.services.audit_service import AuditService
-from playground_backend.services.notification_service import NotificationService
-from playground_backend.services.oauth_service import OAuthService
-from playground_backend.services.secrets_service import SecretsService
-from playground_backend.services.sub_agent_service import SubAgentService
-from playground_backend.services.user_group_service import UserGroupService
-from playground_backend.services.user_service import UserService
-from playground_backend.services.user_settings_service import UserSettingsService
+from console_backend.controllers.auth_controller import AuthController
+from console_backend.db.session import get_db_session
+from console_backend.dependencies import require_auth, require_auth_or_bearer_token
+from console_backend.models.session import StoredSession
+from console_backend.models.user import User, UserRole, UserStatus
+from console_backend.repositories.secrets_repository import SecretsRepository
+from console_backend.repositories.sub_agent_repository import SubAgentRepository
+from console_backend.repositories.user_group_repository import UserGroupRepository
+from console_backend.repositories.user_repository import UserRepository
+from console_backend.services.audit_service import AuditService
+from console_backend.services.notification_service import NotificationService
+from console_backend.services.oauth_service import OAuthService
+from console_backend.services.secrets_service import SecretsService
+from console_backend.services.sub_agent_service import SubAgentService
+from console_backend.services.user_group_service import UserGroupService
+from console_backend.services.user_service import UserService
+from console_backend.services.user_settings_service import UserSettingsService
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ def test_config():
 @pytest.fixture
 def mock_config(test_config, monkeypatch):
     """Mock the global config by patching its attributes."""
-    import playground_backend.config as config_module
+    import console_backend.config as config_module
 
     # Patch config attributes directly on the real config object
     monkeypatch.setattr(config_module.config, "environment", test_config.environment)
@@ -147,14 +147,14 @@ def mock_config(test_config, monkeypatch):
     monkeypatch.setattr(config_module.config, "orchestrator", test_config.orchestrator)
 
     # Also patch the config imported by auth_controller
-    import playground_backend.controllers.auth_controller
+    import console_backend.controllers.auth_controller
 
-    monkeypatch.setattr(playground_backend.controllers.auth_controller, "config", test_config)
+    monkeypatch.setattr(console_backend.controllers.auth_controller, "config", test_config)
 
     # Patch services that import config
-    import playground_backend.services.session_service
+    import console_backend.services.session_service
 
-    monkeypatch.setattr(playground_backend.services.session_service, "config", test_config)
+    monkeypatch.setattr(console_backend.services.session_service, "config", test_config)
 
     return test_config
 
@@ -477,7 +477,7 @@ def mock_oauth(mock_config, monkeypatch):
     This fixture runs automatically for all tests and ensures oauth.oidc
     is available before any controller code tries to access it.
     """
-    import playground_backend.controllers.auth_controller
+    import console_backend.controllers.auth_controller
 
     # Create a mock OAuth client
     mock_oidc_client = MagicMock()
@@ -492,14 +492,14 @@ def mock_oauth(mock_config, monkeypatch):
     mock_oidc_client.server_metadata = mock_server_metadata
 
     # Patch __getattr__ to return our mock when 'oidc' is accessed
-    original_getattr = playground_backend.controllers.auth_controller.oauth.__class__.__getattr__
+    original_getattr = console_backend.controllers.auth_controller.oauth.__class__.__getattr__
 
     def mock_getattr(self, key):
         if key == "oidc":
             return mock_oidc_client
         return original_getattr(self, key)
 
-    monkeypatch.setattr(playground_backend.controllers.auth_controller.oauth.__class__, "__getattr__", mock_getattr)
+    monkeypatch.setattr(console_backend.controllers.auth_controller.oauth.__class__, "__getattr__", mock_getattr)
 
     yield mock_oidc_client
 
@@ -581,7 +581,7 @@ def create_mock_response():
 def postgres_template():
     """Start PostgreSQL container and create template database with migrations.
 
-    This runs once per test session. The 'playground' database becomes a template
+    This runs once per test session. The 'console' database becomes a template
     that is cloned for each test, providing fast isolation.
     """
     import os
@@ -592,8 +592,8 @@ def postgres_template():
     # Configuration matching build-db-container.sh
     pg_user = "postgres"
     pg_password = "password"
-    pg_database = "playground"
-    pg_schema = "playground"
+    pg_database = "console"
+    pg_schema = "console"
     pg_port = 5432
     host_port = 5433 + random.randint(0, 100)  # Random port to avoid conflicts
 
@@ -883,7 +883,7 @@ async def app_with_db(app, pg_session, test_user_model):
 @pytest_asyncio.fixture()
 async def client(app):
     """Mock the database using the pg_session."""
-    from playground_backend.db.connection import force_reset_db_state
+    from console_backend.db.connection import force_reset_db_state
 
     force_reset_db_state()
     async with LifespanManager(app):
@@ -904,7 +904,7 @@ async def client(app):
 @pytest_asyncio.fixture()
 async def client_with_db(app_with_db):
     """Mock the database using the pg_session."""
-    from playground_backend.db.connection import force_reset_db_state
+    from console_backend.db.connection import force_reset_db_state
 
     force_reset_db_state()
     async with LifespanManager(app_with_db):

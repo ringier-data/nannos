@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
-from playground_backend.exceptions import SessionNotFoundError, SessionOwnershipError
-from playground_backend.services.session_service import SessionService
+from console_backend.exceptions import SessionNotFoundError, SessionOwnershipError
+from console_backend.services.session_service import SessionService
 
 
 @pytest_asyncio.fixture
@@ -18,7 +18,7 @@ async def session_service(postgres_with_migrations, mock_config):
     factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
     # Patch get_async_session_factory to return our test factory
-    with patch("playground_backend.services.session_service.get_async_session_factory", return_value=factory):
+    with patch("console_backend.services.session_service.get_async_session_factory", return_value=factory):
         service = SessionService()
 
     yield service

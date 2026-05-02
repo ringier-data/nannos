@@ -5,10 +5,9 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from console_backend.models.sub_agent import SubAgentCreate, SubAgentType
+from console_backend.services.sub_agent_service import SubAgentService
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.sub_agent import SubAgentCreate, SubAgentType
-from playground_backend.services.sub_agent_service import SubAgentService
 
 from ..models.scheduled_job import (
     ScheduledJob,

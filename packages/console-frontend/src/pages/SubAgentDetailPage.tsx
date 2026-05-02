@@ -66,7 +66,7 @@ import { useAvailableModels, modelSupportsThinking } from '@/config/models';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
   getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions,
-  playgroundUpdateSubAgentMutation,
+  consoleUpdateSubAgentMutation,
   deleteSubAgentApiV1SubAgentsSubAgentIdDeleteMutation,
   submitForApprovalApiV1SubAgentsSubAgentIdSubmitPostMutation,
   reviewVersionApiV1SubAgentsSubAgentIdVersionsVersionReviewPostMutation,
@@ -260,7 +260,7 @@ export function SubAgentDetailPage() {
 
   // Mutations
   const updateMutation = useMutation({
-    ...playgroundUpdateSubAgentMutation(),
+    ...consoleUpdateSubAgentMutation(),
     onSuccess: () => {
       invalidateSubAgentQuery();
       setIsEditing(false);
