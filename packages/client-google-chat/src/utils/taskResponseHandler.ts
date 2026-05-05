@@ -168,6 +168,7 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
                         onClick: {
                           action: {
                             function: 'feedback_positive',
+                            parameters: [],
                           },
                         },
                       },
@@ -176,6 +177,7 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
                         onClick: {
                           action: {
                             function: 'feedback_negative',
+                            parameters: [],
                           },
                         },
                       },

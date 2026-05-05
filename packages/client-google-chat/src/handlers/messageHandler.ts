@@ -1,5 +1,5 @@
 import _ from 'lodash';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHmac } from 'crypto';
 
 import { Logger } from '../utils/logger.js';
 import {
@@ -547,7 +547,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         messageId,
         statusMessageId,
       },
-      includeFeedbackButtons: !!feedbackService,
+      includeFeedbackButtons: false,
     });
 
     await inFlightTaskStore.delete(accumulatedTask.id);
@@ -557,16 +557,91 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
       });
 
-      // Store response mapping so button clicks can be correlated to A2A IDs
+      // Post feedback card as a separate private message with link-based buttons.
+      //
+      // Why links instead of action buttons?
+      // Google Chat Workspace Add-ons with HTTP endpoints don't route CARD_CLICKED events
+      // to the HTTP URL. Cloud logs show Google tries to invoke through its internal
+      // function dispatch (Apps Script or Cloud Functions), not via HTTP POST. The available
+      // trigger types confirm this: App command, Added to space, Message, Removed from space —
+      // no Card clicked trigger for HTTP endpoints.
+      //
+      // Pragmatic alternatives to link-based approach (untested/hypothetical):
+      // - Deploy a Cloud Function shim that receives card clicks (which Google natively routes
+      //   to Cloud Functions), then call the HTTP endpoint from there.
+      //
+      // Current solution: link-based approach opens a URL in the browser that records feedback.
+      // URLs are HMAC-signed to prevent impersonation and tampering.
       if (feedbackService && accumulatedTask.contextId) {
-        feedbackService.responseMapping.set(result.messageId, {
-          contextId: accumulatedTask.contextId,
-          taskId: accumulatedTask.id,
-          userId,
-          projectId,
-          subAgents: feedbackRequestData?.sub_agents,
-          createdAt: Date.now(),
-        });
+        try {
+          const subAgentId = feedbackRequestData?.sub_agents?.[0] || '';
+          // HMAC signature prevents URL tampering / impersonation
+          const sig = createHmac('sha256', deps.feedbackSigningSecret || '')
+            .update(`${accumulatedTask.contextId}:${accumulatedTask.id}:${userId}:${projectId}`)
+            .digest('hex')
+            .substring(0, 16);
+          const feedbackParams = new URLSearchParams({
+            c: accumulatedTask.contextId,
+            t: accumulatedTask.id,
+            u: userId,
+            p: projectId,
+            s: subAgentId,
+            sig,
+          });
+          const baseUrl = deps.baseUrl.replace(/\/+$/, '');
+          const positiveUrl = `${baseUrl}/api/v1/feedback?${feedbackParams.toString()}&r=positive`;
+          const negativeUrl = `${baseUrl}/api/v1/feedback?${feedbackParams.toString()}&r=negative`;
+
+          await chatService.sendMessage({
+            projectId,
+            spaceId,
+            threadId,
+            cardsV2: [
+              {
+                cardId: 'feedback_card',
+                card: {
+                  header: {
+                    title: 'Was this response helpful?',
+                  },
+                  sections: [
+                    {
+                      widgets: [
+                        {
+                          buttonList: {
+                            buttons: [
+                              {
+                                text: '👍 Yes',
+                                onClick: {
+                                  openLink: {
+                                    url: positiveUrl,
+                                  },
+                                },
+                              },
+                              {
+                                text: '👎 No',
+                                onClick: {
+                                  openLink: {
+                                    url: negativeUrl,
+                                  },
+                                },
+                              },
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+            privateMessageViewerName: userId,
+            messageReplyOption: threadId ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' : undefined,
+          });
+
+          logger.info(`Sent feedback link card for context=${accumulatedTask.contextId}`);
+        } catch (err) {
+          logger.error(err, `Failed to send feedback card: ${err}`);
+        }
       }
     }
   } catch (error) {

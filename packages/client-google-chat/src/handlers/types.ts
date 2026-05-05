@@ -21,4 +21,5 @@ export interface HandlerDependencies {
   fileStorageService: FileStorageService;
   isLocalMode: boolean;
   feedbackService?: FeedbackService;
+  feedbackSigningSecret?: string;
 }
