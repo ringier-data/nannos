@@ -285,7 +285,7 @@ class TestS3ObjectStorageService:
     @pytest.fixture
     def s3_service(self, mock_s3_client):
         """Create S3ObjectStorageService with mocked client."""
-        with patch("agent_common.core.object_storage.get_session") as mock_session:
+        with patch("aiobotocore.session.get_session") as mock_session:
             session_instance = MagicMock()
             mock_session.return_value = session_instance
 
@@ -385,7 +385,7 @@ class TestS3ObjectStorageService:
 
     def test_client_kwargs_with_endpoint_url(self):
         """Test that endpoint_url is included in client kwargs."""
-        with patch("agent_common.core.object_storage.get_session"):
+        with patch("aiobotocore.session.get_session"):
             service = S3ObjectStorageService(
                 region="us-east-1",
                 endpoint_url="https://minio.example.com",
@@ -418,14 +418,14 @@ class TestCreateObjectStorageService:
 
     def test_create_s3_service(self):
         """Test creating S3 storage service."""
-        with patch("agent_common.core.object_storage.get_session"):
+        with patch("aiobotocore.session.get_session"):
             service = create_object_storage_service(storage_type="s3")
             assert isinstance(service, S3ObjectStorageService)
             assert service.storage_type == "s3"
 
     def test_create_s3_service_with_endpoint(self):
         """Test creating S3-compatible service with custom endpoint."""
-        with patch("agent_common.core.object_storage.get_session"):
+        with patch("aiobotocore.session.get_session"):
             service = create_object_storage_service(
                 storage_type="s3",
                 endpoint_url="https://minio.example.com",
@@ -497,6 +497,6 @@ class TestInterfaceCompliance:
 
     def test_s3_service_implements_interface(self):
         """Test S3ObjectStorageService implements all abstract methods."""
-        with patch("agent_common.core.object_storage.get_session"):
+        with patch("aiobotocore.session.get_session"):
             service = S3ObjectStorageService()
             assert isinstance(service, IObjectStorageService)

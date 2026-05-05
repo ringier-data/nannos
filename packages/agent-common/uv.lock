@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -104,8 +104,8 @@ dev = [
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = ">=0.3.25,<1.0.0" },
     { name = "agent-common", extras = ["openai", "google", "anthropic", "foundry", "docstore"], marker = "extra == 'all'" },
-    { name = "aiobotocore", marker = "extra == 'docstore'", specifier = ">=2.26.0" },
-    { name = "aiobotocore", marker = "extra == 'foundry'", specifier = ">=2.26.0" },
+    { name = "aiobotocore", marker = "extra == 'docstore'", specifier = ">=2.15.0" },
+    { name = "aiobotocore", marker = "extra == 'foundry'", specifier = ">=2.15.0" },
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "deepagents", specifier = ">=0.4.5,<0.5.0" },
     { name = "foundry-platform-sdk", marker = "extra == 'foundry'", specifier = "==1.63.0" },
@@ -136,7 +136,7 @@ provides-extras = ["openai", "google", "anthropic", "foundry", "docstore", "all"
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aiobotocore", specifier = ">=2.26.0" },
+    { name = "aiobotocore", specifier = ">=2.15.0" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=2.0.11" },
     { name = "psycopg", specifier = ">=3.2.0" },
     { name = "psycopg-binary", specifier = ">=3.2.0" },

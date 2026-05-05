@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiomoto import mock_aws
+from moto import mock_aws
 
 from playground_backend.models.user import User
 

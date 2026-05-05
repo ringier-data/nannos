@@ -18,7 +18,7 @@ import os
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
-from aiomoto import mock_aws
+from moto import mock_aws
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from playground_backend.models.notification import NotificationType

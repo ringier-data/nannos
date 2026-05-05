@@ -25,10 +25,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote, urlparse
 
-from aiobotocore.session import AioSession, get_session
+# Lazy import for aiobotocore - only loaded when S3 storage is used
+# This allows packages that only use LocalObjectStorageService to avoid
+# the aiobotocore dependency
+if TYPE_CHECKING:
+    from aiobotocore.session import AioSession
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +207,7 @@ class S3ObjectStorageService(IObjectStorageService):
         endpoint_url: Optional[str] = None,
         access_key_id: Optional[str] = None,
         secret_access_key: Optional[str] = None,
-        session: Optional[AioSession] = None,
+        session: Optional["AioSession"] = None,
     ):
         """Initialize S3 storage service.
 
@@ -214,6 +218,9 @@ class S3ObjectStorageService(IObjectStorageService):
             secret_access_key: Secret key (for S3-compatible APIs)
             session: Optional aiobotocore session (for testing)
         """
+        # Lazy import aiobotocore - only required when S3 storage is used
+        from aiobotocore.session import get_session
+
         self.region = region or os.getenv("AWS_REGION", os.getenv("S3_REGION", "eu-central-1"))
         self.endpoint_url = endpoint_url or os.getenv("S3_ENDPOINT_URL")
         self.access_key_id = access_key_id or os.getenv("S3_ACCESS_KEY_ID")

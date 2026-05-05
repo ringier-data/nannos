@@ -8,7 +8,7 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiomoto import mock_aws
+from moto import mock_aws
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
