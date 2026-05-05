@@ -7,6 +7,7 @@ import { OIDCClient } from './services/oidcClient.js';
 import { UserAuthService } from './services/userAuthService.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
+import { FeedbackService } from './services/feedbackService.js';
 import { registerListeners } from './listeners/index.js';
 import { handleOAuthCallback, generateCallbackHTML } from './utils/oauthCallback.js';
 import { processPendingRequest } from './utils/processPendingRequest.js';
@@ -17,6 +18,7 @@ import { ServerResponse } from 'node:http';
 let userAuthService: UserAuthService;
 let a2aClientService: A2AClientService;
 let fileStorageService: FileStorageService;
+let feedbackService: FeedbackService | undefined;
 let storage: StorageProvider;
 
 // Initialize logger early
@@ -251,6 +253,12 @@ export async function startSlackApp(config: Config) {
     // File storage service for S3 uploads
     fileStorageService = new FileStorageService(config);
 
+    // Feedback service for console-backend integration (optional)
+    if (config.consoleBackend) {
+      feedbackService = new FeedbackService(userAuthService, config);
+      logger.info(`Feedback service enabled (console-backend: ${config.consoleBackend.url})`);
+    }
+
     // Log every incoming Slack event for observability
     app.use(async ({ body, next }) => {
       const eventType = (body as any).event?.type || (body as any).command || (body as any).type || 'unknown';
@@ -273,7 +281,8 @@ export async function startSlackApp(config: Config) {
       config.baseUrl,
       fileStorageService,
       config.isLocal(),
-      storage.botInstallation
+      storage.botInstallation,
+      feedbackService,
     );
 
     // Start the app

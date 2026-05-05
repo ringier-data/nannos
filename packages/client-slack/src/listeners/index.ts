@@ -2,6 +2,7 @@ import { App } from '@slack/bolt';
 import { UserAuthService } from '../services/userAuthService.js';
 import { A2AClientService } from '../services/a2aClientService.js';
 import { FileStorageService } from '../services/fileStorageService.js';
+import { FeedbackService } from '../services/feedbackService.js';
 import type {
   IContextStore,
   IPendingRequestStore,
@@ -13,6 +14,7 @@ import { registerAppMentionListener } from './events/appMention.js';
 import { registerMessageListeners } from './events/directMessage.js';
 import { registerNannosCommand } from './commands/nannos.js';
 import { registerAuthorizeButtonAction } from './actions/authorizeButton.js';
+import { registerReactionListeners } from './events/reactionHandler.js';
 import { Logger } from '../utils/logger.js';
 
 const logger = Logger.getLogger('registerListeners');
@@ -35,7 +37,8 @@ export async function registerListeners(
   baseUrl: string,
   fileStorageService: FileStorageService,
   isLocalMode: boolean,
-  botInstallationStore: IBotInstallationStore
+  botInstallationStore: IBotInstallationStore,
+  feedbackService?: FeedbackService,
 ): Promise<void> {
   // Register event listeners (botToken/botName resolved per-event via context)
   registerAppMentionListener(
@@ -48,7 +51,8 @@ export async function registerListeners(
     oauthStateStore,
     baseUrl,
     fileStorageService,
-    isLocalMode
+    isLocalMode,
+    feedbackService,
   );
   registerMessageListeners(
     app,
@@ -60,7 +64,8 @@ export async function registerListeners(
     oauthStateStore,
     baseUrl,
     fileStorageService,
-    isLocalMode
+    isLocalMode,
+    feedbackService,
   );
 
   // Register slash commands dynamically for every active bot installation
@@ -85,4 +90,9 @@ export async function registerListeners(
 
   // Register actions
   registerAuthorizeButtonAction(app);
+
+  // Register reaction listeners for message feedback (requires console-backend)
+  if (feedbackService) {
+    registerReactionListeners(app, feedbackService);
+  }
 }

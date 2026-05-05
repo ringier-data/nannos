@@ -306,7 +306,7 @@ class AgentCreator(LangGraphAgent):
         # Create credential injection interceptor with token exchange
         self._credential_injector = TokenExchangeCredentialInjector(
             oidc_client=oauth2_client,
-            target_client_id=os.environ.get("MCP_GATEWAY_CLIENT_ID", "gatana"),
+            target_client_id=os.environ.get("CONSOLE_BACKEND_CLIENT_ID", "agent-console"),
             requested_scopes=["openid", "profile", "offline_access"],
         )
 

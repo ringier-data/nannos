@@ -75,6 +75,7 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { SubAgentConfigVersion, OrchestratorThinkingLevel } from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
+import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
 import { usePlaygroundChat } from '@/hooks/usePlaygroundChat';
 
@@ -303,6 +304,25 @@ export function SubAgentDetailPage() {
     },
     onError: (err) => {
       toast.error('Failed to process review action', { description: getErrorMessage(err) });
+    },
+  });
+
+  const systemRoleMutation = useMutation({
+    mutationFn: async (role: string | null) => {
+      const response = await client.put({
+        url: '/api/v1/sub-agents/{sub_agent_id}/system-role',
+        path: { sub_agent_id: id! },
+        query: role ? { role } : {},
+      });
+      if (response.error) throw new Error('Failed to set system role');
+      return response.data;
+    },
+    onSuccess: () => {
+      invalidateSubAgentQuery();
+      toast.success('System role updated');
+    },
+    onError: (err) => {
+      toast.error('Failed to update system role', { description: getErrorMessage(err) });
     },
   });
 
@@ -720,6 +740,32 @@ export function SubAgentDetailPage() {
               <span className="capitalize">{subAgent.type} Agent</span>
               <span>•</span>
               <span>by {subAgent.owner?.name || 'Unknown'}</span>
+              {subAgent.system_role && !(isAdministrator && adminMode) && (
+                <>
+                  <span>•</span>
+                  <Badge variant="outline" className="text-xs font-normal">
+                    <Wrench className="mr-1 h-3 w-3" />
+                    {subAgent.system_role}
+                  </Badge>
+                </>
+              )}
+              {isAdministrator && adminMode && (
+                <>
+                  <span>•</span>
+                  <Select
+                    value={subAgent.system_role || '__none__'}
+                    onValueChange={(value) => systemRoleMutation.mutate(value === '__none__' ? null : value)}
+                  >
+                    <SelectTrigger className="h-6 w-[130px] text-xs">
+                      <SelectValue placeholder="System role" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">No system role</SelectItem>
+                      <SelectItem value="debug">Debug</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </>
+              )}
             </div>
           </div>
         </div>

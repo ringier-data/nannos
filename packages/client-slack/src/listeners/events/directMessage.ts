@@ -6,6 +6,7 @@ import { Logger } from '../../utils/logger.js';
 import { SlackFile } from '../../utils/fileUtils.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, IOAuthStateStore } from '../../storage/types.js';
 import { handleIncomingMessage } from './messageHandler.js';
+import { FeedbackService } from '../../services/feedbackService.js';
 
 /**
  * Register DM message listeners.
@@ -26,7 +27,8 @@ export function registerMessageListeners(
   _oauthStateStore: IOAuthStateStore,
   baseUrl: string,
   fileStorageService: FileStorageService,
-  isLocalMode: boolean
+  isLocalMode: boolean,
+  feedbackService?: FeedbackService,
 ): void {
   const logger = Logger.getLogger('registerMessageListeners');
   logger.info('Registering DM message listener');
@@ -98,6 +100,7 @@ export function registerMessageListeners(
         botName,
         fileStorageService,
         isLocalMode,
+        feedbackService,
       }
     );
   });

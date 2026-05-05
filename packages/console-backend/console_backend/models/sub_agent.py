@@ -169,6 +169,7 @@ class SubAgent(BaseModel):
     owner: SubAgentOwner | None = None
     owner_status: OwnerStatus = OwnerStatus.ACTIVE
     type: SubAgentType
+    system_role: str | None = None  # e.g. 'debug' — identifies agents with special system purposes
     current_version: int = 1
     default_version: int | None = None  # NULL means no approved version yet
     config_version: SubAgentConfigVersion | None = None  # Joined version data

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import uuid
 from typing import Literal
 
@@ -39,9 +40,11 @@ from app.models.responses import AgentStreamResponse
 from ..models.config import UserConfig
 from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    FEEDBACK_REQUEST_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
     new_activity_log_message,
+    new_feedback_request_message,
     new_work_plan_message,
 )
 
@@ -513,6 +516,21 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             # Default to deny for safety
                             resume_value = "deny_all"
                             logger.info(f"Unknown bulk response '{response}', defaulting to deny_all")
+                elif interrupt_type == "bug_report":
+                    # Bug report interrupt — client sends JSON with confirmed/description
+                    # or a simple text response (legacy clients)
+                    logger.info("Resuming from bug_report interrupt")
+                    if isinstance(query, str):
+                        q = query.strip().lower()
+                        if q in ("no", "cancel", "decline", "skip"):
+                            resume_value = {"confirmed": False}
+                        else:
+                            # Treat any other text as confirmation with that text as description
+                            resume_value = {"confirmed": True, "description": query}
+                    elif isinstance(query, dict):
+                        resume_value = query
+                    else:
+                        resume_value = {"confirmed": False}
                 else:
                     # Other interrupt types (auth, etc.)
                     resume_value = query
@@ -605,6 +623,45 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                                 f"message(s) (reinvocation {steering_reinvocations}/{MAX_STEERING_REINVOCATIONS})"
                             )
                             continue  # Loop back for another stream round
+
+                # Emit feedback request for complex tasks before terminal event
+                if (
+                    deferred_terminal_item is not None
+                    and deferred_terminal_item.state in (TaskState.completed, TaskState.failed, TaskState.canceled)
+                    and requested_extensions is not None
+                    and FEEDBACK_REQUEST_EXTENSION in requested_extensions
+                ):
+                    force_feedback = request_metadata.get("forceFeedbackRequest") in (True, "true", "1")
+                    feedback_threshold = int(os.environ.get("FEEDBACK_RECURSION_THRESHOLD", "40"))
+                    try:
+                        final_state = graph.get_state(config)  # type: ignore
+                        msgs = final_state.values.get("messages", []) if hasattr(final_state, "values") else []
+                        tool_msg_count = sum(1 for m in msgs if hasattr(m, "tool_call_id"))
+                        if force_feedback or tool_msg_count > feedback_threshold:
+                            # Extract sub-agent IDs from activity-log metadata
+                            # Prefer integer sub_agent_id; fall back to agent_name for built-in agents
+                            sub_agents_set: set[str] = set()
+                            for m in msgs:
+                                meta = getattr(m, "additional_kwargs", {}).get("a2a_metadata", {})
+                                if meta.get("sub_agent_id") is not None:
+                                    sub_agents_set.add(str(meta["sub_agent_id"]))
+                                elif meta.get("agent_name"):
+                                    sub_agents_set.add(meta["agent_name"])
+                            sub_agents = list(sub_agents_set)
+                            await updater.update_status(
+                                TaskState.working,
+                                new_feedback_request_message(
+                                    context_id=task.context_id,
+                                    task_id=task.id,
+                                    sub_agents_involved=sub_agents,
+                                ),
+                            )
+                            logger.info(
+                                f"[FEEDBACK] Emitted feedback request (tool_msgs={tool_msg_count}, "
+                                f"threshold={feedback_threshold}, sub_agents={sub_agents})"
+                            )
+                    except Exception:
+                        logger.debug("[FEEDBACK] Could not emit feedback request", exc_info=True)
 
                 # Emit the deferred terminal event
                 if deferred_terminal_item is not None:
@@ -821,13 +878,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         elif state == TaskState.input_required:
             # User input required - leave task in input_required state
+            # Include interrupt metadata if present (e.g., interrupt_type for bug reports)
+            interrupt_metadata = {
+                k: v for k, v in metadata.items() if k in ("interrupt_type", "interrupt_reason")
+            } or None
+            msg = new_agent_text_message(
+                content,
+                task.context_id,
+                task.id,
+            )
+            if interrupt_metadata:
+                msg.metadata = interrupt_metadata
             await updater.update_status(
                 TaskState.input_required,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                msg,
             )
 
         elif state == TaskState.auth_required:

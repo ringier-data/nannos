@@ -181,6 +181,7 @@ class SubAgentService:
         """
         base_select = """
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
@@ -243,6 +244,7 @@ class SubAgentService:
             # Non-admins see owned + public + group-assigned sub-agents
             query_str = f"""
                 SELECT DISTINCT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                       sa.system_role,
                        sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                        sa.created_at, sa.updated_at,
                        u.email as owner_email, u.first_name, u.last_name,
@@ -308,6 +310,7 @@ class SubAgentService:
         """Get all sub-agents with versions pending approval (admin only)."""
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
@@ -359,6 +362,7 @@ class SubAgentService:
         """
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
@@ -409,6 +413,7 @@ class SubAgentService:
         """
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
@@ -457,6 +462,7 @@ class SubAgentService:
         """
         query = text("""
             SELECT sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                   sa.system_role,
                    sa.current_version, sa.default_version, sa.is_public, sa.deleted_at,
                    sa.created_at, sa.updated_at,
                    u.email as owner_email, u.first_name, u.last_name,
@@ -1802,6 +1808,40 @@ class SubAgentService:
         await db.commit()
         return await self.get_sub_agent_by_id(db, sub_agent_id)
 
+    async def set_system_role(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        role: str | None,
+    ) -> None:
+        """Set or clear the system_role on a sub-agent (admin only).
+
+        If role is not None, clears that role from any other agent first
+        (each system_role is unique across all agents).
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing:
+            raise ValueError(f"Sub-agent {sub_agent_id} not found")
+
+        # Clear the role from any other agent that currently holds it
+        if role is not None:
+            await db.execute(
+                text(
+                    "UPDATE sub_agents SET system_role = NULL, updated_at = NOW() "
+                    "WHERE system_role = :role AND id != :id"
+                ),
+                {"role": role, "id": sub_agent_id},
+            )
+
+        await self.repo.update_sub_agent(
+            db=db,
+            actor=actor,
+            sub_agent_id=sub_agent_id,
+            fields={"system_role": role},
+        )
+        await db.commit()
+
     async def revert_to_version(
         self,
         db: AsyncSession,
@@ -2217,6 +2257,7 @@ class SubAgentService:
             owner=owner,
             owner_status=row.get("owner_status", "active"),
             type=row["type"],
+            system_role=row.get("system_role"),
             current_version=row["current_version"],
             default_version=row.get("default_version"),
             config_version=config_version,

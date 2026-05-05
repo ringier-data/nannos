@@ -13,6 +13,7 @@ import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, ContextRecord } from '../../storage/types.js';
 import { handleTask, handleError } from '../../utils/taskResponseHandler.js';
+import { FeedbackService } from '../../services/feedbackService.js';
 import _ from 'lodash';
 import { getSpinnerVerb } from '../../utils/spinnerVerbs.js';
 
@@ -52,6 +53,7 @@ export interface HandlerDependencies {
   botName: string; // Personalized bot display name, resolved from botInstallation per event
   fileStorageService: FileStorageService;
   isLocalMode: boolean;
+  feedbackService?: FeedbackService;
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +830,17 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       contextStore.set(contextKey, accumulatedTask?.contextId, result.messageTs).catch((err) => {
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
       });
+
+      // Store response mapping so emoji reactions can be correlated to A2A IDs
+      if (deps.feedbackService && accumulatedTask.contextId) {
+        deps.feedbackService.responseMapping.set(channelId, result.messageTs, {
+          contextId: accumulatedTask.contextId,
+          taskId: accumulatedTask.id,
+          userId,
+          teamId,
+          createdAt: Date.now(),
+        });
+      }
     }
   } catch (error) {
     logger.error(error, `Error handling ${source}: ${error}`);

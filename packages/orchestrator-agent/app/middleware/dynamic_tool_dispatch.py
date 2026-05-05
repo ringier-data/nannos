@@ -84,7 +84,7 @@ from ..models.config import GraphRuntimeContext
 logger = logging.getLogger(__name__)
 
 
-class A2ACompiledSubAgent(TypedDict):
+class A2ACompiledSubAgent(TypedDict, total=False):
     """A pre-compiled agent spec.
 
     !!! note
@@ -100,6 +100,7 @@ class A2ACompiledSubAgent(TypedDict):
     name: str
     description: str
     runnable: A2AClientRunnable
+    sub_agent_id: int | None
 
 
 OrchestratorSupportedRunnables = (
@@ -216,6 +217,17 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
     # description and replace it with the full registry.
     _TOOL_DESC_AGENT_MARKER = "Available agent types and the tools they have access to:\n"
 
+    _BUG_REPORT_TOOL_GUIDANCE = (
+        "\n\n## Error Handling & Bug Reporting\n"
+        "If a tool or sub-agent fails with a system_error classification, first attempt to recover: "
+        "retry, use alternative tools, or adjust your plan.\n"
+        "Only call report_bug_tool when you have exhausted recovery options AND the error is visible "
+        "to the user (i.e., you cannot fulfill their request because of it).\n"
+        "Never call report_bug_tool for errors you recovered from — "
+        "the user should not be aware of transient issues.\n"
+        "Always explain to the user what went wrong before offering to report."
+    )
+
     def _enhance_system_prompt_agents(
         self, system_message: SystemMessage | None, user_context: GraphRuntimeContext
     ) -> SystemMessage | None:
@@ -287,6 +299,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     "text": f"\n\n{marker}" + new_agent_block,
                 }
             )
+
+        # Append bug report tool guidance if the tool is available
+        new_blocks.append({"type": "text", "text": self._BUG_REPORT_TOOL_GUIDANCE})
 
         return SystemMessage(content_blocks=new_blocks)
 
@@ -672,6 +687,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         a2a_metadata: dict[str, Any] | None,
         tool_call_id: str,
         excluded_keys: tuple[str, ...],
+        subagent_name: str = "",
+        sub_agent_id: int | None = None,
     ) -> Command:
         """Build a Command with ToolMessage from a subagent StreamEvent.
 
@@ -681,6 +698,8 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             a2a_metadata: A2A metadata dict or None
             tool_call_id: The tool call ID for the ToolMessage
             excluded_keys: State keys to exclude from state update
+            subagent_name: Name of the sub-agent (for attribution)
+            sub_agent_id: Console backend integer ID of the sub-agent
 
         Returns:
             Command with state update and ToolMessage
@@ -690,6 +709,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         additional_kwargs = {}
         if a2a_metadata:
             additional_kwargs["a2a_metadata"] = a2a_metadata
+        if subagent_name:
+            additional_kwargs.setdefault("a2a_metadata", {})["agent_name"] = subagent_name
+        if sub_agent_id is not None:
+            additional_kwargs.setdefault("a2a_metadata", {})["sub_agent_id"] = sub_agent_id
 
         tool_message = ToolMessage(
             content=content,
@@ -1210,7 +1233,15 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
             # Extract content and A2A metadata, then build Command
             content, a2a_metadata = self._extract_subagent_response(result, subagent_type)
-            return self._build_subagent_command(result, content, a2a_metadata, tool_call_id, excluded_keys)
+            return self._build_subagent_command(
+                result,
+                content,
+                a2a_metadata,
+                tool_call_id,
+                excluded_keys,
+                subagent_name=subagent_type,
+                sub_agent_id=subagent.get("sub_agent_id"),
+            )
 
         except GraphInterrupt as gi:
             # is not an error - just an interrupt from the graph execution
@@ -1544,7 +1575,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             # Extract content and A2A metadata, then build Command
             final_content, final_a2a_metadata = self._extract_subagent_response(final_result, subagent_type)
             return self._build_subagent_command(
-                final_result, final_content, final_a2a_metadata, tool_call_id, excluded_keys
+                final_result,
+                final_content,
+                final_a2a_metadata,
+                tool_call_id,
+                excluded_keys,
+                subagent_name=subagent_type,
+                sub_agent_id=subagent.get("sub_agent_id"),
             )
 
         except GraphInterrupt as gi:

@@ -51,8 +51,10 @@ from ..middleware import (
     ToolsetSelectorMiddleware,
     UserPreferencesMiddleware,
 )
+from ..middleware.error_classification_middleware import ErrorClassificationMiddleware
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
+from .bug_report_tool import report_bug_tool
 from .file_tools import create_presigned_url_tool
 from .steering_state import get_all_active_subagent_dispatches, get_orchestrator_pending_messages
 from .time_tools import create_time_tool
@@ -508,6 +510,7 @@ class GraphFactory:
             user_preferences_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,
+            ErrorClassificationMiddleware(),
             self._retry_middleware,
             self._a2a_middleware,
             self._todo_middleware,
@@ -532,6 +535,9 @@ class GraphFactory:
 
             # Add copy_file tool for efficient file copying without LLM context loading
             static_tools.append(create_copy_file_tool(self.backend_factory))
+
+            # Add bug report tool for last-resort error reporting (uses interrupt())
+            static_tools.append(report_bug_tool)
 
             self._static_tools_cache = static_tools
 

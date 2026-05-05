@@ -117,7 +117,7 @@ class TestMiddlewareStack:
 
         # Verify correct order (DynamicTool first, static content before cache point,
         # steering after cache, user prefs after steering)
-        assert len(stack) == 10
+        assert len(stack) == 11
         assert isinstance(stack[0], DynamicToolDispatchMiddleware)
         assert isinstance(stack[1], StoragePathsInstructionMiddleware)
         assert isinstance(stack[2], BedrockPromptCachingMiddleware)
@@ -126,9 +126,10 @@ class TestMiddlewareStack:
         assert isinstance(stack[4], UserPreferencesMiddleware)
         assert isinstance(stack[5], RepeatedToolCallMiddleware)
         assert isinstance(stack[6], AuthErrorDetectionMiddleware)
-        assert isinstance(stack[7], ToolRetryMiddleware)
-        assert isinstance(stack[8], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[9], TodoStatusMiddleware)
+        assert stack[7].__class__.__name__ == "ErrorClassificationMiddleware"
+        assert isinstance(stack[8], ToolRetryMiddleware)
+        assert isinstance(stack[9], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[10], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph_checkpoint_aws.DynamoDBSaver")
@@ -173,7 +174,7 @@ class TestStaticTools:
 
         # Verify it's a list of tools
         assert isinstance(tools, list)
-        assert len(tools) == 3  # FinalResponseSchema only added when with_response_tool=True
+        assert len(tools) == 4  # FinalResponseSchema only added when with_response_tool=True
 
         # Get tool names
         tool_names = [tool.name for tool in tools]
@@ -182,3 +183,4 @@ class TestStaticTools:
         assert "generate_presigned_url" in tool_names
         assert "get_current_time" in tool_names
         assert "copy_file" in tool_names
+        assert "report_bug_tool" in tool_names

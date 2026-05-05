@@ -120,9 +120,7 @@ class OrchestratorDeepAgent:
             logger.info("Initialized OAuth2 client credentials authenticator")
         else:
             self.oauth2_client = None
-            logger.warning(
-                "OIDC credentials not configured – agent-to-agent authentication disabled (local dev mode)"
-            )
+            logger.warning("OIDC credentials not configured - agent-to-agent authentication disabled (local dev mode)")
 
         # Discovery services for tools and sub-agents
         # NOTE: A2A middleware is shared from GraphFactory to track task status
@@ -526,13 +524,25 @@ class OrchestratorDeepAgent:
                         **value,
                     )
                 else:
+                    interrupt_value_dict = (
+                        final_state.interrupts[-1].value if isinstance(final_state.interrupts[-1].value, dict) else {}
+                    )
                     yield AgentStreamResponse(
                         state=task_state,
-                        content=final_state.interrupts[-1].value.get(
+                        content=interrupt_value_dict.get(
                             "message", "Process interrupted. Human intervention required."
                         ),
                         interrupt_reason="graph_interrupted",
                         pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
+                        metadata={
+                            k: v
+                            for k, v in {
+                                "interrupt_type": interrupt_value_dict.get("type"),
+                                "interrupt_reason": interrupt_value_dict.get("reason"),
+                            }.items()
+                            if v is not None
+                        }
+                        or None,
                     )
                 return
             if hasattr(final_state, "next") and final_state.next:

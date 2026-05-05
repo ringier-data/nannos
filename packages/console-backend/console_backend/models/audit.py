@@ -21,6 +21,7 @@ class AuditEntityType(str, Enum):
     SCHEDULED_JOB = "scheduled_job"  # For scheduler job CRUD operations
     DELIVERY_CHANNEL = "delivery_channel"  # For delivery channel registration/management
     CATALOG = "catalog"  # For catalog management operations
+    BUG_REPORT = "bug_report"  # For bug report operations
 
 
 class AuditAction(str, Enum):

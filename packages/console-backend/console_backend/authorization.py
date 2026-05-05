@@ -15,6 +15,7 @@ SYSTEM_ROLE_CAPABILITIES = {
         "sub_agents": {"read", "write"},  # View/manage sub-agents (intersection applies)
         "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
         "catalogs": {"read", "write"},  # View/manage catalogs (intersection applies)
+        "bug_reports": {"read", "write"},  # View/resolve own bug reports (no intersection)
     },
     "approver": {
         "groups": {"read"},  # View groups they're in (intersection applies)
@@ -26,6 +27,7 @@ SYSTEM_ROLE_CAPABILITIES = {
         },
         "secrets": {"read", "write"},  # View/manage secrets (intersection applies)
         "catalogs": {"read", "write"},  # View/manage catalogs (intersection applies)
+        "bug_reports": {"read", "triage"},  # View own reports, triage any accessible (no intersection)
     },
     "admin": {
         "groups": {
@@ -61,6 +63,13 @@ SYSTEM_ROLE_CAPABILITIES = {
             "write",
             "read.admin",  # View all catalogs system-wide (bypasses intersection, requires admin-mode)
             "write.admin",  # Modify all catalogs system-wide (bypasses intersection, requires admin-mode)
+        },
+        "bug_reports": {
+            "read",
+            "write",
+            "read.admin",  # View all bug reports system-wide (bypasses intersection, requires admin-mode)
+            "write.admin",  # Modify all bug reports system-wide (bypasses intersection, requires admin-mode)
+            "triage.admin",  # Triage any bug report system-wide (bypasses intersection, requires admin-mode)
         },
     },
 }

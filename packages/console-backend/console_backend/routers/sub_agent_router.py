@@ -717,3 +717,27 @@ async def list_pending_version_approvals(
     except Exception as e:
         logger.error(f"Failed to list pending version approvals: {e}")
         raise HTTPException(status_code=500, detail="Failed to list pending approvals")
+
+
+@router.put("/{sub_agent_id}/system-role", status_code=200)
+async def set_system_role(
+    request: Request,
+    sub_agent_id: int,
+    db: DbSession,
+    user: User = Depends(require_admin),
+    role: str | None = Query(default=None, description="System role to assign (e.g. 'debug'), or null to clear"),
+) -> dict:
+    """Set or clear the system_role of a sub-agent (admin only).
+
+    System roles identify agents with special platform purposes (e.g. 'debug').
+    Setting a role on one agent automatically clears it from any other agent with the same role.
+    """
+    sub_agent_service = get_sub_agent_service(request)
+    try:
+        await sub_agent_service.set_system_role(db=db, actor=user, sub_agent_id=sub_agent_id, role=role)
+        return {"sub_agent_id": sub_agent_id, "system_role": role}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to set system_role for sub-agent {sub_agent_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to set system role")

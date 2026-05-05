@@ -46,7 +46,6 @@ from jsonpath_ng.ext import parse as jsonpath_parse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph_checkpoint_aws import DynamoDBSaver
@@ -61,6 +60,7 @@ from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 logger = logging.getLogger(__name__)
 
 _CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
+_CONSOLE_BACKEND_CLIENT_ID = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")
 _MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
 _MCP_TIMEOUT_SECONDS = int(os.getenv("MCP_TIMEOUT_SECONDS", "300"))
 _DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "")
@@ -385,7 +385,7 @@ class AgentRunner(BaseAgent):
         sub_agent_id: int | None = message_meta.get("sub_agent_id")
         job_type: str = message_meta.get("job_type", "task")
         watch: dict | None = message_meta.get("watch")
-        scheduled_job_id: int = message_meta.get("scheduled_job_id", 0)
+        scheduled_job_id: int | None = message_meta.get("scheduled_job_id")
         scheduled_job_run_id: int = message_meta.get("scheduled_job_run_id", "")
 
         # SECURITY: Use verified access token from JWT (validated by JWTValidatorMiddleware)
@@ -393,10 +393,6 @@ class AgentRunner(BaseAgent):
         user_access_token = user_config.access_token.get_secret_value() if user_config.access_token else ""
         user_id: str | None = await self._fetch_user_id_from_backend(user_access_token) if user_access_token else None
 
-        # For tasks: query contains the prompt for the sub-agent
-        # For watches: query contains the agent_message (what the agent delivers to user)
-        # TODO: what about multi-modal inputs (files, data) in the message parts?
-        #       For now we only extract text from the messages.
         message_text = "\n".join(_extract_text_from_message(m) for m in messages).strip()
         last_check_result: dict | None = None
         agent_message: str | None = None
@@ -518,23 +514,41 @@ class AgentRunner(BaseAgent):
         condition_expr: str | None = watch.get("condition_expr")
         expected_value: str | None = watch.get("expected_value")
         llm_condition: str | None = watch.get("llm_condition")
-        # token exchange: orchestrator -> gatana
-        gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
 
         mcp_timeout = timedelta(seconds=_MCP_TIMEOUT_SECONDS)
-        connection = StreamableHttpConnection(
-            transport="streamable_http",
-            url=_MCP_GATEWAY_URL,
-            headers={"Authorization": f"Bearer {gatana_access_token}"},
-            timeout=mcp_timeout,
-            sse_read_timeout=mcp_timeout,
-        )
+
+        # Build MCP connections based on the check_tool prefix
+        connections: dict[str, StreamableHttpConnection] = {}
+
+        if check_tool.startswith("console_"):
+            # Console backend MCP — exchange token for agent-console audience
+            console_mcp_url = f"{_CONSOLE_BACKEND_URL}/mcp"
+            console_token = await (self._get_oauth2_client()).exchange_token(
+                user_access_token, _CONSOLE_BACKEND_CLIENT_ID
+            )
+            connections["console"] = StreamableHttpConnection(
+                transport="streamable_http",
+                url=console_mcp_url,
+                headers={"Authorization": f"Bearer {console_token}"},
+                timeout=mcp_timeout,
+                sse_read_timeout=mcp_timeout,
+            )
+        else:
+            # Gatana gateway — requires token exchange
+            gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
+            connections["gateway"] = StreamableHttpConnection(
+                transport="streamable_http",
+                url=_MCP_GATEWAY_URL,
+                headers={"Authorization": f"Bearer {gatana_access_token}"},
+                timeout=mcp_timeout,
+                sse_read_timeout=mcp_timeout,
+            )
 
         check_result: dict = {}
         try:
-            mcp_client = MultiServerMCPClient({"gateway": connection})
-            async with mcp_client.session("gateway") as session:
-                tools = await load_mcp_tools(session)
+            mcp_client = MultiServerMCPClient(connections)
+            async with mcp_client:
+                tools = await mcp_client.get_tools()
                 tool_map = {t.name: t for t in tools}
 
                 if check_tool not in tool_map:
@@ -763,6 +777,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             return await self._run_langgraph_agent(
                 sub_agent_cfg=sub_agent_cfg,
                 prompt=prompt,
+                raw_a2a_messages=raw_a2a_messages,
                 user_access_token=user_access_token,
                 user_sub=user_config.user_sub,
                 user_id=user_id,
@@ -800,6 +815,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         scheduled_job_run_id: int,
         user_id: str | None = None,
         context_id: str | None = None,
+        raw_a2a_messages: list[Message] | None = None,
     ) -> str | None:
         """Run a one-shot LangGraph agent using agent-common's model factory.
 
@@ -883,7 +899,16 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                     "user_id": user_id or user_sub,
                     "assistant_id": user_id or user_sub,
                 }
-            messages = [HumanMessage(content=prompt)]
+            # For local LLM execution, convert all parts (including DataParts) to text.
+            # text_only=True serializes DataParts as JSON strings which LLMs can read.
+            # (NonStandardContentBlock from text_only=False is rejected by Bedrock Converse)
+            if raw_a2a_messages:
+                text_content = "\n".join(
+                    a2a_parts_to_content(msg.parts, text_only=True) for msg in raw_a2a_messages if msg.parts
+                ).strip()
+                messages = [HumanMessage(content=text_content)] if text_content else [HumanMessage(content=prompt)]
+            else:
+                messages = [HumanMessage(content=prompt)]
 
             # Use astream for proper streaming support (respects recursion_limit set with .with_config())
             # stream_mode="values" with version="v2" yields StreamPart dicts:
@@ -944,7 +969,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 user_id=docstore_user_id,
             )
             logger.info(
-                "Added %d docstore tools for job %d: %s",
+                "Added %d docstore tools for job %s: %s",
                 len(docstore_tools),
                 scheduled_job_id,
                 [t.name for t in docstore_tools],
@@ -953,32 +978,53 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         if mcp_tool_names:
             # Keep the MCP session open for the entire graph execution so that
             # tool closures can call back into the session when invoked.
-            gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
-            connection = StreamableHttpConnection(
-                transport="streamable_http",
-                url=_MCP_GATEWAY_URL,
-                headers={"Authorization": f"Bearer {gatana_access_token}"},
-                timeout=mcp_timeout,
-                sse_read_timeout=mcp_timeout,
-            )
-            mcp_client = MultiServerMCPClient({"gateway": connection})
-            async with mcp_client.session("gateway") as session:
-                all_tools = await load_mcp_tools(session)
-                allowed = set(mcp_tool_names)
-                tools = [t for t in all_tools if t.name in allowed]
-                logger.info(
-                    "Loaded %d/%d MCP tools for job %d: %s",
-                    len(tools),
-                    len(all_tools),
-                    scheduled_job_id,
-                    [t.name for t in tools],
+            allowed = set(mcp_tool_names)
+            has_console_tools = any(name.startswith("console_") for name in allowed)
+            has_gateway_tools = any(not name.startswith("console_") for name in allowed)
+
+            connections: dict[str, StreamableHttpConnection] = {}
+
+            # Add Gatana gateway connection for non-console tools
+            if has_gateway_tools:
+                gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
+                connections["gateway"] = StreamableHttpConnection(
+                    transport="streamable_http",
+                    url=_MCP_GATEWAY_URL,
+                    headers={"Authorization": f"Bearer {gatana_access_token}"},
+                    timeout=mcp_timeout,
+                    sse_read_timeout=mcp_timeout,
                 )
-                await _run_graph(tools + docstore_tools)
+
+            # Add console backend MCP connection for console_ tools
+            if has_console_tools:
+                console_mcp_url = f"{_CONSOLE_BACKEND_URL}/mcp"
+                console_token = await (self._get_oauth2_client()).exchange_token(
+                    user_access_token, _CONSOLE_BACKEND_CLIENT_ID
+                )
+                connections["console"] = StreamableHttpConnection(
+                    transport="streamable_http",
+                    url=console_mcp_url,
+                    headers={"Authorization": f"Bearer {console_token}"},
+                    timeout=mcp_timeout,
+                    sse_read_timeout=mcp_timeout,
+                )
+
+            mcp_client = MultiServerMCPClient(connections)
+            all_tools = await mcp_client.get_tools()
+            tools = [t for t in all_tools if t.name in allowed]
+            logger.info(
+                "Loaded %d/%d MCP tools for job %s: %s",
+                len(tools),
+                len(all_tools),
+                scheduled_job_id,
+                [t.name for t in tools],
+            )
+            await _run_graph(tools + docstore_tools)
         else:
             await _run_graph(docstore_tools)
 
         logger.info(
-            "LangGraph agent execution complete for job %d: %d chars",
+            "LangGraph agent execution complete for job %s: %d chars",
             scheduled_job_id,
             len(result_summary or ""),
         )

@@ -217,6 +217,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     fileStorageService,
     baseUrl,
     isLocalMode,
+    feedbackService,
   } = deps;
 
   let statusMessageId: string | undefined;
@@ -539,6 +540,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         messageId,
         statusMessageId,
       },
+      includeFeedbackButtons: !!feedbackService,
     });
 
     await inFlightTaskStore.delete(accumulatedTask.id);
@@ -547,6 +549,17 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       contextStore.set(contextKey, accumulatedTask?.contextId, result.messageId).catch((err) => {
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
       });
+
+      // Store response mapping so button clicks can be correlated to A2A IDs
+      if (feedbackService && accumulatedTask.contextId) {
+        feedbackService.responseMapping.set(result.messageId, {
+          contextId: accumulatedTask.contextId,
+          taskId: accumulatedTask.id,
+          userId,
+          projectId,
+          createdAt: Date.now(),
+        });
+      }
     }
   } catch (error) {
     logger.error(error, `Error handling ${source}: ${error}`);

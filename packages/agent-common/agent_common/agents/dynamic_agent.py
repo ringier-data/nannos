@@ -162,6 +162,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         backend_factory: Optional[Any] = None,
         mcp_gateway_url: Optional[str] = None,
         mcp_gateway_client_id: Optional[str] = None,
+        console_backend_client_id: Optional[str] = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -181,6 +182,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             backend_factory: Factory function for creating CompositeBackend (for FilesystemMiddleware)
             mcp_gateway_url: MCP gateway URL (defaults to MCP_GATEWAY_URL env var)
             mcp_gateway_client_id: MCP gateway client ID (defaults to MCP_GATEWAY_CLIENT_ID env var)
+            console_backend_client_id: Console backend OIDC client ID for token exchange (defaults to CONSOLE_BACKEND_CLIENT_ID env var)
         """
         self.config = config
         self.model = model
@@ -197,6 +199,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self.backend_factory = backend_factory
         self.mcp_gateway_url = mcp_gateway_url or os.getenv("MCP_GATEWAY_URL", "")
         self.mcp_gateway_client_id = mcp_gateway_client_id or os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
+        self.console_backend_client_id = console_backend_client_id or os.getenv(
+            "CONSOLE_BACKEND_CLIENT_ID", "agent-console"
+        )
+        self.console_backend_mcp_url = os.getenv("CONSOLE_BACKEND_MCP_URL", "") or (
+            f"{os.getenv('CONSOLE_BACKEND_URL', '')}/mcp" if os.getenv("CONSOLE_BACKEND_URL") else ""
+        )
         self._agent = None
         self._discovered_tools: Optional[List[BaseTool]] = None
 
@@ -312,7 +320,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         return addendum
 
     async def _discover_mcp_tools(self) -> List[BaseTool]:
-        """Discover tools from Gatana MCP gateway with authentication.
+        """Discover tools from MCP servers with authentication.
+
+        Connects to:
+        - Gatana MCP gateway (for standard MCP tools)
+        - Console backend MCP (for console_ prefixed tools, if any in whitelist)
 
         This is called lazily on first invocation if config.mcp_tools is set.
         Uses the same token exchange flow as the orchestrator's ToolDiscoveryService
@@ -333,8 +345,13 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         mcp_gateway_url = self.mcp_gateway_url
         mcp_gateway_client_id = self.mcp_gateway_client_id
+        mcp_tool_names = set(self.config.mcp_tools or [])
 
-        logger.info(f"Discovering MCP tools for {self.name} from MCP gateway at {mcp_gateway_url}")
+        # Determine which MCP servers to connect to
+        has_console_tools = any(name.startswith("console_") for name in mcp_tool_names)
+        has_gateway_tools = any(not name.startswith("console_") for name in mcp_tool_names)
+
+        logger.info(f"Discovering MCP tools for {self.name}: gateway={has_gateway_tools}, console={has_console_tools}")
 
         # Retry parameters
         max_retries = 3
@@ -344,40 +361,71 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         for attempt in range(max_retries):
             try:
-                # Build connection headers - use token exchange if oauth2_client is available
-                headers: dict[str, str] = {}
+                # Build connections dict for MultiServerMCPClient
+                connections: dict[str, StreamableHttpConnection] = {}
 
-                if self.oauth2_client and self.user_token:
-                    # Exchange user token for MCP gateway token (same flow as ToolDiscoveryService)
-                    logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
-                    mcp_gateway_token = await self.oauth2_client.exchange_token(
-                        subject_token=self.user_token,
-                        target_client_id=mcp_gateway_client_id,
-                        requested_scopes=["openid", "profile", "offline_access"],
+                # Add Gatana gateway connection if there are non-console tools
+                if has_gateway_tools and mcp_gateway_url:
+                    # Build auth headers for Gatana gateway
+                    headers: dict[str, str] = {}
+                    if self.oauth2_client and self.user_token:
+                        logger.debug(f"Exchanging token for MCP gateway access for {self.name}")
+                        mcp_gateway_token = await self.oauth2_client.exchange_token(
+                            subject_token=self.user_token,
+                            target_client_id=mcp_gateway_client_id,
+                            requested_scopes=["openid", "profile", "offline_access"],
+                        )
+                        headers["Authorization"] = f"Bearer {mcp_gateway_token}"
+                        logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
+                    else:
+                        logger.warning(
+                            f"No OAuth2 client or user token available for {self.name}. "
+                            f"MCP discovery may fail if authentication is required."
+                        )
+
+                    connections[mcp_gateway_client_id] = StreamableHttpConnection(
+                        transport="streamable_http",
+                        url=mcp_gateway_url,
+                        headers=headers if headers else None,
                     )
-                    headers["Authorization"] = f"Bearer {mcp_gateway_token}"
-                    logger.info(f"Successfully exchanged token for MCP gateway ({self.name})")
-                else:
+
+                # Add console backend MCP connection if there are console_ tools
+                if has_console_tools and self.console_backend_mcp_url:
+                    console_headers: dict[str, str] = {}
+                    if self.oauth2_client and self.user_token:
+                        logger.debug(f"Exchanging token for console backend access for {self.name}")
+                        console_token = await self.oauth2_client.exchange_token(
+                            subject_token=self.user_token,
+                            target_client_id=self.console_backend_client_id,
+                            requested_scopes=["openid", "profile", "offline_access"],
+                        )
+                        console_headers["Authorization"] = f"Bearer {console_token}"
+                        logger.info(f"Successfully exchanged token for console backend ({self.name})")
+                    elif self.user_token:
+                        console_headers["Authorization"] = f"Bearer {self.user_token}"
+                    connections["console"] = StreamableHttpConnection(
+                        transport="streamable_http",
+                        url=self.console_backend_mcp_url,
+                        headers=console_headers if console_headers else None,
+                    )
+                elif has_console_tools and not self.console_backend_mcp_url:
                     logger.warning(
-                        f"No OAuth2 client or user token available for {self.name}. "
-                        f"MCP discovery may fail if authentication is required."
+                        f"Console MCP tools requested for {self.name} but CONSOLE_BACKEND_URL not configured"
                     )
+
+                if not connections:
+                    logger.warning(f"No MCP connections to establish for {self.name}")
+                    return []
 
                 client = MultiServerMCPClient(
-                    connections={
-                        mcp_gateway_client_id: StreamableHttpConnection(
-                            transport="streamable_http",
-                            url=mcp_gateway_url,
-                            headers=headers if headers else None,
-                        )
-                    },
+                    connections=connections,
                     callbacks=Callbacks(on_progress=on_mcp_progress),
                 )
 
                 tools = await client.get_tools()
                 logger.info(f"Discovered {len(tools)} MCP tools for {self.name}")
 
-                tools = [tool for tool in tools if tool.name in (self.config.mcp_tools or [])]
+                tools = [tool for tool in tools if tool.name in mcp_tool_names]
                 logger.info(f"Filtered to {len(tools)} tools based on whitelist for {self.name}")
 
                 # Validate tool schemas to prevent OpenAI API errors
@@ -708,6 +756,7 @@ def create_dynamic_local_subagent(
     backend_factory: Optional[Any] = None,
     mcp_gateway_url: Optional[str] = None,
     mcp_gateway_client_id: Optional[str] = None,
+    console_backend_client_id: Optional[str] = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
@@ -729,6 +778,7 @@ def create_dynamic_local_subagent(
         backend_factory: Factory function for creating CompositeBackend (for FilesystemMiddleware)
         mcp_gateway_url: MCP gateway URL (defaults to MCP_GATEWAY_URL env var)
         mcp_gateway_client_id: MCP gateway client ID (defaults to MCP_GATEWAY_CLIENT_ID env var)
+        console_backend_client_id: Console backend OIDC client ID for token exchange (defaults to CONSOLE_BACKEND_CLIENT_ID env var)
 
     Returns:
         CompiledSubAgent that can be registered with the orchestrator
@@ -759,6 +809,7 @@ def create_dynamic_local_subagent(
         backend_factory=backend_factory,
         mcp_gateway_url=mcp_gateway_url,
         mcp_gateway_client_id=mcp_gateway_client_id,
+        console_backend_client_id=console_backend_client_id,
     )
 
     return CompiledSubAgent(

@@ -243,6 +243,8 @@ def build_runtime_context(
                         sub_agent_id=config.sub_agent_id,
                     )
                     subagent_registry[config.name] = dynamic_subagent
+                    if config.sub_agent_id is not None:
+                        dynamic_subagent["sub_agent_id"] = config.sub_agent_id  # type: ignore[typeddict-unknown-key]
                     logger.info(f"Registered Foundry local sub-agent: {config.name}")
                     continue  # Skip to next config after Foundry creation
                 elif isinstance(config, LocalLangGraphSubAgentConfig):
@@ -316,6 +318,8 @@ def build_runtime_context(
                         mcp_gateway_client_id=agent_settings.MCP_GATEWAY_CLIENT_ID if agent_settings else None,
                     )
                     subagent_registry[config.name] = dynamic_subagent
+                    if config.sub_agent_id is not None:
+                        dynamic_subagent["sub_agent_id"] = config.sub_agent_id  # type: ignore[typeddict-unknown-key]
                     logger.info(f"Registered dynamic local sub-agent: {config.name} (model: {subagent_model_type})")
                 else:
                     logger.warning(f"Unknown local sub-agent type for '{config.name}': {type(config)}")

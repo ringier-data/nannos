@@ -16,8 +16,10 @@ from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 from .catalog.token_service import CatalogTokenService
 from .config import config
 from .db.connection import get_async_session_factory, get_sync_session_factory
+from .repositories.bug_report_repository import BugReportRepository
 from .repositories.catalog_repository import CatalogRepository
 from .repositories.delivery_channel_repository import DeliveryChannelRepository
+from .repositories.feedback_repository import FeedbackRepository
 from .repositories.rate_card_repository import RateCardRepository
 from .repositories.scheduled_job_repository import ScheduledJobRepository
 from .repositories.secrets_repository import SecretsRepository
@@ -27,8 +29,11 @@ from .repositories.user_group_repository import UserGroupRepository
 from .repositories.user_repository import UserRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
 from .services.audit_service import AuditService
+from .services.bug_report_service import BugReportService
 from .services.catalog_service import CatalogService
 from .services.conversation_service import ConversationService
+from .services.debug_agent_service import DebugAgentService
+from .services.feedback_service import FeedbackService
 from .services.file_storage_service import FileStorageService
 from .services.keycloak_admin_service import KeycloakAdminService
 from .services.messages_service import MessagesService
@@ -203,6 +208,27 @@ async def initialize_services(app: "FastAPI") -> None:
         client_secret=oidc_config.client_secret.get_secret_value(),
         issuer=oidc_config.issuer,
     )
+
+    # Initialize bug report repository and service
+    app.state.bug_report_repository = BugReportRepository()
+    app.state.bug_report_repository.set_audit_service(app.state.audit_service)
+
+    app.state.bug_report_service = BugReportService()
+    app.state.bug_report_service.set_repository(app.state.bug_report_repository)
+
+    # Initialize debug agent service (dispatches to agent-runner)
+    app.state.debug_agent_service = DebugAgentService(
+        bug_report_service=app.state.bug_report_service,
+        db_session_factory=get_async_session_factory(),
+        agent_runner_url=config.scheduler.agent_runner_url,
+        oauth_service=app.state.oauth_service,
+    )
+
+    # Initialize feedback repository and service
+    app.state.feedback_repository = FeedbackRepository()
+
+    app.state.feedback_service = FeedbackService()
+    app.state.feedback_service.set_repository(app.state.feedback_repository)
 
     # Initialize delivery channel repository
     app.state.delivery_channel_repository = DeliveryChannelRepository()

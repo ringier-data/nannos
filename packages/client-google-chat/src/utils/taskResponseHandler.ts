@@ -2,6 +2,7 @@ import _ from 'lodash';
 import { Logger } from './logger.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import { Artifact, DataPart, FileWithBytes, FileWithUri, Task } from '@a2a-js/sdk';
+import type { chat_v1 } from 'googleapis';
 
 const logger = Logger.getLogger('taskResponseHandler');
 
@@ -31,6 +32,8 @@ export interface HandleTaskResponseParams {
   task: Task;
   chatService: GoogleChatService;
   messageContext: ChatMessageContext;
+  /** When true, append 👍/👎 feedback buttons to the response message. */
+  includeFeedbackButtons?: boolean;
 }
 
 /**
@@ -43,7 +46,8 @@ export async function postOrUpdateMessage(
   spaceId: string,
   threadId: string,
   text: string,
-  existingMessageId?: string
+  existingMessageId?: string,
+  accessoryWidgets?: chat_v1.Schema$AccessoryWidget[],
 ): Promise<string | undefined> {
   try {
     if (existingMessageId) {
@@ -52,11 +56,19 @@ export async function postOrUpdateMessage(
         projectId,
         messageName: existingMessageId,
         text,
+        accessoryWidgets,
       });
       return existingMessageId;
     } else {
       // Post new message in thread
-      const result = await chatService.sendTextMessage(projectId, spaceId, text, threadId);
+      const result = await chatService.sendMessage({
+        projectId,
+        spaceId,
+        text,
+        threadId,
+        accessoryWidgets,
+        messageReplyOption: threadId ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' : undefined,
+      });
       return result.name || undefined;
     }
   } catch (err) {
@@ -108,7 +120,7 @@ export function processArtifacts(artifacts?: Artifact[]): {
  * Main entry point for handling any A2A response uniformly
  */
 export async function handleTask(params: HandleTaskResponseParams): Promise<{ messageId: string | undefined }> {
-  const { task, chatService, messageContext } = params;
+  const { task, chatService, messageContext, includeFeedbackButtons } = params;
 
   const { projectId, spaceId, threadId, messageId, statusMessageId } = messageContext;
 
@@ -133,16 +145,47 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
   }
 
   message = message.trim();
+
+  // Build feedback accessory widgets for completed responses
+  let accessoryWidgets: chat_v1.Schema$AccessoryWidget[] | undefined;
+  if (includeFeedbackButtons && task.status.state === 'completed' && message) {
+    accessoryWidgets = [
+      {
+        buttonList: {
+          buttons: [
+            {
+              text: '👍',
+              onClick: {
+                action: {
+                  function: 'feedback_positive',
+                },
+              },
+            },
+            {
+              text: '👎',
+              onClick: {
+                action: {
+                  function: 'feedback_negative',
+                },
+              },
+            },
+          ],
+        },
+      },
+    ];
+  }
+
   // Update or post the message
   let postedMessageId: string | undefined;
   if (message) {
-    postedMessageId = await await postOrUpdateMessage(
+    postedMessageId = await postOrUpdateMessage(
       chatService,
       projectId,
       spaceId,
       threadId,
       message,
       statusMessageId,
+      accessoryWidgets,
     );
   }
 

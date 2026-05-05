@@ -55,7 +55,7 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
     headers.set('Authorization', `Bearer ${accessToken}`);
     headers.set(
       'X-A2A-Extensions',
-      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0'
+      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0'
     );
     return fetch(input, {
       ...init,

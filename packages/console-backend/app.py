@@ -52,9 +52,12 @@ from console_backend.routers.admin_audit_router import router as admin_audit_rou
 from console_backend.routers.admin_group_router import router as admin_group_router
 from console_backend.routers.admin_user_router import router as admin_user_router
 from console_backend.routers.auth_router import router as auth_router
+from console_backend.routers.bug_report_mcp_tools import router as bug_report_mcp_router
+from console_backend.routers.bug_report_router import router as bug_report_router
 from console_backend.routers.catalog_router import router as catalog_router
 from console_backend.routers.conversation_router import router as conversation_router
 from console_backend.routers.delivery_channel_router import router as delivery_channel_router
+from console_backend.routers.feedback_router import router as feedback_router
 from console_backend.routers.file_router import router as file_router
 from console_backend.routers.group_router import router as group_router
 from console_backend.routers.mcp_router import router as mcp_router
@@ -288,6 +291,9 @@ app.include_router(notification_router)
 app.include_router(scheduler_router)
 app.include_router(delivery_channel_router)
 app.include_router(catalog_router)
+app.include_router(bug_report_router)
+app.include_router(bug_report_mcp_router)
+app.include_router(feedback_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.
@@ -313,6 +319,68 @@ mcp = FastApiMCP(
     app,
     include_tags=["MCP"],
 )
+
+# Override list_tools handler to hide triage-only tools from users without triage capability.
+# fastapi-mcp registers a static handler that returns all tools unconditionally.
+# We re-register it to inspect the request's bearer token and filter accordingly.
+_TRIAGE_ONLY_MCP_TOOLS = {
+    "console_set_bug_report_external_link",
+}
+
+
+@mcp.server.list_tools()
+async def _handle_list_tools() -> list:
+    """Return MCP tools, hiding triage-only tools from users without triage capability."""
+    all_tools = mcp.tools
+    try:
+        ctx = mcp.server.request_context
+        http_request = getattr(ctx, "request", None)
+        if http_request is None:
+            return all_tools
+
+        auth_header = getattr(http_request, "headers", {}).get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return all_tools
+
+        token = auth_header.split(" ", 1)[1]
+        from ringier_a2a_sdk.auth import JWTValidator
+
+        from console_backend.config import config as app_config
+
+        validator = JWTValidator(issuer=app_config.oidc.issuer)
+        payload = await validator.validate(token)
+        sub = payload.get("sub")
+        if not sub:
+            return all_tools
+
+        # Look up user role to check triage capability
+        from console_backend.authorization import check_capability
+        from console_backend.db import get_async_session_factory
+
+        async with get_async_session_factory()() as db:
+            result = await db.execute(
+                sa_text("SELECT role, is_administrator FROM users WHERE sub = :sub"),
+                {"sub": sub},
+            )
+            row = result.first()
+            if row:
+                user_role, is_admin = row[0], row[1]
+                if is_admin:
+                    return all_tools
+                has_triage = check_capability(user_role, "bug_reports", "triage") or check_capability(
+                    user_role, "bug_reports", "triage.admin"
+                )
+                if has_triage:
+                    return all_tools
+
+        # User lacks triage capability — hide triage-only tools
+        return [t for t in all_tools if t.name not in _TRIAGE_ONLY_MCP_TOOLS]
+    except Exception:
+        # On any error (no context, invalid token, etc.), return all tools
+        # The endpoint-level RBAC check is the real security gate
+        logger.debug("MCP list_tools: could not determine user role, returning all tools", exc_info=True)
+        return all_tools
+
 
 # Mount the MCP server directly to your FastAPI app using HTTP transport
 mcp.mount_http()
@@ -553,6 +621,7 @@ async def _process_a2a_response(
                 status_message = (response_data.get("status") or {}).get("message") or {}
                 message_extensions = status_message.get("extensions", []) if isinstance(status_message, dict) else []
                 is_work_plan = "urn:nannos:a2a:work-plan:1.0" in message_extensions
+                is_feedback_request = "urn:nannos:a2a:feedback-request:1.0" in message_extensions
                 is_artifact_append = response_data.get("kind") == "artifact-update" and response_data.get("append")
                 # Handle both camelCase and snake_case, check explicitly for boolean value
                 # Don't use 'or' because False would fallback to checking second field
@@ -638,7 +707,7 @@ async def _process_a2a_response(
                                     f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) "
                                     f"for context {effective_context_id}"
                                 )
-                                await messages_service.insert_message(
+                                saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
                                     user_id=socket_session.user_id,
                                     role="assistant",
@@ -647,6 +716,9 @@ async def _process_a2a_response(
                                     state=TaskState.completed,
                                     kind="artifact-update",
                                 )
+                                # Inject persisted message_id into response so frontend
+                                # can associate its msg-* placeholder with the real DB ID
+                                response_data["persistedMessageId"] = saved_msg.message_id
                             else:
                                 # Safety net: last_chunk never arrived (e.g. input-required,
                                 # unhandled error). Save what we had so content isn't lost.
@@ -654,7 +726,7 @@ async def _process_a2a_response(
                                     f"[STREAMING] Safety-net save ({len(accumulated)} chars, state={status_state}) "
                                     f"for context {effective_context_id}"
                                 )
-                                await messages_service.insert_message(
+                                saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
                                     user_id=socket_session.user_id,
                                     role="assistant",
@@ -663,6 +735,7 @@ async def _process_a2a_response(
                                     state=TaskState(status_state),
                                     kind="status-update",
                                 )
+                                response_data["persistedMessageId"] = saved_msg.message_id
                                 safety_net_saved = True
                         elif is_last_chunk:
                             logger.warning(
@@ -687,6 +760,7 @@ async def _process_a2a_response(
 
                 if (
                     not is_work_plan
+                    and not is_feedback_request
                     and not is_artifact_append
                     and not is_bare_completion_signal
                     and not safety_net_saved
@@ -991,7 +1065,8 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
 
     # Console UI supports all extensions — always request them from the orchestrator
     custom_headers["X-A2A-Extensions"] = (
-        "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0"
+        "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, "
+        "urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0"
     )
 
     if custom_headers:

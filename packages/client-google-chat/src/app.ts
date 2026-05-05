@@ -8,6 +8,7 @@ import { UserAuthService } from './services/userAuthService.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { GoogleChatService } from './services/googleChatService.js';
+import { FeedbackService } from './services/feedbackService.js';
 import { createGoogleChatAuthMiddleware } from './middleware/googleChatAuth.js';
 import { handleOAuthCallback, generateCallbackHTML } from './utils/oauthCallback.js';
 import { processPendingRequest } from './utils/processPendingRequest.js';
@@ -43,6 +44,17 @@ interface BaseGoogleChatEvent {
     user: User;
     messagePayload?: any;
     appCommandPayload?: any;
+    cardClickedPayload?: {
+      message: {
+        name: string;
+        thread?: { name: string };
+      };
+      space: Space;
+      action: {
+        actionMethodName: string;
+        parameters?: Array<{ key: string; value: string }>;
+      };
+    };
   };
 }
 
@@ -133,6 +145,13 @@ function setupServerTimeouts(server: Server, config: Config) {
     // Google Chat service (uses service account credentials)
     const chatService = new GoogleChatService(config);
 
+    // Feedback service for console-backend integration (optional)
+    let feedbackService: FeedbackService | undefined;
+    if (config.consoleBackend) {
+      feedbackService = new FeedbackService(userAuthService, config);
+      logger.info(`Feedback service enabled (console-backend: ${config.consoleBackend.url})`);
+    }
+
     // Handler dependencies
     const handlerDeps: HandlerDependencies = {
       userAuthService,
@@ -144,6 +163,7 @@ function setupServerTimeouts(server: Server, config: Config) {
       baseUrl: config.baseUrl,
       fileStorageService,
       isLocalMode: config.isLocal(),
+      feedbackService,
     };
 
     // -----------------------------------------------------------------------
@@ -174,6 +194,8 @@ function setupServerTimeouts(server: Server, config: Config) {
           eventType = 'MESSAGE';
         } else if (baseEvent.chat?.appCommandPayload) {
           eventType = 'APP_COMMAND';
+        } else if (baseEvent.chat?.cardClickedPayload) {
+          eventType = 'CARD_CLICKED';
         }
 
         logger.info(`[ChatEvent] type=${eventType} user=${userId}`);
@@ -242,6 +264,33 @@ function setupServerTimeouts(server: Server, config: Config) {
               );
 
               // Respond immediately to acknowledge the event
+              res.json({});
+              return;
+            }
+
+            case 'CARD_CLICKED': {
+              const payload = baseEvent.chat.cardClickedPayload!;
+              const actionMethod = payload.action.actionMethodName;
+              const messageName = payload.message.name;
+
+              if (
+                feedbackService &&
+                (actionMethod === 'feedback_positive' || actionMethod === 'feedback_negative')
+              ) {
+                const rating = actionMethod === 'feedback_positive' ? 'positive' : 'negative';
+                const mapping = feedbackService.responseMapping.get(messageName);
+
+                if (mapping) {
+                  feedbackService
+                    .submitFeedback(mapping.userId, mapping.projectId, mapping.contextId, mapping.taskId, rating)
+                    .catch((err) => {
+                      logger.error(err, `Failed to submit feedback: ${err}`);
+                    });
+                } else {
+                  logger.debug(`No response mapping for card click on ${messageName}`);
+                }
+              }
+
               res.json({});
               return;
             }

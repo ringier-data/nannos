@@ -135,6 +135,9 @@ class AgentDiscoveryService:
             description=base_runnable.description,
             runnable=base_runnable,
         )
+        # Attach console-backend integer ID for feedback attribution
+        if sub_agent_id is not None:
+            agent["sub_agent_id"] = sub_agent_id  # type: ignore[typeddict-unknown-key]
         logger.debug(f"Sub-agent created: name={agent['name']}, description={agent['description']}")
 
         return agent
@@ -347,13 +350,18 @@ class ToolDiscoveryService:
                 return []
 
             # Add agent-console backend as an additional MCP server
-            # Agent-console backend MCP endpoints require Gatana token for calling Gatana gateway
+            # Exchange token for agent-console audience (separate from gatana)
             if self.config.CONSOLE_BACKEND_URL:
                 console_mcp_url = f"{self.config.CONSOLE_BACKEND_URL}/mcp"
+                console_token = await self.oauth2_client.exchange_token(
+                    subject_token=token,
+                    target_client_id=self.config.CONSOLE_BACKEND_CLIENT_ID,
+                    requested_scopes=["openid", "profile", "offline_access"],
+                )
                 connections["console"] = StreamableHttpConnection(
                     transport="streamable_http",
                     url=console_mcp_url,
-                    headers={"Authorization": f"Bearer {mcp_gateway_token}"},
+                    headers={"Authorization": f"Bearer {console_token}"},
                 )
                 logger.debug(f"Added agent-console MCP connection: {console_mcp_url}")
 

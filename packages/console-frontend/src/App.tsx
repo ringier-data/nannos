@@ -21,6 +21,7 @@ import { GroupsPage } from './pages/admin/GroupsPage';
 import { GroupDetailPage } from './pages/admin/GroupDetailPage';
 import { AuditPage } from './pages/admin/AuditPage';
 import { RateCardsPage } from './pages/admin/RateCardsPage';
+import { BugReportsPage } from './pages/admin/BugReportsPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -73,6 +74,7 @@ function App() {
         <Route path="admin/groups/:id" element={<AdminRoute><GroupDetailPage /></AdminRoute>} />
         <Route path="admin/audit" element={<AdminRoute><AuditPage /></AdminRoute>} />
         <Route path="admin/rate-cards" element={<AdminRoute><RateCardsPage /></AdminRoute>} />
+        <Route path="admin/bug-reports" element={<AdminRoute><BugReportsPage /></AdminRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/app" replace />} />
     </Routes>

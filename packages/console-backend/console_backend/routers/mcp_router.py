@@ -165,6 +165,56 @@ async def grep_mcp_tools(
     return MCPToolsResponse(tools=filtered_tools)
 
 
+def _get_console_mcp_tools(request: Request, user: User | None = None) -> list[MCPTool]:
+    """Extract console backend's own MCP tools from FastAPI routes tagged 'MCP'.
+
+    Introspects the app's routes to find endpoints tagged with 'MCP' and
+    returns them as MCPTool objects. Excludes discovery endpoints (this router).
+    Triage-only tools (e.g. set external link) are hidden from users without
+    the ``triage`` or ``triage.admin`` capability on ``bug_reports``.
+    """
+    from ..authorization import check_capability
+
+    # Tools that require triage capability to be visible
+    triage_only_tools = {
+        "console_set_bug_report_external_link",
+    }
+
+    has_triage = False
+    if user is not None:
+        has_triage = (
+            user.is_administrator
+            or check_capability(user.role.value, "bug_reports", "triage")
+            or check_capability(user.role.value, "bug_reports", "triage.admin")
+        )
+
+    app = request.app
+    tools = []
+    for route in app.routes:
+        if not hasattr(route, "tags") or "MCP" not in route.tags:
+            continue
+        # Skip MCP discovery/search endpoints (this router's own endpoints)
+        operation_id = getattr(route, "operation_id", None) or ""
+        if operation_id in ("console_list_mcp_tools", "console_grep_mcp_tools", "console_list_mcp_servers"):
+            continue
+        name = operation_id or route.name or ""
+        if not name:
+            continue
+        # Hide triage-only tools from users without triage capability
+        if name in triage_only_tools and not has_triage:
+            continue
+        summary = getattr(route, "summary", None) or ""
+        description = getattr(route, "description", None) or ""
+        tools.append(
+            MCPTool(
+                name=name,
+                description=f"{summary} {description}".strip() if summary or description else None,
+                server="console",
+            )
+        )
+    return tools
+
+
 async def _list_mcp_tools(
     request: Request,
     user: User,
@@ -178,6 +228,11 @@ async def _list_mcp_tools(
             "Returning empty MCP tools list (impersonated user's token not available)"
         )
         return MCPToolsResponse(tools=[])
+
+    # If filtering by "console" server, return only console backend's own MCP tools
+    if server_slug == "console":
+        console_tools = _get_console_mcp_tools(request, user)
+        return MCPToolsResponse(tools=console_tools)
 
     # Get Gatana token (handles both session-based and Bearer token authentication)
     mcp_gateway_token = await _get_gatana_token(request, user)
@@ -267,6 +322,13 @@ async def _list_mcp_tools(
         # Log sample tool for debugging (helps understand available fields)
         if tools:
             logger.debug(f"Sample MCP tool structure: {tools[0]}")
+
+        # Append console backend's own MCP tools (tagged "MCP" in FastAPI routes)
+        # These are tool endpoints served by this backend (e.g., bug report management)
+        console_tools = _get_console_mcp_tools(request, user)
+        if console_tools:
+            tools.extend(console_tools)
+            logger.info(f"Added {len(console_tools)} console backend MCP tools")
 
         return MCPToolsResponse(tools=tools)
 
@@ -508,6 +570,9 @@ async def list_mcp_servers(
                 for server in servers_data
                 if server.get("slug") and server.get("isEnabled", False)
             ]
+
+            # Append console backend as a virtual MCP server
+            servers.append(MCPServer(name="console", description="Console backend tools (bug reports, sub-agents)"))
 
             logger.info(f"Discovered {len(servers)} MCP servers from gateway")
 
