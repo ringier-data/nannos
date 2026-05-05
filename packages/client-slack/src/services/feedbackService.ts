@@ -93,18 +93,26 @@ export class FeedbackService {
     messageId: string,
     rating: FeedbackRating,
     taskId?: string,
+    subAgentId?: string,
   ): Promise<boolean> {
     try {
       const accessToken = await this.userAuthService.getTokenForAudience(userId, teamId, this.audience);
       if (!accessToken) {
-        logger.warn(`Cannot submit feedback: no console-backend token for user ${userId}`);
+        logger.warn(
+          `Cannot submit feedback: no console-backend token for user ${userId}. Failed to exchange token for audience: ${this.audience}`
+        );
         return false;
       }
+
+      logger.debug(
+        `Token exchanged successfully for audience: ${this.audience}. Token starts with: ${accessToken.substring(0, 20)}...`
+      );
 
       const url = `${this.consoleBackendUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/feedback`;
 
       const body: Record<string, string> = { rating };
       if (taskId) body.task_id = taskId;
+      if (subAgentId) body.sub_agent_id = subAgentId;
 
       const response = await fetch(url, {
         method: 'POST',
@@ -116,7 +124,16 @@ export class FeedbackService {
       });
 
       if (!response.ok) {
-        logger.warn(`Feedback submission failed: ${response.status} ${response.statusText}`);
+        let errorDetails = '';
+        try {
+          const errorBody = await response.text();
+          errorDetails = errorBody ? ` — ${errorBody}` : '';
+        } catch (e) {
+          // ignore
+        }
+        logger.warn(
+          `Feedback submission failed: ${response.status} ${response.statusText}${errorDetails}. URL: ${url}. Audience: ${this.audience}`
+        );
         return false;
       }
 

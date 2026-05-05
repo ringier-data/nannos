@@ -492,6 +492,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
   } = deps;
 
   let statusMessageTs: string | undefined;
+  let feedbackRequestData: { sub_agents?: string[] } | null = null;
   try {
     logger.info(`${source} from user ${userId} in channel ${channelId}`);
 
@@ -778,9 +779,17 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               .join('\n');
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
             statusMessages.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
+            // Store feedback request data to send as ephemeral after final response
+            const feedbackData = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
+              sub_agents?: string[];
+            };
+            logger.debug({ feedbackData }, `Received feedback-request extension`);
+            feedbackRequestData = feedbackData;
           } else {
             logger.debug(`Received status update without recognized extensions. Not updating status message details.`);
           }
+          
           const newStatustMessage = `${statusMessages.thinking}${statusMessages.activity ? ` [${statusMessages.activity}]` : ''}${statusMessages.todos ? `\n${statusMessages.todos}` : ''}`;
           if (statusMessageTs) {
             await client.chat.update({
@@ -840,6 +849,86 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           teamId,
           createdAt: Date.now(),
         });
+        logger.info(`Stored response mapping for feedback: channel=${channelId}, messageTs=${result.messageTs}, contextId=${accumulatedTask.contextId}, taskId=${accumulatedTask.id}`);
+      } else {
+        logger.debug(`Not storing response mapping: feedbackService=${!!deps.feedbackService}, contextId=${accumulatedTask.contextId}`);
+      }
+
+      // Send ephemeral feedback widget if feedback was requested
+      if (feedbackRequestData && deps.feedbackService) {
+        // Encode context/task IDs + sub_agents in button values
+        const contextId = accumulatedTask.contextId || '';
+        const taskId = accumulatedTask.id || '';
+        const subAgents = feedbackRequestData.sub_agents || [];
+        const encodedValue = Buffer.from(
+          JSON.stringify({ contextId, taskId, userId, teamId, subAgents })
+        ).toString('base64');
+
+        const blocks: any[] = [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: '👋 Was this response helpful?',
+            },
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '👍 Yes',
+                  emoji: true,
+                },
+                value: encodedValue,
+                action_id: 'feedback_thumbsup',
+                style: 'primary',
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '👎 No',
+                  emoji: true,
+                },
+                value: encodedValue,
+                action_id: 'feedback_thumbsdown',
+                style: 'danger',
+              },
+            ],
+          },
+        ];
+
+        // Add sub-agents attribution if available
+        if (feedbackRequestData.sub_agents && feedbackRequestData.sub_agents.length > 0) {
+          blocks.push({
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `_Agents involved: ${feedbackRequestData.sub_agents.join(', ')}_`,
+              },
+            ],
+          });
+        }
+
+        try {
+          await client.chat.postEphemeral({
+            channel: channelId,
+            user: userId,
+            ...(threadTs && { thread_ts: threadTs }),
+            blocks: blocks,
+          });
+          logger.info(`Sent feedback ephemeral message to user ${userId}`);
+        } catch (err) {
+          logger.error(err, `Failed to send feedback ephemeral message: ${err}`);
+        }
+      } else if (feedbackRequestData) {
+        logger.warn(
+          `Feedback widget requested but feedbackService is not available. Set CONSOLE_BACKEND_URL environment variable to enable feedback functionality.`
+        );
       }
     }
   } catch (error) {

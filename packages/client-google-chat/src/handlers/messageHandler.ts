@@ -431,6 +431,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     logger.info('Sending message via streaming');
 
     let accumulatedTask: Task | null = null;
+    let feedbackRequestData: { sub_agents?: string[] } | null = null;
     try {
       for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
         logger.debug(`Stream event: ${_.get(event, 'kind')}`);
@@ -486,6 +487,12 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               .join('\n');
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
             statusMessage.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
+            const feedbackData = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
+              sub_agents?: string[];
+            };
+            logger.debug({ feedbackData }, `Received feedback-request extension`);
+            feedbackRequestData = feedbackData;
           } else if (event.status?.state === 'completed') {
             if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
             accumulatedTask.artifacts?.push({
@@ -557,6 +564,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           taskId: accumulatedTask.id,
           userId,
           projectId,
+          subAgents: feedbackRequestData?.sub_agents,
           createdAt: Date.now(),
         });
       }

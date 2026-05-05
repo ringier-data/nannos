@@ -257,6 +257,10 @@ export async function startSlackApp(config: Config) {
     if (config.consoleBackend) {
       feedbackService = new FeedbackService(userAuthService, config);
       logger.info(`Feedback service enabled (console-backend: ${config.consoleBackend.url})`);
+    } else {
+      logger.warn(
+        `Feedback service disabled: CONSOLE_BACKEND_URL not set. Feedback buttons and emoji reactions will not work.`
+      );
     }
 
     // Log every incoming Slack event for observability

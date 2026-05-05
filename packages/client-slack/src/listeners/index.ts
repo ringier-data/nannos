@@ -14,6 +14,7 @@ import { registerAppMentionListener } from './events/appMention.js';
 import { registerMessageListeners } from './events/directMessage.js';
 import { registerNannosCommand } from './commands/nannos.js';
 import { registerAuthorizeButtonAction } from './actions/authorizeButton.js';
+import { registerFeedbackButtonActions } from './actions/feedbackButton.js';
 import { registerReactionListeners } from './events/reactionHandler.js';
 import { Logger } from '../utils/logger.js';
 
@@ -90,6 +91,11 @@ export async function registerListeners(
 
   // Register actions
   registerAuthorizeButtonAction(app);
+
+  // Register feedback button actions (requires console-backend)
+  if (feedbackService) {
+    registerFeedbackButtonActions(app, feedbackService);
+  }
 
   // Register reaction listeners for message feedback (requires console-backend)
   if (feedbackService) {

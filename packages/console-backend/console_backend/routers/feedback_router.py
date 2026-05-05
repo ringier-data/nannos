@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import text
 
 from ..db.session import DbSession
-from ..dependencies import User, require_auth
+from ..dependencies import User, require_auth, require_auth_or_bearer_token
 from ..models.feedback import (
     MessageFeedbackCreate,
     MessageFeedbackResponse,
@@ -51,7 +51,7 @@ async def submit_feedback(
     message_id: str,
     body: MessageFeedbackCreate,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> MessageFeedbackResponse:
     await _verify_conversation_ownership(db, conversation_id, user.id, allow_external=True)
     service = get_feedback_service(request)
@@ -73,7 +73,7 @@ async def submit_conversation_feedback(
     conversation_id: str,
     body: MessageFeedbackCreate,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> MessageFeedbackResponse:
     """Submit feedback for a conversation without specifying a message_id.
 
@@ -128,7 +128,7 @@ async def delete_feedback(
     conversation_id: str,
     message_id: str,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_auth_or_bearer_token),
 ) -> None:
     await _verify_conversation_ownership(db, conversation_id, user.id)
     service = get_feedback_service(request)

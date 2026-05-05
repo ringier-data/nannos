@@ -15,6 +15,7 @@ export interface ResponseMapping {
   taskId: string; // A2A task ID (used as message_id for feedback)
   userId: string; // Google Chat user ID
   projectId: string; // GCP project ID
+  subAgents?: string[]; // Sub-agents involved (from feedback-request extension)
   createdAt: number;
 }
 
@@ -86,6 +87,7 @@ export class FeedbackService {
     messageId: string,
     rating: FeedbackRating,
     taskId?: string,
+    subAgentId?: string,
   ): Promise<boolean> {
     try {
       const accessToken = await this.userAuthService.getTokenForAudience(userId, projectId, this.audience);
@@ -98,6 +100,7 @@ export class FeedbackService {
 
       const body: Record<string, string> = { rating };
       if (taskId) body.task_id = taskId;
+      if (subAgentId) body.sub_agent_id = subAgentId;
 
       const response = await fetch(url, {
         method: 'POST',

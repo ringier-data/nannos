@@ -27,19 +27,29 @@ export function registerReactionListeners(
   feedbackService: FeedbackService,
 ): void {
   app.event('reaction_added', async ({ event }) => {
+    logger.debug(`Reaction event received: emoji=${event.reaction}, user=${event.user}, item.type=${event.item.type}, channel=${event.item.channel}, ts=${event.item.ts}`);
+    
     const reaction = event.reaction.replace(/::skin-tone-\d/g, '');
     const rating = REACTION_MAP[reaction];
-    if (!rating) return; // Not a feedback reaction
+    if (!rating) {
+      logger.debug(`Ignoring reaction "${event.reaction}" - not a feedback emoji`);
+      return; // Not a feedback reaction
+    }
 
-    if (event.item.type !== 'message') return;
+    if (event.item.type !== 'message') {
+      logger.debug(`Ignoring reaction - item type is "${event.item.type}", not "message"`);
+      return;
+    }
 
     const channelId = event.item.channel;
     const ts = event.item.ts;
     const userId = event.user;
 
+    logger.debug(`Looking up response mapping for: channelId=${channelId}, ts=${ts}`);
     const mapping = feedbackService.responseMapping.get(channelId, ts);
     if (!mapping) {
-      logger.debug(`No response mapping for reaction on ${channelId}:${ts}`);
+      logger.warn(`No response mapping found for reaction on ${channelId}:${ts} - feedback cannot be submitted`);
+      logger.debug(`(Mapping is only stored for messages posted by this bot after an A2A response. Check if the message was posted by the Slack app.)`);
       return;
     }
 

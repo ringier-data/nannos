@@ -48,6 +48,7 @@ export async function postOrUpdateMessage(
   text: string,
   existingMessageId?: string,
   accessoryWidgets?: chat_v1.Schema$AccessoryWidget[],
+  cardsV2?: chat_v1.Schema$CardWithId[],
 ): Promise<string | undefined> {
   try {
     if (existingMessageId) {
@@ -57,6 +58,7 @@ export async function postOrUpdateMessage(
         messageName: existingMessageId,
         text,
         accessoryWidgets,
+        cardsV2,
       });
       return existingMessageId;
     } else {
@@ -67,6 +69,7 @@ export async function postOrUpdateMessage(
         text,
         threadId,
         accessoryWidgets,
+        cardsV2,
         messageReplyOption: threadId ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' : undefined,
       });
       return result.name || undefined;
@@ -148,26 +151,38 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
 
   // Build feedback accessory widgets for completed responses
   let accessoryWidgets: chat_v1.Schema$AccessoryWidget[] | undefined;
+  let cardsV2: chat_v1.Schema$CardWithId[] | undefined;
   if (includeFeedbackButtons && task.status.state === 'completed' && message) {
-    accessoryWidgets = [
+    cardsV2 = [
       {
-        buttonList: {
-          buttons: [
+        cardId: 'feedback_card',
+        card: {
+          sections: [
             {
-              text: '👍',
-              onClick: {
-                action: {
-                  function: 'feedback_positive',
+              widgets: [
+                {
+                  buttonList: {
+                    buttons: [
+                      {
+                        text: '👍',
+                        onClick: {
+                          action: {
+                            function: 'feedback_positive',
+                          },
+                        },
+                      },
+                      {
+                        text: '👎',
+                        onClick: {
+                          action: {
+                            function: 'feedback_negative',
+                          },
+                        },
+                      },
+                    ],
+                  },
                 },
-              },
-            },
-            {
-              text: '👎',
-              onClick: {
-                action: {
-                  function: 'feedback_negative',
-                },
-              },
+              ],
             },
           ],
         },
@@ -186,6 +201,7 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
       message,
       statusMessageId,
       accessoryWidgets,
+      cardsV2,
     );
   }
 
