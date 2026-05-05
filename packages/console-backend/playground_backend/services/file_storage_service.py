@@ -1,4 +1,7 @@
-"""Service for managing file uploads to S3 and generating presigned URLs."""
+"""Service for managing file uploads and generating presigned URLs.
+
+Uses IObjectStorageService abstraction for backend flexibility (S3, S3-compatible, local).
+"""
 
 import logging
 import mimetypes
@@ -8,7 +11,10 @@ from dataclasses import dataclass
 from typing import Optional
 from uuid import uuid4
 
-from aiobotocore.session import get_session
+from agent_common.core.object_storage import (
+    IObjectStorageService,
+    get_object_storage_service,
+)
 from fastapi import UploadFile
 
 from playground_backend.config import config
@@ -70,14 +76,22 @@ class UploadedFile:
 
 
 class FileStorageService:
-    """Handles file uploads and presigned URL generation for user attachments including audio."""
+    """Handles file uploads and presigned URL generation for user attachments including audio.
 
-    def __init__(self, region: Optional[str] = None) -> None:
+    Uses IObjectStorageService abstraction for backend flexibility:
+    - S3: AWS S3 (production)
+    - S3-compatible: MinIO, DigitalOcean Spaces, etc.
+    - Local: File system (development)
+    """
+
+    def __init__(
+        self,
+        storage: Optional[IObjectStorageService] = None,
+    ) -> None:
+        self._storage = storage or get_object_storage_service()
         self._bucket = config.file_storage.bucket
         self._prefix = config.file_storage.prefix.strip("/ ") or "uploads"
         self._presigned_ttl = config.file_storage.presigned_ttl_seconds
-        self._region = region or os.getenv("AWS_REGION", "eu-central-1")
-        self._session = get_session()
 
     @property
     def bucket(self) -> str:
@@ -86,6 +100,11 @@ class FileStorageService:
     @property
     def presigned_ttl_seconds(self) -> int:
         return self._presigned_ttl
+
+    @property
+    def storage_type(self) -> str:
+        """Return the underlying storage backend type."""
+        return self._storage.storage_type
 
     def is_allowed_file(self, mime_type: str, filename: str | None = None) -> bool:
         """Validate that the provided file mime-type is supported."""
@@ -157,7 +176,7 @@ class FileStorageService:
         user_id: str,
         conversation_id: str,
     ) -> UploadedFile:
-        """Upload a single file to S3 and return metadata."""
+        """Upload a single file and return metadata."""
 
         content_type = upload.content_type or "application/octet-stream"
         filename = upload.filename or "file"
@@ -172,30 +191,23 @@ class FileStorageService:
             filename=filename,
         )
 
-        # Determine size without consuming the stream permanently
-        upload.file.seek(0, os.SEEK_END)
-        size = upload.file.tell()
-        upload.file.seek(0)
+        # Read content
+        content = await upload.read()
+        size = len(content)
 
         try:
-            async with self._session.create_client("s3", region_name=self._region) as client:
-                await client.put_object(
-                    Bucket=self._bucket,
-                    Key=key,
-                    Body=upload.file,
-                    ContentType=content_type,
-                )
+            stored = await self._storage.upload(
+                bucket=self._bucket,
+                key=key,
+                content=content,
+                content_type=content_type,
+            )
         except Exception as exc:  # pragma: no cover
             logger.exception("Failed to upload file %s to bucket %s", filename, self._bucket)
             raise RuntimeError("File upload failed") from exc
-        finally:
-            try:
-                upload.file.seek(0)
-            except (ValueError, OSError):
-                # UploadFile may close its underlying stream after upload; that's fine.
-                pass
 
-        uri = await self.generate_presigned_get_url(key)
+        # Generate presigned URL for download
+        uri = await self._storage.generate_presigned_url(stored.uri, self._presigned_ttl)
 
         return UploadedFile(
             id=uuid4().hex,
@@ -204,31 +216,27 @@ class FileStorageService:
             name=filename,
             mime_type=content_type,
             size=size,
-            uri=uri,
+            uri=stored.uri,
             download_uri=uri,
         )
 
     async def generate_presigned_get_url(self, key: str, *, expires_in: Optional[int] = None) -> str:
-        """Generate a presigned GET URL for the provided S3 object key."""
+        """Generate a presigned GET URL for the provided object key."""
 
         expires = expires_in or self._presigned_ttl
+        uri = f"s3://{self._bucket}/{key}" if self._storage.storage_type != "local" else f"file://{self._bucket}/{key}"
         try:
-            async with self._session.create_client("s3", region_name=self._region) as client:
-                return await client.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": self._bucket, "Key": key},
-                    ExpiresIn=expires,
-                )
+            return await self._storage.generate_presigned_url(uri, expires)
         except Exception as exc:  # pragma: no cover
             logger.exception("Failed to generate presigned URL for key %s", key)
             raise RuntimeError("Failed to generate download URL") from exc
 
     async def delete_file(self, key: str) -> None:
-        """Delete a file from S3. Intended for future lifecycle management."""
+        """Delete a file. Intended for future lifecycle management."""
 
+        uri = f"s3://{self._bucket}/{key}" if self._storage.storage_type != "local" else f"file://{self._bucket}/{key}"
         try:
-            async with self._session.create_client("s3", region_name=self._region) as client:
-                await client.delete_object(Bucket=self._bucket, Key=key)
+            await self._storage.delete(uri)
         except Exception as exc:  # pragma: no cover
-            logger.exception("Failed to delete S3 object %s", key)
+            logger.exception("Failed to delete object %s", key)
             raise RuntimeError("Failed to delete file") from exc

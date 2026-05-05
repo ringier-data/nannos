@@ -16,7 +16,7 @@ import logging
 import mimetypes
 
 from a2a.types import FilePart, Part, TextPart
-from agent_common.core.s3_service import get_s3_service
+from agent_common.core.object_storage import get_object_storage_service
 from langchain_core.messages import (
     AudioContentBlock,
     ContentBlock,
@@ -118,12 +118,12 @@ async def _process_file_part(part: Part) -> tuple[str, ContentBlock] | None:
     uri: str = file_data.uri  # type: ignore[union-attr]
     original_uri = uri  # Store original for logging
     # if uri is a s3 URI, we will generate a pre-signed URL for sub-agents to access the file
-    if uri.startswith("s3://"):
+    if uri.startswith(("s3://", "file://")):
         try:
-            s3_service = get_s3_service()
-            # Generate presigned URL with 24 hour expiration (max allowed)
-            uri = await s3_service.generate_presigned_url(uri, expiration=86400)
-            logger.debug(f"Generated presigned URL for S3 file: {original_uri}")
+            storage = get_object_storage_service()
+            # Generate presigned URL with 24 hour expiration
+            uri = await storage.generate_presigned_url(uri, expiration_seconds=86400)
+            logger.debug(f"Generated presigned URL for storage file: {original_uri}")
         except Exception as e:
             logger.warning(f"Failed to generate presigned URL for {original_uri}: {e}")
             # Continue with original S3 URI if presigned URL generation fails
