@@ -14,17 +14,21 @@ Usage:
         StreamHandler,
         OrchestratorRequestContextBuilder,
         should_retry,
-        handle_auth_error,
+        handle_tool_failure,
         parse_tool_exception,
     )
 """
 
 from .stream_handler import StreamHandler
-from .utils import handle_auth_error, parse_tool_exception, should_retry
+from .utils import handle_tool_failure, parse_tool_exception, should_retry
+
+# Backwards compatibility alias
+handle_auth_error = handle_tool_failure
 
 __all__ = [
     "StreamHandler",
     "should_retry",
+    "handle_tool_failure",
     "handle_auth_error",
     "parse_tool_exception",
 ]

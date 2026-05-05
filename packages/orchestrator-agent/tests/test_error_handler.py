@@ -6,7 +6,7 @@ import httpx
 from agent_common.models.exceptions import A2AClientError
 from langchain_core.tools import ToolException
 
-from app.handlers.utils import handle_auth_error, parse_tool_exception, should_retry
+from app.handlers.utils import handle_tool_failure, parse_tool_exception, should_retry
 
 
 class TestErrorHandlerParseToolException:
@@ -57,8 +57,8 @@ class TestErrorHandlerParseToolException:
         assert result["details"]["field"] == "username"
 
 
-class TestErrorHandlerHandleAuthError:
-    """Tests for handle_auth_error method."""
+class TestErrorHandlerHandleToolFailure:
+    """Tests for handle_tool_failure method."""
 
     def test_handle_tool_exception_with_credentials_error(self):
         """Test handling ToolException with need-credentials error code."""
@@ -69,7 +69,7 @@ class TestErrorHandlerHandleAuthError:
         }
         exception = ToolException(json.dumps(error_data))
 
-        result = handle_auth_error(exception)
+        result = handle_tool_failure(exception)
         parsed = json.loads(result)
 
         assert parsed["errorCode"] == "need-credentials"
@@ -82,27 +82,46 @@ class TestErrorHandlerHandleAuthError:
         )
         exception = httpx.HTTPStatusError("Unauthorized", request=response.request, response=response)
 
-        result = handle_auth_error(exception)
+        result = handle_tool_failure(exception)
 
         assert "Unauthorized" in result or "Invalid token" in result
 
     def test_handle_generic_exception(self):
-        """Test handling generic exception (non-auth)."""
+        """Test handling generic exception returns actual error message."""
         exception = ValueError("Some random error")
 
-        result = handle_auth_error(exception)
+        result = handle_tool_failure(exception)
 
-        assert result == "An unexpected error occurred."
+        assert "Some random error" in result
 
     def test_handle_tool_exception_without_credentials_error(self):
-        """Test handling ToolException without credentials error code."""
+        """Test handling ToolException without credentials error returns actual message."""
         error_data = {"errorCode": "rate-limit", "message": "Too many requests"}
         exception = ToolException(json.dumps(error_data))
 
-        result = handle_auth_error(exception)
+        result = handle_tool_failure(exception)
 
-        # Should return generic message for non-auth errors
-        assert result == "An unexpected error occurred."
+        # Should return actual error message so LLM can understand and adapt
+        assert "rate-limit" in result or "Too many requests" in result
+
+    def test_handle_tool_exception_with_validation_error(self):
+        """Test that validation errors are passed through for the LLM to read."""
+        exception = ToolException("issue_number is required when item_type is 'issue'")
+
+        result = handle_tool_failure(exception)
+
+        assert "issue_number is required" in result
+
+    def test_handle_tool_exception_with_permission_error(self):
+        """Test that permission errors are passed through for the LLM to read."""
+        exception = ToolException(
+            "Failed to find teams: Although you appear to have the correct authorization credentials, "
+            "the `gatana-ai` organization has enabled OAuth App access restrictions"
+        )
+
+        result = handle_tool_failure(exception)
+
+        assert "OAuth App access restrictions" in result
 
 
 class TestErrorHandlerShouldRetry:
@@ -112,6 +131,34 @@ class TestErrorHandlerShouldRetry:
         """Test that 401 errors are not retried."""
         response = httpx.Response(status_code=401, request=httpx.Request("GET", "http://example.com"))
         exception = httpx.HTTPStatusError("Unauthorized", request=response.request, response=response)
+
+        assert not should_retry(exception)
+
+    def test_should_not_retry_400_bad_request(self):
+        """Test that 400 errors are not retried (deterministic client error)."""
+        response = httpx.Response(status_code=400, request=httpx.Request("GET", "http://example.com"))
+        exception = httpx.HTTPStatusError("Bad Request", request=response.request, response=response)
+
+        assert not should_retry(exception)
+
+    def test_should_not_retry_403_forbidden(self):
+        """Test that 403 errors are not retried (permission issue)."""
+        response = httpx.Response(status_code=403, request=httpx.Request("GET", "http://example.com"))
+        exception = httpx.HTTPStatusError("Forbidden", request=response.request, response=response)
+
+        assert not should_retry(exception)
+
+    def test_should_not_retry_404_not_found(self):
+        """Test that 404 errors are not retried (resource doesn't exist)."""
+        response = httpx.Response(status_code=404, request=httpx.Request("GET", "http://example.com"))
+        exception = httpx.HTTPStatusError("Not Found", request=response.request, response=response)
+
+        assert not should_retry(exception)
+
+    def test_should_not_retry_422_unprocessable(self):
+        """Test that 422 errors are not retried (validation failure)."""
+        response = httpx.Response(status_code=422, request=httpx.Request("GET", "http://example.com"))
+        exception = httpx.HTTPStatusError("Unprocessable Entity", request=response.request, response=response)
 
         assert not should_retry(exception)
 
@@ -130,9 +177,15 @@ class TestErrorHandlerShouldRetry:
         assert should_retry(exception)
 
     def test_should_not_retry_credentials_error(self):
-        """Test that credential errors are not retried."""
+        """Test that credential ToolExceptions are not retried."""
         error_data = {"errorCode": "need-credentials"}
         exception = ToolException(json.dumps(error_data))
+
+        assert not should_retry(exception)
+
+    def test_should_not_retry_tool_exception(self):
+        """Test that ToolExceptions are never retried (LLM should read the error)."""
+        exception = ToolException("issue_number is required when item_type is 'issue'")
 
         assert not should_retry(exception)
 

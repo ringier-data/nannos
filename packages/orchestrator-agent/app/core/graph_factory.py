@@ -41,7 +41,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
-from ..handlers import handle_auth_error, should_retry
+from ..handlers import handle_tool_failure, should_retry
 from ..middleware import (
     A2ATaskTrackingMiddleware,
     AuthErrorDetectionMiddleware,
@@ -173,7 +173,7 @@ class GraphFactory:
             max_retries=config.MAX_RETRIES,
             backoff_factor=config.BACKOFF_FACTOR,
             retry_on=should_retry,
-            on_failure=handle_auth_error,
+            on_failure=handle_tool_failure,
         )
         logger.debug("Initialized middleware stack")
 
