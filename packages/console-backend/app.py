@@ -69,6 +69,8 @@ from console_backend.routers.scheduler_router import router as scheduler_router
 from console_backend.routers.secrets_router import router as secrets_router
 from console_backend.routers.sub_agent_router import router as sub_agent_router
 from console_backend.routers.usage_router import router as usage_router
+from console_backend.routers.scim_router import router as scim_router
+from console_backend.routers.scim_token_router import router as scim_token_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
 from console_backend.services.messages_service import MessagesService
@@ -294,6 +296,10 @@ app.include_router(catalog_router)
 app.include_router(bug_report_router)
 app.include_router(bug_report_mcp_router)
 app.include_router(feedback_router)
+# SCIM token management (always available for admins)
+app.include_router(scim_token_router)
+# SCIM 2.0 provisioning endpoints
+app.include_router(scim_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.

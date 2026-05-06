@@ -1,4 +1,18 @@
-import { MessagesSquare, Settings, Bot, Users, UsersRound, FileText, DollarSign, CreditCard, Calendar, Webhook, LibraryBig, Bug } from 'lucide-react';
+import {
+  MessagesSquare,
+  Settings,
+  Bot,
+  Users,
+  UsersRound,
+  FileText,
+  DollarSign,
+  CreditCard,
+  Calendar,
+  Webhook,
+  LibraryBig,
+  Bug,
+  KeyRound,
+} from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -78,5 +92,10 @@ export const adminNavItems: NavItem[] = [
     title: 'Bug Reports',
     url: '/app/admin/bug-reports',
     icon: Bug,
+  },
+  {
+    title: 'SCIM Tokens',
+    url: '/app/admin/scim-tokens',
+    icon: KeyRound,
   },
 ];

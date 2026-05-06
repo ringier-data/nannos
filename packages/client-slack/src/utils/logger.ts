@@ -39,38 +39,23 @@ export class Logger {
   }
 
   public trace(...msg: any[]): void {
-    if (Array.isArray(msg)) {
-      msg = msg[0];
-    }
-    this.logger.trace(msg);
+    this.logger.trace(...msg);
   }
 
   public debug(...msg: any[]): void {
-    if (Array.isArray(msg)) {
-      msg = msg[0];
-    }
-    this.logger.debug(msg);
+    this.logger.debug(...msg);
   }
 
   public info(...msg: any[]): void {
-    if (Array.isArray(msg)) {
-      msg = msg[0];
-    }
-    this.logger.info(msg);
+    this.logger.info(...msg);
   }
 
   public warn(...msg: any[]): void {
-    if (Array.isArray(msg)) {
-      msg = msg[0];
-    }
-    this.logger.warn(msg);
+    this.logger.warn(...msg);
   }
 
   public error(...msg: any[]): void {
-    if (Array.isArray(msg)) {
-      msg = msg[0];
-    }
-    this.logger.error(msg);
+    this.logger.error(...msg);
   }
 
   public setLevel(level: PinoLevel | string): void {

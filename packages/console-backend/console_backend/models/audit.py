@@ -22,6 +22,7 @@ class AuditEntityType(str, Enum):
     DELIVERY_CHANNEL = "delivery_channel"  # For delivery channel registration/management
     CATALOG = "catalog"  # For catalog management operations
     BUG_REPORT = "bug_report"  # For bug report operations
+    SCIM_TOKEN = "scim_token"  # For SCIM token management operations
 
 
 class AuditAction(str, Enum):
@@ -43,6 +44,7 @@ class AuditAction(str, Enum):
     PERMISSION_UPDATE = "permission_update"
     IMPERSONATION_START = "impersonation_start"
     IMPERSONATION_END = "impersonation_end"
+    REVOKE = "revoke"
 
 
 class AuditLog(BaseModel):

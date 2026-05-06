@@ -22,6 +22,7 @@ import { GroupDetailPage } from './pages/admin/GroupDetailPage';
 import { AuditPage } from './pages/admin/AuditPage';
 import { RateCardsPage } from './pages/admin/RateCardsPage';
 import { BugReportsPage } from './pages/admin/BugReportsPage';
+import { ScimTokensPage } from './pages/admin/ScimTokensPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -66,15 +67,86 @@ function App() {
         <Route path="catalogs" element={<CatalogsPage />} />
         <Route path="catalogs/:id" element={<CatalogDetailPage />} />
         <Route path="delivery-channels" element={<DeliveryChannelsPage />} />
-        <Route path="groups" element={<GroupManagerRoute><GroupsPage /></GroupManagerRoute>} />
-        <Route path="groups/:id" element={<GroupManagerRoute><GroupDetailPage /></GroupManagerRoute>} />
-        <Route path="admin/users" element={<AdminRoute><UsersPage /></AdminRoute>} />
-        <Route path="admin/users/:id" element={<AdminRoute><UserDetailPage /></AdminRoute>} />
-        <Route path="admin/groups" element={<AdminRoute><GroupsPage /></AdminRoute>} />
-        <Route path="admin/groups/:id" element={<AdminRoute><GroupDetailPage /></AdminRoute>} />
-        <Route path="admin/audit" element={<AdminRoute><AuditPage /></AdminRoute>} />
-        <Route path="admin/rate-cards" element={<AdminRoute><RateCardsPage /></AdminRoute>} />
-        <Route path="admin/bug-reports" element={<AdminRoute><BugReportsPage /></AdminRoute>} />
+        <Route
+          path="groups"
+          element={
+            <GroupManagerRoute>
+              <GroupsPage />
+            </GroupManagerRoute>
+          }
+        />
+        <Route
+          path="groups/:id"
+          element={
+            <GroupManagerRoute>
+              <GroupDetailPage />
+            </GroupManagerRoute>
+          }
+        />
+        <Route
+          path="admin/users"
+          element={
+            <AdminRoute>
+              <UsersPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/users/:id"
+          element={
+            <AdminRoute>
+              <UserDetailPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/groups"
+          element={
+            <AdminRoute>
+              <GroupsPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/groups/:id"
+          element={
+            <AdminRoute>
+              <GroupDetailPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/audit"
+          element={
+            <AdminRoute>
+              <AuditPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/rate-cards"
+          element={
+            <AdminRoute>
+              <RateCardsPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/bug-reports"
+          element={
+            <AdminRoute>
+              <BugReportsPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/scim-tokens"
+          element={
+            <AdminRoute>
+              <ScimTokensPage />
+            </AdminRoute>
+          }
+        />
       </Route>
       <Route path="*" element={<Navigate to="/app" replace />} />
     </Routes>
