@@ -6,6 +6,7 @@ import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, IOAuthSta
 import { Logger } from '../../utils/logger.js';
 import { SlackFile } from '../../utils/fileUtils.js';
 import { handleIncomingMessage } from './messageHandler.js';
+import { FeedbackService } from '../../services/feedbackService.js';
 
 /**
  * Register app mention listener.
@@ -25,7 +26,8 @@ export function registerAppMentionListener(
   _oauthStateStore: IOAuthStateStore,
   baseUrl: string,
   fileStorageService: FileStorageService,
-  isLocalMode: boolean
+  isLocalMode: boolean,
+  feedbackService?: FeedbackService,
 ): void {
   const logger = Logger.getLogger('registerAppMentionListener');
   logger.info('Registering app_mention event listener');
@@ -68,6 +70,7 @@ export function registerAppMentionListener(
         botName,
         fileStorageService,
         isLocalMode,
+        feedbackService,
       }
     );
   });

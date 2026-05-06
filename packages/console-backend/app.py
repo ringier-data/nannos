@@ -40,54 +40,59 @@ from rcplus_alloy_common.logging import (
 from sqlalchemy import text as sa_text
 from starlette.middleware.sessions import SessionMiddleware
 
-from playground_backend.config import config
-from playground_backend.db import close_db, get_async_session_factory, init_db
-from playground_backend.dependencies import require_auth
-from playground_backend.exceptions import ConversationOwnershipError
-from playground_backend.middleware import OrchestratorAuth, ProxyHeadersMiddleware
-from playground_backend.middleware import SessionMiddleware as CustomSessionMiddleware
-from playground_backend.models.socket_session import SocketSession
-from playground_backend.models.user import User
-from playground_backend.routers.admin_audit_router import router as admin_audit_router
-from playground_backend.routers.admin_group_router import router as admin_group_router
-from playground_backend.routers.admin_user_router import router as admin_user_router
-from playground_backend.routers.auth_router import router as auth_router
-from playground_backend.routers.catalog_router import router as catalog_router
-from playground_backend.routers.conversation_router import router as conversation_router
-from playground_backend.routers.delivery_channel_router import router as delivery_channel_router
-from playground_backend.routers.file_router import router as file_router
-from playground_backend.routers.group_router import router as group_router
-from playground_backend.routers.mcp_router import router as mcp_router
-from playground_backend.routers.message_router import router as message_router
-from playground_backend.routers.models_router import router as models_router
-from playground_backend.routers.notification_router import router as notification_router
-from playground_backend.routers.rate_card_router import router as rate_card_router
-from playground_backend.routers.scheduler_router import router as scheduler_router
-from playground_backend.routers.secrets_router import router as secrets_router
-from playground_backend.routers.sub_agent_router import router as sub_agent_router
-from playground_backend.routers.usage_router import router as usage_router
-from playground_backend.service_instances import cleanup_services, initialize_services
-from playground_backend.services.conversation_service import ConversationService
-from playground_backend.services.messages_service import MessagesService
-from playground_backend.services.socket_notification_manager import SocketNotificationManager
-from playground_backend.utils.connection_pool import connection_pool
-from playground_backend.utils.cookie_signer import verify_cookie
-from playground_backend.utils.fastapi_mcp_patch import apply_patch
-from playground_backend.utils.socket_errors import (
+from console_backend.config import config
+from console_backend.db import close_db, get_async_session_factory, init_db
+from console_backend.dependencies import require_auth
+from console_backend.exceptions import ConversationOwnershipError
+from console_backend.middleware import OrchestratorAuth, ProxyHeadersMiddleware
+from console_backend.middleware import SessionMiddleware as CustomSessionMiddleware
+from console_backend.models.socket_session import SocketSession
+from console_backend.models.user import User
+from console_backend.routers.admin_audit_router import router as admin_audit_router
+from console_backend.routers.admin_group_router import router as admin_group_router
+from console_backend.routers.admin_user_router import router as admin_user_router
+from console_backend.routers.auth_router import router as auth_router
+from console_backend.routers.bug_report_mcp_tools import router as bug_report_mcp_router
+from console_backend.routers.bug_report_router import router as bug_report_router
+from console_backend.routers.catalog_router import router as catalog_router
+from console_backend.routers.conversation_router import router as conversation_router
+from console_backend.routers.delivery_channel_router import router as delivery_channel_router
+from console_backend.routers.feedback_router import router as feedback_router
+from console_backend.routers.file_router import router as file_router
+from console_backend.routers.group_router import router as group_router
+from console_backend.routers.mcp_router import router as mcp_router
+from console_backend.routers.message_router import router as message_router
+from console_backend.routers.models_router import router as models_router
+from console_backend.routers.notification_router import router as notification_router
+from console_backend.routers.rate_card_router import router as rate_card_router
+from console_backend.routers.scheduler_router import router as scheduler_router
+from console_backend.routers.secrets_router import router as secrets_router
+from console_backend.routers.sub_agent_router import router as sub_agent_router
+from console_backend.routers.usage_router import router as usage_router
+from console_backend.routers.scim_router import router as scim_router
+from console_backend.routers.scim_token_router import router as scim_token_router
+from console_backend.service_instances import cleanup_services, initialize_services
+from console_backend.services.conversation_service import ConversationService
+from console_backend.services.messages_service import MessagesService
+from console_backend.services.socket_notification_manager import SocketNotificationManager
+from console_backend.utils.connection_pool import connection_pool
+from console_backend.utils.cookie_signer import verify_cookie
+from console_backend.utils.fastapi_mcp_patch import apply_patch
+from console_backend.utils.socket_errors import (
     SocketError,
     create_error_response,
     create_success_response,
 )
-from playground_backend.utils.socket_events import SocketEvents
-from playground_backend.utils.socketio_auth import require_auth as require_socket_auth
-from playground_backend.validators import validate_agent_card, validate_message
+from console_backend.utils.socket_events import SocketEvents
+from console_backend.utils.socketio_auth import require_auth as require_socket_auth
+from console_backend.validators import validate_agent_card, validate_message
 
 # NOTE: Apply fastapi_mcp patch (waiting for https://github.com/tadata-org/fastapi_mcp/pull/156)
 apply_patch()
 
 
 logger = configure_logger("chat-inspector")
-configure_existing_logger(logging.getLogger("playground_backend"))
+configure_existing_logger(logging.getLogger("console_backend"))
 
 
 # ==============================================================================
@@ -198,7 +203,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.scheduler_engine.start()
 
     # Start internal cost logger for catalog sync cost tracking
-    from playground_backend.services.llm_cost_tracking import _internal_cost_logger
+    from console_backend.services.llm_cost_tracking import _internal_cost_logger
 
     if _internal_cost_logger is not None:
         await _internal_cost_logger.start()
@@ -288,6 +293,13 @@ app.include_router(notification_router)
 app.include_router(scheduler_router)
 app.include_router(delivery_channel_router)
 app.include_router(catalog_router)
+app.include_router(bug_report_router)
+app.include_router(bug_report_mcp_router)
+app.include_router(feedback_router)
+# SCIM token management (always available for admins)
+app.include_router(scim_token_router)
+# SCIM 2.0 provisioning endpoints
+app.include_router(scim_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.
@@ -313,6 +325,68 @@ mcp = FastApiMCP(
     app,
     include_tags=["MCP"],
 )
+
+# Override list_tools handler to hide triage-only tools from users without triage capability.
+# fastapi-mcp registers a static handler that returns all tools unconditionally.
+# We re-register it to inspect the request's bearer token and filter accordingly.
+_TRIAGE_ONLY_MCP_TOOLS = {
+    "console_set_bug_report_external_link",
+}
+
+
+@mcp.server.list_tools()
+async def _handle_list_tools() -> list:
+    """Return MCP tools, hiding triage-only tools from users without triage capability."""
+    all_tools = mcp.tools
+    try:
+        ctx = mcp.server.request_context
+        http_request = getattr(ctx, "request", None)
+        if http_request is None:
+            return all_tools
+
+        auth_header = getattr(http_request, "headers", {}).get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return all_tools
+
+        token = auth_header.split(" ", 1)[1]
+        from ringier_a2a_sdk.auth import JWTValidator
+
+        from console_backend.config import config as app_config
+
+        validator = JWTValidator(issuer=app_config.oidc.issuer)
+        payload = await validator.validate(token)
+        sub = payload.get("sub")
+        if not sub:
+            return all_tools
+
+        # Look up user role to check triage capability
+        from console_backend.authorization import check_capability
+        from console_backend.db import get_async_session_factory
+
+        async with get_async_session_factory()() as db:
+            result = await db.execute(
+                sa_text("SELECT role, is_administrator FROM users WHERE sub = :sub"),
+                {"sub": sub},
+            )
+            row = result.first()
+            if row:
+                user_role, is_admin = row[0], row[1]
+                if is_admin:
+                    return all_tools
+                has_triage = check_capability(user_role, "bug_reports", "triage") or check_capability(
+                    user_role, "bug_reports", "triage.admin"
+                )
+                if has_triage:
+                    return all_tools
+
+        # User lacks triage capability — hide triage-only tools
+        return [t for t in all_tools if t.name not in _TRIAGE_ONLY_MCP_TOOLS]
+    except Exception:
+        # On any error (no context, invalid token, etc.), return all tools
+        # The endpoint-level RBAC check is the real security gate
+        logger.debug("MCP list_tools: could not determine user role, returning all tools", exc_info=True)
+        return all_tools
+
 
 # Mount the MCP server directly to your FastAPI app using HTTP transport
 mcp.mount_http()
@@ -553,6 +627,7 @@ async def _process_a2a_response(
                 status_message = (response_data.get("status") or {}).get("message") or {}
                 message_extensions = status_message.get("extensions", []) if isinstance(status_message, dict) else []
                 is_work_plan = "urn:nannos:a2a:work-plan:1.0" in message_extensions
+                is_feedback_request = "urn:nannos:a2a:feedback-request:1.0" in message_extensions
                 is_artifact_append = response_data.get("kind") == "artifact-update" and response_data.get("append")
                 # Handle both camelCase and snake_case, check explicitly for boolean value
                 # Don't use 'or' because False would fallback to checking second field
@@ -638,7 +713,7 @@ async def _process_a2a_response(
                                     f"[STREAMING] Saving accumulated artifact content ({len(accumulated)} chars) "
                                     f"for context {effective_context_id}"
                                 )
-                                await messages_service.insert_message(
+                                saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
                                     user_id=socket_session.user_id,
                                     role="assistant",
@@ -647,6 +722,9 @@ async def _process_a2a_response(
                                     state=TaskState.completed,
                                     kind="artifact-update",
                                 )
+                                # Inject persisted message_id into response so frontend
+                                # can associate its msg-* placeholder with the real DB ID
+                                response_data["persistedMessageId"] = saved_msg.message_id
                             else:
                                 # Safety net: last_chunk never arrived (e.g. input-required,
                                 # unhandled error). Save what we had so content isn't lost.
@@ -654,7 +732,7 @@ async def _process_a2a_response(
                                     f"[STREAMING] Safety-net save ({len(accumulated)} chars, state={status_state}) "
                                     f"for context {effective_context_id}"
                                 )
-                                await messages_service.insert_message(
+                                saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
                                     user_id=socket_session.user_id,
                                     role="assistant",
@@ -663,6 +741,7 @@ async def _process_a2a_response(
                                     state=TaskState(status_state),
                                     kind="status-update",
                                 )
+                                response_data["persistedMessageId"] = saved_msg.message_id
                                 safety_net_saved = True
                         elif is_last_chunk:
                             logger.warning(
@@ -687,6 +766,7 @@ async def _process_a2a_response(
 
                 if (
                     not is_work_plan
+                    and not is_feedback_request
                     and not is_artifact_append
                     and not is_bare_completion_signal
                     and not safety_net_saved
@@ -794,7 +874,7 @@ async def index() -> JSONResponse:
     """API root endpoint."""
     return JSONResponse(
         content={
-            "name": "Playground Backend API",
+            "name": "Console Backend API",
             "status": "running",
         },
         status_code=200,
@@ -989,9 +1069,10 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
     agent_card_url = data.get("url")
     custom_headers = data.get("customHeaders", {})
 
-    # Playground UI supports all extensions — always request them from the orchestrator
+    # Console UI supports all extensions — always request them from the orchestrator
     custom_headers["X-A2A-Extensions"] = (
-        "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0"
+        "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, "
+        "urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0"
     )
 
     if custom_headers:

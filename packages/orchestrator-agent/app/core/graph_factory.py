@@ -26,7 +26,7 @@ from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AG
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
-from agent_common.core.model_factory import create_model, _has_aws_credentials
+from agent_common.core.model_factory import _has_aws_credentials, create_model
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
@@ -41,7 +41,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
-from ..handlers import handle_auth_error, should_retry
+from ..handlers import handle_tool_failure, should_retry
 from ..middleware import (
     A2ATaskTrackingMiddleware,
     AuthErrorDetectionMiddleware,
@@ -51,8 +51,10 @@ from ..middleware import (
     ToolsetSelectorMiddleware,
     UserPreferencesMiddleware,
 )
+from ..middleware.error_classification_middleware import ErrorClassificationMiddleware
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
+from .bug_report_tool import report_bug_tool
 from .file_tools import create_presigned_url_tool
 from .steering_state import get_all_active_subagent_dispatches, get_orchestrator_pending_messages
 from .time_tools import create_time_tool
@@ -171,7 +173,7 @@ class GraphFactory:
             max_retries=config.MAX_RETRIES,
             backoff_factor=config.BACKOFF_FACTOR,
             retry_on=should_retry,
-            on_failure=handle_auth_error,
+            on_failure=handle_tool_failure,
         )
         logger.debug("Initialized middleware stack")
 
@@ -277,9 +279,7 @@ class GraphFactory:
             Callable ``(ToolRuntime) -> CompositeBackend``
         """
         bedrock_region = self.config.get_bedrock_region() if _has_aws_credentials() else None
-        return create_indexing_backend_factory(
-            self.store, bedrock_region, cost_logger=self.cost_logger
-        )
+        return create_indexing_backend_factory(self.store, bedrock_region, cost_logger=self.cost_logger)
 
     async def ensure_store_setup(self) -> None:
         """Ensure the database schema is set up for the document store.
@@ -510,6 +510,7 @@ class GraphFactory:
             user_preferences_middleware,
             self._loop_detection_middleware,
             self._auth_middleware,
+            ErrorClassificationMiddleware(),
             self._retry_middleware,
             self._a2a_middleware,
             self._todo_middleware,
@@ -534,6 +535,9 @@ class GraphFactory:
 
             # Add copy_file tool for efficient file copying without LLM context loading
             static_tools.append(create_copy_file_tool(self.backend_factory))
+
+            # Add bug report tool for last-resort error reporting (uses interrupt())
+            static_tools.append(report_bug_tool)
 
             self._static_tools_cache = static_tools
 
@@ -619,7 +623,11 @@ class GraphFactory:
             logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
             static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 
-        system_prompt = self.config.SYSTEM_INSTRUCTION_SHORT if os.environ.get('USE_SHORT_PROMPTS') == 'true' and self.config.SYSTEM_INSTRUCTION_SHORT else self.config.SYSTEM_INSTRUCTION
+        system_prompt = (
+            self.config.SYSTEM_INSTRUCTION_SHORT
+            if os.environ.get("USE_SHORT_PROMPTS") == "true" and self.config.SYSTEM_INSTRUCTION_SHORT
+            else self.config.SYSTEM_INSTRUCTION
+        )
         compiled_graph = create_deep_agent(
             model=model,
             tools=static_tools_list,
@@ -788,17 +796,17 @@ class GraphFactory:
 
         The task-scheduler agent has:
         - context_schema=GraphRuntimeContext for accessing tools at runtime
-        - DynamicToolDispatchMiddleware for tool execution (scheduler + playground tools from SYSTEM_TOOLS)
+        - DynamicToolDispatchMiddleware for tool execution (scheduler + console tools from SYSTEM_TOOLS)
         - Common middleware stack for file handling, summarization, caching, etc.
         - Structured output via SubAgentResponseSchema for explicit task_state determination
 
         Unlike GP agent, task-scheduler does NOT use ToolsetSelectorMiddleware because it
-        always needs the same fixed set of tools (scheduler_* and playground_*). These tools
+        always needs the same fixed set of tools (scheduler_* and console_*). These tools
         are provided via SYSTEM_TOOLS in DynamicToolDispatchMiddleware, which bypasses the
         user's tool whitelist.
 
         Middleware ordering (first = outermost wrapper):
-        1. DynamicToolDispatchMiddleware: Injects scheduler/playground tools from SYSTEM_TOOLS,
+        1. DynamicToolDispatchMiddleware: Injects scheduler/console tools from SYSTEM_TOOLS,
            handles tool execution for MCP tools
         2-8. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
            AnthropicPromptCachingMiddleware, BedrockPromptCachingMiddleware,
@@ -820,7 +828,7 @@ class GraphFactory:
         backend = self.backend_factory
 
         # DynamicToolDispatchMiddleware without tool selection
-        # - Injects scheduler/playground tools from SYSTEM_TOOLS
+        # - Injects scheduler/console tools from SYSTEM_TOOLS
         # - Handles tool execution for MCP tools not in ToolNode
         task_scheduler_dispatch = DynamicToolDispatchMiddleware(
             static_tools=[],

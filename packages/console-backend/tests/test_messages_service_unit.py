@@ -1,4 +1,4 @@
-"""Unit tests for playground_backend.services.messages_service."""
+"""Unit tests for console_backend.services.messages_service."""
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from a2a.types import FilePart, FileWithUri, Part, TaskState, TextPart
 
-from playground_backend.models.message import Message
-from playground_backend.services.messages_service import (
+from console_backend.models.message import Message
+from console_backend.services.messages_service import (
     _parse_agent_response,
     _parse_status_update,
     _parse_task,
@@ -16,8 +16,9 @@ from playground_backend.services.messages_service import (
 
 def _make_messages_service():
     """Create a MessagesService with mocked DB session factory."""
-    with patch("playground_backend.services.messages_service.get_async_session_factory", return_value=MagicMock()):
-        from playground_backend.services.messages_service import MessagesService
+    with patch("console_backend.services.messages_service.get_async_session_factory", return_value=MagicMock()):
+        from console_backend.services.messages_service import MessagesService
+
         return MessagesService()
 
 
@@ -276,7 +277,7 @@ async def test_hydrate_with_expired_urls():
         return_value="https://bucket.s3.amazonaws.com/file.txt?fresh=true"
     )
 
-    with patch("playground_backend.services.messages_service.FileStorageService") as mock_fs_class:
+    with patch("console_backend.services.messages_service.FileStorageService") as mock_fs_class:
         mock_fs_class.return_value = mock_storage
 
         # Create expired URL
@@ -320,7 +321,7 @@ async def test_hydrate_skips_valid_urls():
     # Mock FileStorageService
     mock_storage = AsyncMock()
 
-    with patch("playground_backend.services.messages_service.FileStorageService") as mock_fs_class:
+    with patch("console_backend.services.messages_service.FileStorageService") as mock_fs_class:
         mock_fs_class.return_value = mock_storage
 
         # Create valid URL (expires in 30 minutes)
@@ -399,7 +400,7 @@ async def test_hydrate_multiple_files():
         ]
     )
 
-    with patch("playground_backend.services.messages_service.FileStorageService") as mock_fs_class:
+    with patch("console_backend.services.messages_service.FileStorageService") as mock_fs_class:
         mock_fs_class.return_value = mock_storage
         expired_url = "s3://bucket/path/file.txt"
 
@@ -452,7 +453,7 @@ async def test_hydrate_multiple_messages():
         ]
     )
 
-    with patch("playground_backend.services.messages_service.FileStorageService") as mock_fs_class:
+    with patch("console_backend.services.messages_service.FileStorageService") as mock_fs_class:
         mock_fs_class.return_value = mock_storage
 
         expired_url = "s3://bucket/path/file.txt"

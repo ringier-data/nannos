@@ -16,17 +16,16 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
-from sqlalchemy import text
-
-from playground_backend.models.user import User, UserRole, UserStatus
-from playground_backend.models.user_group import (
+from console_backend.models.user import User, UserRole, UserStatus
+from console_backend.models.user_group import (
     GroupMemberAdd,
     GroupMemberRemove,
     MemberInfo,
     UserGroupWithMembers,
 )
-from playground_backend.routers import group_router
+from console_backend.routers import group_router
+from fastapi import HTTPException
+from sqlalchemy import text
 
 
 @pytest.fixture
@@ -284,7 +283,7 @@ class TestUpdateMemberRoleEndpoint:
         self, pg_session, get_mock_request, mock_user, db_test_user, db_test_user_groups
     ):
         """Test member role update forbidden for non-admin/non-manager."""
-        from playground_backend.models.user_group import GroupMemberUpdate
+        from console_backend.models.user_group import GroupMemberUpdate
 
         mock_request = get_mock_request(user=mock_user)
         request_body = GroupMemberUpdate(role="manager")
@@ -300,7 +299,7 @@ class TestUpdateMemberRoleEndpoint:
         self, pg_session, get_mock_request, mock_user, db_test_user, db_test_user_groups
     ):
         """Test member role update forbidden for non-admin/non-manager."""
-        from playground_backend.models.user_group import GroupMemberUpdate
+        from console_backend.models.user_group import GroupMemberUpdate
 
         mock_request = get_mock_request(user=mock_user)
         request_body = GroupMemberUpdate(role="manager")
@@ -314,7 +313,7 @@ class TestUpdateMemberRoleEndpoint:
         self, pg_session, get_mock_request, mock_user, mock_admin_user, db_test_user, db_admin_user, db_test_user_groups
     ):
         """Test admin can update member roles."""
-        from playground_backend.models.user_group import GroupMemberUpdate
+        from console_backend.models.user_group import GroupMemberUpdate
 
         mock_request = get_mock_request(user=mock_admin_user)
         request_body = GroupMemberUpdate(role="manager")
@@ -329,7 +328,7 @@ class TestUpdateMemberRoleEndpoint:
         self, pg_session, get_mock_request, mock_user, mock_admin_user, db_test_user, db_admin_user, db_test_user_groups
     ):
         """Test error when member doesn't exist."""
-        from playground_backend.models.user_group import GroupMemberUpdate
+        from console_backend.models.user_group import GroupMemberUpdate
 
         mock_request = get_mock_request(user=mock_admin_user)
         request_body = GroupMemberUpdate(role="manager")
@@ -391,7 +390,7 @@ class TestAddMembersEndpoint:
         pg_session,
     ):
         """Test that managers can add members to groups."""
-        from playground_backend.models.user_group import GroupMemberAdd
+        from console_backend.models.user_group import GroupMemberAdd
 
         # Add two new users to group 1 as manager
         # First, add users to DB
@@ -444,7 +443,7 @@ class TestAddMembersEndpoint:
         pg_session,
     ):
         """Test error when group doesn't exist."""
-        from playground_backend.models.user_group import GroupMemberAdd
+        from console_backend.models.user_group import GroupMemberAdd
 
         mock_request = get_mock_request(user=mock_user)
         request_body = GroupMemberAdd(user_ids=["user-999"], role="write")
@@ -460,7 +459,7 @@ class TestAddMembersEndpoint:
         pg_session,
     ):
         """Test error when group doesn't exist."""
-        from playground_backend.models.user_group import GroupMemberAdd
+        from console_backend.models.user_group import GroupMemberAdd
 
         mock_request = get_mock_request(user=mock_admin_user)
         request_body = GroupMemberAdd(user_ids=["user-999"], role="write")

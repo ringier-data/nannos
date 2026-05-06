@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from keycloak import KeycloakError
 
-from playground_backend.services.keycloak_admin_service import (
+from console_backend.services.keycloak_admin_service import (
     KeycloakAdminService,
     KeycloakSyncError,
 )
@@ -14,7 +14,7 @@ from playground_backend.services.keycloak_admin_service import (
 @pytest.fixture
 def mock_keycloak_admin():
     """Create a mocked KeycloakAdmin instance."""
-    with patch("playground_backend.services.keycloak_admin_service.KeycloakAdmin") as mock_kc:
+    with patch("console_backend.services.keycloak_admin_service.KeycloakAdmin") as mock_kc:
         mock_instance = Mock()
         mock_instance.a_add_mapper_to_client = AsyncMock()
         mock_kc.return_value = mock_instance
@@ -51,7 +51,7 @@ class TestKeycloakAdminServiceInit:
 
     def test_init_with_keycloak_connection_error(self):
         """Test service raises KeycloakSyncError on connection failure."""
-        with patch("playground_backend.services.keycloak_admin_service.KeycloakAdmin") as mock_kc:
+        with patch("console_backend.services.keycloak_admin_service.KeycloakAdmin") as mock_kc:
             mock_kc.side_effect = Exception("Connection failed")
 
             with pytest.raises(KeycloakSyncError, match="Failed to initialize Keycloak Admin client"):

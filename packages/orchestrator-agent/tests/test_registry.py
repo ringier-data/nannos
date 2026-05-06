@@ -13,7 +13,7 @@ from app.core.registry import RegistryConfig, RegistryService, User
 @pytest.fixture
 def registry_config():
     """Create test registry configuration."""
-    return RegistryConfig(playground_backend_url="http://test-backend:5001")
+    return RegistryConfig(console_backend_url="http://test-backend:5001")
 
 
 @pytest.fixture
@@ -456,12 +456,12 @@ class TestRegistryConfig:
         """Test default configuration values."""
         config = RegistryConfig()
         # Default should be localhost for local development
-        assert "localhost" in config.playground_backend_url or "5001" in config.playground_backend_url
+        assert "localhost" in config.console_backend_url or "5001" in config.console_backend_url
 
     def test_custom_config(self):
         """Test custom configuration values."""
-        config = RegistryConfig(playground_backend_url="https://api.example.com")
-        assert config.playground_backend_url == "https://api.example.com"
+        config = RegistryConfig(console_backend_url="https://api.example.com")
+        assert config.console_backend_url == "https://api.example.com"
 
 
 class TestUserModel:

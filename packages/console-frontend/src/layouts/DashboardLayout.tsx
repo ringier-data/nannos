@@ -38,7 +38,7 @@ export function DashboardLayout() {
         <Sidebar>
         <SidebarHeader>
           <div className="flex items-center gap-2 px-2 py-2">
-            <span className="font-semibold">Playground</span>
+            <span className="font-semibold">Console</span>
           </div>
         </SidebarHeader>
         <SidebarContent>

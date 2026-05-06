@@ -108,6 +108,7 @@ export type PostApiV2InstallationsManifestData = {
     botName: string
     slashCommand: string
     botDescription?: string
+    socketMode?: boolean
   }
   path?: never
   query?: never

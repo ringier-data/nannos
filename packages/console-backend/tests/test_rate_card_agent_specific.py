@@ -5,10 +5,9 @@ from decimal import Decimal
 from unittest.mock import Mock
 
 import pytest
+from console_backend.repositories.rate_card_repository import RateCardRepository
+from console_backend.services.rate_card_service import RateCardService
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.repositories.rate_card_repository import RateCardRepository
-from playground_backend.services.rate_card_service import RateCardService
 
 
 @pytest.mark.asyncio

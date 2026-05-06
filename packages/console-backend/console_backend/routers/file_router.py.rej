@@ -1,0 +1,23 @@
+diff a/packages/console-backend/console_backend/routers/file_router.py b/packages/console-backend/console_backend/routers/file_router.py	(rejected hunks)
+@@ -1,16 +1,21 @@
+ """Routes for managing file uploads for chat messages."""
+ 
+ from typing import Annotated
++from uuid import uuid4
+ 
+ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+ from pydantic import BaseModel
+ 
+ from console_backend.dependencies import require_auth
+ from console_backend.models.user import User
++from console_backend.services.conversation_service import ConversationService
+ from console_backend.services.file_storage_service import FileStorageService
+ 
+ router = APIRouter(prefix="/api/v1/files", tags=["files"])
+ 
++# Initialize services
++conversation_service: ConversationService = ConversationService()
++
+ 
+ class RegenerateUrlRequest(BaseModel):
+     """Request to regenerate presigned URLs for file attachments."""

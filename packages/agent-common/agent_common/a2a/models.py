@@ -49,7 +49,7 @@ class LocalFoundrySubAgentConfig(BaseLocalSubAgentConfig):
     Attributes:
         name: Unique identifier for the sub-agent (used in task tool enum).
         description: Human-readable description shown in task tool description.
-        sub_agent_id: Optional playground backend sub_agent ID for tracking agent-created agents.
+        sub_agent_id: Optional sub_agent ID for tracking agent-created agents.
         foundry_hostname: Foundry hostname (e.g., https://blumen.palantirfoundry.de).
         foundry_client_id: OAuth2 client ID for Foundry authentication.
         foundry_client_secret_ref: SSM Parameter Store name for Foundry client secret.
@@ -61,7 +61,7 @@ class LocalFoundrySubAgentConfig(BaseLocalSubAgentConfig):
 
     type: Literal["foundry"] = "foundry"
     sub_agent_id: Optional[int] = Field(
-        default=None, description="Playground backend sub_agent ID for tracking agent-created agents"
+        default=None, description="Console backend sub_agent ID for tracking agent-created agents"
     )
     hostname: str = Field(
         default="https://blumen.palantirfoundry.de",
@@ -86,7 +86,7 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
         name: Unique identifier for the sub-agent (used in task tool enum).
         model_name: Optional model name override for this sub-agent (inherits orchestrator model if None).
         description: Human-readable description shown in task tool description.
-        sub_agent_id: Optional playground backend sub_agent ID for tracking agent-created agents.
+        sub_agent_id: Optional sub_agent ID for tracking agent-created agents.
         system_prompt: The system prompt that defines the agent's behavior.
         mcp_tools: Optional list of MCP tool names to enable for this sub-agent.
             - If None or empty: The sub-agent inherits tools from the orchestrator.
@@ -113,7 +113,7 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
 
     type: Literal["langgraph"] = "langgraph"
     sub_agent_id: Optional[int] = Field(
-        default=None, description="Playground backend sub_agent ID for tracking agent-created agents"
+        default=None, description="Console backend sub_agent ID for tracking agent-created agents"
     )
     model_name: Optional[str] = Field(
         default=None,

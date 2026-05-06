@@ -9,19 +9,18 @@ Tests cover:
 """
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.catalog import (
+from console_backend.models.catalog import (
     Catalog,
     CatalogCreate,
     CatalogSourceType,
     CatalogUpdate,
 )
-from playground_backend.models.user import User
-from playground_backend.repositories.catalog_repository import CatalogRepository
-from playground_backend.services.audit_service import AuditService
-from playground_backend.services.catalog_service import CatalogService
+from console_backend.models.user import User
+from console_backend.repositories.catalog_repository import CatalogRepository
+from console_backend.services.audit_service import AuditService
+from console_backend.services.catalog_service import CatalogService
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # --- Fixtures ---
 

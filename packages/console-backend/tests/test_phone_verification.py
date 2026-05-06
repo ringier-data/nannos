@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 import pytest
 from twilio.base.exceptions import TwilioRestException
 
-from playground_backend.services.phone_verification_service import (
+from console_backend.services.phone_verification_service import (
     PhoneVerificationService,
 )
 
@@ -64,13 +64,13 @@ class TestPhoneVerificationService:
 
     # ── is_configured ──
 
-    @patch("playground_backend.services.phone_verification_service.config")
+    @patch("console_backend.services.phone_verification_service.config")
     def test_is_configured_true(self, mock_config):
         mock_config.twilio_verify.is_configured = True
         svc = PhoneVerificationService()
         assert svc.is_configured is True
 
-    @patch("playground_backend.services.phone_verification_service.config")
+    @patch("console_backend.services.phone_verification_service.config")
     def test_is_configured_false(self, mock_config):
         mock_config.twilio_verify.is_configured = False
         svc = PhoneVerificationService()
@@ -182,7 +182,7 @@ class TestPhoneVerifyEndpoint:
 
     @pytest.mark.asyncio
     async def test_send_verification_success(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
             mock_svc.send_verification = AsyncMock(return_value=True)
 
@@ -198,7 +198,7 @@ class TestPhoneVerifyEndpoint:
 
     @pytest.mark.asyncio
     async def test_send_verification_call_channel(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
             mock_svc.send_verification = AsyncMock(return_value=True)
 
@@ -211,7 +211,7 @@ class TestPhoneVerifyEndpoint:
 
     @pytest.mark.asyncio
     async def test_send_verification_not_configured(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = False
 
             response = await client_with_db.post(
@@ -223,7 +223,7 @@ class TestPhoneVerifyEndpoint:
 
     @pytest.mark.asyncio
     async def test_send_verification_invalid_phone(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
 
             response = await client_with_db.post(
@@ -236,7 +236,7 @@ class TestPhoneVerifyEndpoint:
 
     @pytest.mark.asyncio
     async def test_send_verification_invalid_channel(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
 
             response = await client_with_db.post(
@@ -249,7 +249,7 @@ class TestPhoneVerifyEndpoint:
 
     @pytest.mark.asyncio
     async def test_send_verification_twilio_failure(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
             mock_svc.send_verification = AsyncMock(return_value=False)
 
@@ -266,7 +266,7 @@ class TestPhoneConfirmEndpoint:
 
     @pytest.mark.asyncio
     async def test_confirm_success(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
             mock_svc.check_verification = AsyncMock(return_value=True)
 
@@ -282,7 +282,7 @@ class TestPhoneConfirmEndpoint:
 
     @pytest.mark.asyncio
     async def test_confirm_wrong_code(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
             mock_svc.check_verification = AsyncMock(return_value=False)
 
@@ -296,7 +296,7 @@ class TestPhoneConfirmEndpoint:
 
     @pytest.mark.asyncio
     async def test_confirm_not_configured(self, client_with_db):
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = False
 
             response = await client_with_db.post(
@@ -329,7 +329,7 @@ class TestPatchSettingsPhoneGuard:
     @pytest.mark.asyncio
     async def test_patch_phone_override_blocked_when_verify_configured(self, client_with_db):
         """Setting a non-null phone_number_override via PATCH is rejected when Verify is configured."""
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
 
             response = await client_with_db.patch(
@@ -343,7 +343,7 @@ class TestPatchSettingsPhoneGuard:
     @pytest.mark.asyncio
     async def test_patch_phone_override_clear_allowed(self, client_with_db):
         """Clearing phone_number_override (null) via PATCH is always allowed."""
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
 
             response = await client_with_db.patch(
@@ -356,7 +356,7 @@ class TestPatchSettingsPhoneGuard:
     @pytest.mark.asyncio
     async def test_patch_phone_override_allowed_when_verify_not_configured(self, client_with_db):
         """Setting phone_number_override via PATCH is allowed when Verify is not configured."""
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = False
 
             response = await client_with_db.patch(
@@ -369,7 +369,7 @@ class TestPatchSettingsPhoneGuard:
     @pytest.mark.asyncio
     async def test_patch_other_fields_unaffected_by_guard(self, client_with_db):
         """PATCH with non-phone fields works regardless of Verify config."""
-        with patch("playground_backend.routers.auth_router._phone_verification_service") as mock_svc:
+        with patch("console_backend.routers.auth_router._phone_verification_service") as mock_svc:
             mock_svc.is_configured = True
 
             response = await client_with_db.patch(

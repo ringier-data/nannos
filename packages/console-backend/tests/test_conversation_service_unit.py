@@ -2,9 +2,8 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from playground_backend.exceptions import ConversationOwnershipError
-from playground_backend.services.conversation_service import ConversationService
+from console_backend.exceptions import ConversationOwnershipError
+from console_backend.services.conversation_service import ConversationService
 
 
 @pytest.mark.asyncio

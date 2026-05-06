@@ -1,6 +1,6 @@
 [project]
-name = "playground-backend"
-version = "0.13.0"
+name = "console-backend"
+version = "0.14.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -47,7 +47,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["playground_backend*"]
+include = ["console_backend*"]
 
 [dependency-groups]
 dev = [

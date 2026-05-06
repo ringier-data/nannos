@@ -4,9 +4,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from console_backend.repositories.usage_repository import UsageRepository
 from sqlalchemy import text
-
-from playground_backend.repositories.usage_repository import UsageRepository
 
 
 @pytest.mark.asyncio

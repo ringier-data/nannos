@@ -14,13 +14,12 @@ import os
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
-from moto import mock_aws
+from aiomoto import mock_aws
+from console_backend.models.secret import Secret, SecretCreate, SecretType
+from console_backend.models.user import User, UserRole
+from console_backend.services.secrets_service import SecretsService
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.secret import Secret, SecretCreate, SecretType
-from playground_backend.models.user import User, UserRole
-from playground_backend.services.secrets_service import SecretsService
 
 
 @mock_aws
@@ -32,7 +31,7 @@ async def _create_secret(
     secret_value: str = "test-secret-value",
 ) -> Secret:
     """Create a test secret and return it."""
-    from playground_backend.models.secret import SecretCreate, SecretType
+    from console_backend.models.secret import SecretCreate, SecretType
 
     service = secrets_service
 

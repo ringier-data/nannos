@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
 import uuid
 from typing import Literal
 
+import httpx
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
@@ -39,9 +41,11 @@ from app.models.responses import AgentStreamResponse
 from ..models.config import UserConfig
 from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    FEEDBACK_REQUEST_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
     new_activity_log_message,
+    new_feedback_request_message,
     new_work_plan_message,
 )
 
@@ -77,7 +81,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         Args:
             sub: The user's sub (OIDC subject identifier)
             access_token: The user's access token for authenticated API calls
-            sub_agent_config_hash: Optional config hash for playground testing mode
+            sub_agent_config_hash: Optional config hash for console testing mode
 
         Returns:
             User object with all user-specific data
@@ -92,6 +96,49 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             logger.error(f"[REGISTRY] User with sub {sub} not found in registry")
             raise ServerError(error=InvalidParamsError())
         return user
+
+    async def _persist_bug_report(
+        self,
+        user_token: str,
+        conversation_id: str,
+        task_id: str,
+        description: str,
+    ) -> None:
+        """Persist a confirmed bug report to console-backend.
+
+        Exchanges the user token for a console-backend-scoped token before
+        calling the API. Best-effort: logs errors but does not raise, so graph
+        resumption is not blocked if the API call fails.
+        """
+        console_url = self.registry_service.config.console_backend_url
+        try:
+            # Exchange user token for console-backend audience
+            oauth2_client = self.agent.oauth2_client
+            if oauth2_client:
+                console_token = await oauth2_client.exchange_token(
+                    subject_token=user_token,
+                    target_client_id=self.agent.config.CONSOLE_BACKEND_CLIENT_ID,
+                    requested_scopes=["openid", "profile", "offline_access"],
+                )
+            else:
+                # Local dev mode — no token exchange available, pass through
+                console_token = user_token
+
+            async with httpx.AsyncClient(base_url=console_url, timeout=10.0) as client:
+                response = await client.post(
+                    "/api/v1/bug-reports",
+                    json={
+                        "conversation_id": conversation_id,
+                        "task_id": task_id,
+                        "description": description,
+                        "source": "orchestrator",
+                    },
+                    headers={"Authorization": f"Bearer {console_token}"},
+                )
+                response.raise_for_status()
+                logger.info(f"Bug report persisted for conversation {conversation_id}")
+        except Exception as e:
+            logger.error(f"Failed to persist bug report: {e}")
 
     async def _build_user_config(
         self,
@@ -120,7 +167,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             model_choice: Optional model preference
             message_formatting: Message formatting style
             slack_user_handle: Optional Slack user handle
-            sub_agent_config_hash: Optional playground mode config hash
+            sub_agent_config_hash: Optional console mode config hash
             preferred_model: Optional preferred model from registry
             enable_thinking: Optional thinking configuration from client
             thinking_level: Optional thinking level from client
@@ -300,7 +347,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 user_name = context.call_context.state["user_name"]
                 user_email = context.call_context.state["user_email"]
                 user_groups = context.call_context.state.get("user_groups", [])
-                # Optional: playground mode sub-agent config hash for isolated testing
+                # Optional: console mode sub-agent config hash for isolated testing
                 sub_agent_config_hash = context.call_context.state.get("sub_agent_config_hash")
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
@@ -313,7 +360,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         set_request_access_token(user_token)
         logger.info(f"[ZERO-TRUST] Using verified user_sub for graph retrieval: {user_sub}")
         if sub_agent_config_hash:
-            logger.info(f"[PLAYGROUND] Playground mode enabled for sub-agent config hash: {sub_agent_config_hash}")
+            logger.info(f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}")
 
         # Fetch user from registry to get stable database ID (user.id)
         # This allows us to use the database ID in config metadata instead of OIDC sub e.g. for docstore read/write
@@ -513,6 +560,31 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             # Default to deny for safety
                             resume_value = "deny_all"
                             logger.info(f"Unknown bulk response '{response}', defaulting to deny_all")
+                elif interrupt_type == "bug_report":
+                    # Bug report interrupt — client sends JSON with confirmed/description
+                    # or a simple text response (legacy clients)
+                    logger.info("Resuming from bug_report interrupt")
+                    if isinstance(query, str):
+                        q = query.strip().lower()
+                        if q in ("no", "cancel", "decline", "skip"):
+                            resume_value = {"confirmed": False}
+                        else:
+                            # Treat any other text as confirmation with that text as description
+                            resume_value = {"confirmed": True, "description": query}
+                    elif isinstance(query, dict):
+                        resume_value = query
+                    else:
+                        resume_value = {"confirmed": False}
+
+                    # Persist the bug report to console-backend if confirmed
+                    if isinstance(resume_value, dict) and resume_value.get("confirmed"):
+                        bug_reason = interrupt_value.get("reason", "") if isinstance(interrupt_value, dict) else ""
+                        await self._persist_bug_report(
+                            user_token=user_token,
+                            conversation_id=task.context_id,
+                            task_id=task.id,
+                            description=str(resume_value.get("description") or bug_reason),
+                        )
                 else:
                     # Other interrupt types (auth, etc.)
                     resume_value = query
@@ -605,6 +677,45 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                                 f"message(s) (reinvocation {steering_reinvocations}/{MAX_STEERING_REINVOCATIONS})"
                             )
                             continue  # Loop back for another stream round
+
+                # Emit feedback request for complex tasks before terminal event
+                if (
+                    deferred_terminal_item is not None
+                    and deferred_terminal_item.state in (TaskState.completed, TaskState.failed, TaskState.canceled)
+                    and requested_extensions is not None
+                    and FEEDBACK_REQUEST_EXTENSION in requested_extensions
+                ):
+                    force_feedback = request_metadata.get("forceFeedbackRequest") in (True, "true", "1")
+                    feedback_threshold = int(os.environ.get("FEEDBACK_RECURSION_THRESHOLD", "40"))
+                    try:
+                        final_state = graph.get_state(config)  # type: ignore
+                        msgs = final_state.values.get("messages", []) if hasattr(final_state, "values") else []
+                        tool_msg_count = sum(1 for m in msgs if hasattr(m, "tool_call_id"))
+                        if force_feedback or tool_msg_count > feedback_threshold:
+                            # Extract sub-agent IDs from activity-log metadata
+                            # Prefer integer sub_agent_id; fall back to agent_name for built-in agents
+                            sub_agents_set: set[str] = set()
+                            for m in msgs:
+                                meta = getattr(m, "additional_kwargs", {}).get("a2a_metadata", {})
+                                if meta.get("sub_agent_id") is not None:
+                                    sub_agents_set.add(str(meta["sub_agent_id"]))
+                                elif meta.get("agent_name"):
+                                    sub_agents_set.add(meta["agent_name"])
+                            sub_agents = list(sub_agents_set)
+                            await updater.update_status(
+                                TaskState.working,
+                                new_feedback_request_message(
+                                    context_id=task.context_id,
+                                    task_id=task.id,
+                                    sub_agents_involved=sub_agents,
+                                ),
+                            )
+                            logger.info(
+                                f"[FEEDBACK] Emitted feedback request (tool_msgs={tool_msg_count}, "
+                                f"threshold={feedback_threshold}, sub_agents={sub_agents})"
+                            )
+                    except Exception:
+                        logger.debug("[FEEDBACK] Could not emit feedback request", exc_info=True)
 
                 # Emit the deferred terminal event
                 if deferred_terminal_item is not None:
@@ -821,13 +932,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         elif state == TaskState.input_required:
             # User input required - leave task in input_required state
+            # Include interrupt metadata if present (e.g., interrupt_type for bug reports)
+            interrupt_metadata = {
+                k: v for k, v in metadata.items() if k in ("interrupt_type", "interrupt_reason")
+            } or None
+            msg = new_agent_text_message(
+                content,
+                task.context_id,
+                task.id,
+            )
+            if interrupt_metadata:
+                msg.metadata = interrupt_metadata
             await updater.update_status(
                 TaskState.input_required,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                msg,
             )
 
         elif state == TaskState.auth_required:

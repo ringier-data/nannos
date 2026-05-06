@@ -3,8 +3,7 @@
 from datetime import datetime, timezone
 
 import pytest
-
-from playground_backend.utils.cookie_utils import (
+from console_backend.utils.cookie_utils import (
     CookieAttributes,
     extract_cookie_attributes,
     find_cookie_in_headers,

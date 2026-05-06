@@ -4,12 +4,11 @@ from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
+from console_backend.models.user import User
+from console_backend.services.user_service import UserService
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.user import User
-from playground_backend.services.user_service import UserService
 
 # user_service fixture now provided by conftest.py with proper DI
 

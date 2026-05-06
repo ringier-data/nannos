@@ -80,7 +80,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report';
 
 /**
  * AuditLog
@@ -153,7 +153,7 @@ export type AutomatedSubAgentConfig = {
     /**
      * Mcp Tools
      *
-     * List of MCP tool names that the agent is allowed to call. Leave empty if the task requires no tools. Call the playground_grep_mcp_tools API to get available tools and their input schemas.
+     * List of MCP tool names that the agent is allowed to call. Leave empty if the task requires no tools. Call the console_grep_mcp_tools API to get available tools and their input schemas.
      */
     mcp_tools?: Array<string> | null;
     /**
@@ -247,6 +247,117 @@ export type BodyUploadFilesApiV1FilesUploadPost = {
      * Conversation Id
      */
     conversation_id?: string | null;
+};
+
+/**
+ * BugReportCreate
+ *
+ * Request model for creating a bug report.
+ */
+export type BugReportCreate = {
+    /**
+     * Conversation Id
+     */
+    conversation_id: string;
+    /**
+     * Message Id
+     */
+    message_id?: string | null;
+    /**
+     * Task Id
+     */
+    task_id?: string | null;
+    /**
+     * Description
+     */
+    description?: string | null;
+    source?: BugReportSource;
+};
+
+/**
+ * BugReportListResponse
+ *
+ * Paginated bug report list response.
+ */
+export type BugReportListResponse = {
+    /**
+     * Data
+     */
+    data: Array<BugReportResponse>;
+    meta: PaginationMeta;
+};
+
+/**
+ * BugReportResponse
+ *
+ * Response model for a single bug report.
+ */
+export type BugReportResponse = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Conversation Id
+     */
+    conversation_id: string;
+    /**
+     * Message Id
+     */
+    message_id?: string | null;
+    /**
+     * Task Id
+     */
+    task_id?: string | null;
+    /**
+     * User Id
+     */
+    user_id: string;
+    source: BugReportSource;
+    /**
+     * Description
+     */
+    description?: string | null;
+    status: BugReportStatus;
+    /**
+     * External Link
+     */
+    external_link?: string | null;
+    /**
+     * Debug Conversation Id
+     */
+    debug_conversation_id?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+};
+
+/**
+ * BugReportSource
+ *
+ * Bug report source enum.
+ */
+export type BugReportSource = 'orchestrator' | 'client';
+
+/**
+ * BugReportStatus
+ *
+ * Bug report status enum.
+ */
+export type BugReportStatus = 'open' | 'acknowledged' | 'investigating' | 'resolved';
+
+/**
+ * BugReportStatusUpdate
+ *
+ * Request model for updating bug report status.
+ */
+export type BugReportStatusUpdate = {
+    status: BugReportStatus;
 };
 
 /**
@@ -980,6 +1091,13 @@ export type DetailedUsageReport = {
 };
 
 /**
+ * FeedbackRating
+ *
+ * Feedback rating enum.
+ */
+export type FeedbackRating = 'positive' | 'negative';
+
+/**
  * FoundryScope
  *
  * Foundry API scopes for OAuth2 authentication.
@@ -1236,6 +1354,68 @@ export type MemberInfo = {
      */
     last_name: string;
     group_role: RoleEnum;
+};
+
+/**
+ * MessageFeedbackCreate
+ *
+ * Request model for submitting message feedback.
+ */
+export type MessageFeedbackCreate = {
+    rating: FeedbackRating;
+    /**
+     * Comment
+     */
+    comment?: string | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: string | null;
+    /**
+     * Task Id
+     */
+    task_id?: string | null;
+};
+
+/**
+ * MessageFeedbackResponse
+ *
+ * Response model for a single message feedback entry.
+ */
+export type MessageFeedbackResponse = {
+    /**
+     * Id
+     */
+    id: string;
+    /**
+     * Conversation Id
+     */
+    conversation_id: string;
+    /**
+     * Message Id
+     */
+    message_id: string;
+    /**
+     * User Id
+     */
+    user_id: string;
+    rating: FeedbackRating;
+    /**
+     * Comment
+     */
+    comment?: string | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: string | null;
+    /**
+     * Task Id
+     */
+    task_id?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
 };
 
 /**
@@ -2071,6 +2251,10 @@ export type SubAgent = {
     owner?: SubAgentOwner | null;
     owner_status?: OwnerStatus;
     type: SubAgentType;
+    /**
+     * System Role
+     */
+    system_role?: string | null;
     /**
      * Current Version
      */
@@ -3881,7 +4065,7 @@ export type ServeLocalFileApiV1FilesLocalFilePathGetResponses = {
     200: unknown;
 };
 
-export type PlaygroundGrepMcpToolsData = {
+export type ConsoleGrepMcpToolsData = {
     body?: never;
     path?: never;
     query: {
@@ -3901,25 +4085,25 @@ export type PlaygroundGrepMcpToolsData = {
     url: '/api/v1/mcp/tools/search';
 };
 
-export type PlaygroundGrepMcpToolsErrors = {
+export type ConsoleGrepMcpToolsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundGrepMcpToolsError = PlaygroundGrepMcpToolsErrors[keyof PlaygroundGrepMcpToolsErrors];
+export type ConsoleGrepMcpToolsError = ConsoleGrepMcpToolsErrors[keyof ConsoleGrepMcpToolsErrors];
 
-export type PlaygroundGrepMcpToolsResponses = {
+export type ConsoleGrepMcpToolsResponses = {
     /**
      * Successful Response
      */
     200: McpToolsResponse;
 };
 
-export type PlaygroundGrepMcpToolsResponse = PlaygroundGrepMcpToolsResponses[keyof PlaygroundGrepMcpToolsResponses];
+export type ConsoleGrepMcpToolsResponse = ConsoleGrepMcpToolsResponses[keyof ConsoleGrepMcpToolsResponses];
 
-export type PlaygroundListMcpToolsData = {
+export type ConsoleListMcpToolsData = {
     body?: never;
     path?: never;
     query?: {
@@ -3931,39 +4115,39 @@ export type PlaygroundListMcpToolsData = {
     url: '/api/v1/mcp/tools';
 };
 
-export type PlaygroundListMcpToolsErrors = {
+export type ConsoleListMcpToolsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundListMcpToolsError = PlaygroundListMcpToolsErrors[keyof PlaygroundListMcpToolsErrors];
+export type ConsoleListMcpToolsError = ConsoleListMcpToolsErrors[keyof ConsoleListMcpToolsErrors];
 
-export type PlaygroundListMcpToolsResponses = {
+export type ConsoleListMcpToolsResponses = {
     /**
      * Successful Response
      */
     200: McpToolsResponse;
 };
 
-export type PlaygroundListMcpToolsResponse = PlaygroundListMcpToolsResponses[keyof PlaygroundListMcpToolsResponses];
+export type ConsoleListMcpToolsResponse = ConsoleListMcpToolsResponses[keyof ConsoleListMcpToolsResponses];
 
-export type PlaygroundListMcpServersData = {
+export type ConsoleListMcpServersData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/mcp/servers';
 };
 
-export type PlaygroundListMcpServersResponses = {
+export type ConsoleListMcpServersResponses = {
     /**
      * Successful Response
      */
     200: McpServersResponse;
 };
 
-export type PlaygroundListMcpServersResponse = PlaygroundListMcpServersResponses[keyof PlaygroundListMcpServersResponses];
+export type ConsoleListMcpServersResponse = ConsoleListMcpServersResponses[keyof ConsoleListMcpServersResponses];
 
 export type ListSecretsApiV1SecretsGetData = {
     body?: never;
@@ -4128,7 +4312,7 @@ export type UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses =
 
 export type UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponse = UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses[keyof UpdateSecretPermissionsApiV1SecretsSecretIdPermissionsPutResponses];
 
-export type PlaygroundListSubAgentsData = {
+export type ConsoleListSubAgentsData = {
     body?: never;
     path?: never;
     query?: {
@@ -4154,48 +4338,48 @@ export type PlaygroundListSubAgentsData = {
     url: '/api/v1/sub-agents';
 };
 
-export type PlaygroundListSubAgentsErrors = {
+export type ConsoleListSubAgentsErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundListSubAgentsError = PlaygroundListSubAgentsErrors[keyof PlaygroundListSubAgentsErrors];
+export type ConsoleListSubAgentsError = ConsoleListSubAgentsErrors[keyof ConsoleListSubAgentsErrors];
 
-export type PlaygroundListSubAgentsResponses = {
+export type ConsoleListSubAgentsResponses = {
     /**
      * Successful Response
      */
     200: SubAgentListResponse;
 };
 
-export type PlaygroundListSubAgentsResponse = PlaygroundListSubAgentsResponses[keyof PlaygroundListSubAgentsResponses];
+export type ConsoleListSubAgentsResponse = ConsoleListSubAgentsResponses[keyof ConsoleListSubAgentsResponses];
 
-export type PlaygroundCreateSubAgentData = {
+export type ConsoleCreateSubAgentData = {
     body: SubAgentCreate;
     path?: never;
     query?: never;
     url: '/api/v1/sub-agents';
 };
 
-export type PlaygroundCreateSubAgentErrors = {
+export type ConsoleCreateSubAgentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundCreateSubAgentError = PlaygroundCreateSubAgentErrors[keyof PlaygroundCreateSubAgentErrors];
+export type ConsoleCreateSubAgentError = ConsoleCreateSubAgentErrors[keyof ConsoleCreateSubAgentErrors];
 
-export type PlaygroundCreateSubAgentResponses = {
+export type ConsoleCreateSubAgentResponses = {
     /**
      * Successful Response
      */
     201: SubAgent;
 };
 
-export type PlaygroundCreateSubAgentResponse = PlaygroundCreateSubAgentResponses[keyof PlaygroundCreateSubAgentResponses];
+export type ConsoleCreateSubAgentResponse = ConsoleCreateSubAgentResponses[keyof ConsoleCreateSubAgentResponses];
 
 export type ListPendingApprovalsApiV1SubAgentsPendingGetData = {
     body?: never;
@@ -4340,7 +4524,7 @@ export type GetSubAgentApiV1SubAgentsSubAgentIdGetResponses = {
 
 export type GetSubAgentApiV1SubAgentsSubAgentIdGetResponse = GetSubAgentApiV1SubAgentsSubAgentIdGetResponses[keyof GetSubAgentApiV1SubAgentsSubAgentIdGetResponses];
 
-export type PlaygroundUpdateSubAgentData = {
+export type ConsoleUpdateSubAgentData = {
     body: SubAgentUpdate;
     path: {
         /**
@@ -4352,23 +4536,23 @@ export type PlaygroundUpdateSubAgentData = {
     url: '/api/v1/sub-agents/{sub_agent_id}';
 };
 
-export type PlaygroundUpdateSubAgentErrors = {
+export type ConsoleUpdateSubAgentErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type PlaygroundUpdateSubAgentError = PlaygroundUpdateSubAgentErrors[keyof PlaygroundUpdateSubAgentErrors];
+export type ConsoleUpdateSubAgentError = ConsoleUpdateSubAgentErrors[keyof ConsoleUpdateSubAgentErrors];
 
-export type PlaygroundUpdateSubAgentResponses = {
+export type ConsoleUpdateSubAgentResponses = {
     /**
      * Successful Response
      */
     200: SubAgent;
 };
 
-export type PlaygroundUpdateSubAgentResponse = PlaygroundUpdateSubAgentResponses[keyof PlaygroundUpdateSubAgentResponses];
+export type ConsoleUpdateSubAgentResponse = ConsoleUpdateSubAgentResponses[keyof ConsoleUpdateSubAgentResponses];
 
 export type ActivateSubAgentApiV1SubAgentsSubAgentIdActivatePostData = {
     body?: never;
@@ -4781,6 +4965,47 @@ export type ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResp
 };
 
 export type ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponse = ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponses[keyof ListPendingVersionApprovalsApiV1SubAgentsAdminPendingVersionsGetResponses];
+
+export type SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutData = {
+    body?: never;
+    path: {
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: {
+        /**
+         * Role
+         *
+         * System role to assign (e.g. 'debug'), or null to clear
+         */
+        role?: string | null;
+    };
+    url: '/api/v1/sub-agents/{sub_agent_id}/system-role';
+};
+
+export type SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutError = SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutErrors[keyof SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutErrors];
+
+export type SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutResponses = {
+    /**
+     * Response Set System Role Api V1 Sub Agents  Sub Agent Id  System Role Put
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutResponse = SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutResponses[keyof SetSystemRoleApiV1SubAgentsSubAgentIdSystemRolePutResponses];
 
 export type ListUsersApiV1AdminUsersGetData = {
     body?: never;
@@ -7539,6 +7764,360 @@ export type GetPageThumbnailResponses = {
     200: unknown;
 };
 
+export type ListBugReportsApiV1BugReportsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Page
+         */
+        page?: number;
+        /**
+         * Limit
+         */
+        limit?: number;
+        /**
+         * Status Filter
+         */
+        status_filter?: BugReportStatus | null;
+    };
+    url: '/api/v1/bug-reports';
+};
+
+export type ListBugReportsApiV1BugReportsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListBugReportsApiV1BugReportsGetError = ListBugReportsApiV1BugReportsGetErrors[keyof ListBugReportsApiV1BugReportsGetErrors];
+
+export type ListBugReportsApiV1BugReportsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportListResponse;
+};
+
+export type ListBugReportsApiV1BugReportsGetResponse = ListBugReportsApiV1BugReportsGetResponses[keyof ListBugReportsApiV1BugReportsGetResponses];
+
+export type CreateBugReportApiV1BugReportsPostData = {
+    body: BugReportCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/bug-reports';
+};
+
+export type CreateBugReportApiV1BugReportsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateBugReportApiV1BugReportsPostError = CreateBugReportApiV1BugReportsPostErrors[keyof CreateBugReportApiV1BugReportsPostErrors];
+
+export type CreateBugReportApiV1BugReportsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: BugReportResponse;
+};
+
+export type CreateBugReportApiV1BugReportsPostResponse = CreateBugReportApiV1BugReportsPostResponses[keyof CreateBugReportApiV1BugReportsPostResponses];
+
+export type GetBugReportApiV1BugReportsReportIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Report Id
+         */
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/bug-reports/{report_id}';
+};
+
+export type GetBugReportApiV1BugReportsReportIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetBugReportApiV1BugReportsReportIdGetError = GetBugReportApiV1BugReportsReportIdGetErrors[keyof GetBugReportApiV1BugReportsReportIdGetErrors];
+
+export type GetBugReportApiV1BugReportsReportIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportResponse;
+};
+
+export type GetBugReportApiV1BugReportsReportIdGetResponse = GetBugReportApiV1BugReportsReportIdGetResponses[keyof GetBugReportApiV1BugReportsReportIdGetResponses];
+
+export type UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchData = {
+    body: BugReportStatusUpdate;
+    path: {
+        /**
+         * Report Id
+         */
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/bug-reports/{report_id}/status';
+};
+
+export type UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchError = UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchErrors[keyof UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchErrors];
+
+export type UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportResponse;
+};
+
+export type UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchResponse = UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchResponses[keyof UpdateBugReportStatusApiV1BugReportsReportIdStatusPatchResponses];
+
+export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostData = {
+    body?: never;
+    path: {
+        /**
+         * Report Id
+         */
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/bug-reports/{report_id}/debug';
+};
+
+export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostError = TriggerDebugAgentApiV1BugReportsReportIdDebugPostErrors[keyof TriggerDebugAgentApiV1BugReportsReportIdDebugPostErrors];
+
+export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses = {
+    /**
+     * Response Trigger Debug Agent Api V1 Bug Reports  Report Id  Debug Post
+     *
+     * Successful Response
+     */
+    202: {
+        [key: string]: unknown;
+    };
+};
+
+export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponse = TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses[keyof TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses];
+
+export type ConsoleUpdateBugReportStatusData = {
+    body?: never;
+    path: {
+        /**
+         * Report Id
+         */
+        report_id: string;
+    };
+    query: {
+        new_status: BugReportStatus;
+    };
+    url: '/api/v1/bug-reports/{report_id}/mcp-status';
+};
+
+export type ConsoleUpdateBugReportStatusErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleUpdateBugReportStatusError = ConsoleUpdateBugReportStatusErrors[keyof ConsoleUpdateBugReportStatusErrors];
+
+export type ConsoleUpdateBugReportStatusResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportResponse;
+};
+
+export type ConsoleUpdateBugReportStatusResponse = ConsoleUpdateBugReportStatusResponses[keyof ConsoleUpdateBugReportStatusResponses];
+
+export type ConsoleSetBugReportExternalLinkData = {
+    body?: never;
+    path: {
+        /**
+         * Report Id
+         */
+        report_id: string;
+    };
+    query: {
+        /**
+         * External Link
+         */
+        external_link: string;
+    };
+    url: '/api/v1/bug-reports/{report_id}/mcp-external-link';
+};
+
+export type ConsoleSetBugReportExternalLinkErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleSetBugReportExternalLinkError = ConsoleSetBugReportExternalLinkErrors[keyof ConsoleSetBugReportExternalLinkErrors];
+
+export type ConsoleSetBugReportExternalLinkResponses = {
+    /**
+     * Successful Response
+     */
+    200: BugReportResponse;
+};
+
+export type ConsoleSetBugReportExternalLinkResponse = ConsoleSetBugReportExternalLinkResponses[keyof ConsoleSetBugReportExternalLinkResponses];
+
+export type DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Conversation Id
+         */
+        conversation_id: string;
+        /**
+         * Message Id
+         */
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/messages/{message_id}/feedback';
+};
+
+export type DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteError = DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteErrors[keyof DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteErrors];
+
+export type DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteResponse = DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteResponses[keyof DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteResponses];
+
+export type SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostData = {
+    body: MessageFeedbackCreate;
+    path: {
+        /**
+         * Conversation Id
+         */
+        conversation_id: string;
+        /**
+         * Message Id
+         */
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/messages/{message_id}/feedback';
+};
+
+export type SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostError = SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostErrors[keyof SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostErrors];
+
+export type SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: MessageFeedbackResponse;
+};
+
+export type SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostResponse = SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostResponses[keyof SubmitFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackPostResponses];
+
+export type GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetData = {
+    body?: never;
+    path: {
+        /**
+         * Conversation Id
+         */
+        conversation_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/feedback';
+};
+
+export type GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetError = GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetErrors[keyof GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetErrors];
+
+export type GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetResponses = {
+    /**
+     * Response Get Conversation Feedback Api V1 Conversations  Conversation Id  Feedback Get
+     *
+     * Successful Response
+     */
+    200: Array<MessageFeedbackResponse>;
+};
+
+export type GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetResponse = GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetResponses[keyof GetConversationFeedbackApiV1ConversationsConversationIdFeedbackGetResponses];
+
+export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostData = {
+    body: MessageFeedbackCreate;
+    path: {
+        /**
+         * Conversation Id
+         */
+        conversation_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/feedback';
+};
+
+export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostError = SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostErrors[keyof SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostErrors];
+
+export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: MessageFeedbackResponse;
+};
+
+export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponse = SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponses[keyof SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponses];
+
 export type HealthCheckApiV1HealthGetData = {
     body?: never;
     path?: never;
@@ -7547,6 +8126,34 @@ export type HealthCheckApiV1HealthGetData = {
 };
 
 export type HealthCheckApiV1HealthGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type GetFrontendConfigApiV1ConfigGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/config';
+};
+
+export type GetFrontendConfigApiV1ConfigGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type CatalogSyncProgressApiInternalCatalogSyncProgressPostData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/internal/catalog-sync-progress';
+};
+
+export type CatalogSyncProgressApiInternalCatalogSyncProgressPostResponses = {
     /**
      * Successful Response
      */

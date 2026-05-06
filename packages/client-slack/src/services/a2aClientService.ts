@@ -55,7 +55,7 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
     headers.set('Authorization', `Bearer ${accessToken}`);
     headers.set(
       'X-A2A-Extensions',
-      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0'
+      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:feedback-request:1.0'
     );
     return fetch(input, {
       ...init,
@@ -80,6 +80,20 @@ export class A2AClientService {
     // Use URL constructor to properly handle trailing slashes
     this.agentCardUrl = new URL('.well-known/agent-card.json', baseUrl).toString();
     this.logger.debug(`A2AClientService initialized with agentCardUrl: ${this.agentCardUrl}`);
+  }
+
+  private extractTextPreview(event: Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent): string | null {
+    let parts: Part[] | undefined;
+    if (event.kind === 'status-update' && event.status?.message?.parts) {
+      parts = event.status.message.parts;
+    } else if (event.kind === 'artifact-update' && event.artifact?.parts) {
+      parts = event.artifact.parts;
+    } else if (event.kind === 'message' && event.parts) {
+      parts = event.parts;
+    }
+    if (!parts) return null;
+    const text = parts.find((p): p is TextPart => p.kind === 'text')?.text;
+    return text ? text.slice(0, 100) : null;
   }
 
   /**
@@ -175,7 +189,11 @@ export class A2AClientService {
     const stream = client.sendMessageStream(sendParams);
 
     for await (const event of stream) {
-      this.logger.debug({ event }, `Stream event received: kind=${event.kind}`);
+      const textPreview = this.extractTextPreview(event);
+      this.logger.debug(
+        { event },
+        `Stream event received: kind=${event.kind}${textPreview ? ` text="${textPreview}"` : ''}`
+      );
       yield event;
     }
 

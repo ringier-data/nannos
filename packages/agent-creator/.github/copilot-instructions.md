@@ -55,7 +55,7 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 - Implements LangGraph workflows for creating and managing sub-agents
 - Uses checkpointers for workflow persistence (DynamoDB + S3)
-- Integrates with Playground Backend for creating agents
+- Integrates with Console Backend for creating agents
 - Supports agent configuration validation and testing
 
 ### Configuration
@@ -103,6 +103,6 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 Fallback to direct pytest commands when needed:
 - Use pytest with pytest-asyncio for async tests
 - Use aiomoto for mocking AWS services
-- Mock external dependencies (Playground Backend, etc.)
+- Mock external dependencies (Console Backend, etc.)
 - Test LangGraph workflows with mock checkpointers
 - Verify agent creation logic with test cases

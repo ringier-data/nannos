@@ -9,12 +9,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from moto import mock_aws
+from console_backend.models.secret import SecretCreate, SecretType
+from console_backend.models.user import User
+from console_backend.services.secrets_service import SecretsService
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.secret import SecretCreate, SecretType
-from playground_backend.models.user import User
-from playground_backend.services.secrets_service import SecretsService
 
 
 async def _create_user(

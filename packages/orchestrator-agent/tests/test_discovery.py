@@ -174,7 +174,7 @@ class TestToolDiscoveryService:
         config.get_oidc_client_secret.return_value.get_secret_value.return_value = "test_secret"
         config.get_oidc_issuer.return_value = "https://test.oidc.com"
         config.MCP_GATEWAY_URL = "https://mock-gateway/mcp"
-        config.PLAYGROUND_BACKEND_URL = None
+        config.CONSOLE_BACKEND_URL = None
 
         oauth2_client = AsyncMock()
         oauth2_client.exchange_token = AsyncMock(return_value="mcp_token")

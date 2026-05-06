@@ -1,5 +1,5 @@
 import _ from 'lodash';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHmac } from 'crypto';
 
 import { Logger } from '../utils/logger.js';
 import {
@@ -217,6 +217,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     fileStorageService,
     baseUrl,
     isLocalMode,
+    feedbackService,
   } = deps;
 
   let statusMessageId: string | undefined;
@@ -430,6 +431,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     logger.info('Sending message via streaming');
 
     let accumulatedTask: Task | null = null;
+    let feedbackRequestData: { sub_agents?: string[] } | null = null;
     try {
       for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
         logger.debug(`Stream event: ${_.get(event, 'kind')}`);
@@ -485,6 +487,12 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               .join('\n');
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
             statusMessage.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
+            const feedbackData = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
+              sub_agents?: string[];
+            };
+            logger.debug({ feedbackData }, `Received feedback-request extension`);
+            feedbackRequestData = feedbackData;
           } else if (event.status?.state === 'completed') {
             if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
             accumulatedTask.artifacts?.push({
@@ -539,6 +547,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         messageId,
         statusMessageId,
       },
+      includeFeedbackButtons: false,
     });
 
     await inFlightTaskStore.delete(accumulatedTask.id);
@@ -547,6 +556,93 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       contextStore.set(contextKey, accumulatedTask?.contextId, result.messageId).catch((err) => {
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
       });
+
+      // Post feedback card as a separate private message with link-based buttons.
+      //
+      // Why links instead of action buttons?
+      // Google Chat Workspace Add-ons with HTTP endpoints don't route CARD_CLICKED events
+      // to the HTTP URL. Cloud logs show Google tries to invoke through its internal
+      // function dispatch (Apps Script or Cloud Functions), not via HTTP POST. The available
+      // trigger types confirm this: App command, Added to space, Message, Removed from space —
+      // no Card clicked trigger for HTTP endpoints.
+      //
+      // Pragmatic alternatives to link-based approach (untested/hypothetical):
+      // - Deploy a Cloud Function shim that receives card clicks (which Google natively routes
+      //   to Cloud Functions), then call the HTTP endpoint from there.
+      //
+      // Current solution: link-based approach opens a URL in the browser that records feedback.
+      // URLs are HMAC-signed to prevent impersonation and tampering.
+      if (feedbackService && accumulatedTask.contextId) {
+        try {
+          const subAgentId = feedbackRequestData?.sub_agents?.[0] || '';
+          // HMAC signature prevents URL tampering / impersonation
+          const sig = createHmac('sha256', deps.feedbackSigningSecret || '')
+            .update(`${accumulatedTask.contextId}:${accumulatedTask.id}:${userId}:${projectId}`)
+            .digest('hex')
+            .substring(0, 16);
+          const feedbackParams = new URLSearchParams({
+            c: accumulatedTask.contextId,
+            t: accumulatedTask.id,
+            u: userId,
+            p: projectId,
+            s: subAgentId,
+            sig,
+          });
+          const baseUrl = deps.baseUrl.replace(/\/+$/, '');
+          const positiveUrl = `${baseUrl}/api/v1/feedback?${feedbackParams.toString()}&r=positive`;
+          const negativeUrl = `${baseUrl}/api/v1/feedback?${feedbackParams.toString()}&r=negative`;
+
+          await chatService.sendMessage({
+            projectId,
+            spaceId,
+            threadId,
+            cardsV2: [
+              {
+                cardId: 'feedback_card',
+                card: {
+                  header: {
+                    title: 'Was this response helpful?',
+                  },
+                  sections: [
+                    {
+                      widgets: [
+                        {
+                          buttonList: {
+                            buttons: [
+                              {
+                                text: '👍 Yes',
+                                onClick: {
+                                  openLink: {
+                                    url: positiveUrl,
+                                  },
+                                },
+                              },
+                              {
+                                text: '👎 No',
+                                onClick: {
+                                  openLink: {
+                                    url: negativeUrl,
+                                  },
+                                },
+                              },
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+            privateMessageViewerName: userId,
+            messageReplyOption: threadId ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' : undefined,
+          });
+
+          logger.info(`Sent feedback link card for context=${accumulatedTask.contextId}`);
+        } catch (err) {
+          logger.error(err, `Failed to send feedback card: ${err}`);
+        }
+      }
     }
   } catch (error) {
     logger.error(error, `Error handling ${source}: ${error}`);

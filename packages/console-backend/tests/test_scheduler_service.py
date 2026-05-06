@@ -8,8 +8,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from playground_backend.models.scheduled_job import (
+from console_backend.models.scheduled_job import (
     AutomatedSubAgentConfig,
     JobType,
     ScheduledJob,
@@ -17,8 +16,8 @@ from playground_backend.models.scheduled_job import (
     ScheduledJobUpdate,
     ScheduleKind,
 )
-from playground_backend.models.user import User, UserRole, UserStatus
-from playground_backend.services.scheduler_service import SchedulerService
+from console_backend.models.user import User, UserRole, UserStatus
+from console_backend.services.scheduler_service import SchedulerService
 
 
 def _make_user(user_id: str = "user-123") -> User:
@@ -147,7 +146,7 @@ class TestCreateJobAutoSubAgent:
         self, service: SchedulerService, mock_repo: AsyncMock, mock_sub_agent_service: AsyncMock, actor: User
     ):
         """The auto-created sub-agent must have type=automated."""
-        from playground_backend.models.sub_agent import SubAgentType
+        from console_backend.models.sub_agent import SubAgentType
 
         db = AsyncMock()
         created_agent = MagicMock()

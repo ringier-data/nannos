@@ -6,9 +6,8 @@ Tests cover the pure `compute_next_run()` function — no database required.
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
-from playground_backend.models.scheduled_job import ScheduleKind
-from playground_backend.repositories.scheduled_job_repository import compute_next_run
+from console_backend.models.scheduled_job import ScheduleKind
+from console_backend.repositories.scheduled_job_repository import compute_next_run
 
 
 class TestComputeNextRun:

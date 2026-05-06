@@ -2,7 +2,7 @@
 
 set -e
 
-DB_NAME="playground"
+DB_NAME="console"
 DB_USER="postgres"
 DB_PASSWORD="password"
 DB_HOST="localhost"

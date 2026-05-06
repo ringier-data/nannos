@@ -1,6 +1,6 @@
 import pytest
 
-from playground_backend import validators
+from console_backend import validators
 
 # ==============================================================================
 # Fixtures

@@ -36,6 +36,10 @@ export interface Config {
     url: string;
     timeout: number;
   };
+  readonly consoleBackend?: {
+    url: string;
+    audience: string;
+  };
 }
 
 export async function getConfigFromEnv(): Promise<Config> {
@@ -145,5 +149,11 @@ export async function getConfigFromEnv(): Promise<Config> {
       url: process.env.A2A_SERVER_URL!,
       timeout: Number(process.env.A2A_SERVER_TIMEOUT) || 30000,
     },
+    consoleBackend: process.env.CONSOLE_BACKEND_URL
+      ? {
+          url: process.env.CONSOLE_BACKEND_URL,
+          audience: process.env.OIDC_CONSOLE_BACKEND_AUDIENCE || 'agent-console',
+        }
+      : undefined,
   };
 }

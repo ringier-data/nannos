@@ -263,7 +263,7 @@ class CostLogger:
         Initialize the cost logger.
 
         Args:
-            backend_url: Base URL of the playground backend API (e.g., "https://backend.nannos.ai")
+            backend_url: Base URL of the console backend API (e.g., "https://backend.nannos.ai")
             access_token: Static JWT access token for API authentication (optional if using provider)
             access_token_provider: Callable that returns current access token (for dynamic tokens via ContextVar)
             batch_size: Number of records to batch before sending (default: 10)

@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import { Server } from 'http';
+import { createHmac } from 'crypto';
 import { Config, getConfigFromEnv } from './config/config.js';
 import { Logger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
@@ -8,6 +9,7 @@ import { UserAuthService } from './services/userAuthService.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
 import { GoogleChatService } from './services/googleChatService.js';
+import { FeedbackService } from './services/feedbackService.js';
 import { createGoogleChatAuthMiddleware } from './middleware/googleChatAuth.js';
 import { handleOAuthCallback, generateCallbackHTML } from './utils/oauthCallback.js';
 import { processPendingRequest } from './utils/processPendingRequest.js';
@@ -43,6 +45,17 @@ interface BaseGoogleChatEvent {
     user: User;
     messagePayload?: any;
     appCommandPayload?: any;
+    cardClickedPayload?: {
+      message: {
+        name: string;
+        thread?: { name: string };
+      };
+      space: Space;
+      action: {
+        actionMethodName: string;
+        parameters?: Array<{ key: string; value: string }>;
+      };
+    };
   };
 }
 
@@ -133,6 +146,13 @@ function setupServerTimeouts(server: Server, config: Config) {
     // Google Chat service (uses service account credentials)
     const chatService = new GoogleChatService(config);
 
+    // Feedback service for console-backend integration (optional)
+    let feedbackService: FeedbackService | undefined;
+    if (config.consoleBackend) {
+      feedbackService = new FeedbackService(userAuthService, config);
+      logger.info(`Feedback service enabled (console-backend: ${config.consoleBackend.url})`);
+    }
+
     // Handler dependencies
     const handlerDeps: HandlerDependencies = {
       userAuthService,
@@ -144,6 +164,8 @@ function setupServerTimeouts(server: Server, config: Config) {
       baseUrl: config.baseUrl,
       fileStorageService,
       isLocalMode: config.isLocal(),
+      feedbackService,
+      feedbackSigningSecret: config.oidc.clientSecret || '',
     };
 
     // -----------------------------------------------------------------------
@@ -155,15 +177,69 @@ function setupServerTimeouts(server: Server, config: Config) {
       res.send('OK');
     });
 
+    // Feedback link endpoint (used by Google Chat card buttons)
+    app.get('/api/v1/feedback', async (req: Request, res: Response) => {
+      const { c: contextId, t: taskId, u: userId, p: projectId, s: subAgentId, r: rating, sig } = req.query as Record<string, string>;
+
+      if (!contextId || !taskId || !userId || !projectId || !rating || !sig) {
+        res.status(400).type('text/html').send('<html><body><h2>Invalid feedback link</h2></body></html>');
+        return;
+      }
+
+      if (rating !== 'positive' && rating !== 'negative') {
+        res.status(400).type('text/html').send('<html><body><h2>Invalid rating</h2></body></html>');
+        return;
+      }
+
+      // Verify HMAC signature to prevent impersonation
+      const expectedSig = createHmac('sha256', config.oidc.clientSecret || '')
+        .update(`${contextId}:${taskId}:${userId}:${projectId}`)
+        .digest('hex')
+        .substring(0, 16);
+      if (sig !== expectedSig) {
+        logger.warn(`Invalid feedback signature for user=${userId} context=${contextId}`);
+        res.status(403).type('text/html').send('<html><body><h2>Invalid or expired link</h2></body></html>');
+        return;
+      }
+
+      if (feedbackService) {
+        const success = await feedbackService.submitFeedback(
+          userId, projectId, contextId, taskId, rating as 'positive' | 'negative', taskId, subAgentId || undefined,
+        );
+        if (success) {
+          res.type('text/html').send('<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>\u2705 Thanks for the feedback!</h2><p>You can close this tab.</p></body></html>');
+        } else {
+          res.type('text/html').send('<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>\u26a0\ufe0f Feedback could not be submitted</h2><p>Please try again later.</p></body></html>');
+        }
+      } else {
+        res.status(503).type('text/html').send('<html><body><h2>Feedback service unavailable</h2></body></html>');
+      }
+    });
+
     // Google Chat event endpoint (with JWT verification)
     app.post(
       '/api/v1/chat/events',
+      (req: Request, _res: Response, next: Function) => {
+        logger.info(`[ChatEvent] Incoming POST /api/v1/chat/events - body keys: ${Object.keys(req.body || {}).join(',')}`);
+        next();
+      },
       createGoogleChatAuthMiddleware(
         config.googleChatTokenExpectedAudience,
         config.googleChatConfigs,
       ),
       async (req: Request, res: Response) => {
+        // Log raw event structure for debugging card clicks
+        const topLevelKeys = Object.keys(req.body || {});
+        const chatKeys = req.body?.chat ? Object.keys(req.body.chat) : [];
+        logger.info(`[ChatEvent] Raw event keys: top=${topLevelKeys.join(',')}, chat=${chatKeys.join(',')}`);
+
         const baseEvent: BaseGoogleChatEvent = req.body;
+
+        if (!baseEvent?.chat?.user) {
+          logger.warn(`[ChatEvent] Received event with unexpected structure (no chat.user). Keys: ${topLevelKeys.join(',')}`);
+          res.json({});
+          return;
+        }
 
         const projectId = res.locals.projectNumber;
 
@@ -174,6 +250,8 @@ function setupServerTimeouts(server: Server, config: Config) {
           eventType = 'MESSAGE';
         } else if (baseEvent.chat?.appCommandPayload) {
           eventType = 'APP_COMMAND';
+        } else if (baseEvent.chat?.cardClickedPayload) {
+          eventType = 'CARD_CLICKED';
         }
 
         logger.info(`[ChatEvent] type=${eventType} user=${userId}`);
@@ -243,6 +321,47 @@ function setupServerTimeouts(server: Server, config: Config) {
 
               // Respond immediately to acknowledge the event
               res.json({});
+              return;
+            }
+
+            case 'CARD_CLICKED': {
+              const payload = baseEvent.chat.cardClickedPayload!;
+              const actionMethod = payload.action.actionMethodName;
+              const messageName = payload.message.name;
+
+              logger.info(`[ChatEvent] CARD_CLICKED: action=${actionMethod} message=${messageName}`);
+
+              if (
+                feedbackService &&
+                (actionMethod === 'feedback_positive' || actionMethod === 'feedback_negative')
+              ) {
+                const rating = actionMethod === 'feedback_positive' ? 'positive' : 'negative';
+                const mapping = feedbackService.responseMapping.get(messageName);
+
+                if (mapping) {
+                  const subAgentId = mapping.subAgents && mapping.subAgents.length > 0 ? mapping.subAgents[0] : undefined;
+                  feedbackService
+                    .submitFeedback(mapping.userId, mapping.projectId, mapping.contextId, mapping.taskId, rating, mapping.taskId, subAgentId)
+                    .catch((err) => {
+                      logger.error(err, `Failed to submit feedback: ${err}`);
+                    });
+                } else {
+                  logger.debug(`No response mapping for card click on ${messageName}`);
+                }
+              }
+
+              // Google Chat requires actionResponse for card click events
+              res.json({
+                actionResponse: {
+                  type: 'DIALOG',
+                  dialogAction: {
+                    actionStatus: {
+                      statusCode: 'OK',
+                      userFacingMessage: 'Thanks for the feedback!',
+                    },
+                  },
+                },
+              });
               return;
             }
 

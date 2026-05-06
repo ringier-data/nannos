@@ -6,19 +6,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-# These env vars are required at import time by playground_backend.config
+# These env vars are required at import time by console_backend.config
 os.environ.setdefault("OIDC_ISSUER", "http://localhost:8080/realms/test")
 os.environ.setdefault("OIDC_CLIENT_ID", "test")
 os.environ.setdefault("OIDC_AUDIENCE", "test")
 
-from playground_backend.services.in_memory_session_service import InMemorySessionService
-from playground_backend.services.in_memory_socket_session_service import InMemorySocketSessionService
-from playground_backend.services.in_memory_conversation_service import InMemoryConversationService
-from playground_backend.services.in_memory_messages_service import InMemoryMessagesService
-from playground_backend.services.local_file_storage_service import LocalFileStorageService
-
+from console_backend.services.in_memory_conversation_service import InMemoryConversationService
+from console_backend.services.in_memory_messages_service import InMemoryMessagesService
+from console_backend.services.in_memory_session_service import InMemorySessionService
+from console_backend.services.in_memory_socket_session_service import InMemorySocketSessionService
+from console_backend.services.local_file_storage_service import LocalFileStorageService
 
 # -- InMemorySessionService --------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_session_create_and_get():
@@ -64,6 +64,7 @@ async def test_session_orchestrator_cookie():
 
 # -- InMemorySocketSessionService --------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_socket_session_create_and_get():
     svc = InMemorySocketSessionService()
@@ -94,6 +95,7 @@ async def test_socket_session_initialize_client():
 
 
 # -- InMemoryConversationService ---------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_conversation_get_or_create():
@@ -127,6 +129,7 @@ async def test_conversation_insert_and_get():
 
 # -- InMemoryMessagesService -------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_messages_insert_and_list():
     svc = InMemoryMessagesService()
@@ -149,6 +152,7 @@ async def test_messages_ordering():
 
 
 # -- LocalFileStorageService -------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_local_storage_properties():
@@ -183,6 +187,7 @@ async def test_local_storage_upload_and_delete():
 
         # Create a fake UploadFile
         import io
+
         from fastapi import UploadFile as UF
 
         content = b"fake image data"

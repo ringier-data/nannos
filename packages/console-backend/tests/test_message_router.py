@@ -1,7 +1,7 @@
-"""Tests for `playground_backend.routers.message_router`."""
+"""Tests for `console_backend.routers.message_router`."""
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 # Prevent AWS/boto3 local credential path during imports
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
-from playground_backend.routers import message_router
+from console_backend.routers import message_router
 
 app = FastAPI()
 app.include_router(message_router.router)

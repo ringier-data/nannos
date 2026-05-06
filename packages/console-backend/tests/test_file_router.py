@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from playground_backend.models.user import User
+from console_backend.models.user import User
 
 
 @pytest.mark.asyncio
@@ -22,7 +22,7 @@ class TestFileRouter:
         )
 
         with patch(
-            "playground_backend.routers.file_router.getattr",
+            "console_backend.routers.file_router.getattr",
             return_value=mock_storage,
         ):
             response = await client_with_db.post(
@@ -52,7 +52,7 @@ class TestFileRouter:
         mock_storage._sanitize_segment = lambda val, default: val.replace("@", "-")
 
         with patch(
-            "playground_backend.routers.file_router.getattr",
+            "console_backend.routers.file_router.getattr",
             return_value=mock_storage,
         ):
             response = await client_with_db.post(
@@ -76,7 +76,7 @@ class TestFileRouter:
         mock_storage._prefix = "uploads"
 
         with patch(
-            "playground_backend.routers.file_router.getattr",
+            "console_backend.routers.file_router.getattr",
             return_value=mock_storage,
         ):
             response = await client_with_db.post(
@@ -127,7 +127,7 @@ class TestFileRouter:
         mock_storage.generate_presigned_get_url = mock_generate_url
 
         with patch(
-            "playground_backend.routers.file_router.getattr",
+            "console_backend.routers.file_router.getattr",
             return_value=mock_storage,
         ):
             response = await client_with_db.post(
