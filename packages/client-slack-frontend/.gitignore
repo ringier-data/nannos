@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Un-ignore src/lib which is not a Python build artifact
+!src/lib/
