@@ -1,6 +1,6 @@
 {
   "name": "rcplus-alloy-a2a-slack-client",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "RC+/Alloy A2A Slack Client ",
   "type": "module",
   "exports": "./dist/src/index.js",
