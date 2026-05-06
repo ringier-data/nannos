@@ -198,9 +198,9 @@ class TestLocalObjectStorageService:
 
     @pytest.mark.asyncio
     async def test_generate_presigned_url_returns_local_path(self, local_service):
-        """Test that presigned URL returns local API path."""
+        """Test that presigned URL returns local API path with bucket."""
         url = await local_service.generate_presigned_url("file://bucket/file.txt")
-        assert url == "/api/v1/files/file.txt"
+        assert url == "/api/v1/files/bucket/file.txt"
 
     @pytest.mark.asyncio
     async def test_delete_removes_file_and_metadata(self, local_service, temp_storage):

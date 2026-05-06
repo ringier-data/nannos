@@ -452,6 +452,9 @@ class LocalObjectStorageService(IObjectStorageService):
 
         For local development, this returns a path that can be served by a local
         HTTP server. The base_url determines the URL prefix.
+
+        When base_url is an HTTP endpoint (e.g., http://localhost:5001/api/v1/files/download),
+        the URL includes bucket and key: {base_url}/{bucket}/{key}
         """
         bucket, key = parse_storage_uri(uri)
 
@@ -461,8 +464,8 @@ class LocalObjectStorageService(IObjectStorageService):
             obj_path = self._object_path(bucket, key)
             return f"file://{obj_path.absolute()}"
         else:
-            # HTTP-style URL (e.g., /api/v1/files/file.txt)
-            return f"{self.base_url.rstrip('/')}/{key}"
+            # HTTP-style URL: {base_url}/{bucket}/{key}
+            return f"{self.base_url.rstrip('/')}/{bucket}/{key}"
 
     def verify_signed_url(self, url: str) -> bool:
         """Verify a signed URL is valid and not expired.
