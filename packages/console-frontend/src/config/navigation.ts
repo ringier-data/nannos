@@ -12,6 +12,7 @@ import {
   LibraryBig,
   Bug,
   KeyRound,
+  Globe,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -94,8 +95,13 @@ export const adminNavItems: NavItem[] = [
     icon: Bug,
   },
   {
-    title: 'SCIM Tokens',
+    title: 'Inbound SCIM',
     url: '/app/admin/scim-tokens',
     icon: KeyRound,
+  },
+  {
+    title: 'Outbound SCIM',
+    url: '/app/admin/outbound-scim',
+    icon: Globe,
   },
 ];

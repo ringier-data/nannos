@@ -281,6 +281,12 @@ class AuthController:
             samesite="lax",  # Must be 'lax' to allow cookie on OAuth redirects from Keycloak
             max_age=config.session_ttl_seconds,
         )
+        # Trigger outbound SCIM push (fire-and-forget) after all DB work is done.
+        # The session auto-commits after this handler returns, and the asyncio task
+        # won't execute until the event loop yields (i.e., after commit).
+        if hasattr(request.app.state, "outbound_scim_push_service"):
+            request.app.state.outbound_scim_push_service.push_user(user.id, "update")
+
         logger.debug(f"Redirecting user to: {redirect_to}")
         return redirect_response
 

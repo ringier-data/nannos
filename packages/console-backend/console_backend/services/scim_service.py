@@ -112,10 +112,14 @@ class ScimUserService:
 
     def __init__(self) -> None:
         self._user_service: UserService | None = None
+        self._outbound_scim_push_service = None
 
     def set_user_service(self, user_service: UserService) -> None:
         """Inject the shared UserService instance."""
         self._user_service = user_service
+
+    def set_outbound_scim_push_service(self, service) -> None:
+        self._outbound_scim_push_service = service
 
     @property
     def user_service(self) -> UserService:
@@ -172,7 +176,7 @@ class ScimUserService:
             },
         )
 
-        return self._build_scim_user(
+        result = self._build_scim_user(
             id=user_id,
             email=email,
             userName=data.userName,
@@ -184,6 +188,12 @@ class ScimUserService:
             updated_at=now,
             base_url=base_url,
         )
+
+        # Trigger outbound SCIM push (fire-and-forget)
+        if self._outbound_scim_push_service:
+            self._outbound_scim_push_service.push_user(user_id, "create")
+
+        return result
 
     async def get_user(self, db: AsyncSession, user_id: str, *, base_url: str) -> ScimUser:
         """Get a single user by internal ID."""
@@ -256,7 +266,7 @@ class ScimUserService:
             },
         )
 
-        return self._build_scim_user(
+        result = self._build_scim_user(
             id=user_id,
             email=email,
             userName=data.userName,
@@ -268,6 +278,12 @@ class ScimUserService:
             updated_at=now,
             base_url=base_url,
         )
+
+        # Trigger outbound SCIM push (fire-and-forget)
+        if self._outbound_scim_push_service:
+            self._outbound_scim_push_service.push_user(user_id, "update")
+
+        return result
 
     async def patch_user(self, db: AsyncSession, user_id: str, patch: ScimPatchOp, *, base_url: str) -> ScimUser:
         """Partial update of a user (PATCH)."""
@@ -313,6 +329,10 @@ class ScimUserService:
                 text(f"UPDATE users SET {set_clauses}, updated_at = :now WHERE id = :id AND deleted_at IS NULL"),
                 {**updates, "now": now},
             )
+
+        # Trigger outbound SCIM push (fire-and-forget)
+        if self._outbound_scim_push_service:
+            self._outbound_scim_push_service.push_user(user_id, "update")
 
         return await self.get_user(db, user_id, base_url=base_url)
 
@@ -506,10 +526,14 @@ class ScimGroupService:
 
     def __init__(self) -> None:
         self._user_group_service: UserGroupService | None = None
+        self._outbound_scim_push_service = None
 
     def set_user_group_service(self, user_group_service: UserGroupService) -> None:
         """Inject the shared UserGroupService instance."""
         self._user_group_service = user_group_service
+
+    def set_outbound_scim_push_service(self, service) -> None:
+        self._outbound_scim_push_service = service
 
     @property
     def user_group_service(self) -> UserGroupService:
@@ -560,7 +584,7 @@ class ScimGroupService:
 
         members = await self._get_group_members(db, group_id)
 
-        return ScimGroup(
+        result = ScimGroup(
             id=str(group_id),
             externalId=data.externalId,
             displayName=data.displayName,
@@ -572,6 +596,12 @@ class ScimGroupService:
                 location=f"{base_url}/scim/v2/Groups/{group_id}",
             ),
         )
+
+        # Trigger outbound SCIM push (fire-and-forget)
+        if self._outbound_scim_push_service:
+            self._outbound_scim_push_service.push_group(group_id, "create")
+
+        return result
 
     async def get_group(self, db: AsyncSession, group_id: str, *, base_url: str) -> ScimGroup:
         """Get a single group by ID."""
@@ -651,7 +681,7 @@ class ScimGroupService:
             await self._add_member(db, gid, user_id)
 
         members = await self._get_group_members(db, gid)
-        return ScimGroup(
+        result = ScimGroup(
             id=group_id,
             externalId=data.externalId,
             displayName=data.displayName,
@@ -663,6 +693,12 @@ class ScimGroupService:
                 location=f"{base_url}/scim/v2/Groups/{group_id}",
             ),
         )
+
+        # Trigger outbound SCIM push (fire-and-forget)
+        if self._outbound_scim_push_service:
+            self._outbound_scim_push_service.push_group(gid, "update")
+
+        return result
 
     async def patch_group(self, db: AsyncSession, group_id: str, patch: ScimPatchOp, *, base_url: str) -> ScimGroup:
         """Partial update of a group (PATCH)."""
@@ -731,6 +767,10 @@ class ScimGroupService:
             text("UPDATE user_groups SET updated_at = :now WHERE id = :id"),
             {"id": gid, "now": now},
         )
+
+        # Trigger outbound SCIM push (fire-and-forget)
+        if self._outbound_scim_push_service:
+            self._outbound_scim_push_service.push_group(gid, "update")
 
         return await self.get_group(db, group_id, base_url=base_url)
 

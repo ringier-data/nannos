@@ -23,6 +23,7 @@ import { AuditPage } from './pages/admin/AuditPage';
 import { RateCardsPage } from './pages/admin/RateCardsPage';
 import { BugReportsPage } from './pages/admin/BugReportsPage';
 import { ScimTokensPage } from './pages/admin/ScimTokensPage';
+import { OutboundScimPage } from './pages/admin/OutboundScimPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth();
@@ -144,6 +145,14 @@ function App() {
           element={
             <AdminRoute>
               <ScimTokensPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="admin/outbound-scim"
+          element={
+            <AdminRoute>
+              <OutboundScimPage />
             </AdminRoute>
           }
         />

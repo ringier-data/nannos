@@ -58,6 +58,7 @@ class UserGroupService:
         self._sub_agent_service = sub_agent_service
         self._notification_service = notification_service
         self._keycloak_service = keycloak_admin_service
+        self._outbound_scim_push_service = None
 
     def set_repository(self, user_group_repository):
         """Set the user group repository (dependency injection)."""
@@ -74,6 +75,10 @@ class UserGroupService:
     def set_keycloak_service(self, keycloak_admin_service: KeycloakAdminService | None):
         """Set the Keycloak admin service (dependency injection)."""
         self._keycloak_service = keycloak_admin_service
+
+    def set_outbound_scim_push_service(self, service):
+        """Set the outbound SCIM push service (dependency injection)."""
+        self._outbound_scim_push_service = service
 
     @property
     def repo(self) -> UserGroupRepository:
@@ -387,6 +392,11 @@ class UserGroupService:
                 raise RuntimeError("Failed to retrieve created group")
 
             logger.info(f"Created group: {name}")
+
+            # Trigger outbound SCIM push (fire-and-forget)
+            if self._outbound_scim_push_service:
+                self._outbound_scim_push_service.push_group(group_id, "create")
+
             return group
         except Exception as e:
             logger.error(f"Failed to create group: {e}")
@@ -457,6 +467,11 @@ class UserGroupService:
             # Fetch and return updated group
             group = await self.get_group(db, group_id)
             logger.info(f"Updated group: {group_id}")
+
+            # Trigger outbound SCIM push (fire-and-forget)
+            if self._outbound_scim_push_service:
+                self._outbound_scim_push_service.push_group(group_id, "update")
+
             return group
         except Exception as e:
             logger.error(f"Failed to update group: {e}")
@@ -792,6 +807,10 @@ class UserGroupService:
             # Use internal helper
             await self._add_members(db, actor, group_id, user_ids, role)
 
+            # Trigger outbound SCIM push (fire-and-forget)
+            if self._outbound_scim_push_service:
+                self._outbound_scim_push_service.push_group(group_id, "update")
+
             # Return updated member list
             members, _ = await self.list_members(db, group_id, page=1, limit=1000)
             return members
@@ -1082,6 +1101,10 @@ class UserGroupService:
         try:
             # Use internal helper
             await self._remove_members(db, actor, group_id, user_ids)
+
+            # Trigger outbound SCIM push (fire-and-forget)
+            if self._outbound_scim_push_service:
+                self._outbound_scim_push_service.push_group(group_id, "update")
 
             # Return updated member list
             members, _ = await self.list_members(db, group_id, page=1, limit=1000)
