@@ -510,6 +510,21 @@ elif [[ "$_OIDC_MODE" == "remote-manual" ]]; then
   ok "OIDC configured with shared secret"
 fi
 
+# ─── 3b. Configure local storage (when not using S3) ─────────────
+
+if [[ -z "$FILES_S3_BUCKET" ]]; then
+  log "Configuring local file storage (no S3 bucket configured)..."
+  OBJECT_STORAGE_TYPE="local"
+  LOCAL_STORAGE_BASE_URL="http://localhost:5001/api/v1/files/download"
+  LOCAL_STORAGE_PATH="${LOCAL_STORAGE_PATH:-./local-uploads}"
+  ok "Local storage configured at: $LOCAL_STORAGE_PATH"
+  ok "Download URL: $LOCAL_STORAGE_BASE_URL"
+else
+  OBJECT_STORAGE_TYPE="s3"
+  LOCAL_STORAGE_BASE_URL=""
+  LOCAL_STORAGE_PATH=""
+fi
+
 # ─── 4. Start infrastructure (PostgreSQL + Keycloak) ──────────────
 
 log "Starting infrastructure..."
@@ -841,6 +856,9 @@ procs:
       CHECKPOINT_DYNAMODB_TABLE_NAME: "$CHECKPOINT_DYNAMODB_TABLE_NAME"
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
       FILES_S3_BUCKET: "$FILES_S3_BUCKET"
+      OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
+      LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
+      LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
       VOICE_AGENT_URL: "http://localhost:8002"
       AGENT_CREATOR_URL: "http://localhost:8080"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
@@ -939,6 +957,9 @@ procs:
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
       CHECKPOINT_AWS_REGION: "$CHECKPOINT_AWS_REGION"
       DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
+      OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
+      LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
+      LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
 

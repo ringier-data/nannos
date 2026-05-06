@@ -1,10 +1,11 @@
 """Routes for managing file uploads for chat messages."""
 
+import json
 import os
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from playground_backend.dependencies import require_auth
@@ -212,3 +213,63 @@ async def serve_local_file(
         raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(abs_path)
+
+
+@router.get("/download/{bucket}/{file_path:path}")
+async def download_storage_file(
+    request: Request,
+    bucket: str,
+    file_path: str,
+) -> Response:
+    """Download a file from local object storage.
+
+    This endpoint serves files stored via LocalObjectStorageService. It's equivalent
+    to S3 presigned URLs - no authentication required since the URL itself acts as
+    the access token (URLs are only distributed to authorized users/agents).
+
+    Only active when OBJECT_STORAGE_TYPE=local (no S3 bucket configured).
+    """
+    from pathlib import Path
+
+    from agent_common.core.object_storage import get_object_storage_service, LocalObjectStorageService
+
+    try:
+        storage = get_object_storage_service()
+    except Exception:
+        raise HTTPException(status_code=500, detail="Object storage service not configured")
+
+    if not isinstance(storage, LocalObjectStorageService):
+        raise HTTPException(status_code=404, detail="This endpoint is only available for local storage")
+
+    # Validate bucket and key to prevent path traversal
+    if ".." in bucket or "/" in bucket:
+        raise HTTPException(status_code=400, detail="Invalid bucket name")
+    if ".." in file_path:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    # Construct URI and download
+    uri = f"file://{bucket}/{file_path}"
+    try:
+        obj = await storage.download(uri)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {e}")
+
+    # Read metadata for content type
+    meta_path = storage._meta_path(bucket, file_path)
+    content_type = "application/octet-stream"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            content_type = meta.get("content_type", content_type)
+        except Exception:
+            pass
+
+    return Response(
+        content=obj.content,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{Path(file_path).name}"',
+        },
+    )

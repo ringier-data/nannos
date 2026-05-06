@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+from moto import mock_aws
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +40,20 @@ from playground_backend.services.user_service import UserService
 from playground_backend.services.user_settings_service import UserSettingsService
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture
+def aws_mock():
+    """Fixture that provides mocked AWS services (S3, SSM, etc.).
+
+    Use this fixture instead of @mock_aws decorator for async tests.
+    The decorator approach doesn't work properly with pytest-asyncio.
+
+    Services that use AWS (like SecretsService) should depend on this fixture
+    to ensure the mock is active when the aiobotocore session is created.
+    """
+    with mock_aws():
+        yield
 
 
 # Docker network cleanup fixture
