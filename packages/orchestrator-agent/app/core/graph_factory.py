@@ -32,7 +32,7 @@ from agent_common.middleware.storage_paths_middleware import StoragePathsInstruc
 from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolRetryMiddleware
+from langchain.agents.middleware import HumanInTheLoopMiddleware, ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
@@ -54,12 +54,25 @@ from ..middleware import (
 from ..middleware.error_classification_middleware import ErrorClassificationMiddleware
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
-from .bug_report_tool import report_bug_tool
 from .file_tools import create_presigned_url_tool
 from .steering_state import get_all_active_subagent_dispatches, get_orchestrator_pending_messages
 from .time_tools import create_time_tool
 
 logger = logging.getLogger(__name__)
+
+# Tools that require user confirmation before execution (HITL interrupt)
+HITL_GUARDED_TOOLS = {
+    "console_create_bug_report": {
+        "allowed_decisions": ["approve", "edit", "reject"],
+        "description": "Bug report requires your confirmation before submission.",
+    },
+}
+
+
+def _create_hitl_middleware() -> HumanInTheLoopMiddleware:
+    """Create a HumanInTheLoopMiddleware instance for guarded tools."""
+    return HumanInTheLoopMiddleware(interrupt_on=HITL_GUARDED_TOOLS)
+
 
 # System prompt for the custom general-purpose agent graph.
 # This agent is invoked when the orchestrator delegates a "general-purpose" task.
@@ -502,6 +515,10 @@ class GraphFactory:
             on_messages_received=_forward_to_active_subagents,
         )
 
+        # HumanInTheLoopMiddleware: uses interrupt() to pause and ask for user
+        # confirmation before executing guarded tools (e.g. console_create_bug_report).
+        hitl_middleware = _create_hitl_middleware()
+
         return [
             dynamic_tool_middleware,
             storage_paths_middleware,
@@ -511,6 +528,7 @@ class GraphFactory:
             self._loop_detection_middleware,
             self._auth_middleware,
             ErrorClassificationMiddleware(),
+            hitl_middleware,
             self._retry_middleware,
             self._a2a_middleware,
             self._todo_middleware,
@@ -535,9 +553,6 @@ class GraphFactory:
 
             # Add copy_file tool for efficient file copying without LLM context loading
             static_tools.append(create_copy_file_tool(self.backend_factory))
-
-            # Add bug report tool for last-resort error reporting (uses interrupt())
-            static_tools.append(report_bug_tool)
 
             self._static_tools_cache = static_tools
 
@@ -735,10 +750,15 @@ class GraphFactory:
         # request.override(tool=...) and delegates to handler, so the full inner chain
         # runs for every tool call.  No hoisting of FilesystemMiddleware is needed.
         common_stack = build_common_middleware_stack(model, backend, add_docstore_hint=self.store is not None)
+
+        # HITL middleware must also guard MCP tools called by the GP agent
+        gp_hitl_middleware = _create_hitl_middleware()
+
         middleware = [
             toolset_selector,
             gp_dynamic_dispatch,
             *common_stack,  # FilesystemMiddleware, SummarizationMiddleware, caching, retry, etc.
+            gp_hitl_middleware,
         ]
 
         # Get response_format for structured output (SubAgentResponseSchema)

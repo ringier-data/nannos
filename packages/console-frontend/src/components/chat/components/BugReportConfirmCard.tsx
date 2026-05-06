@@ -1,48 +1,31 @@
 import { useState } from 'react';
 import { Bug } from 'lucide-react';
-import { useMutation } from '@tanstack/react-query';
-import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  createBugReportApiV1BugReportsPostMutation,
-} from '@/api/generated/@tanstack/react-query.gen';
 import { useChat } from '../contexts';
 
 export function BugReportConfirmCard() {
-  const { pendingBugReport, dismissBugReport, sendMessage } = useChat();
+  const { pendingBugReport, dismissBugReport, sendSilentMessage } = useChat();
   const [description, setDescription] = useState('');
-
-  const mutation = useMutation({
-    ...createBugReportApiV1BugReportsPostMutation(),
-    onSuccess: () => {
-      toast.success('Bug report submitted');
-      // Send confirmation back to the orchestrator so it can resume
-      sendMessage(description || 'confirmed');
-      dismissBugReport();
-      setDescription('');
-    },
-    onError: () => {
-      toast.error('Failed to submit bug report');
-    },
-  });
 
   if (!pendingBugReport) return null;
 
   const handleConfirm = () => {
-    mutation.mutate({
-      body: {
-        conversation_id: pendingBugReport.conversationId,
-        task_id: pendingBugReport.taskId || undefined,
-        description: description || pendingBugReport.reason || undefined,
-        source: 'orchestrator',
-      },
-    });
+    // Send HumanInTheLoopMiddleware decisions as structured DataPart to orchestrator.
+    // The MCP tool (console_create_bug_report) handles actual creation after approval.
+    if (description) {
+      const originalAction = pendingBugReport.actionRequests?.[0];
+      const editedArgs = { ...(originalAction?.args || {}), description };
+      sendSilentMessage('', [{ decisions: [{ type: 'edit', edited_action: { name: originalAction?.name || 'console_create_bug_report', args: editedArgs } }] }]);
+    } else {
+      sendSilentMessage('', [{ decisions: [{ type: 'approve' }] }]);
+    }
+    dismissBugReport();
+    setDescription('');
   };
 
   const handleDecline = () => {
-    // Send decline back to the orchestrator
-    sendMessage('decline');
+    sendSilentMessage('', [{ decisions: [{ type: 'reject', message: 'User declined' }] }]);
     dismissBugReport();
   };
 
@@ -72,8 +55,8 @@ export function BugReportConfirmCard() {
         <Button variant="outline" size="sm" onClick={handleDecline}>
           Dismiss
         </Button>
-        <Button size="sm" onClick={handleConfirm} disabled={mutation.isPending}>
-          {mutation.isPending ? 'Submitting...' : 'Report Issue'}
+        <Button size="sm" onClick={handleConfirm}>
+          Report Issue
         </Button>
       </div>
     </div>

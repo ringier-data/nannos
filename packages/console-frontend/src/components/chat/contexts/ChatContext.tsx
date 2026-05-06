@@ -45,6 +45,7 @@ interface ChatContextType {
   createConversation: () => void;
   selectConversation: (id: string) => void;
   sendMessage: (content: string, files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>) => void;
+  sendSilentMessage: (content: string, dataParts?: Record<string, unknown>[]) => void;
   interruptTask: () => void;
   dismissBugReport: () => void;
   dismissFeedbackRequest: () => void;
@@ -617,15 +618,38 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             return m;
           });
 
-          // Detect bug report interrupt from orchestrator metadata
+          // Detect HITL interrupt from orchestrator via extension
           if (normalizedStatus === 'input-required') {
-            const msgMeta = data.status.message?.metadata;
-            if (msgMeta && msgMeta.interrupt_type === 'bug_report') {
-              setPendingBugReport({
-                conversationId: resolvedConversationId,
-                taskId: data.taskId as string | undefined,
-                reason: (msgMeta.interrupt_reason as string) || '',
-              });
+            const extensions: string[] = data.status.message?.extensions || [];
+            const isHitlInterrupt = extensions.includes('urn:nannos:a2a:human-in-the-loop:1.0');
+
+            if (isHitlInterrupt) {
+              // Extract action_requests from DataPart
+              let actionRequests: Array<{ name: string; args: Record<string, unknown> }> | undefined;
+              let reason = '';
+              if (data.status.message?.parts) {
+                for (const part of data.status.message.parts) {
+                  if (part.kind === 'data') {
+                    const partData = part.data as Record<string, unknown> | undefined;
+                    if (partData?.action_requests) {
+                      actionRequests = partData.action_requests as typeof actionRequests;
+                    }
+                  } else if (part.kind === 'text') {
+                    reason = part.text || '';
+                  }
+                }
+              }
+              // Determine if this is a bug report interrupt
+              const isBugReport = actionRequests?.some((ar) => ar.name === 'console_create_bug_report');
+              if (isBugReport) {
+                const bugAction = actionRequests?.find((ar) => ar.name === 'console_create_bug_report');
+                setPendingBugReport({
+                  conversationId: resolvedConversationId,
+                  taskId: data.taskId as string | undefined,
+                  reason: (bugAction?.args?.description as string) || reason,
+                  actionRequests,
+                });
+              }
             }
           }
         }
@@ -1267,6 +1291,32 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
     ]
   );
 
+  // Send a message to the orchestrator without displaying it in the UI (e.g., HITL decisions)
+  const sendSilentMessageAction = useCallback(
+    (content: string, dataParts?: Record<string, unknown>[]) => {
+      if (!isConnected || (!content.trim() && !dataParts?.length)) return;
+      const conversationId = activeConversationId;
+      if (!conversationId) return;
+
+      const contextId = contextIdsMap.get(conversationId);
+      const messageId = generateUUID();
+
+      const payload: any = {
+        id: messageId,
+        conversationId,
+        message: content,
+        sessionId,
+        metadata: {},
+        ...(contextId && { contextId }),
+        ...(dataParts && { dataParts }),
+      };
+
+      setWaitingMap((prev) => new Map(prev).set(conversationId, true));
+      socketSendMessage(payload);
+    },
+    [activeConversationId, isConnected, contextIdsMap, sessionId, socketSendMessage]
+  );
+
   // Update settings and initialize connection
   const updateSettings = useCallback(
     async (newSettings: Settings): Promise<boolean> => {
@@ -1353,6 +1403,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         dismissFeedbackRequest,
         selectConversation,
         sendMessage: sendMessageAction,
+        sendSilentMessage: sendSilentMessageAction,
         updateSettings,
         loadConversations,
       }}

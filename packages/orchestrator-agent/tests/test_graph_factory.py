@@ -174,7 +174,7 @@ class TestStaticTools:
 
         # Verify it's a list of tools
         assert isinstance(tools, list)
-        assert len(tools) == 4  # FinalResponseSchema only added when with_response_tool=True
+        assert len(tools) == 3  # FinalResponseSchema only added when with_response_tool=True
 
         # Get tool names
         tool_names = [tool.name for tool in tools]
@@ -183,4 +183,3 @@ class TestStaticTools:
         assert "generate_presigned_url" in tool_names
         assert "get_current_time" in tool_names
         assert "copy_file" in tool_names
-        assert "report_bug_tool" in tool_names

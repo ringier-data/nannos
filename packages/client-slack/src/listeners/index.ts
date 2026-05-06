@@ -15,6 +15,8 @@ import { registerMessageListeners } from './events/directMessage.js';
 import { registerNannosCommand } from './commands/nannos.js';
 import { registerAuthorizeButtonAction } from './actions/authorizeButton.js';
 import { registerFeedbackButtonActions } from './actions/feedbackButton.js';
+import { registerBugReportActions } from './actions/bugReportButton.js';
+import { registerBugReportModalHandler } from './views/bugReportModal.js';
 import { registerReactionListeners } from './events/reactionHandler.js';
 import { Logger } from '../utils/logger.js';
 
@@ -96,6 +98,26 @@ export async function registerListeners(
   if (feedbackService) {
     registerFeedbackButtonActions(app, feedbackService);
   }
+
+  // Register bug report button and modal handlers
+  // A factory is used because botToken/botName are normally resolved per-event,
+  // but bug report interactions (view submissions, button clicks) don't have
+  // the file-download context, so an empty botToken is fine.
+  const makeBugReportDeps = () => ({
+    userAuthService,
+    a2aClientService,
+    contextStore,
+    pendingRequestStore,
+    inFlightTaskStore,
+    baseUrl,
+    botToken: '',
+    botName: '',
+    fileStorageService,
+    isLocalMode,
+    feedbackService,
+  });
+  registerBugReportActions(app, makeBugReportDeps);
+  registerBugReportModalHandler(app, makeBugReportDeps);
 
   // Register reaction listeners for message feedback (requires console-backend)
   if (feedbackService) {

@@ -257,3 +257,93 @@ export async function handleError(
     logger.error(`Failed to send error message: ${err}`);
   }
 }
+
+/**
+ * Build a bug report card for Google Chat
+ */
+export interface BugReportCardData {
+  taskId: string;
+  contextId: string;
+  reason: string;
+}
+
+export function buildBugReportCard(data: BugReportCardData): chat_v1.Schema$CardWithId {
+  return {
+    cardId: 'bug_report_card',
+    card: {
+      header: {
+        title: '🐛 Bug Report',
+        subtitle: 'Please confirm this bug report',
+        imageUrl: 'https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/bug_report/default/48px.svg',
+        imageType: 'CIRCLE',
+      },
+      sections: [
+        {
+          widgets: [
+            {
+              textParagraph: {
+                text: `<b>Reason:</b>\n${data.reason}`,
+              },
+            } as any,
+            {
+              divider: {},
+            },
+            {
+              textParagraph: {
+                text: '<b>Would you like to confirm this report?</b>',
+              },
+            } as any,
+            {
+              buttonList: {
+                buttons: [
+                  {
+                    text: '✅ Confirm',
+                    onClick: {
+                      action: {
+                        function: 'bug_report_confirm',
+                        parameters: [
+                          {
+                            key: 'taskId',
+                            value: data.taskId,
+                          },
+                          {
+                            key: 'contextId',
+                            value: data.contextId,
+                          },
+                          {
+                            key: 'reason',
+                            value: data.reason,
+                          },
+                        ],
+                      },
+                    },
+                    color: {
+                      red: 0.0,
+                      green: 0.54,
+                      blue: 0.86,
+                      alpha: 1,
+                    },
+                  },
+                  {
+                    text: '❌ Decline',
+                    onClick: {
+                      action: {
+                        function: 'bug_report_decline',
+                        parameters: [
+                          {
+                            key: 'taskId',
+                            value: data.taskId,
+                          },
+                        ],
+                      },
+                    },
+                  },
+                ],
+              },
+            } as any,
+          ],
+        },
+      ],
+    },
+  };
+}

@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import { Server } from 'http';
-import { createHmac } from 'crypto';
+import { createHmac, randomUUID } from 'crypto';
 import { Config, getConfigFromEnv } from './config/config.js';
 import { Logger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
@@ -328,10 +328,60 @@ function setupServerTimeouts(server: Server, config: Config) {
               const payload = baseEvent.chat.cardClickedPayload!;
               const actionMethod = payload.action.actionMethodName;
               const messageName = payload.message.name;
+              const space = payload.space;
+              const threadName = payload.message.thread?.name;
 
               logger.info(`[ChatEvent] CARD_CLICKED: action=${actionMethod} message=${messageName}`);
 
-              if (
+              // Extract action parameters
+              const params: Record<string, string> = {};
+              if (payload.action.parameters) {
+                for (const param of payload.action.parameters) {
+                  params[param.key] = param.value;
+                }
+              }
+
+              if (actionMethod === 'bug_report_confirm' || actionMethod === 'bug_report_decline') {
+                // Extract bug report details from parameters
+                const taskId = params.taskId;
+                
+                logger.info(`Bug report action: ${actionMethod} for taskId=${taskId}`);
+
+                // Build decisions payload as structured data (DataPart)
+                let decisions: Record<string, unknown>;
+                if (actionMethod === 'bug_report_confirm') {
+                  decisions = { decisions: [{ type: 'approve' }] };
+                } else {
+                  decisions = { decisions: [{ type: 'reject', message: 'User declined' }] };
+                }
+
+                // Send as a synthetic message via handleIncomingMessage (no visible chat message)
+                const syntheticMessage: NormalizedMessage = {
+                  userId,
+                  userEmail,
+                  projectId,
+                  spaceId: space.name,
+                  messageId: `synthetic-${randomUUID()}`,
+                  threadId: threadName || '',
+                  rawText: '',
+                  dataParts: [decisions],
+                  source: 'direct_message',
+                };
+
+                handleIncomingMessage(syntheticMessage, handlerDeps).catch((err) => {
+                  logger.error(err, `Failed to send bug report decision to orchestrator: ${err}`);
+                });
+
+                // Remove the card widget via actionResponse
+                res.json({
+                  actionResponse: {
+                    type: 'UPDATE_MESSAGE',
+                  },
+                  text: '',
+                  cardsV2: [],
+                });
+                return;
+              } else if (
                 feedbackService &&
                 (actionMethod === 'feedback_positive' || actionMethod === 'feedback_negative')
               ) {
@@ -357,7 +407,7 @@ function setupServerTimeouts(server: Server, config: Config) {
                   dialogAction: {
                     actionStatus: {
                       statusCode: 'OK',
-                      userFacingMessage: 'Thanks for the feedback!',
+                      userFacingMessage: 'Thanks for your response!',
                     },
                   },
                 },

@@ -12,7 +12,7 @@ import { A2AClientService, A2ASlackBasedRequest } from '../../services/a2aClient
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, ContextRecord } from '../../storage/types.js';
-import { handleTask, handleError } from '../../utils/taskResponseHandler.js';
+import { handleTask, handleError, postMessage } from '../../utils/taskResponseHandler.js';
 import { FeedbackService } from '../../services/feedbackService.js';
 import _ from 'lodash';
 import { getSpinnerVerb } from '../../utils/spinnerVerbs.js';
@@ -34,6 +34,7 @@ export interface NormalizedMessage {
   threadTs: string;
   rawText: string;
   files?: SlackFile[];
+  dataParts?: Record<string, unknown>[]; // Structured data (e.g., HITL decisions)
   source: MessageSource;
   appId?: string; // Slack App ID (api_app_id from body) for multi-bot token routing
   client: WebClient;
@@ -477,7 +478,7 @@ async function sendAuthorizationRequired(
  */
 export async function handleIncomingMessage(msg: NormalizedMessage, deps: HandlerDependencies): Promise<void> {
   const logger = Logger.getLogger('handleIncomingMessage');
-  const { userId, teamId, channelId, messageTs, threadTs, rawText, files: eventFiles, source, client, appId } = msg;
+  const { userId, teamId, channelId, messageTs, threadTs, rawText, files: eventFiles, dataParts, source, client, appId } = msg;
   const {
     userAuthService,
     a2aClientService,
@@ -493,6 +494,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
   let statusMessageTs: string | undefined;
   let feedbackRequestData: { sub_agents?: string[] } | null = null;
+  let interruptWidgetPosted = false;
   try {
     logger.info(`${source} from user ${userId} in channel ${channelId}`);
 
@@ -517,7 +519,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     // Resolve <@USERID> mentions to @DisplayName (no-op for DMs without mentions)
     const cleanText = (await resolveMentions(rawText, client)).trim();
 
-    if (!cleanText && (!eventFiles || eventFiles.length === 0)) {
+    if (!cleanText && (!eventFiles || eventFiles.length === 0) && (!dataParts || dataParts.length === 0)) {
       return;
     }
 
@@ -715,6 +717,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               url: f.url,
             }))
           : undefined,
+      dataParts,
       contextId: existingContextId || undefined,
       webhookUrl: isLocalMode ? undefined : webhookUrl,
       webhookToken: isLocalMode ? undefined : webhookToken,
@@ -762,6 +765,102 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           // Update final response state
           accumulatedTask.status = statusEvent.status;
 
+          // Handle interrupted states (input-required) with HITL extension
+          if (statusEvent.status.state === 'input-required' && statusEvent.status.message) {
+            const extensions = statusEvent.status.message.extensions || [];
+            const isHitlInterrupt = extensions.includes('urn:nannos:a2a:human-in-the-loop:1.0');
+            
+            if (isHitlInterrupt) {
+              logger.info(
+                { taskId: accumulatedTask?.id },
+                `Received HITL interrupt via extension`
+              );
+              
+              // Extract text description from TextPart and structured data from DataPart
+              let interruptMessage = '';
+              let actionRequests: any[] = [];
+              if (statusEvent.status.message?.parts) {
+                for (const part of statusEvent.status.message.parts) {
+                  if (part.kind === 'text') {
+                    interruptMessage += (part as { kind: 'text'; text: string }).text;
+                  } else if (part.kind === 'data') {
+                    const data = (part as { kind: 'data'; data: any }).data;
+                    if (data?.action_requests) {
+                      actionRequests = data.action_requests;
+                    }
+                  }
+                }
+              }
+
+              if (interruptMessage) {
+                // Determine interrupt type from action_requests
+                const toolNames = actionRequests.map((ar: any) => ar?.name).filter(Boolean);
+                const isBugReport = toolNames.includes('console_create_bug_report');
+
+                if (isBugReport) {
+                  // Mark as handled regardless of widget success/failure to prevent duplicate from handleTask
+                  interruptWidgetPosted = true;
+                  const { buildBugReportWidget } = await import('../../utils/taskResponseHandler.js');
+                  
+                  try {
+                    const interruptReason = actionRequests.find((ar: any) => ar.name === 'console_create_bug_report')?.args?.description || interruptMessage;
+                    const bugReportWidget = buildBugReportWidget({
+                      taskId: accumulatedTask.id,
+                      contextId: accumulatedTask.contextId || '',
+                      reason: interruptReason,
+                      channelId,
+                      threadTs,
+                      actionRequests,
+                    });
+
+                    logger.info(
+                      { taskId: accumulatedTask?.id },
+                      `Posting bug report widget to Slack`
+                    );
+
+                    await client.chat.postMessage({
+                      channel: channelId,
+                      thread_ts: threadTs,
+                      text: `🐛 Bug Report`,
+                      blocks: bugReportWidget,
+                    });
+                  } catch (widgetErr) {
+                    logger.error(widgetErr, `Failed to post bug report widget, falling back to text: ${widgetErr}`);
+                    await postMessage(client, channelId, threadTs, interruptMessage);
+                  }
+                } else {
+                  // For other HITL interrupt types, post message with tool info
+                  logger.info(
+                    { taskId: accumulatedTask?.id, toolNames },
+                    `Posting HITL interrupt message to Slack`
+                  );
+                  await postMessage(client, channelId, threadTs, interruptMessage);
+                }
+
+                // Store the interrupt context so we can resume later
+                await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
+                  logger.error(err, `Failed to update in-flight task for interrupt: ${err}`);
+                });
+              }
+            } else if (statusEvent.status.message?.metadata) {
+              // Legacy non-extension interrupt handling (e.g., auth_required)
+              const interruptType = (statusEvent.status.message.metadata as any).interrupt_type;
+              if (interruptType) {
+                let interruptMessage = '';
+                if (statusEvent.status.message?.parts) {
+                  for (const part of statusEvent.status.message.parts) {
+                    if (part.kind === 'text') {
+                      interruptMessage += (part as { kind: 'text'; text: string }).text;
+                    }
+                  }
+                }
+                if (interruptMessage) {
+                  await postMessage(client, channelId, threadTs, interruptMessage);
+                }
+              }
+            }
+          }
+
           if (event.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {
             const workPlan = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
               todos: Array<{
@@ -790,7 +889,8 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             };
             logger.debug({ feedbackData }, `Received feedback-request extension`);
             feedbackRequestData = feedbackData;
-          } else {
+          } else if (statusEvent.status.state !== 'input-required') {
+            // Only log if it's not an interrupt (interrupts already logged above)
             logger.debug(
               `Received status update without recognized extensions (${event.status.message?.extensions}). Not updating status message details.`
             );
@@ -835,6 +935,11 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     }
 
     // ---- Handle the response ----
+    // Skip if we already posted a custom interrupt widget (e.g. bug report)
+    if (interruptWidgetPosted) {
+      logger.info({ taskId: accumulatedTask?.id }, `Skipping handleTask — interrupt widget already posted`);
+      return;
+    }
     const result = await handleTask({
       task: accumulatedTask,
       slackClient: client,
