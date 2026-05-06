@@ -444,7 +444,7 @@ class VoiceAgent(BaseAgent):
                         try:
                             loop = asyncio.get_event_loop()
                             await loop.run_in_executor(None, send_sms, caller_number, sms_body)
-                            logger.info("MCP auth URL SMS sent to %s (session=%s)", caller_number, session_key)
+                            logger.info("MCP auth URL SMS sent (session=%s)", session_key)
                         except Exception as sms_exc:
                             logger.warning("Failed to send MCP auth SMS: %s", sms_exc)
                     yield AgentStreamResponse(
@@ -547,7 +547,6 @@ class VoiceAgent(BaseAgent):
         # the phone_number claim), fall back to GET /me on the backend which returns
         # phone_number_override ?? phone_number_idp from the DB.
         phone_number = user_config.phone_number
-        logger.info(f"User config: {user_config.model_dump()}")
 
         if not phone_number:
             yield AgentStreamResponse(
@@ -678,7 +677,7 @@ class VoiceAgent(BaseAgent):
             loop = asyncio.get_event_loop()
             call_sid: str = await loop.run_in_executor(None, make_outbound_call, phone_number, public_url)
         except Exception as exc:
-            logger.error("Failed to initiate Twilio call to %s: %s", phone_number, exc)
+            logger.error("Failed to initiate Twilio call: %s", exc)
             yield AgentStreamResponse(
                 state=TaskState.failed,
                 content=f"Call initiation failed: {exc}",
@@ -735,14 +734,14 @@ class VoiceAgent(BaseAgent):
             try:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, send_sms, phone_number, sms_body)
-                logger.info("MCP auth failure SMS sent to %s (call_sid=%s)", phone_number, call_sid)
+                logger.info("MCP auth failure SMS sent (call_sid=%s)", call_sid)
                 yield AgentStreamResponse(
                     state=TaskState.working,
                     content="SMS sent to caller with tool authorization instructions.",
                     metadata={"type": "mcp_auth_sms_sent"},
                 )
             except Exception as sms_exc:
-                logger.warning("Failed to send MCP auth SMS to %s: %s", phone_number, sms_exc)
+                logger.warning("Failed to send MCP auth SMS (call_sid=%s): %s", call_sid, sms_exc)
 
         # Register config so twilio_stream picks it up when the call connects.
         _PENDING_CALLS[call_sid] = OutboundCallRequest(
@@ -759,9 +758,8 @@ class VoiceAgent(BaseAgent):
         _CALL_FUTURES[call_sid] = future
 
         logger.info(
-            "Call %s initiated, ringing %s (timeout=%ds)",
+            "Call %s initiated (timeout=%ds)",
             call_sid,
-            phone_number,
             timeout,
         )
         yield AgentStreamResponse(

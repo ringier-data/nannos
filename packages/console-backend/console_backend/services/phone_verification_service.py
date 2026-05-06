@@ -87,7 +87,11 @@ class PhoneVerificationService:
             )
             return verification.status == "pending"
         except TwilioRestException as e:
-            logger.error(f"Twilio Verify send failed: {e}")
+            logger.error(
+                "Twilio Verify send failed for %s: %s",
+                self._mask_phone_number(phone_number),
+                str(e),
+            )
             raise
 
     async def check_verification(self, phone_number: str, code: str) -> bool:
@@ -114,5 +118,9 @@ class PhoneVerificationService:
             )
             return check.status == "approved"
         except TwilioRestException as e:
-            logger.error(f"Twilio Verify check failed: {e}")
+            logger.error(
+                "Twilio Verify check failed for %s: %s",
+                self._mask_phone_number(phone_number),
+                str(e),
+            )
             return False
