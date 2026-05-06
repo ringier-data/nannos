@@ -17,7 +17,7 @@ from collections.abc import AsyncIterable
 from typing import Any, Optional
 
 from a2a.types import Part, TaskState
-from agent_common.core.object_storage import get_object_storage_service
+from object_storage import get_object_storage_service
 from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk

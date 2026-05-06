@@ -25,7 +25,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "cachetools>=5.5.0",
     "ringier-a2a-sdk>=0.1.0",
-    "agent-common>=0.7.0",
+    "object-storage>=0.1.0",
     "uuid6>=2024.7.10",
     "fastapi-mcp>=0.4.0",
     "python-keycloak>=7.0.2",
@@ -111,4 +111,4 @@ reportMissingModuleSource = "none"
 
 [tool.uv.sources]
 ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }
-agent-common = { path = "../agent-common", editable = true }
+object-storage = { path = "../object-storage", editable = true }

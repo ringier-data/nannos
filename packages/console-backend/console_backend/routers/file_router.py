@@ -230,7 +230,7 @@ async def download_storage_file(
     """
     from pathlib import Path
 
-    from agent_common.core.object_storage import get_object_storage_service, LocalObjectStorageService
+    from object_storage import get_object_storage_service, LocalObjectStorageService
 
     try:
         storage = get_object_storage_service()

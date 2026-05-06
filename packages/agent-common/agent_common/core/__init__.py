@@ -9,7 +9,7 @@ from .model_factory import (
     get_thinking_budget,
     is_valid_model,
 )
-from .object_storage import (
+from object_storage import (
     IObjectStorageService,
     LocalObjectStorageService,
     S3ObjectStorageService,

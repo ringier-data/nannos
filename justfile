@@ -322,6 +322,7 @@ build-pkg pkg:
     BUILD_CTX_ARGS=(
       --build-context "ringier-a2a-sdk=packages/ringier-a2a-sdk"
       --build-context "agent-common=packages/agent-common"
+      --build-context "object-storage=packages/object-storage"
     )
 
     # Multi-stage target support: some packages build a specific Dockerfile stage

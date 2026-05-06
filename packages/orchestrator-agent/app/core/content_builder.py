@@ -16,7 +16,7 @@ import logging
 import mimetypes
 
 from a2a.types import FilePart, Part, TextPart
-from agent_common.core.object_storage import get_object_storage_service
+from object_storage import get_object_storage_service
 from langchain_core.messages import (
     AudioContentBlock,
     ContentBlock,

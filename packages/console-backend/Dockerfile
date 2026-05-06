@@ -23,6 +23,7 @@ RUN find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && 
     find . -name "*.pyo" -delete 2>/dev/null || true
 # Copy shared SDK from named build context
 COPY --from=ringier-a2a-sdk . ../ringier-a2a-sdk
+COPY --from=object-storage . ../object-storage
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 RUN uv pip install validators
 

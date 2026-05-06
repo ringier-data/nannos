@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_common.core.object_storage import (
+from object_storage import (
     IObjectStorageService,
     LocalObjectStorageService,
     S3ObjectStorageService,

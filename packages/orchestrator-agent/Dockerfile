@@ -23,6 +23,7 @@ RUN find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && 
 # Copy shared packages from named build contexts
 COPY --from=ringier-a2a-sdk . ../ringier-a2a-sdk
 COPY --from=agent-common . ../agent-common
+COPY --from=object-storage . ../object-storage
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 
 FROM docker.rcplus.io/python:3.13-slim AS nannos-runtime
@@ -40,6 +41,7 @@ RUN chmod +x /usr/local/bin/rambler
 WORKDIR ${WORKDIR}
 COPY --from=nannos-build ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
 COPY --from=nannos-build ${WORKDIR}/../agent-common ../agent-common
+COPY --from=nannos-build ${WORKDIR}/../object-storage ../object-storage
 COPY --from=nannos-build ${WORKDIR} .
 
 # Copy migration files

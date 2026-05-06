@@ -13,7 +13,7 @@ the unified read_file tool.
 import logging
 from typing import Literal
 
-from agent_common.core.object_storage import get_object_storage_service
+from object_storage import get_object_storage_service
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 

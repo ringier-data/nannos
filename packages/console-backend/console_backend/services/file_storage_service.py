@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Optional
 from uuid import uuid4
 
-from agent_common.core.object_storage import (
+from object_storage import (
     IObjectStorageService,
     get_object_storage_service,
 )

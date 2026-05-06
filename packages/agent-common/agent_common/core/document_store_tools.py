@@ -23,7 +23,7 @@ from langgraph.types import interrupt
 from langsmith import traceable
 from typing_extensions import NotRequired
 
-from agent_common.core.object_storage import IObjectStorageService
+from object_storage import IObjectStorageService
 
 
 class DocumentStoreState(AgentState):
