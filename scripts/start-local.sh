@@ -820,6 +820,7 @@ procs:
       OIDC_CLIENT_SECRET: "$_OIDC_SECRET_BACKEND"
       OIDC_AUDIENCE: "agent-console"
       ORCHESTRATOR_CLIENT_ID: "orchestrator"
+      BASE_DOMAIN: "localhost:5173"
       ORCHESTRATOR_BASE_DOMAIN: "localhost:10001"
       ORCHESTRATOR_ENVIRONMENT: "local"
       KEYCLOAK_ADMIN_CLIENT_ID: "nannos-admin"

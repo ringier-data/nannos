@@ -42,6 +42,8 @@ from .services.rate_card_service import RateCardService
 from .services.scheduler_engine import SchedulerEngine
 from .services.scheduler_service import SchedulerService
 from .services.scheduler_token_service import SchedulerTokenService
+from .services.scim_service import ScimGroupService, ScimUserService
+from .services.scim_token_service import ScimTokenService
 from .services.sub_agent_service import SubAgentService
 from .services.usage_service import UsageService
 from .services.user_group_service import UserGroupService
@@ -131,6 +133,14 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.user_group_service.set_repository(app.state.user_group_repository)
     app.state.user_group_service.set_sub_agent_service(app.state.sub_agent_service)
     app.state.user_group_service.set_notification_service(app.state.notification_service)
+
+    # Initialize SCIM services
+    app.state.scim_token_service = ScimTokenService()
+    app.state.scim_token_service.set_audit_service(app.state.audit_service)
+    app.state.scim_user_service = ScimUserService()
+    app.state.scim_user_service.set_user_service(app.state.user_service)
+    app.state.scim_group_service = ScimGroupService()
+    app.state.scim_group_service.set_user_group_service(app.state.user_group_service)
 
     # Initialize Keycloak Admin service for group synchronization (optional)
     keycloak_secret = config.keycloak_admin.admin_client_secret.get_secret_value()

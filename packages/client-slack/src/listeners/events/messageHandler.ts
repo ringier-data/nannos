@@ -779,6 +779,10 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               .join('\n');
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
             statusMessages.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:intermediate-output:1.0')) {
+            logger.debug(
+              `Received status update as intermediate-output. Not updating status message details. This is thinking`
+            );
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
             // Store feedback request data to send as ephemeral after final response
             const feedbackData = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
@@ -787,7 +791,9 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             logger.debug({ feedbackData }, `Received feedback-request extension`);
             feedbackRequestData = feedbackData;
           } else {
-            logger.debug(`Received status update without recognized extensions. Not updating status message details.`);
+            logger.debug(
+              `Received status update without recognized extensions (${event.status.message?.extensions}). Not updating status message details.`
+            );
           }
           
           const newStatustMessage = `${statusMessages.thinking}${statusMessages.activity ? ` [${statusMessages.activity}]` : ''}${statusMessages.todos ? `\n${statusMessages.todos}` : ''}`;
@@ -801,6 +807,10 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         } else if (event.kind === 'artifact-update') {
           if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
           accumulatedTask.artifacts.push(event.artifact);
+          logger.debug(
+            { taskId: accumulatedTask?.id, accumulatedTask },
+            `Building artifact update. Total artifacts now: ${accumulatedTask.artifacts.length}`
+          );
         } else {
           logger.debug({ taskId: accumulatedTask?.id }, `Unknown stream event: ${_.get(event, 'kind')}`);
         }

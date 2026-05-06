@@ -36,7 +36,7 @@ def resolve_schema_references(
     if "$ref" in schema_part:
         ref_path = schema_part["$ref"]
         # Standard OpenAPI references are in the format "#/components/schemas/ModelName"
-        if ref_path.startswith("#/components/schemas/"):
+        if isinstance(ref_path, str) and ref_path.startswith("#/components/schemas/"):
             if ref_path in seen:
                 # Return a simple type to avoid infinite recursion
                 return {"type": "object"}

@@ -542,3 +542,32 @@ async def require_group_member(
         )
 
     return user
+
+
+async def require_scim_token(request: Request, db: DbSession) -> None:
+    """Dependency to require a valid SCIM bearer token.
+
+    Extracts the token from the Authorization header, validates it against
+    the scim_tokens table (not revoked, not expired), and updates last_used_at.
+
+    Raises HTTPException 401 if token is missing, invalid, revoked, or expired.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_value = auth_header.split(" ", 1)[1]
+    scim_token_service = request.app.state.scim_token_service
+
+    is_valid = await scim_token_service.validate_token(db, token_value)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid, expired, or revoked SCIM token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
