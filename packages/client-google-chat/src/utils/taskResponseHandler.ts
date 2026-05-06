@@ -7,6 +7,13 @@ import type { chat_v1 } from 'googleapis';
 const logger = Logger.getLogger('taskResponseHandler');
 
 /**
+ * Check if state is an interrupted state (paused, awaiting user action)
+ */
+export function isInterruptedState(state?: Task['status']['state']): boolean {
+  return ['input-required', 'auth-required'].includes(state || '');
+}
+
+/**
  * Check if state has a user-facing message that should be displayed immediately
  * This includes terminated states plus interrupted states waiting for user action
  */
@@ -136,10 +143,31 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
   // Process artifacts for completed tasks
   const parts = processArtifacts(task.artifacts);
 
-  // If we have text artifacts, use them as the message
   let message = '';
-  if (parts.textParts.length > 0) {
+
+  // For interrupted states (input-required, auth-required), the authoritative
+  // message is in status.message — artifacts are just intermediate streaming
+  // tokens from BEFORE the interrupt fired, not the final response.
+  if (isInterruptedState(task.status.state) && task.status?.message?.parts) {
+    for (const part of task.status.message.parts) {
+      if (part.kind === 'text') {
+        message += (part as { kind: 'text'; text: string }).text;
+      }
+    }
+  }
+
+  // For terminal states, use artifact text as the message
+  if (!message && parts.textParts.length > 0) {
     message = parts.textParts.join('');
+  }
+
+  // Final fallback: extract from status message (e.g. completed with no artifacts)
+  if (!message && task.status?.message?.parts) {
+    for (const part of task.status.message.parts) {
+      if (part.kind === 'text') {
+        message += (part as { kind: 'text'; text: string }).text;
+      }
+    }
   }
 
   const urls = parts.filesWithUri.map((file) => file.uri);

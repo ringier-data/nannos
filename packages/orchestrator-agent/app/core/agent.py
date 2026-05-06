@@ -513,7 +513,7 @@ class OrchestratorDeepAgent:
             if hasattr(final_state, "interrupts") and final_state.interrupts:
                 task_state = final_state.interrupts[-1].value.get("task_state", TaskState.input_required)
                 if task_state == TaskState.auth_required:
-                    logger.info(
+                    logger.debug(
                         f"[ORCHESTRATOR] Found auth_required interrupt in final state: {final_state.interrupts[-1].value}"
                     )
                     value: dict = final_state.interrupts[-1].value.copy()
@@ -524,6 +524,7 @@ class OrchestratorDeepAgent:
                         **value,
                     )
                 else:
+                    logger.debug(f"[ORCHESTRATOR] Found interrupt in final state: {final_state.interrupts[-1].value}")
                     interrupt_value_dict = (
                         final_state.interrupts[-1].value if isinstance(final_state.interrupts[-1].value, dict) else {}
                     )
@@ -532,7 +533,7 @@ class OrchestratorDeepAgent:
                         content=interrupt_value_dict.get(
                             "message", "Process interrupted. Human intervention required."
                         ),
-                        interrupt_reason="graph_interrupted",
+                        interrupt_reason=interrupt_value_dict.get("reason", "graph_interrupted"),
                         pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
                         metadata={
                             k: v

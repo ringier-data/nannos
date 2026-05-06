@@ -28,7 +28,13 @@ def report_bug_tool(reason: str) -> str:
     """
     # Interrupt pauses graph execution. The client presents a bug report form.
     # On resume, the graph receives {"confirmed": True, "description": "..."} or {"confirmed": False}.
-    response = interrupt(value={"type": "bug_report", "reason": reason})
+    response = interrupt(
+        value={
+            "type": "bug_report",
+            "reason": reason,
+            "message": f"I encountered an issue and would like to file a bug report.\n\nReason: {reason}\n\nWould you like to confirm this report?",
+        }
+    )
 
     if isinstance(response, dict) and response.get("confirmed"):
         description = response.get("description", reason)

@@ -91,6 +91,11 @@ class ErrorClassificationMiddleware(AgentMiddleware[AgentState, ContextT]):
             additional_kwargs["error_classification"] = classification
             result.additional_kwargs = additional_kwargs
 
+            # Prepend classification to content so the model can see and act on it.
+            # additional_kwargs are stripped by the model serialization layer,
+            # so we must surface the classification in the visible content.
+            result.content = f"[ERROR_TYPE: {classification}]\n{content}"
+
             tool_name = request.tool_call.get("name", "unknown")
             logger.info(f"[ERROR_CLASSIFICATION] {tool_name}: {classification}")
 

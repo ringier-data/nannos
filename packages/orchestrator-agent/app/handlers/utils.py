@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 import httpx
 from langchain_core.tools import ToolException
+from langgraph.errors import GraphBubbleUp
 
 from ..models import A2AClientError
 
@@ -50,11 +51,17 @@ def should_retry(exception: Exception) -> bool:
     - A2A client errors (agent communication issues)
 
     Does NOT retry:
+    - GraphBubbleUp (LangGraph interrupt mechanism — must propagate)
     - HTTP 4xx client errors (deterministic: bad request, forbidden, not found)
     - ToolException (deterministic: validation errors, permission issues — the LLM
       should see the error message and adapt its approach)
     - Any other exception type
     """
+    # GraphBubbleUp is raised by interrupt() — it MUST propagate to pause the graph.
+    # Re-raising here escapes ToolRetryMiddleware's `except Exception` block.
+    if isinstance(exception, GraphBubbleUp):
+        raise exception
+
     logger.warning(f"Evaluating retry for exception: {exception.__class__.__name__}: {exception}")
     if isinstance(exception, httpx.HTTPStatusError):
         # Only retry 5xx server errors (transient)

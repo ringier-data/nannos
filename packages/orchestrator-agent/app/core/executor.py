@@ -4,6 +4,7 @@ import os
 import uuid
 from typing import Literal
 
+import httpx
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
@@ -95,6 +96,49 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             logger.error(f"[REGISTRY] User with sub {sub} not found in registry")
             raise ServerError(error=InvalidParamsError())
         return user
+
+    async def _persist_bug_report(
+        self,
+        user_token: str,
+        conversation_id: str,
+        task_id: str,
+        description: str,
+    ) -> None:
+        """Persist a confirmed bug report to console-backend.
+
+        Exchanges the user token for a console-backend-scoped token before
+        calling the API. Best-effort: logs errors but does not raise, so graph
+        resumption is not blocked if the API call fails.
+        """
+        console_url = self.registry_service.config.console_backend_url
+        try:
+            # Exchange user token for console-backend audience
+            oauth2_client = self.agent.oauth2_client
+            if oauth2_client:
+                console_token = await oauth2_client.exchange_token(
+                    subject_token=user_token,
+                    target_client_id=self.agent.config.CONSOLE_BACKEND_CLIENT_ID,
+                    requested_scopes=["openid", "profile", "offline_access"],
+                )
+            else:
+                # Local dev mode — no token exchange available, pass through
+                console_token = user_token
+
+            async with httpx.AsyncClient(base_url=console_url, timeout=10.0) as client:
+                response = await client.post(
+                    "/api/v1/bug-reports",
+                    json={
+                        "conversation_id": conversation_id,
+                        "task_id": task_id,
+                        "description": description,
+                        "source": "orchestrator",
+                    },
+                    headers={"Authorization": f"Bearer {console_token}"},
+                )
+                response.raise_for_status()
+                logger.info(f"Bug report persisted for conversation {conversation_id}")
+        except Exception as e:
+            logger.error(f"Failed to persist bug report: {e}")
 
     async def _build_user_config(
         self,
@@ -531,6 +575,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         resume_value = query
                     else:
                         resume_value = {"confirmed": False}
+
+                    # Persist the bug report to console-backend if confirmed
+                    if isinstance(resume_value, dict) and resume_value.get("confirmed"):
+                        bug_reason = interrupt_value.get("reason", "") if isinstance(interrupt_value, dict) else ""
+                        await self._persist_bug_report(
+                            user_token=user_token,
+                            conversation_id=task.context_id,
+                            task_id=task.id,
+                            description=str(resume_value.get("description") or bug_reason),
+                        )
                 else:
                     # Other interrupt types (auth, etc.)
                     resume_value = query

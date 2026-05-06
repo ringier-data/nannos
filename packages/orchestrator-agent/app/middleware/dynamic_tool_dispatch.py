@@ -219,13 +219,23 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
     _BUG_REPORT_TOOL_GUIDANCE = (
         "\n\n## Error Handling & Bug Reporting\n"
-        "If a tool or sub-agent fails with a system_error classification, first attempt to recover: "
-        "retry, use alternative tools, or adjust your plan.\n"
-        "Only call report_bug_tool when you have exhausted recovery options AND the error is visible "
-        "to the user (i.e., you cannot fulfill their request because of it).\n"
-        "Never call report_bug_tool for errors you recovered from — "
-        "the user should not be aware of transient issues.\n"
-        "Always explain to the user what went wrong before offering to report."
+        "Tool errors are prefixed with `[ERROR_TYPE: <classification>]` where classification is one of:\n"
+        "- `transient`: Temporary issue (timeout, rate limit, 5xx) — retry after a moment.\n"
+        "- `auth`: Authentication/authorization failure — handled by the system.\n"
+        "- `capability_gap`: Tool/agent cannot do this — try alternative tools or agents.\n"
+        "- `user_fixable`: Bad input or missing fields — ask the user for clarification.\n"
+        "- `system_error`: Unexpected crash — attempt recovery first, then report_bug_tool.\n\n"
+        "Recovery strategy:\n"
+        "1. For `transient`: Retry once, then try alternative approach.\n"
+        "2. For `user_fixable`: Ask the user what they meant or for missing info.\n"
+        "3. For `capability_gap`: Use a different tool or sub-agent.\n"
+        "4. For `system_error`: Try alternatives first. Only call report_bug_tool as last resort "
+        "when the error is unrecoverable AND prevents fulfilling the user's request.\n\n"
+        "When calling report_bug_tool:\n"
+        "- Do NOT claim the bug was reported or say 'done' — the tool pauses execution "
+        "to collect user confirmation first.\n"
+        "- Explain to the user what went wrong BEFORE calling the tool.\n"
+        "- Never call report_bug_tool for errors you recovered from."
     )
 
     def _enhance_system_prompt_agents(
