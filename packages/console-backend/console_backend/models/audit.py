@@ -23,6 +23,7 @@ class AuditEntityType(str, Enum):
     CATALOG = "catalog"  # For catalog management operations
     BUG_REPORT = "bug_report"  # For bug report operations
     SCIM_TOKEN = "scim_token"  # For SCIM token management operations
+    OUTBOUND_SCIM_ENDPOINT = "outbound_scim_endpoint"  # For outbound SCIM endpoint management
 
 
 class AuditAction(str, Enum):

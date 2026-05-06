@@ -583,6 +583,13 @@ docker compose exec -T postgres-console psql -U postgres -d console -c \
   "UPDATE users SET is_administrator = true WHERE is_administrator = false;" \
   >/dev/null 2>&1 || true
 
+# Seed: ensure test@local.dev user exists as admin (for first-time local dev)
+docker compose exec -T postgres-console psql -U postgres -d console -c \
+  "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status, created_at, updated_at)
+   VALUES (gen_random_uuid(), 'local-test-user', 'test@local.dev', 'Test', 'User', true, 'admin', 'active', now(), now())
+   ON CONFLICT (email) DO UPDATE SET is_administrator = true, role = 'admin';" \
+  >/dev/null 2>&1 || true
+
 # ─── 6. Wait for Keycloak ────────────────────────────────────────
 
 if [[ "$_OIDC_MODE" == "local" ]]; then
@@ -604,6 +611,13 @@ ok "Keycloak is ready (realm: nannos)"
 
 log "Configuring Keycloak client secrets..."
 
+# Keycloak 26.x defaults the master realm to sslRequired!=NONE, blocking HTTP
+# admin token requests from the host. Disable it via kcadm.sh (internal HTTP).
+docker compose exec -T keycloak /opt/keycloak/bin/kcadm.sh update realms/master \
+  -s sslRequired=NONE \
+  --server http://localhost:8080 --realm master --user admin --password admin \
+  >/dev/null 2>&1 || warn "Could not disable master realm SSL (may already be NONE)"
+
 KC_ADMIN_TOKEN=""
 for i in $(seq 1 15); do
   KC_ADMIN_TOKEN=$(curl -s -X POST http://localhost:8180/realms/master/protocol/openid-connect/token \
@@ -611,7 +625,7 @@ for i in $(seq 1 15); do
     -d "client_id=admin-cli" \
     -d "username=admin" \
     -d "password=admin" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null || true)
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" || true)
   [[ -n "$KC_ADMIN_TOKEN" ]] && break
   sleep 2
 done
@@ -634,6 +648,44 @@ for CLIENT_ID in agent-console orchestrator agent-creator nannos-admin; do
 done
 
 ok "Keycloak client secrets configured"
+
+# ─── 6c. Grant nannos-admin service account realm-management roles ──
+# The realm export doesn't include service account role mappings, so we
+# assign them here to allow the backend to manage groups/users in Keycloak.
+
+log "Granting nannos-admin service account roles..."
+
+NANNOS_ADMIN_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
+  "http://localhost:8180/admin/realms/nannos/clients?clientId=nannos-admin" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+
+# Get the service account user for nannos-admin
+SA_USER_ID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
+  "http://localhost:8180/admin/realms/nannos/clients/$NANNOS_ADMIN_UUID/service-account-user" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+# Get the realm-management client UUID
+REALM_MGMT_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
+  "http://localhost:8180/admin/realms/nannos/clients?clientId=realm-management" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+
+# Get available realm-management roles and assign the needed ones
+ROLES_JSON=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
+  "http://localhost:8180/admin/realms/nannos/clients/$REALM_MGMT_UUID/roles")
+
+ROLES_TO_ASSIGN=$(echo "$ROLES_JSON" | python3 -c "
+import sys, json
+roles = json.load(sys.stdin)
+needed = ['manage-users', 'view-users', 'query-groups', 'query-users']
+selected = [r for r in roles if r['name'] in needed]
+print(json.dumps(selected))
+")
+
+curl -sf -X POST -H "Authorization: Bearer $KC_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  "http://localhost:8180/admin/realms/nannos/users/$SA_USER_ID/role-mappings/clients/$REALM_MGMT_UUID" \
+  -d "$ROLES_TO_ASSIGN" >/dev/null
+
+ok "nannos-admin service account roles granted"
 
 else
   log "Skipping local Keycloak (using external OIDC)"
