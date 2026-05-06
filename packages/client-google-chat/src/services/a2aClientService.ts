@@ -5,6 +5,7 @@ import {
   Task,
   Part,
   TextPart,
+  DataPart,
   FilePart,
   GetTaskResponse,
   TaskStatusUpdateEvent,
@@ -31,6 +32,7 @@ export interface A2AGoogleChatBasedRequest {
   messageId: string; // Message name
   text: string; // The user's request text
   fileUrls?: GoogleChatFileUrl[]; // Attached files with S3 presigned URLs (preferred)
+  dataParts?: Record<string, unknown>[]; // Structured data (e.g., HITL decisions)
   contextId?: string; // A2A context ID for conversation continuity
   webhookUrl?: string; // Webhook URL for A2A push notifications
   webhookToken?: string; // Token for validating incoming webhook requests
@@ -45,7 +47,7 @@ function createAuthenticatedFetch(accessToken: string): typeof fetch {
     headers.set('Authorization', `Bearer ${accessToken}`);
     headers.set(
       'X-A2A-Extensions',
-      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0'
+      'urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, urn:nannos:a2a:feedback-request:1.0, urn:nannos:a2a:human-in-the-loop:1.0'
     );
 
     return fetch(input, {
@@ -84,6 +86,16 @@ export class A2AClientService {
         text: request.text,
       } as TextPart,
     ];
+
+    // Add structured DataParts (e.g., HITL decisions)
+    if (request.dataParts && request.dataParts.length > 0) {
+      for (const data of request.dataParts) {
+        parts.push({
+          kind: 'data',
+          data,
+        } as DataPart);
+      }
+    }
 
     // Prefer fileUrls (S3 presigned URLs) over files (base64)
     if (request.fileUrls && request.fileUrls.length > 0) {

@@ -18,6 +18,7 @@ import yaml
 from a2a.client import A2ACardResolver, A2AClientHTTPError
 from a2a.client.client import Client, ClientEvent
 from a2a.types import (
+    DataPart,
     FilePart,
     FileWithUri,
     Message,
@@ -64,14 +65,14 @@ from console_backend.routers.mcp_router import router as mcp_router
 from console_backend.routers.message_router import router as message_router
 from console_backend.routers.models_router import router as models_router
 from console_backend.routers.notification_router import router as notification_router
+from console_backend.routers.outbound_scim_router import router as outbound_scim_router
 from console_backend.routers.rate_card_router import router as rate_card_router
 from console_backend.routers.scheduler_router import router as scheduler_router
+from console_backend.routers.scim_router import router as scim_router
+from console_backend.routers.scim_token_router import router as scim_token_router
 from console_backend.routers.secrets_router import router as secrets_router
 from console_backend.routers.sub_agent_router import router as sub_agent_router
 from console_backend.routers.usage_router import router as usage_router
-from console_backend.routers.scim_router import router as scim_router
-from console_backend.routers.scim_token_router import router as scim_token_router
-from console_backend.routers.outbound_scim_router import router as outbound_scim_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
 from console_backend.services.messages_service import MessagesService
@@ -1075,7 +1076,8 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
     # Console UI supports all extensions — always request them from the orchestrator
     custom_headers["X-A2A-Extensions"] = (
         "urn:nannos:a2a:activity-log:1.0, urn:nannos:a2a:work-plan:1.0, "
-        "urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0"
+        "urn:nannos:a2a:intermediate-output:1.0, urn:nannos:a2a:feedback-request:1.0, "
+        "urn:nannos:a2a:human-in-the-loop:1.0"
     )
 
     if custom_headers:
@@ -1276,20 +1278,30 @@ async def _save_user_message_to_db(
         logger.error(f"Failed to save user message to DynamoDB: {db_error}", exc_info=True)
 
 
-def _build_a2a_message_parts(message_text: str, file_attachments: list[dict[str, Any]]) -> list[Any]:
-    """Build A2A message parts from text and file attachments.
+def _build_a2a_message_parts(
+    message_text: str,
+    file_attachments: list[dict[str, Any]],
+    data_parts: list[dict[str, Any]] | None = None,
+) -> list[Any]:
+    """Build A2A message parts from text, file attachments, and optional data parts.
 
     Args:
         message_text: Message text content
         file_attachments: File attachments list
+        data_parts: Optional structured data parts (e.g., HITL decisions)
 
     Returns:
-        List of A2A message parts (TextPart and/or FilePart)
+        List of A2A message parts (TextPart, FilePart, and/or DataPart)
     """
     a2a_parts: list[Any] = []
 
     if message_text.strip():
         a2a_parts.append(TextPart(text=str(message_text)))  # type: ignore[arg-type]
+
+    if data_parts and isinstance(data_parts, list):
+        for data in data_parts:
+            if isinstance(data, dict):
+                a2a_parts.append(DataPart(data=data))  # type: ignore[arg-type]
 
     if file_attachments and isinstance(file_attachments, list):
         for attachment in file_attachments:
@@ -1466,8 +1478,9 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         file_attachments = json_data.get("fileAttachments", [])
         has_text = bool(message_text.strip())
         has_files = bool(file_attachments and isinstance(file_attachments, list) and len(file_attachments) > 0)
+        has_data_parts = bool(json_data.get("dataParts") and isinstance(json_data.get("dataParts"), list))
 
-        if not has_text and not has_files:
+        if not has_text and not has_files and not has_data_parts:
             error_response = create_error_response(
                 SocketError.MSG_SEND_FAILED,
                 details={"reason": "Message must contain either text content or file attachments"},
@@ -1549,9 +1562,10 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         )
 
         # Build and send A2A message
+        data_parts = json_data.get("dataParts")
         message = Message(
             role=Role.user,
-            parts=_build_a2a_message_parts(message_text, file_attachments),
+            parts=_build_a2a_message_parts(message_text, file_attachments, data_parts),
             message_id=message_id,
             context_id=context_id,
             metadata=metadata,

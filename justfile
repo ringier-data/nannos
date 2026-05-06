@@ -379,6 +379,106 @@ pkg-deploy pkg:
       *) echo "{{ pkg }}" ;;
     esac
 
+# Builds and pushes dev images for ALL packages in parallel, then reconciles Flux once
+deploy-dev-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CYAN='\033[1;36m' GREEN='\033[1;32m' DIM='\033[2m' RED='\033[1;31m' YELLOW='\033[1;33m' RESET='\033[0m'
+
+    source scripts/release-helpers.sh
+    BUILDABLE="{{ _buildable_packages }}"
+    TS="{{ build_ts }}"
+    PIDS=()
+    PKGS=()
+    LOGS=()
+    FAILED=()
+
+    LOG_DIR=$(mktemp -d /tmp/nannos-deploy-dev-XXXXXX)
+    trap 'rm -rf "$LOG_DIR"' EXIT
+
+    # Phase 1: Build & push all packages in parallel (output silenced per-package)
+    printf "${CYAN}🚀 Building & pushing all packages in parallel...${RESET}\n"
+    for pkg in $BUILDABLE; do
+      VERSION="$(get_package_version "$pkg")"
+      TAG="v${VERSION}-next.${TS}"
+      LOGFILE="${LOG_DIR}/${pkg}.log"
+      printf "${DIM}   %s → %s${RESET}\n" "$pkg" "$TAG"
+      just tag="$TAG" push=true build-pkg "$pkg" > "$LOGFILE" 2>&1 &
+      PIDS+=($!)
+      PKGS+=("$pkg")
+      LOGS+=("$LOGFILE")
+    done
+
+    # Wait for all builds, report progress
+    for i in "${!PIDS[@]}"; do
+      if wait "${PIDS[$i]}"; then
+        printf "${GREEN}   ✓ %s${RESET}\n" "${PKGS[$i]}"
+      else
+        FAILED+=("${PKGS[$i]}")
+        printf "${RED}   ✗ %s${RESET}\n" "${PKGS[$i]}"
+      fi
+    done
+
+    if [[ ${#FAILED[@]} -gt 0 ]]; then
+      printf "\n${RED}❌ Failed to build %d package(s):${RESET}\n" "${#FAILED[@]}"
+      for pkg in "${FAILED[@]}"; do
+        printf "\n${YELLOW}── %s (last 30 lines) ──${RESET}\n" "$pkg"
+        tail -30 "${LOG_DIR}/${pkg}.log"
+      done
+      printf "\n${DIM}Full logs: %s${RESET}\n" "$LOG_DIR"
+      trap - EXIT  # keep logs around for inspection
+      exit 1
+    fi
+    printf "${GREEN}✅ All images built & pushed${RESET}\n\n"
+
+    # Phase 2: Reconcile Flux (single pass)
+    printf "${CYAN}🔄 Reconciling Flux image repositories & policies...${RESET}\n"
+    for pkg in $BUILDABLE; do
+      FLUX_NAME="nannos-${pkg}"
+      flux reconcile image repository "$FLUX_NAME" > /dev/null 2>&1 &
+    done
+    wait
+    for pkg in $BUILDABLE; do
+      FLUX_NAME="nannos-${pkg}"
+      flux reconcile image policy "$FLUX_NAME" > /dev/null 2>&1 &
+    done
+    wait
+    flux reconcile kustomization nannos-app --with-source > /dev/null 2>&1
+    printf "${GREEN}✅ Flux reconciled${RESET}\n\n"
+
+    # Phase 3: Wait for rollouts
+    printf "${CYAN}⏳ Waiting for rollouts...${RESET}\n"
+    DEPLOYS=()
+    for pkg in $BUILDABLE; do
+      DEPLOY=$(just pkg-deploy "$pkg")
+      # Deduplicate (console-backend & console-frontend share "console")
+      if [[ ! " ${DEPLOYS[*]:-} " =~ " $DEPLOY " ]]; then
+        DEPLOYS+=("$DEPLOY")
+      fi
+    done
+    ROLLOUT_FAILED=()
+    ROLLOUT_PIDS=()
+    ROLLOUT_NAMES=()
+    for deploy in "${DEPLOYS[@]}"; do
+      kubectl -n nannos rollout status "deployment/$deploy" --timeout=300s > /dev/null 2>&1 &
+      ROLLOUT_PIDS+=($!)
+      ROLLOUT_NAMES+=("$deploy")
+    done
+    for i in "${!ROLLOUT_PIDS[@]}"; do
+      if wait "${ROLLOUT_PIDS[$i]}"; then
+        printf "${GREEN}   ✓ %s${RESET}\n" "${ROLLOUT_NAMES[$i]}"
+      else
+        ROLLOUT_FAILED+=("${ROLLOUT_NAMES[$i]}")
+        printf "${RED}   ✗ %s${RESET}\n" "${ROLLOUT_NAMES[$i]}"
+      fi
+    done
+    if [[ ${#ROLLOUT_FAILED[@]} -gt 0 ]]; then
+      printf "\n${RED}❌ Rollout failed for: %s${RESET}\n" "${ROLLOUT_FAILED[*]}"
+      printf "${DIM}   Inspect with: kubectl -n nannos describe deployment/<name>${RESET}\n"
+      exit 1
+    fi
+    printf "${GREEN}✅ All deployments rolled out successfully${RESET}\n"
+
 # Builds, pushes a dev image, then triggers Flux to deploy it and waits for rollout
 deploy-dev pkg:
     #!/usr/bin/env bash

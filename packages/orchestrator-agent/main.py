@@ -39,6 +39,7 @@ from ringier_a2a_sdk.server import AuthRequestContextBuilder
 
 from app.core.a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    HUMAN_IN_THE_LOOP_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
 )
@@ -135,6 +136,11 @@ def create_app():
             AgentExtension(
                 uri=INTERMEDIATE_OUTPUT_EXTENSION,
                 description="Streams draft content from sub-agents via Artifact.extensions on artifact updates.",
+            ),
+            AgentExtension(
+                uri=HUMAN_IN_THE_LOOP_EXTENSION,
+                description="Emits structured interrupt requests requiring human approval before tool execution. "
+                "Response: send a DataPart with {decisions: [{type, ...}]}.",
             ),
         ],
     )
