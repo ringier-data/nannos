@@ -1,6 +1,6 @@
 [project]
 name = "voice-agent"
-version = "0.8.0"
+version = "0.8.1"
 description = "Voice agent powered by Gemini Live native audio (single-model STT+LLM+TTS)"
 requires-python = ">=3.13"
 dependencies = [
