@@ -9,21 +9,20 @@ import os
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
+from console_backend.models.notification import NotificationType
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.notification import NotificationType
 
 
 @pytest.mark.asyncio
 async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSession, test_user):
     """Test that bulk activation only sends notifications to users whose state changed."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
+    from console_backend.repositories.sub_agent_repository import SubAgentRepository
+    from console_backend.repositories.user_group_repository import UserGroupRepository
+    from console_backend.services.audit_service import AuditService
+    from console_backend.services.notification_service import NotificationService
+    from console_backend.services.sub_agent_service import SubAgentService
+    from console_backend.services.user_group_service import UserGroupService
 
     # Setup repositories and services
     audit_service = AuditService()
@@ -126,12 +125,12 @@ async def test_bulk_activate_only_notifies_affected_users(pg_session: AsyncSessi
 @pytest.mark.asyncio
 async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSession, test_user):
     """Test that bulk deactivation only sends notifications to users whose state changed."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
+    from console_backend.repositories.sub_agent_repository import SubAgentRepository
+    from console_backend.repositories.user_group_repository import UserGroupRepository
+    from console_backend.services.audit_service import AuditService
+    from console_backend.services.notification_service import NotificationService
+    from console_backend.services.sub_agent_service import SubAgentService
+    from console_backend.services.user_group_service import UserGroupService
 
     # Setup repositories and services
     audit_service = AuditService()
@@ -242,12 +241,12 @@ async def test_bulk_deactivate_only_notifies_affected_users(pg_session: AsyncSes
 @pytest.mark.asyncio
 async def test_add_members_only_notifies_members_with_new_activations(pg_session: AsyncSession, test_user):
     """Test that adding members only notifies those who get new agent activations."""
-    from playground_backend.repositories.sub_agent_repository import SubAgentRepository
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
-    from playground_backend.services.notification_service import NotificationService
-    from playground_backend.services.sub_agent_service import SubAgentService
-    from playground_backend.services.user_group_service import UserGroupService
+    from console_backend.repositories.sub_agent_repository import SubAgentRepository
+    from console_backend.repositories.user_group_repository import UserGroupRepository
+    from console_backend.services.audit_service import AuditService
+    from console_backend.services.notification_service import NotificationService
+    from console_backend.services.sub_agent_service import SubAgentService
+    from console_backend.services.user_group_service import UserGroupService
 
     # Setup repositories and services
     audit_service = AuditService()

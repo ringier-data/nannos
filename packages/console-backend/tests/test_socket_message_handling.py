@@ -3,8 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from playground_backend.services.conversation_service import ConversationService
+from console_backend.services.conversation_service import ConversationService
 
 
 @pytest.mark.asyncio

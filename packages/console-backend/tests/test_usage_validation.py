@@ -3,9 +3,8 @@
 from datetime import datetime, timezone
 
 import pytest
+from console_backend.models.usage import UsageLogCreate
 from pydantic import ValidationError
-
-from playground_backend.models.usage import UsageLogCreate
 
 
 class TestBillingUnitValidation:

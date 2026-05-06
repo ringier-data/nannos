@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Search, Wrench, AlertCircle, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
-import { playgroundListMcpToolsOptions } from '@/api/generated/@tanstack/react-query.gen';
+import { consoleListMcpToolsOptions } from '@/api/generated/@tanstack/react-query.gen';
 import type { McpTool, McpToolsResponse } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -74,7 +74,7 @@ export function MCPToolToggleList({ value = [], onChange, disabled = false }: MC
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
 
   const { data: mcpToolsData, isLoading, error } = useQuery({
-    ...playgroundListMcpToolsOptions({}),
+    ...consoleListMcpToolsOptions({}),
   });
 
   const allTools = ((mcpToolsData as McpToolsResponse)?.tools ?? []) as McpTool[];

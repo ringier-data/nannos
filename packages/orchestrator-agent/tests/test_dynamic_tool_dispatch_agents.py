@@ -119,14 +119,16 @@ class TestEnhanceSystemPromptAgents:
 
         result = middleware._enhance_system_prompt_agents(original, ctx)
 
-        # The last block should now list all three agents in XML format
-        last_text = result.content_blocks[-1]["text"]
-        assert '<agent name="general-purpose">' in last_text
-        assert '<agent name="file-analyzer">' in last_text
-        assert '<agent name="jira-agent">' in last_text
-        # Should NOT have duplicate marker entries
+        # Find the block containing the agent marker (bug report guidance is appended after)
         marker = DynamicToolDispatchMiddleware._SYSTEM_PROMPT_AGENT_MARKER
-        assert last_text.count(marker) == 1
+        agent_blocks = [b for b in result.content_blocks if isinstance(b, dict) and marker in b.get("text", "")]
+        assert len(agent_blocks) == 1
+        agent_text = agent_blocks[0]["text"]
+        assert '<agent name="general-purpose">' in agent_text
+        assert '<agent name="file-analyzer">' in agent_text
+        assert '<agent name="jira-agent">' in agent_text
+        # Should NOT have duplicate marker entries
+        assert agent_text.count(marker) == 1
 
     def test_returns_none_when_system_message_is_none(self, middleware):
         ctx = _make_context(subagent_registry=SAMPLE_REGISTRY)
@@ -159,9 +161,12 @@ class TestEnhanceSystemPromptAgents:
         ctx = _make_context(subagent_registry=SAMPLE_REGISTRY)
 
         result = middleware._enhance_system_prompt_agents(original, ctx)
-        last_text = result.content_blocks[-1]["text"]
-        assert "old-agent" not in last_text
-        assert '<agent name="jira-agent">' in last_text
+        marker = DynamicToolDispatchMiddleware._SYSTEM_PROMPT_AGENT_MARKER
+        agent_blocks = [b for b in result.content_blocks if isinstance(b, dict) and marker in b.get("text", "")]
+        assert len(agent_blocks) == 1
+        agent_text = agent_blocks[0]["text"]
+        assert "old-agent" not in agent_text
+        assert '<agent name="jira-agent">' in agent_text
 
 
 # ===========================================================================

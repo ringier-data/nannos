@@ -29,6 +29,7 @@ from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMi
 from .a2a_tracking import A2ATaskTrackingMiddleware, A2ATrackingState
 from .auth_error_middleware import AuthErrorDetectionMiddleware, AuthErrorState
 from .dynamic_tool_dispatch import DynamicToolDispatchMiddleware
+from .error_classification_middleware import ErrorClassificationMiddleware
 from .todo_status_middleware import TodoStatusMiddleware, TodoStatusState
 from .toolset_selector import ToolsetSelectorMiddleware
 from .user_preferences_middleware import UserPreferencesMiddleware
@@ -39,6 +40,7 @@ __all__ = [
     "DynamicToolDispatchMiddleware",
     "AuthErrorDetectionMiddleware",
     "AuthErrorState",
+    "ErrorClassificationMiddleware",
     "TodoStatusMiddleware",
     "TodoStatusState",
     "ToolSchemaCleaningMiddleware",

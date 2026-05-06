@@ -187,7 +187,7 @@ class UserConfig(BaseModel):
     )
     sub_agent_config_hash: Optional[str] = Field(
         default=None,
-        description="Sub-agent config hash for playground testing mode (single sub-agent isolation)",
+        description="Sub-agent config hash for console testing mode (single sub-agent isolation)",
     )
     agent_metadata: Optional[dict[str, dict[str, Any]]] = Field(
         default=None,
@@ -276,16 +276,16 @@ class AgentSettings:
     MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
 
-    # Playground backend URL — used to subscribe to playground's MCP endpoint
-    PLAYGROUND_BACKEND_URL: str | None = os.getenv("PLAYGROUND_BACKEND_URL", None)
+    # Console backend URL — used to subscribe to console's MCP endpoint
+    CONSOLE_BACKEND_URL: str | None = os.getenv("CONSOLE_BACKEND_URL", None)
+    CONSOLE_BACKEND_CLIENT_ID: str = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")
 
     POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
     POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
-    POSTGRES_DB = os.getenv("POSTGRES_DB", "playground")
+    POSTGRES_DB = os.getenv("POSTGRES_DB", "console")
     POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
     POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
-    POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "playground")
-
+    POSTGRES_SCHEMA = os.getenv("POSTGRES_SCHEMA", "console")
 
     # System prompt
     SYSTEM_INSTRUCTION = (

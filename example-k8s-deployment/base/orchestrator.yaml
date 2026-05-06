@@ -44,7 +44,7 @@ spec:
           value: "orchestrator"
         - name: AGENT_BASE_URL
           value: "https://orchestrator.${BASE_DOMAIN}"
-        - name: PLAYGROUND_BACKEND_URL
+        - name: CONSOLE_BACKEND_URL
           value: "https://console.${BASE_DOMAIN}"
         - name: MCP_GATEWAY_URL
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"

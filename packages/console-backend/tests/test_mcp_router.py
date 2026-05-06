@@ -11,7 +11,7 @@ from fastapi import HTTPException
 # Prevent AWS/boto3 local credential path during imports
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
-from playground_backend.routers.mcp_router import MCPToolsResponse, list_mcp_tools
+from console_backend.routers.mcp_router import MCPToolsResponse, list_mcp_tools
 
 
 class TestListMcpTools:
@@ -77,14 +77,14 @@ class TestListMcpTools:
     @pytest.mark.asyncio
     async def test_successful_token_exchange_and_tool_fetch(self, mock_request, mock_user, sample_mcp_response):
         """Test successful flow: token exchange → MCP request → parse tools."""
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             # Mock OAuth2 client
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_gateway_token")
             mock_oauth_class.return_value = mock_oauth
 
             # Mock httpx client
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.headers = {"content-type": "application/json"}
                 mock_response.json.return_value = sample_mcp_response
@@ -127,12 +127,12 @@ class TestListMcpTools:
         """Test parsing Server-Sent Events (SSE) response format."""
         sse_response_text = 'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"tool1"}]}}\n\n'
 
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.headers = {"content-type": "text/event-stream"}
                 mock_response.text = sse_response_text
@@ -173,7 +173,7 @@ class TestListMcpTools:
         request.state.original_user = None
         request.headers.get = MagicMock(return_value=None)  # No Authorization header
 
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             # Create two separate mock instances for refresh and exchange
             mock_oauth_refresh = AsyncMock()
             mock_oauth_refresh.refresh_token = AsyncMock(
@@ -190,7 +190,7 @@ class TestListMcpTools:
             # First call returns refresh client, second call returns exchange client
             mock_oauth_class.side_effect = [mock_oauth_refresh, mock_oauth_exchange]
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.headers = {"content-type": "application/json"}
                 mock_response.json.return_value = sample_mcp_response
@@ -225,7 +225,7 @@ class TestListMcpTools:
         request.state.original_user = None
         request.headers.get = MagicMock(return_value=None)  # No Authorization header
 
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.refresh_token = AsyncMock(side_effect=Exception("Invalid refresh token"))
             mock_oauth_class.return_value = mock_oauth
@@ -255,7 +255,7 @@ class TestListMcpTools:
     @pytest.mark.asyncio
     async def test_token_exchange_failure_raises_401(self, mock_request, mock_user):
         """Test that failed token exchange raises 401."""
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             # Simulate token exchange failure
             mock_oauth.exchange_token = AsyncMock(side_effect=Exception("Token exchange failed"))
@@ -271,12 +271,12 @@ class TestListMcpTools:
     @pytest.mark.asyncio
     async def test_mcp_gateway_connect_error_raises_503(self, mock_request, mock_user):
         """Test that connection error to MCP gateway raises 503."""
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_client = AsyncMock()
                 mock_client.__aenter__.return_value = mock_client
                 mock_client.post = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
@@ -292,12 +292,12 @@ class TestListMcpTools:
     @pytest.mark.asyncio
     async def test_mcp_gateway_timeout_raises_504(self, mock_request, mock_user):
         """Test that timeout to MCP gateway raises 504."""
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_client = AsyncMock()
                 mock_client.__aenter__.return_value = mock_client
                 mock_client.post = AsyncMock(side_effect=httpx.TimeoutException("Request timed out"))
@@ -312,12 +312,12 @@ class TestListMcpTools:
     @pytest.mark.asyncio
     async def test_mcp_gateway_http_error_raises_503(self, mock_request, mock_user):
         """Test that HTTP error from MCP gateway raises 503."""
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 # Mock HTTP 500 error from gateway
                 mock_response = MagicMock()
                 mock_response.status_code = 500
@@ -339,12 +339,12 @@ class TestListMcpTools:
     @pytest.mark.asyncio
     async def test_invalid_mcp_response_format_raises_503(self, mock_request, mock_user):
         """Test that invalid MCP response format raises 503."""
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.headers = {"content-type": "application/json"}
                 # Missing "result" or "tools" field
@@ -365,12 +365,12 @@ class TestListMcpTools:
     @pytest.mark.asyncio
     async def test_invalid_sse_response_raises_503(self, mock_request, mock_user):
         """Test that invalid SSE response raises 503."""
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.headers = {"content-type": "text/event-stream"}
                 # Invalid SSE format - no valid data lines
@@ -404,12 +404,12 @@ class TestListMcpTools:
             },
         }
 
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.headers = {"content-type": "application/json"}
                 mock_response.json.return_value = response_with_invalid_tools
@@ -432,12 +432,12 @@ class TestListMcpTools:
         """Test that empty tools list returns valid empty response."""
         empty_response = {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
 
-        with patch("playground_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
+        with patch("console_backend.routers.mcp_router.OidcOAuth2Client") as mock_oauth_class:
             mock_oauth = AsyncMock()
             mock_oauth.exchange_token = AsyncMock(return_value="mcp_token")
             mock_oauth_class.return_value = mock_oauth
 
-            with patch("playground_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
+            with patch("console_backend.routers.mcp_router.httpx.AsyncClient") as mock_client_class:
                 mock_response = MagicMock()
                 mock_response.headers = {"content-type": "application/json"}
                 mock_response.json.return_value = empty_response

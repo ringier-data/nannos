@@ -16,6 +16,7 @@ import {
   SettingsModal,
 } from './components';
 import { WorkingBlock } from './components/WorkingBlock';
+import { BugReportConfirmCard } from './components/BugReportConfirmCard';
 
 export function ChatApp() {
   const { isAdmin } = useAuth();
@@ -167,6 +168,9 @@ export function ChatApp() {
             <WorkingBlock steps={liveWorkingSteps} complete={!isWaiting} />
           </div>
         )}
+
+        {/* Bug Report Confirmation Card — shown when orchestrator triggers bug report interrupt */}
+        <BugReportConfirmCard />
 
         {/* Chat Input */}
         <ChatInput />

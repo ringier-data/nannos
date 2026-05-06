@@ -1,11 +1,10 @@
 """Tests for notification service."""
 
 import pytest
+from console_backend.models.notification import NotificationType
+from console_backend.services.notification_service import NotificationService
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.notification import NotificationType
-from playground_backend.services.notification_service import NotificationService
 
 
 @pytest.mark.asyncio
@@ -71,7 +70,7 @@ async def test_bulk_create_notifications(pg_session: AsyncSession):
     await pg_session.commit()
 
     # Bulk create
-    from playground_backend.models.notification import NotificationData
+    from console_backend.models.notification import NotificationData
 
     notifications = [
         NotificationData(

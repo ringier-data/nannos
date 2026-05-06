@@ -8,9 +8,9 @@ export RAMBLER_PORT=5432
 export RAMBLER_USER=postgres
 export RAMBLER_PASSWORD=password
 export RAMBLER_DIRECTORY=/scripts
-export RAMBLER_DATABASE=playground
+export RAMBLER_DATABASE=console
 export RAMBLER_TABLE=migrations
-export RAMBLER_SCHEMA=playground
+export RAMBLER_SCHEMA=console
 export PGDATA=/var/lib/postgresql-static/data
 export SCRIPTS=../../infrastructure/roles/basis/files/ddl/scripts
 
@@ -59,9 +59,9 @@ docker run -v "/$(pwd)/${SCRIPTS}:/scripts:ro" --network=${NETWORK_NAME} \
 if [ -z "$CLONES" ]; then
   CLONES=$(getconf _NPROCESSORS_ONLN) # gets number of logical processors available
 fi
-# loop CLONES times and create playground_n identical databases for parallel testing
+# loop CLONES times and create console_n identical databases for parallel testing
 for i in $(seq 1 $CLONES); do
-  docker exec $DB_CONTAINER_NAME psql --username ${RAMBLER_USER} -c "CREATE DATABASE playground_${i} TEMPLATE playground"
+  docker exec $DB_CONTAINER_NAME psql --username ${RAMBLER_USER} -c "CREATE DATABASE console_${i} TEMPLATE console"
 done
 
 
@@ -74,6 +74,6 @@ cleanup
 echo ""
 echo "Created image. Publish this to repo or use it locally to start a local Postgres 16 database with an empty schema."
 if [ -n "$CLONES" ]; then
-  echo "Contains $CLONES cloned databases (e.g. playground_1, playground_2, etc.)"
+  echo "Contains $CLONES cloned databases (e.g. console_1, console_2, etc.)"
 fi
 echo $IMAGE_TAG

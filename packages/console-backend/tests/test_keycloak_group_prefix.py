@@ -4,13 +4,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from playground_backend.services.keycloak_admin_service import KeycloakAdminService
+from console_backend.services.keycloak_admin_service import KeycloakAdminService
 
 
 @pytest.mark.asyncio
 async def test_prefix_isolation_different_environments():
     """Test that different environments create different group names."""
-    with patch("playground_backend.services.keycloak_admin_service.KeycloakAdmin") as mock_admin_class:
+    with patch("console_backend.services.keycloak_admin_service.KeycloakAdmin") as mock_admin_class:
         mock_admin = Mock()
         mock_admin_class.return_value = mock_admin
         mock_admin.a_create_group = AsyncMock(return_value="kc-group-id-123")

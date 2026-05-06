@@ -5,6 +5,7 @@ import type {
 } from '../storage/types.js';
 
 import { A2AClientService } from "../services/a2aClientService.js";
+import { FeedbackService } from "../services/feedbackService.js";
 import { FileStorageService } from "../services/fileStorageService.js";
 import { GoogleChatService } from "../services/googleChatService.js";
 import { UserAuthService } from "../services/userAuthService.js";
@@ -19,4 +20,6 @@ export interface HandlerDependencies {
   baseUrl: string;
   fileStorageService: FileStorageService;
   isLocalMode: boolean;
+  feedbackService?: FeedbackService;
+  feedbackSigningSecret?: string;
 }

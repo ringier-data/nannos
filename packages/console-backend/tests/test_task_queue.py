@@ -4,8 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
-
-from playground_backend.catalog.task_queue import (
+from console_backend.catalog.task_queue import (
     BatchResult,
     FileTaskPayload,
     FileTaskResult,
@@ -45,7 +44,7 @@ class TestFileTaskPayload:
             p.catalog_id = "changed"  # type: ignore[misc]
 
     def test_round_trip_source_file(self):
-        from playground_backend.catalog.adapters.base import SourceFile
+        from console_backend.catalog.adapters.base import SourceFile
 
         now = datetime.now(timezone.utc)
         sf = SourceFile(

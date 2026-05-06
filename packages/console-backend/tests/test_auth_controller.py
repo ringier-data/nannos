@@ -4,9 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from authlib.integrations.starlette_client import OAuthError
+from console_backend.controllers.auth_controller import AuthController
 from fastapi import HTTPException
-
-from playground_backend.controllers.auth_controller import AuthController
 
 
 @pytest.mark.asyncio
@@ -193,7 +192,7 @@ class TestAuthController:
         """Test URL validation rejects different domains in non-local mode."""
         from unittest.mock import patch
 
-        from playground_backend.config import Config
+        from console_backend.config import Config
 
         # Mock Config.is_local to return False so domain validation is enforced
         with patch.object(Config, "is_local", return_value=False):
@@ -583,7 +582,7 @@ class TestAuthController:
         pg_session,
     ):
         """Test that Keycloak seeding failure does not block the login flow."""
-        from playground_backend.services.keycloak_admin_service import KeycloakSyncError
+        from console_backend.services.keycloak_admin_service import KeycloakSyncError
 
         mock_keycloak = AsyncMock()
         mock_keycloak.sync_phone_number_override.side_effect = KeycloakSyncError("Connection refused")

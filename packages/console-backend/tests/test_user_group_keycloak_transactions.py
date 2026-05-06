@@ -4,11 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from console_backend.repositories.user_group_repository import UserGroupRepository
+from console_backend.services.keycloak_admin_service import KeycloakSyncError
+from console_backend.services.user_group_service import UserGroupService
 from sqlalchemy import text
-
-from playground_backend.repositories.user_group_repository import UserGroupRepository
-from playground_backend.services.keycloak_admin_service import KeycloakSyncError
-from playground_backend.services.user_group_service import UserGroupService
 
 
 @pytest_asyncio.fixture
@@ -26,7 +25,7 @@ async def mock_keycloak_service():
 @pytest_asyncio.fixture
 async def user_group_service_with_keycloak(mock_keycloak_service):
     """Create UserGroupService with mocked Keycloak and audit service."""
-    from playground_backend.services.audit_service import AuditService
+    from console_backend.services.audit_service import AuditService
 
     repo = UserGroupRepository()
     # Mock audit service to avoid DynamoDB calls

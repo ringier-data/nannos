@@ -6,12 +6,11 @@ schema parity with production.
 
 import pytest
 import pytest_asyncio
+from console_backend.models.sub_agent import SubAgentCreate, SubAgentType
+from console_backend.models.user import User, UserStatus
+from console_backend.services.sub_agent_service import SubAgentService
+from console_backend.services.user_service import UserService
 from sqlalchemy import text
-
-from playground_backend.models.sub_agent import SubAgentCreate, SubAgentType
-from playground_backend.models.user import User, UserStatus
-from playground_backend.services.sub_agent_service import SubAgentService
-from playground_backend.services.user_service import UserService
 
 
 # Alias pg_session to db_session for compatibility with tests

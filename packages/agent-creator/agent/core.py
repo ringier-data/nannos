@@ -65,10 +65,10 @@ You are an expert AI Agent Creator for the Alloy Infrastructure Agents platform.
 </role>
 
 <tools>
-- playground_list_sub_agents — View existing subagents to avoid duplicates and understand the current agent ecosystem
-- playground_create_sub_agent — Create new subagents with specific configurations
-- playground_update_sub_agent — Modify existing subagents to improve or fix their configurations
-- playground_grep_mcp_tools — Discover available MCP tools that can be assigned to agents
+- console_list_sub_agents — View existing subagents to avoid duplicates and understand the current agent ecosystem
+- console_create_sub_agent — Create new subagents with specific configurations
+- console_update_sub_agent — Modify existing subagents to improve or fix their configurations
+- console_grep_mcp_tools — Discover available MCP tools that can be assigned to agents
 </tools>
 
 <agent_creation_guidelines>
@@ -226,7 +226,7 @@ When configuring MCP tools (on top of the built-in tools above):
 <step name="When a user asks you to create an agent">
 1. Discovery Phase
    - Ask clarifying questions about the agent's purpose
-   - Use playground_list_sub_agents to check if a similar agent exists
+   - Use console_list_sub_agents to check if a similar agent exists
    - If similar exists, suggest updating instead of duplicating
 
 2. Design Phase
@@ -234,24 +234,24 @@ When configuring MCP tools (on top of the built-in tools above):
    - Get user confirmation or refinement
 
 3. Creation Phase
-   - Use playground_create_sub_agent with the finalized configuration
-   - Provide: confirmation, agent name and description, link to agent ({PLAYGROUND_FRONTEND_URL}/app/subagents/{sub_agent_id}), how to activate and use it, limitations or considerations
+   - Use console_create_sub_agent with the finalized configuration
+   - Provide: confirmation, agent name and description, link to agent ({CONSOLE_FRONTEND_URL}/app/subagents/{sub_agent_id}), how to activate and use it, limitations or considerations
 
 4. Iteration Phase
-   - If user wants changes, use playground_update_sub_agent
+   - If user wants changes, use console_update_sub_agent
    - Explain what was changed and why
    - Suggest testing approaches
 </step>
 
 <step name="When a user asks you to update an agent">
-1. Use playground_list_sub_agents to find the agent
+1. Use console_list_sub_agents to find the agent
 2. Ask what specifically should change
-3. Use playground_update_sub_agent with only the changed fields
+3. Use console_update_sub_agent with only the changed fields
 4. Explain the impact of the changes
 </step>
 
 <step name="When a user asks about existing agents">
-1. Use playground_list_sub_agents to retrieve current agents
+1. Use console_list_sub_agents to retrieve current agents
 2. Present information in an organized, readable format
 3. Highlight key capabilities and specializations
 4. Suggest improvements or gaps if relevant
@@ -259,7 +259,7 @@ When configuring MCP tools (on top of the built-in tools above):
 </workflow>
 
 <important_rules>
-- ALWAYS provide a link to the created agent: {PLAYGROUND_FRONTEND_URL}/subagents/{sub_agent_id}
+- ALWAYS provide a link to the created agent: {CONSOLE_FRONTEND_URL}/subagents/{sub_agent_id}
 - ALWAYS validate that agent names follow the pattern: /^[a-z0-9-]+$/
 - Agent descriptions are routing-critical — the orchestrator uses descriptions to decide which agent to invoke. Make them specific and keyword-rich.
 - Avoid overlap — each agent should have a clear, distinct purpose. Similar agents confuse the orchestrator.
@@ -279,7 +279,7 @@ class AgentCreator(LangGraphAgent):
     """Agent Creator - Helps users design and create specialized AI agents.
 
     This agent uses whichever LLM provider is available (via agent-common's
-    model_factory) and has access to playground backend MCP tools for managing
+    model_factory) and has access to console backend MCP tools for managing
     the agent lifecycle.
 
     Architecture:
@@ -293,8 +293,8 @@ class AgentCreator(LangGraphAgent):
     def __init__(self):
         """Initialize the Agent Creator."""
         # Store configuration before calling super().__init__()
-        self.playground_backend_url = os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
-        self.playground_frontend_url = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
+        self.console_backend_url = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
+        self.console_frontend_url = os.getenv("CONSOLE_FRONTEND_URL", "http://localhost:5173")
 
         # Create OIDC client for token exchange
         oauth2_client = OidcOAuth2Client(
@@ -306,7 +306,7 @@ class AgentCreator(LangGraphAgent):
         # Create credential injection interceptor with token exchange
         self._credential_injector = TokenExchangeCredentialInjector(
             oidc_client=oauth2_client,
-            target_client_id=os.environ.get("MCP_GATEWAY_CLIENT_ID", "gatana"),
+            target_client_id=os.environ.get("CONSOLE_BACKEND_CLIENT_ID", "agent-console"),
             requested_scopes=["openid", "profile", "offline_access"],
         )
 
@@ -376,18 +376,18 @@ class AgentCreator(LangGraphAgent):
             return MemorySaver()
 
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
-        """Return MCP server connection for playground backend."""
-        playground_mcp_url = f"{self.playground_backend_url}/mcp"
+        """Return MCP server connection for console backend."""
+        console_mcp_url = f"{self.console_backend_url}/mcp"
         return {
-            "playground": StreamableHttpConnection(
+            "console": StreamableHttpConnection(
                 transport="streamable_http",
-                url=playground_mcp_url,
+                url=console_mcp_url,
             )
         }
 
     def _get_system_prompt(self) -> str:
         """Return agent creator system prompt with configured frontend URL and model list."""
-        return AGENT_CREATOR_SYSTEM_PROMPT.replace("{PLAYGROUND_FRONTEND_URL}", self.playground_frontend_url).replace(
+        return AGENT_CREATOR_SYSTEM_PROMPT.replace("{CONSOLE_FRONTEND_URL}", self.console_frontend_url).replace(
             "{AVAILABLE_MODELS}", _get_models_prompt_text()
         )
 

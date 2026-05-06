@@ -1,4 +1,4 @@
-# Playground Backend Copilot Instructions
+# Console Backend Copilot Instructions
 
 ## Maintaining These Instructions
 
@@ -47,7 +47,7 @@ uv run python script.py
 uv run pytest tests/ -v
 
 # Run with coverage
-uv run pytest tests/ --cov=playground_backend --cov-report=html
+uv run pytest tests/ --cov=console_backend --cov-report=html
 ```
 
 ## File Writing Safety
@@ -62,7 +62,7 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 #### How to Add New Data Operations
 
-1. **Extend or create a repository** in `playground_backend/repositories/`:
+1. **Extend or create a repository** in `console_backend/repositories/`:
    - Inherit from `AuditedRepository` base class
    - Specify the entity type in the constructor
    - Override `create()`, `update()`, or `delete()` if custom logic is needed
@@ -82,8 +82,8 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 #### Example: Creating a New Repository
 
 ```python
-from playground_backend.repositories.base import AuditedRepository
-from playground_backend.models.audit import AuditEntityType
+from console_backend.repositories.base import AuditedRepository
+from console_backend.models.audit import AuditEntityType
 
 class MyEntityRepository(AuditedRepository):
     def __init__(self):
@@ -97,7 +97,7 @@ class MyEntityRepository(AuditedRepository):
 #### Example: Using Repository in Service
 
 ```python
-from playground_backend.repositories.my_entity_repository import MyEntityRepository
+from console_backend.repositories.my_entity_repository import MyEntityRepository
 
 class MyEntityService:
     def __init__(self):
@@ -154,7 +154,7 @@ Available in `AuditAction` enum:
 
 ### Adding New Audit Types
 
-1. Add enum value to `playground_backend/models/audit.py`
+1. Add enum value to `console_backend/models/audit.py`
 2. Create database migration in `infrastructure/roles/basis/files/ddl/scripts/`
 3. Use `ALTER TYPE` to add enum value (PostgreSQL doesn't support removing enum values)
 
@@ -237,7 +237,7 @@ from unittest.mock import patch, AsyncMock
 
 @pytest.mark.asyncio
 async def test_complex_operation_logs_audit(pg_session):
-    with patch('playground_backend.repositories.sub_agent_repository.audit_service.log_action', new_callable=AsyncMock) as mock_audit:
+    with patch('console_backend.repositories.sub_agent_repository.audit_service.log_action', new_callable=AsyncMock) as mock_audit:
         # Perform operation that has complex DB interactions
         await repo.approve_version(pg_session, context)
         
@@ -266,7 +266,7 @@ async def my_function(db: AsyncSession):
 ### Service Singletons
 Services use singleton pattern via `service_instances.py`:
 ```python
-from playground_backend.service_instances import sub_agent_service
+from console_backend.service_instances import sub_agent_service
 
 # Use in routes/controllers
 agent = await sub_agent_service.create_sub_agent(...)
@@ -274,7 +274,7 @@ agent = await sub_agent_service.create_sub_agent(...)
 
 ### Authorization Checks
 ```python
-from playground_backend.authorization import check_capability, check_action_allowed
+from console_backend.authorization import check_capability, check_action_allowed
 
 # Check system-level capability
 if check_capability(user.role, 'sub_agents', 'approve'):
@@ -386,8 +386,8 @@ Actions with `.admin` suffix require admin-mode to be enabled:
 ### Authorization Helpers
 
 ```python
-from playground_backend.authorization import check_capability, check_action_allowed
-from playground_backend.services.user_group_service import user_group_service
+from console_backend.authorization import check_capability, check_action_allowed
+from console_backend.services.user_group_service import user_group_service
 
 # Check system role capability
 can_approve = check_capability(user.role, 'sub_agents', 'approve')

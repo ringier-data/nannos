@@ -20,7 +20,7 @@ Token Exchange Strategy:
 4. Sub-agents validate token locally via JWTValidatorMiddleware
 
 Security Considerations:
-- ✅ Scope reduction: Removes broader scopes the user might have (e.g., playground access)
+- ✅ Scope reduction: Removes broader scopes the user might have (e.g., console access)
 - ✅ Audience scoping: Token is for specific service (orchestrator/agent-creator), not arbitrary services
 - ⚠️  Lateral movement: Compromised sub-agent CAN still call orchestrator (token has aud=orchestrator)
   and invoke other agents on behalf of the user. User's groups/permissions remain in token.
@@ -51,13 +51,13 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
     Token Exchange Targets:
     - Default: 'orchestrator' target with reduced scopes (openid, profile, email)
-    - Exception: 'agent-creator' uses its own client ID to preserve playground access
+    - Exception: 'agent-creator' uses its own client ID to preserve console access
 
     This provides:
     - Scope reduction: Tokens have minimal scopes [openid, profile, email] instead of user's full scopes
     - Audience scoping: Tokens targeted for orchestrator or agent-creator (not arbitrary services)
     - Dynamic provisioning: No per-agent client registration needed
-    - Selective access: agent-creator gets playground access, others get orchestrator-scoped tokens
+    - Selective access: agent-creator gets console access, others get orchestrator-scoped tokens
 
     Security Note:
     - Compromised sub-agent CAN still call orchestrator with the token (aud=orchestrator)
@@ -186,7 +186,7 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         Handle OIDC authentication by exchanging user token for target-specific token.
 
         Token exchange targets:
-        - agent-creator: Uses 'agent-creator' target to preserve playground endpoint access
+        - agent-creator: Uses 'agent-creator' target to preserve console endpoint access
         - All other agents: Uses 'orchestrator' target with reduced scopes
 
         This provides scope-based isolation while maintaining dynamic provisioning.
@@ -210,11 +210,11 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             return request_payload, http_kwargs
 
         # Determine target client ID based on agent requirements
-        # agent-creator needs playground access, others use reduced-scope orchestrator token
+        # agent-creator needs console access, others use reduced-scope orchestrator token
         if scheme_name in ("agent-creator", "voice-agent"):
-            # NOTE: the agent-creator client is provisioned manually to allow playground access
+            # NOTE: the agent-creator client is provisioned manually to allow console access
             target_client_id = scheme_name
-            requested_scopes = ["openid", "profile", "email"]  # Preserve playground access
+            requested_scopes = ["openid", "profile", "email"]  # Preserve console access
             token_description = f"{scheme_name} token"
         elif scheme_name == "alloy-agent":
             # TOOD: shall we establish a convention that agents needing MCP gateway access should use a specific scheme name?

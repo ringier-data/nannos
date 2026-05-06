@@ -48,9 +48,9 @@ spec:
           value: "https://agent-creator.${BASE_DOMAIN}"
         - name: OIDC_CLIENT_ID
           value: "agent-creator"
-        - name: PLAYGROUND_BACKEND_URL
+        - name: CONSOLE_BACKEND_URL
           value: "https://console.${BASE_DOMAIN}"
-        - name: PLAYGROUND_FRONTEND_URL
+        - name: CONSOLE_FRONTEND_URL
           value: "https://console.${BASE_DOMAIN}"
         - name: MCP_GATEWAY_URL
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"

@@ -1,15 +1,25 @@
-import { AlertTriangle, Bot, User, FileText, Download } from 'lucide-react';
+import { useState } from 'react';
+import { AlertTriangle, Bot, User, FileText, Download, Flag, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Markdown } from '@/components/ui/markdown';
+import {
+  getConversationFeedbackApiV1ConversationsConversationIdFeedbackGetOptions,
+  getConversationFeedbackApiV1ConversationsConversationIdFeedbackGetQueryKey,
+} from '@/api/generated/@tanstack/react-query.gen';
+import type { FeedbackRating } from '@/api/generated';
 import { useChat } from '../contexts';
 import { formatTime } from '../utils';
 import type { Message } from '../types';
 import { UnifiedTimelineBlock } from './UnifiedTimelineBlock';
+import { MessageFeedback } from './MessageFeedback';
+import { ReportIssueDialog } from './ReportIssueDialog';
 
 interface MessageCardProps {
   message: Message;
+  feedbackMap?: Map<string, FeedbackRating>;
 }
 
 /**
@@ -19,18 +29,22 @@ interface MessageCardProps {
  * whenever messages are loaded, so they're always fresh.
  */
 
-function MessageCard({ message }: MessageCardProps) {
+function MessageCard({ message, feedbackMap }: MessageCardProps) {
+  const { activeConversationId } = useChat();
   const isUser = message.type === 'user';
   const isError = message.content.startsWith('Error:');
   const formattedTime = formatTime(message.timestamp);
+  const [reportOpen, setReportOpen] = useState(false);
 
   // Extract file parts if available
   const fileParts = message.parts?.filter(part => part.kind === 'file' && part.file) || [];
 
+  const currentRating = feedbackMap?.get(message.id) ?? null;
+
   return (
     <div
       className={cn(
-        'flex gap-3 py-4',
+        'group flex gap-3 py-4',
         isUser && 'flex-row-reverse'
       )}
       data-testid={`message-${message.id}`}
@@ -129,7 +143,34 @@ function MessageCard({ message }: MessageCardProps) {
             </div>
           )}
         </div>
-        <span className="text-xs text-muted-foreground px-1">{formattedTime}</span>
+        <div className="flex items-center gap-2 px-1">
+          <span className="text-xs text-muted-foreground">{formattedTime}</span>
+          {!isUser && activeConversationId && (
+            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+              <MessageFeedback
+                conversationId={activeConversationId}
+                messageId={message.id}
+                currentRating={currentRating}
+              />
+              <button
+                type="button"
+                onClick={() => setReportOpen(true)}
+                className="p-1 rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-accent transition-colors"
+                aria-label="Report issue"
+              >
+                <Flag className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+        </div>
+        {reportOpen && activeConversationId && (
+          <ReportIssueDialog
+            open={reportOpen}
+            onOpenChange={setReportOpen}
+            conversationId={activeConversationId}
+            messageId={message.id}
+          />
+        )}
       </div>
     </div>
   );
@@ -165,8 +206,102 @@ function EmptyState() {
   );
 }
 
+function FeedbackRequestBanner({ conversationId, subAgents, onDismiss }: { conversationId: string; subAgents: string[]; onDismiss: () => void }) {
+  const queryClient = useQueryClient();
+  const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const feedbackQueryKey = getConversationFeedbackApiV1ConversationsConversationIdFeedbackGetQueryKey({
+    path: { conversation_id: conversationId },
+  });
+
+  const handleFeedback = async (rating: FeedbackRating) => {
+    setSubmitting(true);
+    try {
+      const resp = await fetch(
+        `/api/v1/conversations/${encodeURIComponent(conversationId)}/feedback`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            rating,
+            ...(subAgents.length > 0 && { sub_agent_id: subAgents.join(', ') }),
+          }),
+        }
+      );
+      if (resp.ok) {
+        setSubmitted(true);
+        queryClient.invalidateQueries({ queryKey: feedbackQueryKey });
+        setTimeout(onDismiss, 1500);
+      }
+    } catch {
+      // Best effort
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (submitted) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-3 px-4 bg-green-50 dark:bg-green-950/30 rounded-lg mx-4 my-2">
+        <span className="text-sm text-green-700 dark:text-green-400">Thanks for your feedback!</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-3 py-3 px-4 bg-muted/50 border border-border rounded-lg mx-4 my-2">
+      <span className="text-sm text-muted-foreground">Was this response helpful?</span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => handleFeedback('positive')}
+          disabled={submitting}
+          className="p-1.5 rounded hover:bg-green-100 dark:hover:bg-green-900/30 text-muted-foreground hover:text-green-600 dark:hover:text-green-400 transition-colors"
+          aria-label="Thumbs up"
+        >
+          <ThumbsUp className="w-4 h-4" />
+        </button>
+        <button
+          type="button"
+          onClick={() => handleFeedback('negative')}
+          disabled={submitting}
+          className="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-muted-foreground hover:text-red-600 dark:hover:text-red-400 transition-colors"
+          aria-label="Thumbs down"
+        >
+          <ThumbsDown className="w-4 h-4" />
+        </button>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-xs text-muted-foreground/70 hover:text-muted-foreground ml-2"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function MessageList() {
-  const { messages, isLoadingMessages, streamingMessage, liveTimeline } = useChat();
+  const { messages, isLoadingMessages, streamingMessage, liveTimeline, activeConversationId, pendingFeedbackRequest, dismissFeedbackRequest } = useChat();
+
+  // Fetch feedback for the active conversation
+  const { data: feedbackData } = useQuery({
+    ...getConversationFeedbackApiV1ConversationsConversationIdFeedbackGetOptions({
+      path: { conversation_id: activeConversationId! },
+    }),
+    enabled: !!activeConversationId,
+  });
+
+  // Build a map of messageId -> rating for quick lookup
+  const feedbackMap = new Map<string, FeedbackRating>();
+  if (feedbackData) {
+    for (const fb of feedbackData) {
+      feedbackMap.set(fb.message_id, fb.rating);
+    }
+  }
 
   if (isLoadingMessages) {
     return <LoadingState />;
@@ -205,7 +340,7 @@ export function MessageList() {
             <UnifiedTimelineBlock timeline={msg.timeline} complete={true} />
           )}
           {/* Only render MessageCard if message has actual content */}
-          {msg.showMessageCard !== false && <MessageCard message={msg} />}
+          {msg.showMessageCard !== false && <MessageCard message={msg} feedbackMap={feedbackMap} />}
         </div>
       ))}
       {/* Live streaming events - unified timeline maintains chronological order */}
@@ -215,7 +350,7 @@ export function MessageList() {
       {/* Steering messages sent while agent is streaming render after the timeline */}
       {trailingUserMessages.map((msg) => (
         <div key={msg.id}>
-          <MessageCard message={msg} />
+          <MessageCard message={msg} feedbackMap={feedbackMap} />
         </div>
       ))}
       {streamingMessage && (
@@ -232,6 +367,13 @@ export function MessageList() {
             </div>
           </div>
         </div>
+      )}
+      {pendingFeedbackRequest?.conversationId === activeConversationId && activeConversationId && (
+        <FeedbackRequestBanner
+          conversationId={activeConversationId}
+          subAgents={pendingFeedbackRequest.subAgents}
+          onDismiss={dismissFeedbackRequest}
+        />
       )}
     </div>
   );

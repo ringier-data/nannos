@@ -19,10 +19,8 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
 from aiomoto import mock_aws
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.notification import NotificationType
-from playground_backend.models.sub_agent import (
+from console_backend.models.notification import NotificationType
+from console_backend.models.sub_agent import (
     FoundryScope,
     SubAgent,
     SubAgentCreate,
@@ -30,10 +28,11 @@ from playground_backend.models.sub_agent import (
     SubAgentType,
     SubAgentUpdate,
 )
-from playground_backend.models.user import User
-from playground_backend.services.notification_service import NotificationService
-from playground_backend.services.secrets_service import SecretsService
-from playground_backend.services.sub_agent_service import SubAgentService
+from console_backend.models.user import User
+from console_backend.services.notification_service import NotificationService
+from console_backend.services.secrets_service import SecretsService
+from console_backend.services.sub_agent_service import SubAgentService
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def _create_sub_agent(
@@ -268,7 +267,7 @@ class TestSubAgentVersionCreation:
         test_user_db: User,
     ):
         """Test that creating a Foundry agent stores the client_secret in SSM."""
-        from playground_backend.models.secret import SecretCreate, SecretType
+        from console_backend.models.secret import SecretCreate, SecretType
 
         service = sub_agent_service
 
@@ -326,7 +325,7 @@ class TestSubAgentVersionCreation:
         test_user_db: User,
     ):
         """Test that updating a Foundry agent's client_secret creates a new secret."""
-        from playground_backend.models.secret import SecretCreate, SecretType
+        from console_backend.models.secret import SecretCreate, SecretType
 
         service = sub_agent_service
         user = test_user_db
@@ -400,7 +399,7 @@ class TestSubAgentVersionCreation:
         test_user_db: User,
     ):
         """Test that updating a Foundry agent without providing client_secret keeps the existing one."""
-        from playground_backend.models.secret import SecretCreate, SecretType
+        from console_backend.models.secret import SecretCreate, SecretType
 
         service = sub_agent_service
         user = test_user_db
@@ -460,7 +459,7 @@ class TestSubAgentVersionCreation:
         test_user_db: User,
     ):
         """Test that Foundry agents require all Foundry-specific fields including client_secret."""
-        from playground_backend.models.secret import SecretCreate, SecretType
+        from console_backend.models.secret import SecretCreate, SecretType
 
         service = sub_agent_service
         user = test_user_db
@@ -839,7 +838,9 @@ class TestVersionApprovalWorkflow:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
+            SubAgentUpdate(
+                system_prompt="V2 prompt" * 100, description="Version 2"
+            ),  # Long enough to prevent auto-approval
             actor=user,
         )
         await service.submit_for_approval(pg_session, agent.id, "V2", actor=user)
@@ -1027,7 +1028,9 @@ class TestDefaultVersionManagement:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
+            SubAgentUpdate(
+                system_prompt="V2 prompt" * 100, description="Version 2"
+            ),  # Long enough to prevent auto-approval
             actor=user,
         )
         await service.submit_for_approval(pg_session, agent.id, "V2", actor=user)
@@ -1128,7 +1131,9 @@ class TestVersionDeletion:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
+            SubAgentUpdate(
+                system_prompt="V2 prompt" * 100, description="Version 2"
+            ),  # Long enough to prevent auto-approval
             actor=user,
         )
 
@@ -1189,7 +1194,9 @@ class TestVersionDeletion:
         await service.update_sub_agent(
             pg_session,
             agent.id,
-            SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"),  # Long enough to prevent auto-approval
+            SubAgentUpdate(
+                system_prompt="V2 prompt" * 100, description="Version 2"
+            ),  # Long enough to prevent auto-approval
             actor=user,
         )
 

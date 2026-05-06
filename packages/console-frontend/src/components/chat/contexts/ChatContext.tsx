@@ -2,8 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { useLocation, useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import type { AgentResponseData, Conversation, Message, Settings, Task, TaskHistoryEntry, TodoItem, TimelineEvent } from '../types';
-import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT } from '../types';
+import type { AgentResponseData, Conversation, Message, PendingBugReport, Settings, Task, TaskHistoryEntry, TodoItem, TimelineEvent } from '../types';
+import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT, FEEDBACK_REQUEST_EXT } from '../types';
 import { useSocket } from './SocketContext';
 import { useSessionId } from '../hooks/useLocalStorage';
 import { extractPartTexts, generateUUID, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
@@ -38,12 +38,16 @@ interface ChatContextType {
   liveSubagentThoughts: Array<{agent_name: string; content: string; complete: boolean}>;
   liveStatusHistory: Array<{timestamp: Date; message: string}>;
   liveTimeline: TimelineEvent[];
+  pendingBugReport: PendingBugReport | null;
+  pendingFeedbackRequest: { conversationId: string; subAgents: string[] } | null;
 
   // Actions
   createConversation: () => void;
   selectConversation: (id: string) => void;
   sendMessage: (content: string, files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>) => void;
   interruptTask: () => void;
+  dismissBugReport: () => void;
+  dismissFeedbackRequest: () => void;
   updateSettings: (settings: Settings) => Promise<boolean>;
   loadConversations: () => Promise<void>;
 }
@@ -234,6 +238,8 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [workingStepsMap, setWorkingStepsMap] = useState<Map<string, TodoItem[]>>(new Map());
   const [subagentThoughtsMap, setSubagentThoughtsMap] = useState<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
   const [statusHistoryMap, setStatusHistoryMap] = useState<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
+  const [pendingBugReport, setPendingBugReport] = useState<PendingBugReport | null>(null);
+  const [pendingFeedbackRequest, setPendingFeedbackRequest] = useState<{ conversationId: string; subAgents: string[] } | null>(null);
   const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
   const streamingMapRef = useRef<Map<string, string>>(new Map());
   const subagentThoughtsMapRef = useRef<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
@@ -248,6 +254,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const playgroundModeRef = useRef(playgroundMode);
   const activeConversationIdRef = useRef(activeConversationId);
   const pendingMessagesRef = useRef<Map<string, string>>(new Map()); // messageId → conversationId
+  const persistedMessageIdRef = useRef<Map<string, string>>(new Map()); // conversationId → DB message_id
 
   // Keep ref in sync
   useEffect(() => {
@@ -392,6 +399,11 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         }
       }
 
+      // Capture persisted message ID from backend (injected after DB flush)
+      if (data.persistedMessageId) {
+        persistedMessageIdRef.current.set(resolvedConversationId, data.persistedMessageId as string);
+      }
+
       // Handle streaming artifact chunks (A2A artifact-append pattern)
       if (data.kind === 'artifact-update' && data.artifact?.parts) {
         const parts = data.artifact.parts;
@@ -435,6 +447,20 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         }
         // Don't finalize here - let the completion status handler finalize the stream
         return;
+      }
+
+      // Handle feedback-request extension — show proactive feedback prompt
+      if (data.kind === 'status-update') {
+        const statusMsg = data.status?.message;
+        const exts = ((statusMsg as any)?.extensions || []) as string[];
+        if (exts.includes(FEEDBACK_REQUEST_EXT)) {
+          // Extract sub_agents from DataPart
+          const dataPart = statusMsg?.parts?.find((p: any) => p.kind === 'data' || p.data);
+          const subAgents = ((dataPart?.data as any)?.sub_agents || []) as string[];
+          console.log('[FEEDBACK] Received feedback request for conversation:', resolvedConversationId, 'sub_agents:', subAgents);
+          setPendingFeedbackRequest({ conversationId: resolvedConversationId, subAgents });
+          return;
+        }
       }
 
       // Capture activity-log events for linear display (similar to VSCode Copilot chat)
@@ -510,7 +536,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           messageCounterRef.current++;
           const timestamp = new Date();
           const agentMsg: Message = {
-            id: `msg-${messageCounterRef.current}`,
+            id: (data.messageId as string) || `msg-${messageCounterRef.current}`,
             conversationId: resolvedConversationId,
             type: 'agent',
             content: text,
@@ -547,9 +573,11 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
           const finalizeMessage = (content: string) => {
             messageCounterRef.current++;
+            const persistedId = persistedMessageIdRef.current.get(resolvedConversationId);
+            persistedMessageIdRef.current.delete(resolvedConversationId);
             const timestamp = new Date();
             const agentMsg: Message = {
-              id: `msg-${messageCounterRef.current}`,
+              id: persistedId || `msg-${messageCounterRef.current}`,
               conversationId: resolvedConversationId,
               type: 'agent',
               content,
@@ -588,6 +616,18 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             m.delete(resolvedConversationId);
             return m;
           });
+
+          // Detect bug report interrupt from orchestrator metadata
+          if (normalizedStatus === 'input-required') {
+            const msgMeta = data.status.message?.metadata;
+            if (msgMeta && msgMeta.interrupt_type === 'bug_report') {
+              setPendingBugReport({
+                conversationId: resolvedConversationId,
+                taskId: data.taskId as string | undefined,
+                reason: (msgMeta.interrupt_reason as string) || '',
+              });
+            }
+          }
         }
 
         // Extract nested message if present (skip if already finalized from streamed content)
@@ -611,7 +651,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             messageCounterRef.current++;
             const timestamp = new Date();
             const agentMsg: Message = {
-              id: `msg-${messageCounterRef.current}`,
+              id: (nestedMsg.messageId as string) || `msg-${messageCounterRef.current}`,
               conversationId: resolvedConversationId,
               type: 'agent',
               content: text,
@@ -1043,6 +1083,14 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
     });
   }, [activeConversationId, cancelTask]);
 
+  const dismissBugReport = useCallback(() => {
+    setPendingBugReport(null);
+  }, []);
+
+  const dismissFeedbackRequest = useCallback(() => {
+    setPendingFeedbackRequest(null);
+  }, []);
+
   // Select a conversation
   const selectConversation = useCallback(
     (id: string) => {
@@ -1297,8 +1345,12 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         liveSubagentThoughts,
         liveStatusHistory,
         liveTimeline,
+        pendingBugReport,
+        pendingFeedbackRequest,
         createConversation,
         interruptTask,
+        dismissBugReport,
+        dismissFeedbackRequest,
         selectConversation,
         sendMessage: sendMessageAction,
         updateSettings,

@@ -44,6 +44,10 @@ export interface Config {
     url: string;
     timeout: number;
   };
+  readonly consoleBackend?: {
+    url: string;
+    audience: string;
+  };
   readonly adminGroup: string;
   readonly v2CookieSecret: string;
   readonly sessionTtlSeconds: number;
@@ -204,6 +208,12 @@ export async function getConfigFromEnv(): Promise<Config> {
       url: process.env.A2A_SERVER_URL!,
       timeout: Number(process.env.A2A_SERVER_TIMEOUT) || 30000,
     },
+    consoleBackend: process.env.CONSOLE_BACKEND_URL
+      ? {
+          url: process.env.CONSOLE_BACKEND_URL,
+          audience: process.env.OIDC_CONSOLE_BACKEND_AUDIENCE || 'agent-console',
+        }
+      : undefined,
     adminGroup: process.env.ADMIN_GROUP!,
     v2CookieSecret: process.env.V2_COOKIE_SECRET!,
     sessionTtlSeconds: Number(process.env.SESSION_TTL_SECONDS) || 86400,

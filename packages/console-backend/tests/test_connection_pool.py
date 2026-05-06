@@ -13,8 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-
-from playground_backend.utils.connection_pool import ConnectionPool
+from console_backend.utils.connection_pool import ConnectionPool
 
 
 @pytest.fixture

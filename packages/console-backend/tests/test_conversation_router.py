@@ -8,13 +8,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from playground_backend.models.user import UserStatus
+from console_backend.models.user import UserStatus
 
 # Ensure code chooses auto credentials path during imports (avoid boto3 local credentials)
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 # Create test app and client
-from playground_backend.routers import conversation_router
+from console_backend.routers import conversation_router
 
 app = FastAPI()
 app.include_router(conversation_router.router)
@@ -128,7 +128,7 @@ def test_datetime_serialization(mock_conversations):
     assert conv["last_message_at"].endswith("+00:00")
 
 
-@patch("playground_backend.routers.conversation_router.config")
+@patch("console_backend.routers.conversation_router.config")
 def test_get_conversations_permission(mock_config):
     """Test that non-local environment enforces user can only request their own conversations."""
     # Set up non-local environment

@@ -11,13 +11,12 @@ import os
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
+from console_backend.models.notification import NotificationType
+from console_backend.models.user import User
+from console_backend.services.sub_agent_service import SubAgentService
+from console_backend.services.user_group_service import UserGroupService
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.notification import NotificationType
-from playground_backend.models.user import User
-from playground_backend.services.sub_agent_service import SubAgentService
-from playground_backend.services.user_group_service import UserGroupService
 
 
 @pytest.mark.asyncio

@@ -6,23 +6,22 @@ testing Pydantic models or framework behavior.
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
-
-from playground_backend.authorization import (
+from console_backend.authorization import (
     GROUP_ROLE_CAPABILITIES,
     SYSTEM_ROLE_CAPABILITIES,
     check_action_allowed,
 )
-from playground_backend.models.user import User
-from playground_backend.services.user_group_service import UserGroupService
-from playground_backend.services.user_service import UserService
+from console_backend.models.user import User
+from console_backend.services.user_group_service import UserGroupService
+from console_backend.services.user_service import UserService
+from sqlalchemy import text
 
 
 @pytest.fixture
 def user_service():
     """Create UserService instance with injected dependencies."""
-    from playground_backend.repositories.user_repository import UserRepository
-    from playground_backend.services.audit_service import AuditService
+    from console_backend.repositories.user_repository import UserRepository
+    from console_backend.services.audit_service import AuditService
 
     audit_service = AuditService()
     user_repo = UserRepository()
@@ -37,8 +36,8 @@ def user_service():
 @pytest.fixture
 def user_group_service():
     """Create UserGroupService instance with injected dependencies."""
-    from playground_backend.repositories.user_group_repository import UserGroupRepository
-    from playground_backend.services.audit_service import AuditService
+    from console_backend.repositories.user_group_repository import UserGroupRepository
+    from console_backend.services.audit_service import AuditService
 
     audit_service = AuditService()
     user_group_repo = UserGroupRepository()

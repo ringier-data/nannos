@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { SubAgentList } from '@/components/subagents/SubAgentList';
 import {
-  playgroundListSubAgentsOptions,
+  consoleListSubAgentsOptions,
   listPendingApprovalsApiV1SubAgentsPendingGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { SubAgent, SubAgentListResponse } from '@/api/generated/types.gen';
@@ -40,7 +40,7 @@ export function SubAgentsPage() {
 
   // Fetch owned sub-agents
   const { data: ownedData } = useQuery({
-    ...playgroundListSubAgentsOptions({
+    ...consoleListSubAgentsOptions({
       query: { owned_only: true },
     }),
     enabled: activeTab === 'my',
@@ -48,7 +48,7 @@ export function SubAgentsPage() {
 
   // Fetch all accessible sub-agents (for 'accessible' tab)
   const { data: accessibleData } = useQuery({
-    ...playgroundListSubAgentsOptions({}),
+    ...consoleListSubAgentsOptions({}),
     enabled: activeTab === 'accessible',
   });
 

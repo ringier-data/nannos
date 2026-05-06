@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from playground_backend.middleware.orchestrator_auth import OrchestratorAuth
+from console_backend.middleware.orchestrator_auth import OrchestratorAuth
 
 
 @pytest.fixture
@@ -258,7 +258,7 @@ class TestOrchestratorAuthRequestDetection:
     ):
         """Test that localhost requests are handled correctly in local mode."""
         # Patch config before creating OrchestratorAuth
-        with patch("playground_backend.middleware.orchestrator_auth.config") as mock_config:
+        with patch("console_backend.middleware.orchestrator_auth.config") as mock_config:
             mock_config.orchestrator.base_domain = "localhost:10001"
             mock_config.orchestrator.is_local.return_value = True
             mock_config.orchestrator.client_id = "test_client_id"

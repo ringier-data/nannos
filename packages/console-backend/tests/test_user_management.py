@@ -5,11 +5,10 @@ schema parity with production.
 """
 
 import pytest
+from console_backend.models.user import User, UserStatus
+from console_backend.services.user_group_service import UserGroupService
+from console_backend.services.user_service import UserService
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.user import User, UserStatus
-from playground_backend.services.user_group_service import UserGroupService
-from playground_backend.services.user_service import UserService
 
 
 @pytest.mark.asyncio
@@ -256,7 +255,7 @@ class TestUserServiceExtended:
 
     async def test_bulk_update_users(self, user_service: UserService, pg_session: AsyncSession, test_user: User):
         """Test bulk updating multiple users."""
-        from playground_backend.models.user import BulkUserOperation
+        from console_backend.models.user import BulkUserOperation
 
         # Create users
         user_ids = []
@@ -294,7 +293,7 @@ class TestUserServiceExtended:
         self, user_service: UserService, pg_session: AsyncSession, test_user: User
     ):
         """Test bulk update with some non-existent users."""
-        from playground_backend.models.user import BulkUserOperation
+        from console_backend.models.user import BulkUserOperation
 
         user1 = await user_service.upsert_user(
             db=pg_session,

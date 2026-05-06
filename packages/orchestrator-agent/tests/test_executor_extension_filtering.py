@@ -481,17 +481,17 @@ class TestSlackScenario:
 
 
 # ===========================================================================
-# Combined: Playground scenario (all extensions active)
+# Combined: Console scenario (all extensions active)
 # ===========================================================================
 
 
-class TestPlaygroundScenario:
-    """End-to-end scenario: playground client sends all extensions."""
+class TestConsoleScenario:
+    """End-to-end scenario: console client sends all extensions."""
 
     @pytest.mark.asyncio
     async def test_all_events_reach_client(self, executor, updater, task):
         """All event types should be emitted when all extensions are active."""
-        artifact_id = "art-playground"
+        artifact_id = "art-console"
         all_ext = ALL_EXTENSIONS
 
         # 1. Activity log → emitted

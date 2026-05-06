@@ -14,6 +14,7 @@ export interface SendMessageOptions {
   spaceId: string;
   text?: string;
   cardsV2?: chat_v1.Schema$CardWithId[];
+  accessoryWidgets?: chat_v1.Schema$AccessoryWidget[];
   threadId?: string; // Thread key to reply in
   messageReplyOption?: 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' | 'REPLY_MESSAGE_OR_FAIL';
   /** When set, the message is only visible to this user (ephemeral). Must be a User resource name, e.g. "users/123456789" */
@@ -28,6 +29,7 @@ export interface UpdateMessageOptions {
   messageName: string; // e.g. spaces/xxx/messages/yyy
   text?: string;
   cardsV2?: chat_v1.Schema$CardWithId[];
+  accessoryWidgets?: chat_v1.Schema$AccessoryWidget[];
   updateMask?: string; // e.g. 'text' or 'cardsV2'
 }
 
@@ -167,6 +169,10 @@ export class GoogleChatService {
         requestBody.cardsV2 = options.cardsV2;
       }
 
+      if (options.accessoryWidgets) {
+        requestBody.accessoryWidgets = options.accessoryWidgets;
+      }
+
       if (options.threadId) {
         requestBody.thread = {
           name: options.threadId,
@@ -207,6 +213,11 @@ export class GoogleChatService {
       if (options.cardsV2 !== undefined) {
         requestBody.cardsV2 = options.cardsV2;
         updateMaskFields.push('cardsV2');
+      }
+
+      if (options.accessoryWidgets !== undefined) {
+        requestBody.accessoryWidgets = options.accessoryWidgets;
+        updateMaskFields.push('accessoryWidgets');
       }
 
       const updateMask = options.updateMask || updateMaskFields.join(',');

@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from playground_backend.dependencies import (
+from console_backend.dependencies import (
     ADMIN_MODE_HEADER,
     get_admin_mode,
     is_admin_mode,
@@ -14,7 +14,7 @@ from playground_backend.dependencies import (
     require_auth,
     require_auth_or_bearer_token,
 )
-from playground_backend.models.user import User, UserRole, UserStatus
+from console_backend.models.user import User, UserRole, UserStatus
 
 
 class TestAuthDependencies:
@@ -143,7 +143,7 @@ class TestRequireAuthOrBearerToken:
         request.app.state.user_service = user_service_mock
 
         with (
-            patch("playground_backend.dependencies.JWTValidator") as mock_validator_class,
+            patch("console_backend.dependencies.JWTValidator") as mock_validator_class,
         ):
             mock_validator = AsyncMock()
             mock_validator.validate = AsyncMock(
@@ -200,7 +200,7 @@ class TestRequireAuthOrBearerToken:
         }
 
         with (
-            patch("playground_backend.dependencies.JWTValidator") as mock_validator_class,
+            patch("console_backend.dependencies.JWTValidator") as mock_validator_class,
         ):
             mock_validator = AsyncMock()
             mock_validator.validate = AsyncMock(return_value=token_payload)
@@ -249,7 +249,7 @@ class TestRequireAuthOrBearerToken:
         # Token with only sub claim (no email, name, etc.)
         token_payload = {"sub": "minimal-user-sub"}
 
-        with patch("playground_backend.dependencies.JWTValidator") as mock_validator_class:
+        with patch("console_backend.dependencies.JWTValidator") as mock_validator_class:
             mock_validator = AsyncMock()
             mock_validator.validate = AsyncMock(return_value=token_payload)
             mock_validator_class.return_value = mock_validator
@@ -275,7 +275,7 @@ class TestRequireAuthOrBearerToken:
         request.state.user = None
         request.headers = {"Authorization": "Bearer invalid_token"}
 
-        with patch("playground_backend.dependencies.JWTValidator") as mock_validator_class:
+        with patch("console_backend.dependencies.JWTValidator") as mock_validator_class:
             mock_validator = AsyncMock()
             mock_validator.validate = AsyncMock(return_value={"email": "test@example.com"})  # No sub
             mock_validator_class.return_value = mock_validator
@@ -296,7 +296,7 @@ class TestRequireAuthOrBearerToken:
         request.state.user = None
         request.headers = {"Authorization": "Bearer invalid_token"}
 
-        with patch("playground_backend.dependencies.JWTValidator") as mock_validator_class:
+        with patch("console_backend.dependencies.JWTValidator") as mock_validator_class:
             mock_validator = AsyncMock()
             mock_validator.validate = AsyncMock(side_effect=JWTValidationError("Invalid token"))
             mock_validator_class.return_value = mock_validator

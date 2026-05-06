@@ -180,7 +180,7 @@ Full reference: [`packages/orchestrator-agent/`](packages/orchestrator-agent/)
 |----------|-------------|
 | `OIDC_ISSUER` | OIDC issuer URL |
 | `AGENT_BASE_URL` | Public URL of this service, used in the A2A agent card (default: `http://localhost:10001`) |
-| `PLAYGROUND_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
+| `CONSOLE_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
 | `POSTGRES_HOST` | PostgreSQL hostname |
 | `POSTGRES_DB` | PostgreSQL database |
 | `POSTGRES_USER` | docstore user |
@@ -235,8 +235,8 @@ Full reference: [`packages/agent-creator/.env.template`](packages/agent-creator/
 | `OIDC_CLIENT_SECRET` | Client secret |
 | `ORCHESTRATOR_CLIENT_ID` | Keycloak client ID used to validate inbound tokens |
 | `AGENT_ID` | Numeric identifier for this agent instance (e.g. `1`) |
-| `PLAYGROUND_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
-| `PLAYGROUND_FRONTEND_URL` | URL of the console-frontend (default: `http://localhost:5173`) |
+| `CONSOLE_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
+| `CONSOLE_FRONTEND_URL` | URL of the console-frontend (default: `http://localhost:5173`) |
 
 LLM provider credentials — same options as the orchestrator.
 
@@ -251,7 +251,7 @@ Full reference: [`packages/agent-runner/.env.template`](packages/agent-runner/.e
 | `OIDC_ISSUER` | OIDC issuer URL |
 | `OIDC_CLIENT_ID` | Keycloak client ID (uses `orchestrator` client) |
 | `AGENT_BASE_URL` | Public URL of this service (default: `http://localhost:5005`) |
-| `PLAYGROUND_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
+| `CONSOLE_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
 | `POSTGRES_HOST` | PostgreSQL hostname (for document store) |
 | `POSTGRES_PORT` | PostgreSQL port (default: `5432`) |
 | `POSTGRES_DB` | PostgreSQL database |

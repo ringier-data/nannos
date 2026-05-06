@@ -2,17 +2,16 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from playground_backend.models.audit import AuditAction, AuditEntityType
-from playground_backend.models.user import User
-from playground_backend.repositories import (
+from console_backend.models.audit import AuditAction, AuditEntityType
+from console_backend.models.user import User
+from console_backend.repositories import (
     SecretsRepository,
     SubAgentRepository,
     UserRepository,
 )
-from playground_backend.repositories.sub_agent_repository import ApprovalContext
+from console_backend.repositories.sub_agent_repository import ApprovalContext
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def get_latest_audit_log(

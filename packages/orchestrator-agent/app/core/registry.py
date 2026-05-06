@@ -1,4 +1,4 @@
-"""Registry service for fetching approved sub-agents from the playground backend."""
+"""Registry service for fetching approved sub-agents from the console backend."""
 
 import asyncio
 import logging
@@ -101,9 +101,7 @@ class SubAgent(BaseModel):
 class RegistryConfig(BaseModel):
     """Configuration for the registry service."""
 
-    playground_backend_url: str = Field(
-        default_factory=lambda: os.getenv("PLAYGROUND_BACKEND_URL", "http://localhost:5001")
-    )
+    console_backend_url: str = Field(default_factory=lambda: os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001"))
 
 
 class User(BaseModel):
@@ -131,7 +129,7 @@ class User(BaseModel):
 
 
 class RegistryService:
-    """Service for fetching approved sub-agents from the playground backend.
+    """Service for fetching approved sub-agents from the console backend.
 
     This service calls the /api/v1/sub-agents endpoint to retrieve all approved
     sub-agents accessible to the user (owned + group-shared).
@@ -153,7 +151,7 @@ class RegistryService:
         """Get or create the HTTP client."""
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
-                base_url=self.config.playground_backend_url,
+                base_url=self.config.console_backend_url,
                 timeout=30.0,
             )
         return self._client
@@ -230,7 +228,7 @@ class RegistryService:
     async def get_user(
         self, user_sub: str, access_token: str | None = None, sub_agent_config_hash: str | None = None
     ) -> User | None:
-        """Retrieve approved sub-agents for a user from the playground backend.
+        """Retrieve approved sub-agents for a user from the console backend.
 
         Calls GET /api/v1/sub-agents?status=approved to fetch all approved
         sub-agents accessible to the user (owned + group-shared).
@@ -310,7 +308,7 @@ class RegistryService:
     async def _fetch_user_settings(
         self, client: httpx.AsyncClient, headers: dict[str, str], user_sub: str
     ) -> UserSettings:
-        """Fetch user settings from the playground backend.
+        """Fetch user settings from the console backend.
 
         Args:
             client: The HTTP client
@@ -383,7 +381,7 @@ class RegistryService:
                             model_name=cv.model,
                             enable_thinking=cv.enable_thinking,
                             thinking_level=cv.thinking_level,
-                            sub_agent_id=sa.id,  # Include playground backend ID for tracking
+                            sub_agent_id=sa.id,  # Include console backend ID for tracking
                         )
                     )
                     logger.debug(
@@ -396,7 +394,7 @@ class RegistryService:
                         LocalFoundrySubAgentConfig(
                             name=sa.name,
                             description=cv.description or f"Foundry agent: {sa.name}",
-                            sub_agent_id=cv.sub_agent_id,  # Include playground backend ID for tracking
+                            sub_agent_id=cv.sub_agent_id,  # Include console backend ID for tracking
                             hostname=cv.foundry_hostname,
                             client_id=cv.foundry_client_id or "",
                             client_secret_ref=cv.foundry_client_secret_ssmkey or "",

@@ -51,7 +51,7 @@ class SteeringMiddleware(AgentMiddleware[AgentState, ContextT]):
     is invoked, giving the LLM the user's latest instructions.
 
     An activity-log custom stream event is also emitted so that downstream
-    consumers (e.g. the playground frontend) can render a timeline entry.
+    consumers (e.g. the console frontend) can render a timeline entry.
     """
 
     def __init__(

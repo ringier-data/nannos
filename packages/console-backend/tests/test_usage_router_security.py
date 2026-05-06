@@ -19,7 +19,7 @@ class TestUsageLogSecuritySingle:
             return test_user
 
         with patch(
-            "playground_backend.routers.usage_router.require_auth_or_bearer_token",
+            "console_backend.routers.usage_router.require_auth_or_bearer_token",
             side_effect=mock_require_auth_or_bearer_token,
         ):
             response = await client_with_db.post(
@@ -46,7 +46,7 @@ class TestUsageLogSecuritySingle:
             return test_user
 
         with patch(
-            "playground_backend.routers.usage_router.require_auth_or_bearer_token",
+            "console_backend.routers.usage_router.require_auth_or_bearer_token",
             side_effect=mock_require_auth_or_bearer_token,
         ):
             response = await client_with_db.post(
@@ -76,7 +76,7 @@ class TestUsageLogSecurityBatch:
             return test_user
 
         with patch(
-            "playground_backend.routers.usage_router.require_auth_or_bearer_token",
+            "console_backend.routers.usage_router.require_auth_or_bearer_token",
             side_effect=mock_require_auth_or_bearer_token,
         ):
             response = await client_with_db.post(
@@ -110,7 +110,7 @@ class TestUsageLogSecurityBatch:
             return test_user
 
         with patch(
-            "playground_backend.routers.usage_router.require_auth_or_bearer_token",
+            "console_backend.routers.usage_router.require_auth_or_bearer_token",
             side_effect=mock_require_auth_or_bearer_token,
         ):
             response = await client_with_db.post(

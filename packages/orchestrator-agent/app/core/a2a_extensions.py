@@ -26,7 +26,15 @@ WORK_PLAN_EXTENSION = "urn:nannos:a2a:work-plan:1.0"
 INTERMEDIATE_OUTPUT_EXTENSION = "urn:nannos:a2a:intermediate-output:1.0"
 """Streaming draft content from sub-agents (may be rewritten by orchestrator)."""
 
-ALL_EXTENSIONS = [ACTIVITY_LOG_EXTENSION, WORK_PLAN_EXTENSION, INTERMEDIATE_OUTPUT_EXTENSION]
+FEEDBACK_REQUEST_EXTENSION = "urn:nannos:a2a:feedback-request:1.0"
+"""Non-blocking hint asking clients to prompt for user feedback."""
+
+ALL_EXTENSIONS = [
+    ACTIVITY_LOG_EXTENSION,
+    WORK_PLAN_EXTENSION,
+    INTERMEDIATE_OUTPUT_EXTENSION,
+    FEEDBACK_REQUEST_EXTENSION,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +86,8 @@ def new_work_plan_message(
         parts=[
             Part(
                 root=DataPart(
-                    data={"todos": [t.model_dump(exclude_none=True) for t in todos]}, media_type="application/json"
+                    data={"todos": [t.model_dump(exclude_none=True) for t in todos]},
+                    metadata={"media_type": "application/json"},
                 )
             )
         ],
@@ -86,4 +95,35 @@ def new_work_plan_message(
         context_id=context_id,
         task_id=task_id,
         extensions=[WORK_PLAN_EXTENSION],
+    )
+
+
+def new_feedback_request_message(
+    context_id: str | None = None,
+    task_id: str | None = None,
+    sub_agents_involved: list[str] | None = None,
+) -> Message:
+    """Build a Message for a feedback-request status update.
+
+    Emitted as a fire-and-forget hint when a complex task completes.
+    Clients render a non-blocking feedback prompt (thumbs up/down).
+
+    The message carries:
+      - A DataPart with {"sub_agents": [...]} for attribution
+      - extensions=[FEEDBACK_REQUEST_EXTENSION] for client classification
+    """
+    return Message(
+        role=Role.agent,
+        parts=[
+            Part(
+                root=DataPart(
+                    data={"sub_agents": sub_agents_involved or []},
+                    metadata={"media_type": "application/json"},
+                )
+            )
+        ],
+        message_id=str(uuid.uuid4()),
+        context_id=context_id,
+        task_id=task_id,
+        extensions=[FEEDBACK_REQUEST_EXTENSION],
     )

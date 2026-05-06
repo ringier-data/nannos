@@ -5,7 +5,7 @@ This is a built-in capability, not an external A2A service, providing:
 
 1. Clean LangSmith observability (separate agent trace)
 2. Dedicated scheduling expertise and context
-3. Integration with scheduler and playground management tools via LangGraph
+3. Integration with scheduler and console management tools via LangGraph
 4. Consistent sub-agent interface with the rest of the system
 
 The sub-agent handles:
@@ -66,7 +66,7 @@ TASK_SCHEDULER_DESCRIPTION = (
 # Default model for task scheduling (strategic planning)
 # Can be overridden via TASK_SCHEDULER_MODEL environment variable
 DEFAULT_TASK_SCHEDULER_MODEL: ModelType = "claude-sonnet-4.6"
-PLAYGROUND_FRONTEND_URL = os.getenv("PLAYGROUND_FRONTEND_URL", "http://localhost:5173")
+CONSOLE_FRONTEND_URL = os.getenv("CONSOLE_FRONTEND_URL", "http://localhost:5173")
 # System prompt for the task scheduler agent
 TASK_SCHEDULER_SYSTEM_PROMPT = """<role>
 You are a task scheduling specialist responsible for managing scheduled tasks and automated workflows.
@@ -87,10 +87,10 @@ You are a task scheduling specialist responsible for managing scheduled tasks an
 - scheduler_update_job: Update an existing job's configuration
 - scheduler_pause_job: Pause a job temporarily
 - scheduler_validate_watch: Test a watch condition before scheduling
-- playground_list_mcp_servers: List available MCP servers
-- playground_grep_mcp_tools: Search tools details with input and optionally output schemas for a specific MCP server
-- playground_list_sub_agents: List existing sub-agents (check before creating new ones)
-- playground_create_sub_agent: Create a new automated sub-agent for task execution
+- console_list_mcp_servers: List available MCP servers
+- console_grep_mcp_tools: Search tools details with input and optionally output schemas for a specific MCP server
+- console_list_sub_agents: List existing sub-agents (check before creating new ones)
+- console_create_sub_agent: Create a new automated sub-agent for task execution
 </tools>
 
 <job_types>
@@ -109,11 +109,11 @@ Poll interval: interval_seconds
 </job_types>
 
 <workflow_task_jobs>
-1. Check for existing sub-agents using playground_list_sub_agents
+1. Check for existing sub-agents using console_list_sub_agents
    - Look for sub-agents with matching purpose/description
    - Filter by agent_type='automated' and check if any match the user's intent
 
-2. Create sub-agent if needed using playground_create_sub_agent
+2. Create sub-agent if needed using console_create_sub_agent
    - Use agent_type='automated'
    - Provide clear name, description, and system_prompt
    - Store the sub_agent_id from the response
@@ -126,11 +126,11 @@ Poll interval: interval_seconds
 </workflow_task_jobs>
 
 <workflow_watch_jobs>
-1. Discover MCP servers using playground_list_mcp_servers
+1. Discover MCP servers using console_list_mcp_servers
    - Get a high-level overview of available integration servers
    - Choose the server that matches the monitoring target
 
-2. Explore tools in the target server using playground_grep_mcp_tools
+2. Explore tools in the target server using console_grep_mcp_tools
    - Pass the server_slug from step 1 and the search query to get a list of tools with details about inputs and optional outputs schemas
    - Tool names are EXACT and case-sensitive — copy them exactly
 
@@ -178,8 +178,8 @@ Poll interval: interval_seconds
 - Show job IDs and next run times
 - Explain what will happen when the job executes
 - Guide users on how to monitor or modify schedules
-- Provide a link to the newly created scheduled job in the UI: PLAYGROUND_FRONTEND_URL/app/scheduler/{scheduled_job_id}
-</response_format>""".replace("PLAYGROUND_FRONTEND_URL", PLAYGROUND_FRONTEND_URL)
+- Provide a link to the newly created scheduled job in the UI: CONSOLE_FRONTEND_URL/app/scheduler/{scheduled_job_id}
+</response_format>""".replace("CONSOLE_FRONTEND_URL", CONSOLE_FRONTEND_URL)
 
 
 class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
@@ -191,7 +191,7 @@ class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
     - Context injection via graph's context_schema=GraphRuntimeContext
     - Structured output via SubAgentResponseSchema
 
-    Tool access is handled by DynamicToolDispatchMiddleware with scheduler/playground tools
+    Tool access is handled by DynamicToolDispatchMiddleware with scheduler/console tools
     from SYSTEM_TOOLS (always available regardless of user whitelist).
 
     Args:

@@ -3,8 +3,7 @@
 import asyncio
 
 import pytest
-
-from playground_backend.catalog.sync import _WeightedSemaphore
+from console_backend.catalog.sync import _WeightedSemaphore
 
 
 class TestWeightedSemaphoreBasics:

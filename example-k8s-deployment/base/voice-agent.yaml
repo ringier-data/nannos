@@ -50,7 +50,7 @@ spec:
           value: "https://voice-agent.${BASE_DOMAIN}"
         - name: VOICE_AGENT_BASE_URL
           value: "https://voice-agent.${BASE_DOMAIN}"
-        - name: PLAYGROUND_BACKEND_URL
+        - name: CONSOLE_BACKEND_URL
           value: "https://console.${BASE_DOMAIN}"
         - name: GCP_PROJECT_ID
           value: "YOUR_GCP_PROJECT_ID"

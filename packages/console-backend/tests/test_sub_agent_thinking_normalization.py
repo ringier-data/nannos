@@ -1,7 +1,7 @@
 """Unit tests for sub-agent thinking configuration normalization."""
 
-from playground_backend.models.sub_agent import ThinkingLevel
-from playground_backend.services.sub_agent_service import (
+from console_backend.models.sub_agent import ThinkingLevel
+from console_backend.services.sub_agent_service import (
     MODELS_SUPPORTING_THINKING,
     _normalize_thinking_config,
 )

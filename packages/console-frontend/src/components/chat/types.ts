@@ -4,6 +4,13 @@
 export const ACTIVITY_LOG_EXT = 'urn:nannos:a2a:activity-log:1.0';
 export const WORK_PLAN_EXT = 'urn:nannos:a2a:work-plan:1.0';
 export const INTERMEDIATE_OUTPUT_EXT = 'urn:nannos:a2a:intermediate-output:1.0';
+export const FEEDBACK_REQUEST_EXT = 'urn:nannos:a2a:feedback-request:1.0';
+
+export interface PendingBugReport {
+  conversationId: string;
+  taskId?: string;
+  reason: string;
+}
 
 export interface TodoItem {
   name: string;
@@ -104,6 +111,7 @@ export interface TaskStatusDetails {
     role?: string;
     taskId?: string;
     extensions?: string[];
+    metadata?: Record<string, unknown>;
   };
   progress?: number;
 }
@@ -140,6 +148,8 @@ export interface AgentResponseData {
   contextId?: string;
   error?: string;
   role?: string;
+  messageId?: string;
+  persistedMessageId?: string;
   parts?: Array<{ text?: string; kind?: string }>;
   status?: TaskStatusDetails;
   metadata?: Record<string, unknown>;

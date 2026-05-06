@@ -2,8 +2,16 @@ import _ from 'lodash';
 import { Logger } from './logger.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import { Artifact, DataPart, FileWithBytes, FileWithUri, Task } from '@a2a-js/sdk';
+import type { chat_v1 } from 'googleapis';
 
 const logger = Logger.getLogger('taskResponseHandler');
+
+/**
+ * Check if state is an interrupted state (paused, awaiting user action)
+ */
+export function isInterruptedState(state?: Task['status']['state']): boolean {
+  return ['input-required', 'auth-required'].includes(state || '');
+}
 
 /**
  * Check if state has a user-facing message that should be displayed immediately
@@ -31,6 +39,8 @@ export interface HandleTaskResponseParams {
   task: Task;
   chatService: GoogleChatService;
   messageContext: ChatMessageContext;
+  /** When true, append 👍/👎 feedback buttons to the response message. */
+  includeFeedbackButtons?: boolean;
 }
 
 /**
@@ -43,7 +53,9 @@ export async function postOrUpdateMessage(
   spaceId: string,
   threadId: string,
   text: string,
-  existingMessageId?: string
+  existingMessageId?: string,
+  accessoryWidgets?: chat_v1.Schema$AccessoryWidget[],
+  cardsV2?: chat_v1.Schema$CardWithId[],
 ): Promise<string | undefined> {
   try {
     if (existingMessageId) {
@@ -52,11 +64,21 @@ export async function postOrUpdateMessage(
         projectId,
         messageName: existingMessageId,
         text,
+        accessoryWidgets,
+        cardsV2,
       });
       return existingMessageId;
     } else {
       // Post new message in thread
-      const result = await chatService.sendTextMessage(projectId, spaceId, text, threadId);
+      const result = await chatService.sendMessage({
+        projectId,
+        spaceId,
+        text,
+        threadId,
+        accessoryWidgets,
+        cardsV2,
+        messageReplyOption: threadId ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' : undefined,
+      });
       return result.name || undefined;
     }
   } catch (err) {
@@ -108,7 +130,7 @@ export function processArtifacts(artifacts?: Artifact[]): {
  * Main entry point for handling any A2A response uniformly
  */
 export async function handleTask(params: HandleTaskResponseParams): Promise<{ messageId: string | undefined }> {
-  const { task, chatService, messageContext } = params;
+  const { task, chatService, messageContext, includeFeedbackButtons } = params;
 
   const { projectId, spaceId, threadId, messageId, statusMessageId } = messageContext;
 
@@ -121,10 +143,31 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
   // Process artifacts for completed tasks
   const parts = processArtifacts(task.artifacts);
 
-  // If we have text artifacts, use them as the message
   let message = '';
-  if (parts.textParts.length > 0) {
+
+  // For interrupted states (input-required, auth-required), the authoritative
+  // message is in status.message — artifacts are just intermediate streaming
+  // tokens from BEFORE the interrupt fired, not the final response.
+  if (isInterruptedState(task.status.state) && task.status?.message?.parts) {
+    for (const part of task.status.message.parts) {
+      if (part.kind === 'text') {
+        message += (part as { kind: 'text'; text: string }).text;
+      }
+    }
+  }
+
+  // For terminal states, use artifact text as the message
+  if (!message && parts.textParts.length > 0) {
     message = parts.textParts.join('');
+  }
+
+  // Final fallback: extract from status message (e.g. completed with no artifacts)
+  if (!message && task.status?.message?.parts) {
+    for (const part of task.status.message.parts) {
+      if (part.kind === 'text') {
+        message += (part as { kind: 'text'; text: string }).text;
+      }
+    }
   }
 
   const urls = parts.filesWithUri.map((file) => file.uri);
@@ -133,16 +176,62 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
   }
 
   message = message.trim();
+
+  // Build feedback accessory widgets for completed responses
+  let accessoryWidgets: chat_v1.Schema$AccessoryWidget[] | undefined;
+  let cardsV2: chat_v1.Schema$CardWithId[] | undefined;
+  if (includeFeedbackButtons && task.status.state === 'completed' && message) {
+    cardsV2 = [
+      {
+        cardId: 'feedback_card',
+        card: {
+          sections: [
+            {
+              widgets: [
+                {
+                  buttonList: {
+                    buttons: [
+                      {
+                        text: '👍',
+                        onClick: {
+                          action: {
+                            function: 'feedback_positive',
+                            parameters: [],
+                          },
+                        },
+                      },
+                      {
+                        text: '👎',
+                        onClick: {
+                          action: {
+                            function: 'feedback_negative',
+                            parameters: [],
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ];
+  }
+
   // Update or post the message
   let postedMessageId: string | undefined;
   if (message) {
-    postedMessageId = await await postOrUpdateMessage(
+    postedMessageId = await postOrUpdateMessage(
       chatService,
       projectId,
       spaceId,
       threadId,
       message,
       statusMessageId,
+      accessoryWidgets,
+      cardsV2,
     );
   }
 

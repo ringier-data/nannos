@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { SubAgentForm } from '@/components/subagents/SubAgentForm';
 import type { SubAgentFormData } from '@/components/subagents/types';
-import { playgroundCreateSubAgentMutation } from '@/api/generated/@tanstack/react-query.gen';
+import { consoleCreateSubAgentMutation } from '@/api/generated/@tanstack/react-query.gen';
 import type { SubAgent } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
 
@@ -13,7 +13,7 @@ export function SubAgentCreatePage() {
   const navigate = useNavigate();
 
   const createMutation = useMutation({
-    ...playgroundCreateSubAgentMutation(),
+    ...consoleCreateSubAgentMutation(),
     onSuccess: (data: SubAgent) => {
       toast.success('Sub-agent created successfully');
       // Navigate to the new sub-agent detail page
