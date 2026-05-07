@@ -10,6 +10,7 @@ export interface PendingBugReport {
   conversationId: string;
   taskId?: string;
   reason: string;
+  actionRequests?: Array<{ name: string; args: Record<string, unknown> }>;
 }
 
 export interface TodoItem {

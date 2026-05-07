@@ -528,23 +528,62 @@ class OrchestratorDeepAgent:
                     interrupt_value_dict = (
                         final_state.interrupts[-1].value if isinstance(final_state.interrupts[-1].value, dict) else {}
                     )
-                    yield AgentStreamResponse(
-                        state=task_state,
-                        content=interrupt_value_dict.get(
-                            "message", "Process interrupted. Human intervention required."
-                        ),
-                        interrupt_reason=interrupt_value_dict.get("reason", "graph_interrupted"),
-                        pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
-                        metadata={
-                            k: v
-                            for k, v in {
-                                "interrupt_type": interrupt_value_dict.get("type"),
-                                "interrupt_reason": interrupt_value_dict.get("reason"),
-                            }.items()
-                            if v is not None
-                        }
-                        or None,
-                    )
+
+                    # Detect HumanInTheLoopMiddleware interrupts (HITLRequest format)
+                    action_requests = interrupt_value_dict.get("action_requests")
+                    if action_requests and isinstance(action_requests, list):
+                        # HITL interrupt — extract tool name and args for metadata
+                        tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
+                        if "console_create_bug_report" in tool_names:
+                            # Bug report HITL interrupt
+                            bug_action = next(
+                                ar for ar in action_requests if ar.get("name") == "console_create_bug_report"
+                            )
+                            reason = bug_action.get("args", {}).get("description", "")
+                            description = bug_action.get("description", "")
+                            content = f"Reason: {reason}\n\n{description}" if reason else description
+                            yield AgentStreamResponse(
+                                state=TaskState.input_required,
+                                content=content or "Bug report requires your confirmation.",
+                                interrupt_reason=reason,
+                                pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
+                                metadata={
+                                    "interrupt_type": "bug_report",
+                                    "interrupt_reason": reason,
+                                    "action_requests": action_requests,
+                                },
+                            )
+                        else:
+                            # Generic HITL interrupt for other tools
+                            description = action_requests[0].get("description", "") if action_requests else ""
+                            yield AgentStreamResponse(
+                                state=TaskState.input_required,
+                                content=description or "Tool execution requires approval.",
+                                pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
+                                metadata={
+                                    "interrupt_type": "hitl_approval",
+                                    "action_requests": action_requests,
+                                },
+                            )
+                    else:
+                        # Standard interrupt (file permissions, custom interrupts, etc.)
+                        yield AgentStreamResponse(
+                            state=task_state,
+                            content=interrupt_value_dict.get(
+                                "message", "Process interrupted. Human intervention required."
+                            ),
+                            interrupt_reason=interrupt_value_dict.get("reason", "graph_interrupted"),
+                            pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
+                            metadata={
+                                k: v
+                                for k, v in {
+                                    "interrupt_type": interrupt_value_dict.get("type"),
+                                    "interrupt_reason": interrupt_value_dict.get("reason"),
+                                }.items()
+                                if v is not None
+                            }
+                            or None,
+                        )
                 return
             if hasattr(final_state, "next") and final_state.next:
                 logger.warning(f"graph in final state but no interrupt: {final_state}")

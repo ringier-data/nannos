@@ -138,6 +138,10 @@ async def update_user(
 
     await db.commit()
 
+    # Trigger outbound SCIM push (fire-and-forget)
+    if hasattr(request.app.state, "outbound_scim_push_service"):
+        request.app.state.outbound_scim_push_service.push_user(user_id, "update")
+
     # Return user with groups
     user_with_groups = await user_service.get_user_with_groups(db, user_id)
     if user_with_groups is None:
@@ -340,6 +344,10 @@ async def update_user_role(
 
     await db.commit()
 
+    # Trigger outbound SCIM push (fire-and-forget)
+    if hasattr(request.app.state, "outbound_scim_push_service"):
+        request.app.state.outbound_scim_push_service.push_user(user_id, "update")
+
     # Return user with groups
     user_with_groups = await user_service.get_user_with_groups(db, user_id)
     if user_with_groups is None:
@@ -387,6 +395,10 @@ async def update_user_status(
         )
 
     await db.commit()
+
+    # Trigger outbound SCIM push (fire-and-forget)
+    if hasattr(request.app.state, "outbound_scim_push_service"):
+        request.app.state.outbound_scim_push_service.push_user(user_id, "update")
 
     # Return user with groups
     user_with_groups = await user_service.get_user_with_groups(db, user_id)

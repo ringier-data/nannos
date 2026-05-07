@@ -1,6 +1,6 @@
 {
   "name": "rcplus-nannos-a2a-google-chat-client",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "RC+/Nannos A2A Google Chat Client",
   "type": "module",
   "exports": "./dist/src/index.js",

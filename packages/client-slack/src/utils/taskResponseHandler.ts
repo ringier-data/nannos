@@ -366,3 +366,63 @@ export async function handleError(
     })
     .catch((err) => logger.error(err, `Failed to send error message: ${err}`));
 }
+
+/**
+ * Build a bug report widget with Confirm/Decline buttons
+ */
+export interface BugReportWidgetData {
+  taskId: string;
+  contextId: string;
+  reason: string;
+  channelId: string;
+  threadTs: string;
+  actionRequests?: any[];
+}
+
+export function buildBugReportWidget(data: BugReportWidgetData): any[] {
+  // Encode only the IDs (not the full reason text) to stay within Slack's 2000-char value limit
+  const encodedData = Buffer.from(JSON.stringify({
+    taskId: data.taskId,
+    contextId: data.contextId,
+    reason: data.reason.substring(0, 500),
+    channelId: data.channelId,
+    threadTs: data.threadTs,
+    actionRequests: data.actionRequests,
+  })).toString('base64');
+
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `🐛 *Bug Report*\n\n${data.reason.substring(0, 2000)}\n\nWould you like to confirm this report?`,
+      },
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: '✅ Confirm',
+            emoji: true,
+          },
+          action_id: 'bug_report_confirm',
+          value: encodedData,
+          style: 'primary',
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: '❌ Decline',
+            emoji: true,
+          },
+          action_id: 'bug_report_decline',
+          value: encodedData,
+        },
+      ],
+    },
+  ];
+}

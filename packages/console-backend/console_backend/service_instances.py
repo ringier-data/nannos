@@ -44,6 +44,8 @@ from .services.scheduler_service import SchedulerService
 from .services.scheduler_token_service import SchedulerTokenService
 from .services.scim_service import ScimGroupService, ScimUserService
 from .services.scim_token_service import ScimTokenService
+from .services.outbound_scim_endpoint_service import OutboundScimEndpointService
+from .services.outbound_scim_push_service import OutboundScimPushService
 from .services.sub_agent_service import SubAgentService
 from .services.usage_service import UsageService
 from .services.user_group_service import UserGroupService
@@ -157,6 +159,20 @@ async def initialize_services(app: "FastAPI") -> None:
     else:
         logger.warning("Keycloak Admin credentials not set — group sync disabled")
         app.state.keycloak_admin_service = None
+
+    # Initialize outbound SCIM services (push provisioning to external IdPs)
+    app.state.outbound_scim_endpoint_service = OutboundScimEndpointService()
+    app.state.outbound_scim_endpoint_service.set_audit_service(app.state.audit_service)
+
+    app.state.outbound_scim_push_service = OutboundScimPushService()
+    app.state.outbound_scim_push_service.set_endpoint_service(app.state.outbound_scim_endpoint_service)
+    app.state.outbound_scim_push_service.set_audit_service(app.state.audit_service)
+    app.state.outbound_scim_push_service.set_db_session_factory(get_async_session_factory())
+
+    # Inject outbound SCIM push service into services that trigger user/group changes
+    app.state.scim_user_service.set_outbound_scim_push_service(app.state.outbound_scim_push_service)
+    app.state.scim_group_service.set_outbound_scim_push_service(app.state.outbound_scim_push_service)
+    app.state.user_group_service.set_outbound_scim_push_service(app.state.outbound_scim_push_service)
 
     app.state.rate_card_service = RateCardService()
     app.state.rate_card_service.set_repository(app.state.rate_card_repository)

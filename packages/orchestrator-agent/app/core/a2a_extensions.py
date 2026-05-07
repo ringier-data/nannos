@@ -29,11 +29,37 @@ INTERMEDIATE_OUTPUT_EXTENSION = "urn:nannos:a2a:intermediate-output:1.0"
 FEEDBACK_REQUEST_EXTENSION = "urn:nannos:a2a:feedback-request:1.0"
 """Non-blocking hint asking clients to prompt for user feedback."""
 
+HUMAN_IN_THE_LOOP_EXTENSION = "urn:nannos:a2a:human-in-the-loop:1.0"
+"""Structured interrupt requiring a human decision before tool execution.
+
+When emitted on a status-update with state=input_required, the message carries:
+- extensions=[HUMAN_IN_THE_LOOP_EXTENSION]
+- A TextPart with a human-readable description
+- A DataPart with the structured review request:
+  {
+    "action_requests": [
+      {"name": "tool_name", "args": {...}, "description": "..."}
+    ],
+    "review_configs": [
+      {"action_name": "tool_name", "allowed_decisions": ["approve", "edit", "reject"]}
+    ]
+  }
+
+To respond, send a message with a DataPart containing:
+  {"decisions": [{"type": "approve"|"edit"|"reject", ...}]}
+
+Decision formats:
+  - approve: {"type": "approve"}
+  - edit:    {"type": "edit", "edited_action": {"name": "tool_name", "args": {...}}}
+  - reject:  {"type": "reject", "message": "reason text"}
+"""
+
 ALL_EXTENSIONS = [
     ACTIVITY_LOG_EXTENSION,
     WORK_PLAN_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
+    HUMAN_IN_THE_LOOP_EXTENSION,
 ]
 
 
@@ -126,4 +152,41 @@ def new_feedback_request_message(
         context_id=context_id,
         task_id=task_id,
         extensions=[FEEDBACK_REQUEST_EXTENSION],
+    )
+
+
+def new_hitl_interrupt_message(
+    description: str,
+    action_requests: list[dict],
+    review_configs: list[dict],
+    context_id: str | None = None,
+    task_id: str | None = None,
+) -> Message:
+    """Build a Message for a human-in-the-loop interrupt (tool approval required).
+
+    The message carries:
+      - A TextPart with the human-readable description
+      - A DataPart with action_requests + review_configs for structured client rendering
+      - extensions=[HUMAN_IN_THE_LOOP_EXTENSION] for client classification
+
+    Clients respond with a DataPart containing {"decisions": [...]}.
+    """
+    return Message(
+        role=Role.agent,
+        parts=[
+            Part(root=TextPart(text=description)),
+            Part(
+                root=DataPart(
+                    data={
+                        "action_requests": action_requests,
+                        "review_configs": review_configs,
+                    },
+                    metadata={"media_type": "application/json"},
+                )
+            ),
+        ],
+        message_id=str(uuid.uuid4()),
+        context_id=context_id,
+        task_id=task_id,
+        extensions=[HUMAN_IN_THE_LOOP_EXTENSION],
     )

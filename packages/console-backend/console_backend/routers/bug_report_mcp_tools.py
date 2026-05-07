@@ -1,16 +1,17 @@
 """Bug report MCP tools — expose bug report management as MCP tools.
 
 Endpoints are tagged "MCP" so FastApiMCP auto-exposes them as MCP tools,
-allowing the debug agent to manage bug report lifecycle autonomously.
+allowing the orchestrator and debug agent to manage bug report lifecycle autonomously.
 
 Access control uses the Two-Layer RBAC model:
+- Any authenticated user can create bug reports.
 - Members can update status on their own reports (self-resolve only).
 - Approvers/admins with ``triage`` capability can manage any accessible report.
 """
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..authorization import check_capability
 from ..db.session import DbSession
@@ -44,6 +45,37 @@ def _require_triage(user: User) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Bug report triage capability required",
         )
+
+
+@router.post(
+    "/mcp-create",
+    response_model=BugReportResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["MCP"],
+    operation_id="console_create_bug_report",
+    summary="Create a bug report for an unrecoverable error.",
+    description=(
+        "File a bug report when an unrecoverable error prevents fulfilling the user's request. "
+        "Only use as a last resort after exhausting recovery options (retries, alternative tools, plan changes)."
+    ),
+)
+async def create_bug_report_mcp(
+    request: Request,
+    conversation_id: str = Query(..., description="The conversation ID where the error occurred."),
+    description: str = Query(..., description="Description of the bug — what went wrong and why it's unrecoverable."),
+    task_id: str | None = Query(None, description="The A2A task ID associated with the error."),
+    db: DbSession = None,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> BugReportResponse:
+    service = _get_bug_report_service(request)
+    return await service.create_bug_report(
+        db=db,
+        actor=user,
+        conversation_id=conversation_id,
+        source="orchestrator",
+        task_id=task_id,
+        description=description,
+    )
 
 
 @router.patch(

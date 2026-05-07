@@ -12,7 +12,7 @@ import { A2AGoogleChatBasedRequest } from '../services/a2aClientService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import type { ContextRecord } from '../storage/types.js';
-import { handleTask, handleError } from '../utils/taskResponseHandler.js';
+import { handleTask, handleError, buildBugReportCard } from '../utils/taskResponseHandler.js';
 import { HandlerDependencies } from './types.js';
 import { getSpinnerVerb } from '../utils/spinnerVerbs.js';
 
@@ -34,6 +34,7 @@ export interface NormalizedMessage {
   threadId: string;
   rawText: string;
   attachments?: GoogleChatAttachment[];
+  dataParts?: Record<string, unknown>[]; // Structured data (e.g., HITL decisions)
   source: MessageSource;
 }
 
@@ -205,6 +206,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     threadId,
     rawText,
     attachments: eventAttachments,
+    dataParts,
     source,
   } = msg;
   const {
@@ -226,7 +228,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     const cleanText = rawText.trim();
 
-    if (!cleanText && (!eventAttachments || eventAttachments.length === 0)) {
+    if (!cleanText && (!eventAttachments || eventAttachments.length === 0) && (!dataParts || dataParts.length === 0)) {
       return;
     }
 
@@ -423,6 +425,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               url: f.url,
             }))
           : undefined,
+      dataParts,
       contextId: existingContextId || undefined,
       webhookUrl: isLocalMode ? undefined : webhookUrl,
       webhookToken: isLocalMode ? undefined : webhookToken,
@@ -432,6 +435,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     let accumulatedTask: Task | null = null;
     let feedbackRequestData: { sub_agents?: string[] } | null = null;
+    let interruptWidgetPosted = false;
     try {
       for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
         logger.debug(`Stream event: ${_.get(event, 'kind')}`);
@@ -470,6 +474,78 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           // Update final response state
           accumulatedTask.status = statusEvent.status;
 
+          // Handle interrupted states (input-required) with HITL extension
+          if (statusEvent.status.state === 'input-required' && statusEvent.status.message) {
+            const extensions = statusEvent.status.message.extensions || [];
+            const isHitlInterrupt = extensions.includes('urn:nannos:a2a:human-in-the-loop:1.0');
+
+            if (isHitlInterrupt) {
+              logger.info(
+                { taskId: accumulatedTask?.id },
+                `Received HITL interrupt via extension`
+              );
+
+              // Extract text description from TextPart and structured data from DataPart
+              let interruptMessage = '';
+              let actionRequests: any[] = [];
+              if (statusEvent.status.message?.parts) {
+                for (const part of statusEvent.status.message.parts) {
+                  if (part.kind === 'text') {
+                    interruptMessage += (part as { kind: 'text'; text: string }).text;
+                  } else if (part.kind === 'data') {
+                    const data = (part as { kind: 'data'; data: any }).data;
+                    if (data?.action_requests) {
+                      actionRequests = data.action_requests;
+                    }
+                  }
+                }
+              }
+
+              // Determine interrupt type from action_requests
+              const toolNames = actionRequests.map((ar: any) => ar?.name).filter(Boolean);
+              const isBugReport = toolNames.includes('console_create_bug_report');
+
+              if (isBugReport) {
+                try {
+                  const interruptReason = actionRequests.find((ar: any) => ar.name === 'console_create_bug_report')?.args?.description || interruptMessage;
+                  const bugReportCard = buildBugReportCard({
+                    taskId: accumulatedTask.id,
+                    contextId: accumulatedTask.contextId || '',
+                    reason: interruptReason,
+                  });
+
+                  logger.info(
+                    { taskId: accumulatedTask?.id },
+                    `Posting bug report card to Google Chat`
+                  );
+
+                  await chatService.sendMessage({
+                    projectId,
+                    spaceId,
+                    threadId,
+                    cardsV2: [bugReportCard],
+                  });
+                  interruptWidgetPosted = true;
+
+                  // Store the interrupt context
+                  await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
+                    logger.error(err, `Failed to update in-flight task for interrupt: ${err}`);
+                  });
+                } catch (widgetErr) {
+                  logger.error(widgetErr, `Failed to post bug report card, falling back to text: ${widgetErr}`);
+                  if (interruptMessage) {
+                    await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
+                  }
+                }
+              } else {
+                // For other HITL interrupt types, post text
+                if (interruptMessage) {
+                  await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
+                }
+              }
+            }
+          }
+
           if (event.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {
             const workPlan = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
               todos: Array<{
@@ -485,6 +561,10 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                   `• ${x.state === 'completed' ? '✅' : x.state === 'working' ? '⏳' : x.state === 'failed' ? '❌' : '🔜'} ${x.name}${x.source ? ` (agent ${x.source})` : ''}${x.target ? ` [${x.target}]` : ''}`
               )
               .join('\n');
+          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:intermediate-output:1.0')) {
+            logger.debug(
+              `Received status update as intermediate-output. Not updating status message details. This is thinking`
+            );
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
             statusMessage.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
@@ -499,7 +579,8 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               artifactId: `final_response_${Date.now()}`,
               parts: event.status.message?.parts || [],
             })
-          } else {
+          } else if (statusEvent.status.state !== 'input-required') {
+            // Only log if it's not an interrupt
             logger.debug(`Received status update without recognized extensions. Not updating status message details.`);
           }
           const newStatusMessage = `${statusMessage.thinking}${statusMessage.activity ? ` [${statusMessage.activity}]` : ''}${statusMessage.todos ? `\n${statusMessage.todos}` : ''}`;
@@ -537,6 +618,11 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     }
 
     // ---- Handle the response ----
+    // Skip if we already posted a custom interrupt widget (e.g. bug report)
+    if (interruptWidgetPosted) {
+      logger.info({ taskId: accumulatedTask?.id }, `Skipping handleTask — interrupt widget already posted`);
+      return;
+    }
     const result = await handleTask({
       task: accumulatedTask,
       chatService,

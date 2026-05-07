@@ -4,7 +4,6 @@ import os
 import uuid
 from typing import Literal
 
-import httpx
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
@@ -42,10 +41,12 @@ from ..models.config import UserConfig
 from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
+    HUMAN_IN_THE_LOOP_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
     new_activity_log_message,
     new_feedback_request_message,
+    new_hitl_interrupt_message,
     new_work_plan_message,
 )
 
@@ -97,48 +98,26 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             raise ServerError(error=InvalidParamsError())
         return user
 
-    async def _persist_bug_report(
-        self,
-        user_token: str,
-        conversation_id: str,
-        task_id: str,
-        description: str,
-    ) -> None:
-        """Persist a confirmed bug report to console-backend.
+    @staticmethod
+    def _extract_hitl_decisions(context: RequestContext) -> dict:
+        """Extract HITL decisions from the incoming A2A message DataPart.
 
-        Exchanges the user token for a console-backend-scoped token before
-        calling the API. Best-effort: logs errors but does not raise, so graph
-        resumption is not blocked if the API call fails.
+        Clients send decisions as a DataPart with {"decisions": [...]}.
+
+        Returns:
+            A dict like {"decisions": [{"type": "approve"}]}
         """
-        console_url = self.registry_service.config.console_backend_url
-        try:
-            # Exchange user token for console-backend audience
-            oauth2_client = self.agent.oauth2_client
-            if oauth2_client:
-                console_token = await oauth2_client.exchange_token(
-                    subject_token=user_token,
-                    target_client_id=self.agent.config.CONSOLE_BACKEND_CLIENT_ID,
-                    requested_scopes=["openid", "profile", "offline_access"],
-                )
-            else:
-                # Local dev mode — no token exchange available, pass through
-                console_token = user_token
+        from a2a.types import DataPart
 
-            async with httpx.AsyncClient(base_url=console_url, timeout=10.0) as client:
-                response = await client.post(
-                    "/api/v1/bug-reports",
-                    json={
-                        "conversation_id": conversation_id,
-                        "task_id": task_id,
-                        "description": description,
-                        "source": "orchestrator",
-                    },
-                    headers={"Authorization": f"Bearer {console_token}"},
-                )
-                response.raise_for_status()
-                logger.info(f"Bug report persisted for conversation {conversation_id}")
-        except Exception as e:
-            logger.error(f"Failed to persist bug report: {e}")
+        if context.message and context.message.parts:
+            for part in context.message.parts:
+                inner = part.root if hasattr(part, "root") else part
+                if isinstance(inner, DataPart) and isinstance(inner.data, dict):
+                    if "decisions" in inner.data:
+                        return inner.data
+
+        logger.warning("[HITL] No DataPart with decisions found, defaulting to reject")
+        return {"decisions": [{"type": "reject"}]}
 
     async def _build_user_config(
         self,
@@ -560,31 +539,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             # Default to deny for safety
                             resume_value = "deny_all"
                             logger.info(f"Unknown bulk response '{response}', defaulting to deny_all")
-                elif interrupt_type == "bug_report":
-                    # Bug report interrupt — client sends JSON with confirmed/description
-                    # or a simple text response (legacy clients)
-                    logger.info("Resuming from bug_report interrupt")
-                    if isinstance(query, str):
-                        q = query.strip().lower()
-                        if q in ("no", "cancel", "decline", "skip"):
-                            resume_value = {"confirmed": False}
-                        else:
-                            # Treat any other text as confirmation with that text as description
-                            resume_value = {"confirmed": True, "description": query}
-                    elif isinstance(query, dict):
-                        resume_value = query
-                    else:
-                        resume_value = {"confirmed": False}
+                elif isinstance(interrupt_value, dict) and "action_requests" in interrupt_value:
+                    # HumanInTheLoopMiddleware interrupt (HITLRequest format)
+                    # Per LangChain docs, resume with Command(resume={"decisions": [...]})
+                    # Clients should send decisions as a DataPart (structured JSON, no XML wrapping).
+                    action_requests = interrupt_value.get("action_requests", [])
+                    tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
+                    logger.info(f"Resuming from HITL interrupt for tools: {tool_names}")
 
-                    # Persist the bug report to console-backend if confirmed
-                    if isinstance(resume_value, dict) and resume_value.get("confirmed"):
-                        bug_reason = interrupt_value.get("reason", "") if isinstance(interrupt_value, dict) else ""
-                        await self._persist_bug_report(
-                            user_token=user_token,
-                            conversation_id=task.context_id,
-                            task_id=task.id,
-                            description=str(resume_value.get("description") or bug_reason),
-                        )
+                    resume_value = self._extract_hitl_decisions(context)
+                    logger.info(f"HITL resume_value: {resume_value}")
                 else:
                     # Other interrupt types (auth, etc.)
                     resume_value = query
@@ -932,17 +896,41 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         elif state == TaskState.input_required:
             # User input required - leave task in input_required state
-            # Include interrupt metadata if present (e.g., interrupt_type for bug reports)
-            interrupt_metadata = {
-                k: v for k, v in metadata.items() if k in ("interrupt_type", "interrupt_reason")
-            } or None
-            msg = new_agent_text_message(
-                content,
-                task.context_id,
-                task.id,
-            )
-            if interrupt_metadata:
-                msg.metadata = interrupt_metadata
+            action_requests = metadata.get("action_requests")
+            if action_requests and _ext_active(HUMAN_IN_THE_LOOP_EXTENSION):
+                # Structured HITL interrupt via extension — any A2A client can respond
+                # Build review_configs from HITL_GUARDED_TOOLS metadata
+                from app.core.graph_factory import HITL_GUARDED_TOOLS
+
+                review_configs = []
+                for ar in action_requests:
+                    tool_name = ar.get("name", "")
+                    guarded = HITL_GUARDED_TOOLS.get(tool_name, {})
+                    review_configs.append(
+                        {
+                            "action_name": tool_name,
+                            "allowed_decisions": guarded.get("allowed_decisions", ["approve", "reject"]),
+                        }
+                    )
+                msg = new_hitl_interrupt_message(
+                    description=content,
+                    action_requests=action_requests,
+                    review_configs=review_configs,
+                    context_id=task.context_id,
+                    task_id=task.id,
+                )
+            else:
+                # Generic input_required (no HITL extension or not subscribed)
+                msg = new_agent_text_message(
+                    content,
+                    task.context_id,
+                    task.id,
+                )
+                interrupt_metadata = {
+                    k: v for k, v in metadata.items() if k in ("interrupt_type", "interrupt_reason", "action_requests")
+                } or None
+                if interrupt_metadata:
+                    msg.metadata = interrupt_metadata
             await updater.update_status(
                 TaskState.input_required,
                 msg,

@@ -224,18 +224,19 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         "- `auth`: Authentication/authorization failure — handled by the system.\n"
         "- `capability_gap`: Tool/agent cannot do this — try alternative tools or agents.\n"
         "- `user_fixable`: Bad input or missing fields — ask the user for clarification.\n"
-        "- `system_error`: Unexpected crash — attempt recovery first, then report_bug_tool.\n\n"
+        "- `system_error`: Unexpected crash — attempt recovery first, then console_create_bug_report.\n\n"
         "Recovery strategy:\n"
         "1. For `transient`: Retry once, then try alternative approach.\n"
         "2. For `user_fixable`: Ask the user what they meant or for missing info.\n"
         "3. For `capability_gap`: Use a different tool or sub-agent.\n"
-        "4. For `system_error`: Try alternatives first. Only call report_bug_tool as last resort "
+        "4. For `system_error`: Try alternatives first. Only call console_create_bug_report as last resort "
         "when the error is unrecoverable AND prevents fulfilling the user's request.\n\n"
-        "When calling report_bug_tool:\n"
+        "When calling console_create_bug_report:\n"
+        "- The `conversation_id` parameter is auto-injected by the system — use any placeholder value.\n"
         "- Do NOT claim the bug was reported or say 'done' — the tool pauses execution "
         "to collect user confirmation first.\n"
         "- Explain to the user what went wrong BEFORE calling the tool.\n"
-        "- Never call report_bug_tool for errors you recovered from."
+        "- Never call console_create_bug_report for errors you recovered from."
     )
 
     def _enhance_system_prompt_agents(
@@ -1804,6 +1805,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 tool_call_id=tool_call_id,
                 status="error",
             )
+
+        # Auto-inject conversation_id for bug report tool from config thread_id
+        if tool_name == "console_create_bug_report":
+            config = request.runtime.config or {}
+            thread_id = config.get("configurable", {}).get("thread_id")
+            if thread_id:
+                tool_call = {**tool_call, "args": {**tool_call.get("args", {}), "conversation_id": thread_id}}
+                request = request.override(tool_call=tool_call)
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.awrap_tool_call: "

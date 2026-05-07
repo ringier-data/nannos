@@ -46,17 +46,7 @@ class UserSettingsService:
 
             if row is None:
                 logger.debug(f"No settings found for user {user_id}, returning defaults")
-                return UserSettings(
-                    user_id=user_id,
-                    language="en",
-                    timezone="Europe/Zurich",
-                    custom_prompt=None,
-                    mcp_tools=[],
-                    preferred_model=None,
-                    enable_thinking=None,
-                    thinking_level=None,
-                    phone_number_override=None,
-                )
+                return UserSettings(user_id=user_id)
 
             return UserSettings(
                 user_id=row["user_id"],

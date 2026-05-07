@@ -201,6 +201,7 @@ def build_runtime_context(
         "console_update_sub_agent",
         "console_list_mcp_servers",
         "console_grep_mcp_tools",
+        "console_create_bug_report",
     }
     orchestrator_auto_tools = {
         name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
