@@ -158,7 +158,7 @@ class UserSettings(BaseModel):
 
     user_id: str
     language: str = Field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))
-    timezone: str = "Europe/Zurich"
+    timezone: str = Field(default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"))
     custom_prompt: str | None = None
     mcp_tools: list[str] = Field(default_factory=list)
     preferred_model: str | None = None

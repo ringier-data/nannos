@@ -70,7 +70,10 @@ class UserConfig(BaseModel):
     language: str = Field(
         default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"), description="User's preferred language"
     )
-    timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
+    timezone: str = Field(
+        default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "Europe/Zurich"),
+        description="User's preferred timezone (IANA timezone name)",
+    )
     sub_agent_id: Optional[int] = Field(
         default=None, description="Sub-agent ID for cost attribution (set by orchestrator)"
     )
