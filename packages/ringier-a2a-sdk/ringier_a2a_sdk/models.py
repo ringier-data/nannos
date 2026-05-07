@@ -1,5 +1,6 @@
 """Common models for A2A agents."""
 
+import os
 from typing import Any, Dict, Literal, Optional
 
 from a2a.types import TaskState
@@ -66,7 +67,9 @@ class UserConfig(BaseModel):
     )
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
-    language: str = Field(default="en", description="User's preferred language")
+    language: str = Field(
+        default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"), description="User's preferred language"
+    )
     timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
     sub_agent_id: Optional[int] = Field(
         default=None, description="Sub-agent ID for cost attribution (set by orchestrator)"

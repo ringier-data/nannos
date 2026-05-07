@@ -1,5 +1,6 @@
 """User model."""
 
+import os
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
@@ -156,7 +157,7 @@ class UserSettings(BaseModel):
     """User settings model for user-editable preferences."""
 
     user_id: str
-    language: str = "en"
+    language: str = Field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))
     timezone: str = "Europe/Zurich"
     custom_prompt: str | None = None
     mcp_tools: list[str] = Field(default_factory=list)

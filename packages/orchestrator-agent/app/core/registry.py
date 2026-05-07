@@ -117,7 +117,7 @@ class User(BaseModel):
         default_factory=dict
     )  # Maps agent_url -> {sub_agent_id, name, description}
     tool_names: list[str] = Field(default_factory=list)  # MCP tool names enabled for orchestrator
-    language: str = "en"  # User's preferred language
+    language: str = Field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))  # User's preferred language
     custom_prompt: str | None = None  # User's custom prompt addendum
     local_subagents: list[LocalSubAgentConfig] = Field(default_factory=list)  # Local sub-agents
     catalog_ids: list[str] = Field(default_factory=list)  # Accessible catalog IDs for catalog_search

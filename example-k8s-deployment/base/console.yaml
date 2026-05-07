@@ -53,6 +53,8 @@ spec:
           value: "${ENV}"
         - name: AWS_REGION
           value: "eu-central-1"
+        - name: DEFAULT_LANGUAGE
+          value: "en"
         - name: OIDC_CLIENT_ID
           value: "agent-console"
         - name: OIDC_ISSUER

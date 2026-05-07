@@ -53,7 +53,7 @@ class GraphRuntimeContext:
     email: str
     """User's email address."""
 
-    language: str = "en"
+    language: str = field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))
     """User's preferred language for responses (ISO 639-1 code)."""
 
     timezone: str = "Europe/Zurich"
@@ -167,7 +167,9 @@ class UserConfig(BaseModel):
     name: str = Field(..., description="User's full name")
     email: str = Field(..., description="User's email address")
     groups: list[str] = Field(default_factory=list, description="User's group memberships (from Keycloak groups claim)")
-    language: str = Field(default="en", description="User's preferred language")
+    language: str = Field(
+        default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"), description="User's preferred language"
+    )
     timezone: str = Field(default="Europe/Zurich", description="User's preferred timezone (IANA timezone name)")
     model: Optional[str] = Field(
         default=None,
@@ -220,15 +222,6 @@ class UserConfig(BaseModel):
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-class DynamoDBConfig(BaseModel):
-    """DynamoDB configuration."""
-
-    region: str = Field(default_factory=lambda: os.getenv("AWS_REGION", "eu-central-1"))
-    users_table: str = Field(
-        default_factory=lambda: os.getenv("DYNAMODB_USERS_TABLE", "dev-nannos-infrastructure-agents-users")
-    )
 
 
 class AgentSettings:
