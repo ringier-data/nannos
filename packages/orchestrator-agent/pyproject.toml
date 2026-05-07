@@ -89,7 +89,6 @@ env = [
     "LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com",
     "LANGSMITH_PROJECT=dev-nannos-agent-framework",
     "LANGSMITH_API_KEY=test-key",
-    "DYNAMODB_USERS_TABLE=dev-nannos-infrastructure-agents-users",
     "AWS_ACCESS_KEY_ID=testing",
     "AWS_SECRET_ACCESS_KEY=testing",
     "AWS_SECURITY_TOKEN=testing",

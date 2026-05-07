@@ -38,6 +38,8 @@ spec:
           value: "1"
         - name: AWS_REGION
           value: "eu-central-1"
+        - name: DEFAULT_LANGUAGE
+          value: "en"
         - name: OIDC_ISSUER
           value: "https://login.my-issuer.com/realms/nannos"
         - name: OIDC_CLIENT_ID
