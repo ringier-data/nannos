@@ -1,10 +1,11 @@
 """Pydantic models for sub-agents."""
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ActivationSource(str, Enum):
@@ -97,6 +98,35 @@ class FoundryAgentConfiguration(BaseModel):
     foundry_version: str | None = Field(None, description="Optional query API version")
 
 
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+
+
+class SkillFile(BaseModel):
+    """A file bundled with a standard skill (e.g., script, reference doc)."""
+
+    path: str = Field(..., description="Relative path inside the skill directory (e.g., 'scripts/check.py')")
+    content: str = Field(..., description="File content")
+
+
+class SkillDefinition(BaseModel):
+    """A standard (immutable) skill bundled with a sub-agent config version."""
+
+    name: str = Field(..., description="Skill identifier (lowercase, alphanumeric + hyphens)")
+    description: str = Field(..., max_length=1024, description="What the skill does")
+    body: str = Field(..., description="SKILL.md body content (markdown)")
+    files: list[SkillFile] = Field(default_factory=list, description="Optional scripts/references/assets")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        if not v or len(v) > 64 or not _SKILL_NAME_RE.match(v):
+            raise ValueError(
+                "Skill name must be 1-64 chars, lowercase alphanumeric + hyphens, "
+                "no leading/trailing/consecutive hyphens"
+            )
+        return v
+
+
 class SubAgentConfigVersion(BaseModel):
     """Version history entry for sub-agent configurations."""
 
@@ -144,6 +174,10 @@ class SubAgentConfigVersion(BaseModel):
     # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)
     enable_thinking: bool | None = None
     thinking_level: ThinkingLevel | None = ThinkingLevel.LOW
+
+    # Standard skills and sandbox execution
+    skills: list[SkillDefinition] = Field(default_factory=list)
+    sandbox_enabled: bool = False
 
     change_summary: str | None = None
     status: SubAgentStatus = SubAgentStatus.DRAFT
@@ -233,6 +267,10 @@ class SubAgentCreate(BaseModel):
     enable_thinking: bool | None = None
     thinking_level: ThinkingLevel | None = None
 
+    # Standard skills and sandbox execution
+    skills: list[SkillDefinition] = Field(default_factory=list)
+    sandbox_enabled: bool = False
+
 
 class SubAgentUpdate(BaseModel):
     """Request model for updating a sub-agent."""
@@ -269,6 +307,10 @@ class SubAgentUpdate(BaseModel):
     # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)
     enable_thinking: bool | None = None
     thinking_level: ThinkingLevel | None = None
+
+    # Standard skills and sandbox execution
+    skills: list[SkillDefinition] = Field(default_factory=list)
+    sandbox_enabled: bool = False
 
     change_summary: str | None = None  # For version history
 

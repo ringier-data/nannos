@@ -136,6 +136,14 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
         default=None,
         description="Thinking depth level (minimal/low/medium/high) for extended thinking mode",
     )
+    skills: list = Field(
+        default_factory=list,
+        description="Standard (immutable) skills bundled with the sub-agent config version",
+    )
+    sandbox_enabled: bool = Field(
+        default=False,
+        description="Whether sandbox execution is enabled for this sub-agent",
+    )
 
 
 LocalSubAgentConfig = Annotated[Union[LocalFoundrySubAgentConfig, LocalLangGraphSubAgentConfig], Discriminator("type")]

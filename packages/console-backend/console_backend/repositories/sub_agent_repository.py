@@ -819,6 +819,8 @@ class SubAgentRepository(AuditedRepository):
         pricing_config: dict | None = None,
         enable_thinking: bool | None = None,
         thinking_level: ThinkingLevel | None = None,
+        skills: list | None = None,
+        sandbox_enabled: bool = False,
     ) -> int:
         """
         Create a new configuration version with automatic audit logging.
@@ -853,18 +855,20 @@ class SubAgentRepository(AuditedRepository):
 
         now = datetime.now(timezone.utc)
         mcp_tools_list = mcp_tools if mcp_tools is not None else []
+        skills_list = skills if skills is not None else []
 
         query = text("""
             INSERT INTO sub_agent_config_versions
             (sub_agent_id, version, version_hash, description, model, system_prompt, agent_url, mcp_tools, 
              foundry_hostname, foundry_client_id, foundry_client_secret_ref, foundry_ontology_rid, 
              foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, enable_thinking, 
-             thinking_level, change_summary, status, created_at)
+             thinking_level, skills, sandbox_enabled, change_summary, status, created_at)
             VALUES (:sub_agent_id, :version, :version_hash, :description, :model, :system_prompt, :agent_url, 
                     CAST(:mcp_tools AS jsonb), :foundry_hostname, :foundry_client_id, :foundry_client_secret_ref, 
                     :foundry_ontology_rid, :foundry_query_api_name, CAST(:foundry_scopes AS text[]), 
                     :foundry_version, CAST(:pricing_config AS jsonb), :enable_thinking, 
-                    CAST(:thinking_level AS thinking_level), :change_summary, :status, :now)
+                    CAST(:thinking_level AS thinking_level), CAST(:skills AS jsonb), :sandbox_enabled,
+                    :change_summary, :status, :now)
             RETURNING id
         """)
         result = await db.execute(
@@ -888,6 +892,8 @@ class SubAgentRepository(AuditedRepository):
                 "pricing_config": json.dumps(pricing_config) if pricing_config else None,
                 "enable_thinking": enable_thinking,
                 "thinking_level": thinking_level,
+                "skills": json.dumps([s.model_dump() if hasattr(s, "model_dump") else s for s in skills_list]),
+                "sandbox_enabled": sandbox_enabled,
                 "change_summary": change_summary,
                 "status": status,
                 "now": now,
@@ -915,6 +921,8 @@ class SubAgentRepository(AuditedRepository):
             "pricing_config": pricing_config,
             "enable_thinking": enable_thinking,
             "thinking_level": thinking_level,
+            "skills": [s.model_dump() if hasattr(s, "model_dump") else s for s in skills_list],
+            "sandbox_enabled": sandbox_enabled,
             "change_summary": change_summary,
             "status": status,
         }

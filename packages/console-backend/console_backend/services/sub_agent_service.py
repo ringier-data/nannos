@@ -202,6 +202,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -267,6 +269,8 @@ class SubAgentService:
                        cv.pricing_config as cv_pricing_config,
                        cv.enable_thinking as cv_enable_thinking,
                        cv.thinking_level as cv_thinking_level,
+                       cv.skills as cv_skills,
+                       cv.sandbox_enabled as cv_sandbox_enabled,
                        cv.change_summary as cv_change_summary, cv.status as cv_status,
                        cv.submitted_by_user_id as cv_submitted_by_user_id,
                        cv.approved_by_user_id as cv_approved_by_user_id,
@@ -330,6 +334,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -381,6 +387,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -432,6 +440,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -481,6 +491,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -521,6 +533,7 @@ class SubAgentService:
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
                        cv.pricing_config, cv.enable_thinking, cv.thinking_level,
+                       cv.skills, cv.sandbox_enabled,
                        cv.change_summary, cv.status, 
                        cv.submitted_by_user_id,
                        cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
@@ -537,6 +550,7 @@ class SubAgentService:
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
                        cv.pricing_config, cv.enable_thinking, cv.thinking_level,
+                       cv.skills, cv.sandbox_enabled,
                        cv.change_summary, cv.status, 
                        cv.submitted_by_user_id,
                        cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
@@ -629,6 +643,8 @@ class SubAgentService:
             pricing_config=data.pricing_config,
             enable_thinking=normalized_enable_thinking,
             thinking_level=normalized_thinking_level,
+            skills=data.skills,
+            sandbox_enabled=data.sandbox_enabled,
         )
         await db.commit()
 
@@ -745,6 +761,14 @@ class SubAgentService:
 
             # Get current version values to use as defaults
             current_config = existing.config_version
+
+            # Skills and sandbox_enabled apply to all agent types
+            version_skills = data.skills if data.skills else (current_config.skills if current_config else [])
+            version_sandbox_enabled = (
+                data.sandbox_enabled
+                if data.sandbox_enabled
+                else (current_config.sandbox_enabled if current_config else False)
+            )
 
             # For local/automated agents, only use system_prompt. For remote agents, only use agent_url. For Foundry agents, use foundry_* fields.
             # This ensures we don't violate the CHECK constraint.
@@ -919,6 +943,8 @@ class SubAgentService:
                 pricing_config=version_pricing_config,
                 enable_thinking=version_enable_thinking,
                 thinking_level=version_thinking_level,
+                skills=version_skills,
+                sandbox_enabled=version_sandbox_enabled,
             )
 
             # Update current_version pointer
@@ -1886,6 +1912,8 @@ class SubAgentService:
             pricing_config=target.config_version.pricing_config,
             thinking_level=target.config_version.thinking_level,
             enable_thinking=target.config_version.enable_thinking,
+            skills=target.config_version.skills,
+            sandbox_enabled=target.config_version.sandbox_enabled,
         )
 
         await self.repo.update_current_version(
@@ -2146,10 +2174,22 @@ class SubAgentService:
         ]
 
     def _generate_version_hash(
-        self, system_prompt: str | None, agent_url: str | None, mcp_tools: list[str], timestamp: datetime
+        self,
+        system_prompt: str | None,
+        agent_url: str | None,
+        mcp_tools: list[str],
+        skills: list,
+        sandbox_enabled: bool,
+        timestamp: datetime,
     ) -> str:
         """Generate a 12-character hash for a version based on content and timestamp."""
-        content_dict = {"system_prompt": system_prompt, "agent_url": agent_url, "mcp_tools": mcp_tools}
+        content_dict = {
+            "system_prompt": system_prompt,
+            "agent_url": agent_url,
+            "mcp_tools": mcp_tools,
+            "skills": [s.model_dump() if hasattr(s, "model_dump") else s for s in skills],
+            "sandbox_enabled": sandbox_enabled,
+        }
         content = json.dumps(content_dict, sort_keys=True) + timestamp.isoformat()
         return hashlib.sha256(content.encode()).hexdigest()[:12]
 
@@ -2176,11 +2216,16 @@ class SubAgentService:
         pricing_config: dict | None = None,
         enable_thinking: bool | None = None,
         thinking_level: ThinkingLevel | None = None,
+        skills: list | None = None,
+        sandbox_enabled: bool = False,
     ) -> int:
         """Create a new configuration version entry. Returns the new version ID."""
         now = datetime.now(timezone.utc)
         mcp_tools_list = mcp_tools if mcp_tools is not None else []
-        version_hash = self._generate_version_hash(system_prompt, agent_url, mcp_tools_list, now)
+        skills_list = skills if skills is not None else []
+        version_hash = self._generate_version_hash(
+            system_prompt, agent_url, mcp_tools_list, skills_list, sandbox_enabled, now
+        )
 
         return await self.repo.create_config_version(
             db=db,
@@ -2205,6 +2250,8 @@ class SubAgentService:
             pricing_config=pricing_config,
             enable_thinking=enable_thinking,
             thinking_level=thinking_level,
+            skills=skills_list,
+            sandbox_enabled=sandbox_enabled,
         )
 
     def _row_to_sub_agent_with_version(self, row: Any) -> SubAgent:
@@ -2240,6 +2287,8 @@ class SubAgentService:
                 foundry_scopes=row.get("cv_foundry_scopes"),
                 foundry_version=row.get("cv_foundry_version"),
                 pricing_config=row.get("cv_pricing_config"),
+                skills=row.get("cv_skills", []),
+                sandbox_enabled=row.get("cv_sandbox_enabled", False),
                 change_summary=row["cv_change_summary"],
                 status=row["cv_status"],
                 submitted_by_user_id=row.get("cv_submitted_by_user_id"),
@@ -2292,6 +2341,8 @@ class SubAgentService:
             foundry_scopes=row.get("foundry_scopes"),
             foundry_version=row.get("foundry_version"),
             pricing_config=row.get("pricing_config"),
+            skills=row.get("skills", []),
+            sandbox_enabled=row.get("sandbox_enabled", False),
             enable_thinking=row.get("enable_thinking", False),
             thinking_level=row.get("thinking_level", "low"),
             change_summary=row["change_summary"],

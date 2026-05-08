@@ -71,6 +71,10 @@ class SubAgentConfigVersion(BaseModel):
     foundry_scopes: list[str] | None = None  # Stored as TEXT[] in database
     foundry_version: str | None = None
 
+    # Standard skills and sandbox execution
+    skills: list = Field(default_factory=list)
+    sandbox_enabled: bool = False
+
     change_summary: str | None = None
     status: str
     approved_by_user_id: str | None = None  # References agent-console backend users.id (database PK)
@@ -382,6 +386,8 @@ class RegistryService:
                             enable_thinking=cv.enable_thinking,
                             thinking_level=cv.thinking_level,
                             sub_agent_id=sa.id,  # Include console backend ID for tracking
+                            skills=cv.skills if cv.skills else [],
+                            sandbox_enabled=cv.sandbox_enabled if cv.sandbox_enabled else False,
                         )
                     )
                     logger.debug(
