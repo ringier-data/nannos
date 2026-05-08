@@ -35,7 +35,7 @@ class TestPlaybookReaderService:
         mock_item.value = {"content": "# My Playbook\n\n## Preferences\nBe concise."}
 
         async def mock_aget(namespace, key):
-            if namespace == ("user1", "playbooks"):
+            if namespace == ("user1", "agent-data"):
                 return mock_item
             return None
 
@@ -53,9 +53,9 @@ class TestPlaybookReaderService:
         mock_group.value = {"content": "group content"}
 
         async def mock_aget(namespace, key):
-            if namespace == ("user1", "playbooks"):
+            if namespace == ("user1", "agent-data"):
                 return mock_personal
-            if namespace == ("group1", "playbooks"):
+            if namespace == ("group1", "agent-data"):
                 return mock_group
             return None
 
@@ -102,7 +102,7 @@ class TestPlaybookReaderService:
         mock_item.value = {"content": "personal skill content"}
 
         async def mock_aget(namespace, key):
-            if namespace == ("user1", "playbooks") and "triage" in key:
+            if namespace == ("user1", "agent-data") and "triage" in key:
                 return mock_item
             return None
 
@@ -119,7 +119,7 @@ class TestPlaybookReaderService:
         mock_group_item.value = {"content": "group skill content"}
 
         async def mock_aget(namespace, key):
-            if namespace == ("group1", "playbooks") and "triage" in key:
+            if namespace == ("group1", "agent-data") and "triage" in key:
                 return mock_group_item
             return None
 

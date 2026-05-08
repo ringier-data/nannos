@@ -1,10 +1,10 @@
 """Playbook reader service for loading AGENTS.md and SKILLS.md files.
 
-Reads playbook files from a dedicated "playbooks" namespace in the store:
-- Personal playbooks: namespace=(user_id, "playbooks"), key="/{agent_name}/AGENTS.md"
-- Personal skills: namespace=(user_id, "playbooks"), key="/{agent_name}/skills/{skill_name}.md"
-- Group playbooks: namespace=(group_id, "playbooks"), key="/{agent_name}/AGENTS.md"
-- Group skills: namespace=(group_id, "playbooks"), key="/{agent_name}/skills/{skill_name}.md"
+Reads playbook files from a dedicated "agent-data" namespace in the store:
+- Personal playbooks: namespace=(user_id, "agent-data"), key="/{agent_name}/AGENTS.md"
+- Personal skills: namespace=(user_id, "agent-data"), key="/{agent_name}/skills/{skill_name}.md"
+- Group playbooks: namespace=(group_id, "agent-data"), key="/{agent_name}/AGENTS.md"
+- Group skills: namespace=(group_id, "agent-data"), key="/{agent_name}/skills/{skill_name}.md"
 
 Provides:
 - read_agents_md() - loads AGENTS.md for system prompt injection
@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 # Cache TTL in seconds
 _CACHE_TTL = 60
+
+# Legacy namespace — try as fallback when "agent-data" yields nothing.
+# Remove after one release cycle.
+_LEGACY_NAMESPACE = "playbooks"
+_CURRENT_NAMESPACE = "agent-data"
 
 
 @dataclass
@@ -77,13 +82,24 @@ class PlaybookReaderService:
     async def _read_file_from_store(self, namespace: tuple[str, ...], file_path: str) -> str | None:
         """Read a file from the store by namespace and path.
 
+        Tries the provided namespace first; if the namespace ends with
+        ``_CURRENT_NAMESPACE`` and no content is found, retries with the
+        legacy ``_LEGACY_NAMESPACE`` for backward compatibility.
+
         Args:
-            namespace: Store namespace tuple (e.g., (user_id, "filesystem"))
+            namespace: Store namespace tuple (e.g., (user_id, "agent-data"))
             file_path: The file path key in the store
 
         Returns:
             File content as string, or None if not found
         """
+        content = await self._try_read(namespace, file_path)
+        if content is None and len(namespace) >= 2 and namespace[-1] == _CURRENT_NAMESPACE:
+            content = await self._try_read((*namespace[:-1], _LEGACY_NAMESPACE), file_path)
+        return content
+
+    async def _try_read(self, namespace: tuple[str, ...], file_path: str) -> str | None:
+        """Attempt to read a single file from the store."""
         try:
             items = await self._store.aget(namespace=namespace, key=file_path)
             if items and hasattr(items, "value") and items.value:
@@ -99,7 +115,8 @@ class PlaybookReaderService:
         """List file keys in a store namespace matching a prefix.
 
         Uses asearch without a semantic query (query=None) to list items,
-        then filters by key prefix client-side.
+        then filters by key prefix client-side. Falls back to the legacy
+        namespace if the current one returns no results.
 
         Args:
             namespace: Store namespace tuple
@@ -108,6 +125,13 @@ class PlaybookReaderService:
         Returns:
             List of matching file path keys
         """
+        results = await self._try_list(namespace, prefix)
+        if not results and len(namespace) >= 2 and namespace[-1] == _CURRENT_NAMESPACE:
+            results = await self._try_list((*namespace[:-1], _LEGACY_NAMESPACE), prefix)
+        return results
+
+    async def _try_list(self, namespace: tuple[str, ...], prefix: str) -> list[str]:
+        """Attempt to list files in a single namespace."""
         try:
             results = await self._store.asearch(namespace, limit=100)
             return [item.key for item in results if item.key.startswith(prefix)]
@@ -140,7 +164,7 @@ class PlaybookReaderService:
         personal_content = self._get_cached(personal_cache_key)
         if personal_content is None:
             personal_content = await self._read_file_from_store(
-                namespace=(user_id, "playbooks"),
+                namespace=(user_id, "agent-data"),
                 file_path=personal_path,
             )
             # Cache even None results to avoid repeated lookups
@@ -159,7 +183,7 @@ class PlaybookReaderService:
             content = self._get_cached(group_cache_key)
             if content is None:
                 content = await self._read_file_from_store(
-                    namespace=(str(group_id), "playbooks"),
+                    namespace=(str(group_id), "agent-data"),
                     file_path=group_path,
                 )
                 self._set_cached(group_cache_key, content or "")
@@ -201,13 +225,13 @@ class PlaybookReaderService:
         # Personal skills
         personal_prefix = f"/{agent_name}/skills/"
         personal_files = await self._list_files_in_store(
-            namespace=(user_id, "playbooks"),
+            namespace=(user_id, "agent-data"),
             prefix=personal_prefix,
         )
         for file_path in personal_files:
             skill_name = file_path.rsplit("/", 1)[-1].removesuffix(".md")
             description = await self._extract_skill_description(
-                namespace=(user_id, "playbooks"),
+                namespace=(user_id, "agent-data"),
                 file_path=file_path,
             )
             skills.append(SkillIndexEntry(name=skill_name, description=description, scope="personal"))
@@ -217,7 +241,7 @@ class PlaybookReaderService:
         for group_id in group_ids or []:
             group_prefix = f"/{agent_name}/skills/"
             group_files = await self._list_files_in_store(
-                namespace=(str(group_id), "playbooks"),
+                namespace=(str(group_id), "agent-data"),
                 prefix=group_prefix,
             )
             for file_path in group_files:
@@ -226,7 +250,7 @@ class PlaybookReaderService:
                 if skill_name in seen_names:
                     continue
                 description = await self._extract_skill_description(
-                    namespace=(str(group_id), "playbooks"),
+                    namespace=(str(group_id), "agent-data"),
                     file_path=file_path,
                 )
                 skills.append(SkillIndexEntry(name=skill_name, description=description, scope="group"))
@@ -259,7 +283,7 @@ class PlaybookReaderService:
 
         if scope in ("personal", "auto"):
             content = await self._read_file_from_store(
-                namespace=(user_id, "playbooks"),
+                namespace=(user_id, "agent-data"),
                 file_path=personal_path,
             )
             if content:
@@ -271,7 +295,7 @@ class PlaybookReaderService:
             for group_id in group_ids or []:
                 group_path = f"/{agent_name}/skills/{skill_name}.md"
                 content = await self._read_file_from_store(
-                    namespace=(str(group_id), "playbooks"),
+                    namespace=(str(group_id), "agent-data"),
                     file_path=group_path,
                 )
                 if content:

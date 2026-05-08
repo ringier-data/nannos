@@ -216,10 +216,10 @@ def _get_namespace(scope: str, user_id: str | None, group_id: str | None) -> tup
     if scope == "group":
         if not group_id:
             raise ValueError("group_id is required for group-scoped operations")
-        return (str(group_id), "playbooks")
+        return (str(group_id), "agent-data")
     if not user_id:
         raise ValueError("user_id is required for personal-scoped operations")
-    return (user_id, "playbooks")
+    return (user_id, "agent-data")
 
 
 def _update_section_in_markdown(existing_content: str | None, section: str, new_content: str) -> str:

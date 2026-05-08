@@ -16,11 +16,11 @@ class TestPlaybookServicePrefixAndKeys:
 
     def test_get_prefix_personal(self):
         prefix = self.service._get_prefix("personal", "user-123", None)
-        assert prefix == "user-123.playbooks"
+        assert prefix == "user-123.agent-data"
 
     def test_get_prefix_group(self):
         prefix = self.service._get_prefix("group", "user-123", "group-456")
-        assert prefix == "group-456.playbooks"
+        assert prefix == "group-456.agent-data"
 
     def test_get_prefix_group_requires_group_id(self):
         with pytest.raises(ValueError, match="group_id required"):
@@ -202,7 +202,7 @@ class TestPlaybookServicePutAgentsMd:
         # Verify the SQL params include expected prefix and key
         call_args = mock_session.execute.call_args
         params = call_args[0][1]
-        assert params["prefix"] == "user1.playbooks"
+        assert params["prefix"] == "user1.agent-data"
         assert params["key"] == "/orchestrator/AGENTS.md"
 
 
@@ -392,5 +392,5 @@ class TestPlaybookServiceSkillCRUD:
 
         call_args = mock_session.execute.call_args
         params = call_args[0][1]
-        assert params["prefix"] == "g1.playbooks"
+        assert params["prefix"] == "g1.agent-data"
         assert params["key"] == "/orchestrator/skills/my_skill.md"

@@ -42,13 +42,13 @@ class PlaybookService:
         """Build the store prefix from scope and IDs.
 
         LangGraph stores namespace tuples as dot-joined strings.
-        e.g., ("user123", "playbooks") → "user123.playbooks"
+        e.g., ("user123", "agent-data") → "user123.agent-data"
         """
         if scope == "group":
             if not group_id:
                 raise ValueError("group_id required for group scope")
-            return f"{group_id}.playbooks"
-        return f"{user_id}.playbooks"
+            return f"{group_id}.agent-data"
+        return f"{user_id}.agent-data"
 
     def _agents_md_key(self, agent_name: str, scope: str, group_id: str | None) -> str:
         """Build the store key for an AGENTS.md file."""
