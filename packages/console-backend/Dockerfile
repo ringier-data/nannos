@@ -43,6 +43,7 @@ RUN chmod +x /usr/local/bin/rambler
 
 WORKDIR ${WORKDIR}
 COPY --from=backend-builder ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
+COPY --from=backend-builder ${WORKDIR}/../object-storage ../object-storage
 COPY --from=backend-builder ${WORKDIR} .
 
 # Copy migration files
@@ -79,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR ${WORKDIR}
 COPY --from=backend-builder ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
+COPY --from=backend-builder ${WORKDIR}/../object-storage ../object-storage
 COPY --from=backend-builder ${WORKDIR} .
 
 ENTRYPOINT [".venv/bin/python", "catalog_worker.py"]
