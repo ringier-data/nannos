@@ -702,6 +702,10 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             # Thread isolation is already provided by unique thread_id="{context_id}::dynamic-{name}".
             standalone_config = {
                 **config,
+                "metadata": {
+                    **config.get("metadata", {}),
+                    "agent_name": self.name,  # Ensure tools resolve to this agent's skills
+                },
                 "configurable": {
                     **config.get("configurable", {}),
                     "checkpoint_ns": "",  # Empty for standalone graph (not a subgraph)
