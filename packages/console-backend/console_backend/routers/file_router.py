@@ -108,7 +108,7 @@ async def upload_files(
                 name=stored.name,
                 mimeType=stored.mime_type,
                 size=stored.size,
-                uri=stored.uri,
+                uri=stored.download_uri,
                 downloadUri=stored.download_uri,
                 s3Url=f"s3://{stored.bucket}/{stored.key}",
             )
