@@ -244,7 +244,7 @@ def create_indexing_backend_factory(
             Claude).
 
     Returns:
-        A callable ``(ToolRuntime) -> Backend`` suitable for passing to
+        A callable ``(Runtime) -> Backend`` suitable for passing to
         ``FilesystemMiddleware``, ``SummarizationMiddleware``,
         ``build_common_middleware_stack``, or ``create_deep_agent``.
     """
@@ -265,7 +265,7 @@ def create_indexing_backend_factory(
             #
             # Personal files: user-scoped namespace
             user_documents_backend = IndexingStoreBackend(
-                rt,
+                store=store,
                 bedrock_region=bedrock_region,
                 cost_logger=cost_logger,
                 namespace_factory=lambda ctx: _user_scoped_namespace(ctx),
@@ -273,7 +273,7 @@ def create_indexing_backend_factory(
 
             # Tool results: conversation-scoped namespace for isolation
             tool_results_backend = IndexingStoreBackend(
-                rt,
+                store=store,
                 bedrock_region=bedrock_region,
                 cost_logger=cost_logger,
                 namespace_factory=lambda ctx: _conversation_scoped_namespace(ctx),
@@ -281,7 +281,7 @@ def create_indexing_backend_factory(
 
             # Channel files: channel-scoped namespace for shared access
             channel_documents_backend = IndexingStoreBackend(
-                rt,
+                store=store,
                 bedrock_region=bedrock_region,
                 cost_logger=cost_logger,
                 namespace_factory=lambda ctx: _channel_scoped_namespace(ctx),
@@ -289,14 +289,14 @@ def create_indexing_backend_factory(
 
             # Group files: group-scoped namespace for shared group files
             group_documents_backend = IndexingStoreBackend(
-                rt,
+                store=store,
                 bedrock_region=bedrock_region,
                 cost_logger=cost_logger,
                 namespace_factory=lambda ctx: _group_scoped_namespace(ctx),
             )
 
             return CompositeBackend(
-                default=StateBackend(rt),
+                default=StateBackend(),
                 routes={
                     "/memories/": user_documents_backend,
                     "/large_tool_results/": tool_results_backend,
@@ -307,7 +307,7 @@ def create_indexing_backend_factory(
 
         return _backend_with_indexing
     else:
-        return lambda rt: StateBackend(rt)
+        return lambda rt: StateBackend()
 
 
 def _conversation_scoped_namespace(ctx: Any) -> tuple[str, ...]:
