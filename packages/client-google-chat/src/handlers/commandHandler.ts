@@ -5,6 +5,16 @@ import { UserAuthService } from '../services/userAuthService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import { HandlerDependencies } from './types.js';
 
+
+export interface AppCommand {
+  commandArgument: string;
+  spaceId: string;
+  userId: string;
+  projectId: string;
+  threadId: string;
+  messageId: string;
+};
+
 function formatTimestamp(ts: number): string {
   return new Date(ts).toISOString();
 }
@@ -17,35 +27,31 @@ function formatTimestamp(ts: number): string {
  * Google Chat has no ephemeral messages, so we send a regular message in the thread.
  */
 async function handleDebugCommand(
+  appCommand: AppCommand,
   chatService: GoogleChatService,
-  spaceId: string,
-  userId: string,
-  projectId: string,
-  threadId: string,
-  _messageId: string,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore,
   userAuthService: UserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('handleDebugCommand');
-  logger.info(`debug command from user ${userId} in thread ${threadId}`);
+  logger.info(`debug command from user ${appCommand.userId} in thread ${appCommand.threadId}`);
 
   const debugInfo: string[] = [];
   debugInfo.push('🔍 *Nannos Debug Information*\n');
 
   debugInfo.push('*Identifiers:*');
-  debugInfo.push(`• Project ID: \`${projectId}\``);
-  debugInfo.push(`• Space ID: \`${spaceId}\``);
-  debugInfo.push(`• User ID: \`${userId}\``);
-  debugInfo.push(`• Thread ID: \`${threadId}\``);
+  debugInfo.push(`• Project ID: \`${appCommand.projectId}\``);
+  debugInfo.push(`• Space ID: \`${appCommand.spaceId}\``);
+  debugInfo.push(`• User ID: \`${appCommand.userId}\``);
+  debugInfo.push(`• Thread ID: \`${appCommand.threadId}\``);
   debugInfo.push('');
 
-  const isAuthorized = await userAuthService.isUserAuthorized(userId, projectId);
+  const isAuthorized = await userAuthService.isUserAuthorized(appCommand.userId, appCommand.projectId);
   debugInfo.push('*Login Status:*');
   debugInfo.push(`• Status: ${isAuthorized ? '✅ Logged in' : '❌ Not logged in'}`);
   debugInfo.push('');
 
-  const contextKey = contextStore.buildKey(projectId, spaceId, threadId);
+  const contextKey = contextStore.buildKey(appCommand.projectId, appCommand.spaceId, appCommand.threadId);
   const contextRecord = await contextStore.get(contextKey);
 
   debugInfo.push('*Thread Context:*');
@@ -60,8 +66,8 @@ async function handleDebugCommand(
   }
   debugInfo.push('');
 
-  const inFlightTasks = await inFlightTaskStore.getByUser(projectId, userId);
-  const threadTasks = inFlightTasks.filter((t) => t.threadId === threadId);
+  const inFlightTasks = await inFlightTaskStore.getByUser(appCommand.projectId, appCommand.userId);
+  const threadTasks = inFlightTasks.filter((t) => t.threadId === appCommand.threadId);
 
   debugInfo.push('*In-Flight Tasks (this thread):*');
   if (threadTasks.length === 0) {
@@ -82,57 +88,54 @@ async function handleDebugCommand(
     debugInfo.push(`*Other In-Flight Tasks:* ${inFlightTasks.length - threadTasks.length} task(s) in other threads`);
   }
 
-  await chatService.sendPrivateTextMessage(projectId, spaceId, userId, debugInfo.join('\n'), threadId);
+  await chatService.sendPrivateTextMessage(appCommand.projectId, appCommand.spaceId, appCommand.userId, debugInfo.join('\n'), appCommand.threadId);
 }
 
 /**
  * Handle "debug logout" command – revokes user authorization.
  */
 async function handleDebugLogoutCommand(
+  appCommand: AppCommand,
   chatService: GoogleChatService,
-  spaceId: string,
-  userId: string,
-  projectId: string,
-  threadId: string,
   userAuthService: UserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('handleDebugLogoutCommand');
-  logger.info(`debug logout from user ${userId} in thread ${threadId}`);
+  logger.info(`debug logout from user ${appCommand.userId} in thread ${appCommand.threadId}`);
 
   try {
-    const isAuthorized = await userAuthService.isUserAuthorized(userId, projectId);
+    const isAuthorized = await userAuthService.isUserAuthorized(appCommand.userId, appCommand.projectId);
 
     if (!isAuthorized) {
       await chatService.sendPrivateTextMessage(
-        projectId,
-        spaceId,
-        userId,
+        appCommand.projectId,
+        appCommand.spaceId,
+        appCommand.userId,
         '✅ You are already not logged in to Nannos.',
-        threadId
+        appCommand.threadId
       );
       return;
     }
 
-    await userAuthService.revokeUserAuthorization(userId, projectId);
+    await userAuthService.revokeUserAuthorization(appCommand.userId, appCommand.projectId);
 
     await chatService.sendPrivateTextMessage(
-      projectId,
-      spaceId,
-      userId,
+      appCommand.projectId,
+      appCommand.spaceId,
+      appCommand.userId,
       '✅ Successfully logged out from Nannos. You will need to authorize again on your next request.',
-      threadId
+      appCommand.threadId
     );
 
-    logger.info(`Successfully removed authorization for user ${userId} in project ${projectId}`);
+    logger.info(`Successfully removed authorization for user ${appCommand.userId} in project ${appCommand.projectId}`);
   } catch (error) {
     logger.error(error, `Error handling debug logout command: ${error}`);
 
     await chatService.sendPrivateTextMessage(
-      projectId,
-      spaceId,
-      userId,
+      appCommand.projectId,
+      appCommand.spaceId,
+      appCommand.userId,
       '❌ Failed to log out. Please try again.',
-      threadId
+      appCommand.threadId
     );
   }
 }
@@ -141,25 +144,22 @@ async function handleDebugLogoutCommand(
  * Handle "login" command – sends an authorization card.
  */
 async function handleLoginCommand(
+  appCommand: AppCommand,
   chatService: GoogleChatService,
-  spaceId: string,
-  userId: string,
-  projectId: string,
-  threadId: string,
   userAuthService: UserAuthService
 ): Promise<void> {
   const logger = Logger.getLogger('handleLoginCommand');
-  logger.info(`login command from user ${userId}`);
+  logger.info(`login command from user ${appCommand.userId}`);
 
-  const isAuthorized = await userAuthService.isUserAuthorized(userId, projectId);
+  const isAuthorized = await userAuthService.isUserAuthorized(appCommand.userId, appCommand.projectId);
 
   if (isAuthorized) {
-    await chatService.sendPrivateTextMessage(projectId, spaceId, userId, '✅ You are already logged in!', threadId);
+    await chatService.sendPrivateTextMessage(appCommand.projectId, appCommand.spaceId, appCommand.userId, '✅ You are already logged in!', appCommand.threadId);
     return;
   }
 
-  const state = `gchat-auth-${Date.now()}-${userId}`;
-  await userAuthService.storeAuthState(state, userId, projectId);
+  const state = `gchat-auth-${Date.now()}-${appCommand.userId}`;
+  await userAuthService.storeAuthState(state, appCommand.userId, appCommand.projectId);
 
   const config = await import('../config/config.js').then((m) => m.getConfigFromEnv());
   const appAuthorizeUrl = new URL(`/api/v1/authorize?state=${encodeURIComponent(state)}`, config.baseUrl).toString();
@@ -172,18 +172,15 @@ async function handleLoginCommand(
     'Log In'
   );
 
-  await chatService.sendPrivateCardMessage(projectId, spaceId, userId, [card], threadId);
+  await chatService.sendPrivateCardMessage(appCommand.projectId, appCommand.spaceId, appCommand.userId, [card], appCommand.threadId);
 }
 
 /**
  * Handle "help" command – shows available commands.
  */
 async function handleHelpCommand(
+  appCommand: AppCommand,
   chatService: GoogleChatService,
-  spaceId: string,
-  userId: string,
-  projectId: string,
-  threadId: string
 ): Promise<void> {
   const helpText = [
     '🤖 *Nannos Commands*\n',
@@ -195,7 +192,7 @@ async function handleHelpCommand(
     'You can also just send a message to ask Nannos anything!',
   ].join('\n');
 
-  await chatService.sendPrivateTextMessage(projectId, spaceId, userId, helpText, threadId);
+  await chatService.sendPrivateTextMessage(appCommand.projectId, appCommand.spaceId, appCommand.userId, helpText, appCommand.threadId);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,43 +205,34 @@ async function handleHelpCommand(
  * @see https://developers.google.com/workspace/chat/commands
  */
 export async function handleAppCommand(
-  commandArgument: string,
-  spaceId: string,
-  userId: string,
-  projectId: string,
-  threadId: string,
-  messageId: string,
+  appCommand: AppCommand,
   deps: HandlerDependencies
 ): Promise<void> {
   const { chatService, contextStore, inFlightTaskStore, userAuthService } = deps;
 
   const logger = Logger.getLogger('handleAppCommand');
-  logger.info(`App command argument=${commandArgument} from user ${userId} in space ${spaceId}`);
+  logger.info(`App command argument=${appCommand.commandArgument} from user ${appCommand.userId} in space ${appCommand.spaceId}`);
 
-  switch (commandArgument) {
+  switch (appCommand.commandArgument) {
     case 'help':
-      return handleHelpCommand(chatService, spaceId, userId, projectId, threadId);
+      return handleHelpCommand(appCommand, chatService);
 
     case 'login':
-      return handleLoginCommand(chatService, spaceId, userId, projectId, threadId, userAuthService);
+      return handleLoginCommand(appCommand, chatService, userAuthService);
 
     case 'debug':
       return handleDebugCommand(
+        appCommand,
         chatService,
-        spaceId,
-        userId,
-        projectId,
-        threadId,
-        messageId,
         contextStore,
         inFlightTaskStore,
         userAuthService
       );
 
     case 'logout':
-      return handleDebugLogoutCommand(chatService, spaceId, userId, projectId, threadId, userAuthService);
+      return handleDebugLogoutCommand(appCommand, chatService, userAuthService);
 
     default:
-      logger.warn(`Unknown command argument=${commandArgument}, ignoring`);
+      logger.warn(`Unknown command argument=${appCommand.commandArgument}, ignoring`);
   }
 }

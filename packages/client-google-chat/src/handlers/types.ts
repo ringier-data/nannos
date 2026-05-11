@@ -9,6 +9,7 @@ import { FeedbackService } from "../services/feedbackService.js";
 import { FileStorageService } from "../services/fileStorageService.js";
 import { GoogleChatService } from "../services/googleChatService.js";
 import { UserAuthService } from "../services/userAuthService.js";
+import { Config } from '../config/config.js';
 
 export interface HandlerDependencies {
   userAuthService: UserAuthService;
@@ -17,9 +18,8 @@ export interface HandlerDependencies {
   contextStore: IContextStore;
   pendingRequestStore: IPendingRequestStore;
   inFlightTaskStore: IInFlightTaskStore;
-  baseUrl: string;
   fileStorageService: FileStorageService;
-  isLocalMode: boolean;
   feedbackService?: FeedbackService;
-  feedbackSigningSecret?: string;
+  config: Config
+  ;
 }

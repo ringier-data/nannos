@@ -1,6 +1,5 @@
 import express, { Request, Response } from 'express';
 import { Server } from 'http';
-import { createHmac, randomUUID } from 'crypto';
 import { Config, getConfigFromEnv } from './config/config.js';
 import { Logger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
@@ -17,7 +16,8 @@ import { recoverOrphanedTasks } from './utils/taskRecovery.js';
 import { handleIncomingMessage, type NormalizedMessage } from './handlers/messageHandler.js';
 import type { GoogleChatAttachment } from './utils/fileUtils.js';
 import { HandlerDependencies } from './handlers/types.js';
-import { handleAppCommand } from './handlers/commandHandler.js';
+import { AppCommand, handleAppCommand } from './handlers/commandHandler.js';
+import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClickedHanler.js';
 
 // Initialize logger early
 const logger = Logger.getLogger('app');
@@ -45,17 +45,7 @@ interface BaseGoogleChatEvent {
     user: User;
     messagePayload?: any;
     appCommandPayload?: any;
-    cardClickedPayload?: {
-      message: {
-        name: string;
-        thread?: { name: string };
-      };
-      space: Space;
-      action: {
-        actionMethodName: string;
-        parameters?: Array<{ key: string; value: string }>;
-      };
-    };
+    buttonClickedPayload?: any;
   };
 }
 
@@ -80,6 +70,26 @@ interface AppCommandGoogleChatEvent {
   chat: {
     user: User;
     appCommandPayload: {
+      space: Space;
+      message: {
+        name: string;
+        text: string;
+        argumentText: string;
+        thread?: {
+          name: string;
+        };
+      };
+    };
+  };
+}
+
+interface ButtonClickedGoogleChatEvent {
+  commonEventObject: {
+    parameters: {cardId: string; action: string, parameters: string};
+  }
+  chat: {
+    user: User;
+    buttonClickedPayload: {
       space: Space;
       message: {
         name: string;
@@ -161,11 +171,9 @@ function setupServerTimeouts(server: Server, config: Config) {
       contextStore: storage.context,
       pendingRequestStore: storage.pendingRequest,
       inFlightTaskStore: storage.inFlightTask,
-      baseUrl: config.baseUrl,
       fileStorageService,
-      isLocalMode: config.isLocal(),
       feedbackService,
-      feedbackSigningSecret: config.oidc.clientSecret || '',
+      config,
     };
 
     // -----------------------------------------------------------------------
@@ -177,52 +185,9 @@ function setupServerTimeouts(server: Server, config: Config) {
       res.send('OK');
     });
 
-    // Feedback link endpoint (used by Google Chat card buttons)
-    app.get('/api/v1/feedback', async (req: Request, res: Response) => {
-      const { c: contextId, t: taskId, u: userId, p: projectId, s: subAgentId, r: rating, sig } = req.query as Record<string, string>;
-
-      if (!contextId || !taskId || !userId || !projectId || !rating || !sig) {
-        res.status(400).type('text/html').send('<html><body><h2>Invalid feedback link</h2></body></html>');
-        return;
-      }
-
-      if (rating !== 'positive' && rating !== 'negative') {
-        res.status(400).type('text/html').send('<html><body><h2>Invalid rating</h2></body></html>');
-        return;
-      }
-
-      // Verify HMAC signature to prevent impersonation
-      const expectedSig = createHmac('sha256', config.oidc.clientSecret || '')
-        .update(`${contextId}:${taskId}:${userId}:${projectId}`)
-        .digest('hex')
-        .substring(0, 16);
-      if (sig !== expectedSig) {
-        logger.warn(`Invalid feedback signature for user=${userId} context=${contextId}`);
-        res.status(403).type('text/html').send('<html><body><h2>Invalid or expired link</h2></body></html>');
-        return;
-      }
-
-      if (feedbackService) {
-        const success = await feedbackService.submitFeedback(
-          userId, projectId, contextId, taskId, rating as 'positive' | 'negative', taskId, subAgentId || undefined,
-        );
-        if (success) {
-          res.type('text/html').send('<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>\u2705 Thanks for the feedback!</h2><p>You can close this tab.</p></body></html>');
-        } else {
-          res.type('text/html').send('<html><body style="font-family:sans-serif;text-align:center;padding:40px"><h2>\u26a0\ufe0f Feedback could not be submitted</h2><p>Please try again later.</p></body></html>');
-        }
-      } else {
-        res.status(503).type('text/html').send('<html><body><h2>Feedback service unavailable</h2></body></html>');
-      }
-    });
-
     // Google Chat event endpoint (with JWT verification)
     app.post(
       '/api/v1/chat/events',
-      (req: Request, _res: Response, next: Function) => {
-        logger.info(`[ChatEvent] Incoming POST /api/v1/chat/events - body keys: ${Object.keys(req.body || {}).join(',')}`);
-        next();
-      },
       createGoogleChatAuthMiddleware(
         config.googleChatTokenExpectedAudience,
         config.googleChatConfigs,
@@ -250,8 +215,8 @@ function setupServerTimeouts(server: Server, config: Config) {
           eventType = 'MESSAGE';
         } else if (baseEvent.chat?.appCommandPayload) {
           eventType = 'APP_COMMAND';
-        } else if (baseEvent.chat?.cardClickedPayload) {
-          eventType = 'CARD_CLICKED';
+        } else if (baseEvent.chat?.buttonClickedPayload) {
+          eventType = 'BUTTON_CLICKED';
         }
 
         logger.info(`[ChatEvent] type=${eventType} user=${userId}`);
@@ -313,105 +278,48 @@ function setupServerTimeouts(server: Server, config: Config) {
               const messageId = event.chat.appCommandPayload.message.name || '';
               const threadId = event.chat.appCommandPayload.message.thread?.name || messageId;
 
-              handleAppCommand(commandArgument, spaceId, userId, projectId, threadId, messageId, handlerDeps).catch(
-                (error) => {
-                  logger.error(error, `Error handling APP_COMMAND event: ${error}`);
-                }
-              );
+              const appCommand: AppCommand = {
+                commandArgument,
+                spaceId,
+                userId,
+                projectId,
+                threadId,
+                messageId,
+              };
+
+              // Process asynchronously so we respond to Google Chat quickly
+              handleAppCommand(appCommand, handlerDeps).catch((error) => {
+                logger.error(error, `Error handling APP_COMMAND event: ${error}`);
+              });
 
               // Respond immediately to acknowledge the event
               res.json({});
               return;
             }
 
-            case 'CARD_CLICKED': {
-              const payload = baseEvent.chat.cardClickedPayload!;
-              const actionMethod = payload.action.actionMethodName;
-              const messageName = payload.message.name;
-              const space = payload.space;
-              const threadName = payload.message.thread?.name;
+            case 'BUTTON_CLICKED': {
+              const event = baseEvent as ButtonClickedGoogleChatEvent;
 
-              logger.info(`[ChatEvent] CARD_CLICKED: action=${actionMethod} message=${messageName}`);
+              const messageId = event.chat.buttonClickedPayload.message.name || '';
+              const threadId = event.chat.buttonClickedPayload.message.thread?.name || messageId;
 
-              // Extract action parameters
-              const params: Record<string, string> = {};
-              if (payload.action.parameters) {
-                for (const param of payload.action.parameters) {
-                  params[param.key] = param.value;
-                }
-              }
+              const buttonPayload: ButtonClickedPayload = {
+                cardId: event.commonEventObject.parameters.cardId,
+                action: event.commonEventObject.parameters.action,
+                actionParameters: JSON.parse(event.commonEventObject.parameters.parameters),
+                userId,
+                userEmail,
+                projectId,
+                spaceId: event.chat.buttonClickedPayload.space.name,
+                threadId,
+                messageId,
+              };
 
-              if (actionMethod === 'bug_report_confirm' || actionMethod === 'bug_report_decline') {
-                // Extract bug report details from parameters
-                const taskId = params.taskId;
-                
-                logger.info(`Bug report action: ${actionMethod} for taskId=${taskId}`);
-
-                // Build decisions payload as structured data (DataPart)
-                let decisions: Record<string, unknown>;
-                if (actionMethod === 'bug_report_confirm') {
-                  decisions = { decisions: [{ type: 'approve' }] };
-                } else {
-                  decisions = { decisions: [{ type: 'reject', message: 'User declined' }] };
-                }
-
-                // Send as a synthetic message via handleIncomingMessage (no visible chat message)
-                const syntheticMessage: NormalizedMessage = {
-                  userId,
-                  userEmail,
-                  projectId,
-                  spaceId: space.name,
-                  messageId: `synthetic-${randomUUID()}`,
-                  threadId: threadName || '',
-                  rawText: '',
-                  dataParts: [decisions],
-                  source: 'direct_message',
-                };
-
-                handleIncomingMessage(syntheticMessage, handlerDeps).catch((err) => {
-                  logger.error(err, `Failed to send bug report decision to orchestrator: ${err}`);
-                });
-
-                // Remove the card widget via actionResponse
-                res.json({
-                  actionResponse: {
-                    type: 'UPDATE_MESSAGE',
-                  },
-                  text: '',
-                  cardsV2: [],
-                });
-                return;
-              } else if (
-                feedbackService &&
-                (actionMethod === 'feedback_positive' || actionMethod === 'feedback_negative')
-              ) {
-                const rating = actionMethod === 'feedback_positive' ? 'positive' : 'negative';
-                const mapping = feedbackService.responseMapping.get(messageName);
-
-                if (mapping) {
-                  const subAgentId = mapping.subAgents && mapping.subAgents.length > 0 ? mapping.subAgents[0] : undefined;
-                  feedbackService
-                    .submitFeedback(mapping.userId, mapping.projectId, mapping.contextId, mapping.taskId, rating, mapping.taskId, subAgentId)
-                    .catch((err) => {
-                      logger.error(err, `Failed to submit feedback: ${err}`);
-                    });
-                } else {
-                  logger.debug(`No response mapping for card click on ${messageName}`);
-                }
-              }
-
-              // Google Chat requires actionResponse for card click events
-              res.json({
-                actionResponse: {
-                  type: 'DIALOG',
-                  dialogAction: {
-                    actionStatus: {
-                      statusCode: 'OK',
-                      userFacingMessage: 'Thanks for your response!',
-                    },
-                  },
-                },
+              handleButtonClicked(buttonPayload, handlerDeps).catch((error) => {
+                logger.error(error, `Error handling BUTTON_CLICKED event: ${error}`);
               });
+
+              res.json({});
               return;
             }
 
