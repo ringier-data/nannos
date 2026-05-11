@@ -21,7 +21,7 @@ export interface ButtonClickedPayload {
 
 interface ButtonFeedbackCardClickedParameters {
   taskId: string;
-  subAgents?: string;
+  subAgents?: string[];
 }
 
 interface ButtonBugReportCardClickedParameters {
@@ -86,7 +86,7 @@ async function handleBugReportCardClick(payload: ButtonClickedPayload, deps: Han
   await deps.chatService.updateMessage({
     projectId: payload.projectId,
     messageName: payload.messageId,
-    text: '✅ Response is accepted',
+    text: payload.action === 'approve' ? '✅ Confirmed' : '❌ Declined',
     cardsV2: [],
   });
 

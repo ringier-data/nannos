@@ -20,6 +20,5 @@ export interface HandlerDependencies {
   inFlightTaskStore: IInFlightTaskStore;
   fileStorageService: FileStorageService;
   feedbackService?: FeedbackService;
-  config: Config
-  ;
+  config: Config;
 }

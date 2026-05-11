@@ -497,7 +497,7 @@ export class GoogleChatService {
                           function: buttonClickHandlerUrl,
                           parameters: [
                             { key: 'cardId', value: 'bug_report_card' },
-                            { key: 'action', value: 'confirm' },
+                            { key: 'action', value: 'approve' },
                             { key: 'parameters', value: JSON.stringify(parameters) },
                           ],
                         },
@@ -516,7 +516,7 @@ export class GoogleChatService {
                           function: buttonClickHandlerUrl,
                           parameters: [
                             { key: 'cardId', value: 'bug_report_card' },
-                            { key: 'action', value: 'decline' },
+                            { key: 'action', value: 'reject' },
                             { key: 'parameters', value: JSON.stringify(parameters) },
                           ],
                         },

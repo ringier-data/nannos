@@ -17,7 +17,7 @@ import { handleIncomingMessage, type NormalizedMessage } from './handlers/messag
 import type { GoogleChatAttachment } from './utils/fileUtils.js';
 import { HandlerDependencies } from './handlers/types.js';
 import { AppCommand, handleAppCommand } from './handlers/commandHandler.js';
-import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClickedHanler.js';
+import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClickedHandler.js';
 
 // Initialize logger early
 const logger = Logger.getLogger('app');
