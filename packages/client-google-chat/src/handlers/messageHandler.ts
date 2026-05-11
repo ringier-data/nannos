@@ -1,5 +1,5 @@
 import _ from 'lodash';
-import { randomUUID, createHmac } from 'crypto';
+import { randomUUID } from 'crypto';
 
 import { Logger } from '../utils/logger.js';
 import {
@@ -11,10 +11,12 @@ import { UserAuthService } from '../services/userAuthService.js';
 import { A2AGoogleChatBasedRequest } from '../services/a2aClientService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
-import type { ContextRecord } from '../storage/types.js';
-import { handleTask, handleError, buildBugReportCard } from '../utils/taskResponseHandler.js';
+import type { ContextRecord, IInFlightTaskStore, IPendingRequestStore } from '../storage/types.js';
+import { handleTask, handleError } from '../utils/taskResponseHandler.js';
 import { HandlerDependencies } from './types.js';
 import { getSpinnerVerb } from '../utils/spinnerVerbs.js';
+import { FileStorageService } from '../services/fileStorageService.js';
+import { Config } from '../config/config.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,7 +46,7 @@ export interface NormalizedMessage {
 
 interface ThreadHistoryResult {
   historyXml?: string;
-  attachments?: GoogleChatAttachment[];
+  attachments: GoogleChatAttachment[];
 }
 
 /**
@@ -64,7 +66,10 @@ async function fetchThreadHistory(
   logger.info(
     `Fetching thread history for space ${spaceId}, thread ${threadId} since ${sinceMessageId || 'beginning'}`
   );
-  const result: ThreadHistoryResult = {};
+  const result: ThreadHistoryResult = {
+    historyXml: undefined,
+    attachments: [],
+  };
 
   try {
     const messages = await chatService.listMessages(projectId, spaceId, threadId, 100);
@@ -99,6 +104,7 @@ async function fetchThreadHistory(
     const filteredMessages = messages.slice(startIndex)
       .filter((msg) => msg.name !== currentMessageId && msg.name !== statusMessageId);
 
+    const seenFiles = new Set<string>();
     const historyMessages = filteredMessages
       .map((msg) => {
         const msgTimestamp = msg.createTime ? new Date(msg.createTime) : new Date();
@@ -108,7 +114,34 @@ async function fetchThreadHistory(
         const role = msg.sender?.type === 'BOT' ? 'assistant' : 'user';
         const userId = msg.sender?.name || '';
         const userName = msg.sender?.displayName || '';
-        return `<message role="${role}" userId="${userId}" userName="${userName}" timestamp="${isoTimestamp}" relativeTime="${relativeTime}">${msg.text || ''}</message>`;
+
+        let filesXml = '';
+        const msgFiles = (msg.attachment ?? []).filter((a) => a.source === 'UPLOADED_CONTENT' && a.attachmentDataRef?.resourceName) || [];
+        if (msgFiles && msgFiles.length > 0) {
+          const fileElements = msgFiles
+            .map((f) => `<file name="${f.contentName}" type="${f.contentType}" />`)
+            .join('');
+          filesXml = `\n  <attachedFiles>${fileElements}</attachedFiles>`;
+          
+          for (const f of msgFiles) {
+            if (!f.name || seenFiles.has(f.name)) {
+              continue;
+            }
+
+            seenFiles.add(f.name);
+            result.attachments.push({
+              name: f.name ?? '',
+              contentName: f.contentName ?? '',
+              contentType: f.contentType ?? 'application/octet-stream',
+              attachmentDataRef: f.attachmentDataRef
+                ? { resourceName: f.attachmentDataRef.resourceName ?? '' }
+                : undefined,
+              source: 'UPLOADED_CONTENT',
+            });
+          }
+        }
+
+        return `<message role="${role}" userId="${userId}" userName="${userName}" timestamp="${isoTimestamp}" relativeTime="${relativeTime}">${msg.text || ''}${filesXml}</message>`;
       })
       .filter(Boolean);
 
@@ -116,26 +149,7 @@ async function fetchThreadHistory(
       result.historyXml = `<thread_context>\n${historyMessages.join('\n')}\n</thread_context>`;
     }
 
-    // Collect attachments from all history messages
-    const attachments: GoogleChatAttachment[] = filteredMessages.flatMap((msg) =>
-      (msg.attachment ?? [])
-        .filter((a) => a.source === 'UPLOADED_CONTENT' && a.attachmentDataRef?.resourceName)
-        .map((a) => ({
-          name: a.name ?? '',
-          contentName: a.contentName ?? '',
-          contentType: a.contentType ?? 'application/octet-stream',
-          attachmentDataRef: a.attachmentDataRef
-            ? { resourceName: a.attachmentDataRef.resourceName ?? '' }
-            : undefined,
-          source: 'UPLOADED_CONTENT',
-        }))
-    );
-
-    if (attachments.length > 0) {
-      result.attachments = attachments;
-    }
-
-    logger.info(`Fetched ${historyMessages.length} messages and ${attachments.length} attachments from thread history`);
+    logger.info(`Fetched ${historyMessages.length} messages and ${result.attachments.length} attachments from thread history`);
     return result;
   } catch (error) {
     logger.debug(`Failed to fetch thread history: ${error}`);
@@ -143,14 +157,6 @@ async function fetchThreadHistory(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Authorization prompt
-// ---------------------------------------------------------------------------
-
-/**
- * Send an authorization-required prompt with a card button.
- * Google Chat doesn't have ephemeral messages, so this sends a regular card.
- */
 async function sendAuthorizationRequired(
   chatService: GoogleChatService,
   spaceId: string,
@@ -185,54 +191,87 @@ async function sendAuthorizationRequired(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Unified message handler
-// ---------------------------------------------------------------------------
+async function sendThinkingStatusMessage(
+  logger: Logger,
+  chatService: GoogleChatService,
+  projectId: string,
+  spaceId: string,
+  threadId: string,
+  userId: string,
+) {
+  const statusMessage = {
+    thinking: `🧠 ${getSpinnerVerb() || 'Working'}...`,
+    activity: '',
+    todos: '',
+    statusMessageId: undefined,
+  };
 
-/**
- * Unified handler for Google Chat MESSAGE events.
- *
- * This is the single entry-point for processing user messages regardless of
- * whether they come from a space @mention or a DM.
- */
-export async function handleIncomingMessage(msg: NormalizedMessage, deps: HandlerDependencies): Promise<void> {
-  const logger = Logger.getLogger('handleIncomingMessage');
-  const {
-    userId,
-    userEmail,
-    projectId,
-    spaceId,
-    messageId,
-    threadId,
-    rawText,
-    attachments: eventAttachments,
-    dataParts,
-    source,
-  } = msg;
-  const {
-    userAuthService,
-    a2aClientService,
-    chatService,
-    contextStore,
-    pendingRequestStore,
-    inFlightTaskStore,
-    fileStorageService,
-    baseUrl,
-    isLocalMode,
-    feedbackService,
-  } = deps;
-
-  let statusMessageId: string | undefined;
   try {
-    logger.info(`${source} from user ${userId} in space ${spaceId}`);
+    const immediateStatus = await chatService.sendPrivateTextMessage(
+      projectId,
+      spaceId,
+      userId,
+      statusMessage.thinking,
+      threadId,
+    );
 
-    const cleanText = rawText.trim();
+    return {
+      ...statusMessage,
+      statusMessageId: immediateStatus.name || undefined,
+    };
+  } catch (err) {
+    logger.debug(`Failed to post immediate status message: ${err}`);
+  }
 
-    if (!cleanText && (!eventAttachments || eventAttachments.length === 0) && (!dataParts || dataParts.length === 0)) {
-      return;
+  return statusMessage;
+}
+
+async function getRequestText(
+  userId: string,
+  cleanText: string,
+  isInThread: boolean,
+  threadHistoryResult: ThreadHistoryResult | undefined,
+  eventAttachments?: GoogleChatAttachment[],
+) {
+    const isoTimestamp = new Date().toISOString();
+
+    let requestText = cleanText;
+
+    const buildAttachedFilesXml = (attachments: GoogleChatAttachment[]): string => {
+      if (attachments.length === 0) return '';
+      const fileElements = attachments.map((a) => `<file name="${a.contentName}" type="${a.contentType}" />`).join('');
+      return `\n  <attachedFiles>${fileElements}</attachedFiles>`;
+    };
+
+    const currentFilesXml = eventAttachments ? buildAttachedFilesXml(eventAttachments) : '';
+
+    if (isInThread) {
+      if (threadHistoryResult?.historyXml) {
+        requestText = `${threadHistoryResult.historyXml}\n<current_request userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</current_request>`;
+      } else {
+        requestText = `<message role="user" userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</message>`;
+      }
+    } else {
+      requestText = `<message role="user" userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</message>`;
     }
 
-    // ---- Authorization check ----
+    return requestText;
+}
+
+async function getOrchestratorAccessToken(
+  logger: Logger,
+  userAuthService: UserAuthService,
+  pendingRequestStore: IPendingRequestStore,
+  chatService: GoogleChatService,
+  userId: string,
+  projectId: string,
+  spaceId: string,
+  threadId: string,
+  messageId: string,
+  userEmail: string,
+  source: MessageSource,
+  cleanText: string,
+): Promise<string | null> {
     let isAuthorized = false;
     try {
       isAuthorized = await userAuthService.isUserAuthorized(userId, projectId);
@@ -246,7 +285,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           '⚠️ The system is not properly configured. Please contact your administrator.',
           threadId
         );
-        return;
+        return null;
       }
       throw error;
     }
@@ -264,10 +303,9 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         createdAt: Date.now(),
       });
       await sendAuthorizationRequired(chatService, spaceId, userId, projectId, threadId, userAuthService);
-      return;
+      return null;
     }
 
-    // ---- Get orchestrator access token ----
     const accessToken = await userAuthService.getOrchestratorToken(userId, projectId);
 
     if (!accessToken) {
@@ -290,87 +328,33 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         createdAt: Date.now(),
       });
       await sendAuthorizationRequired(chatService, spaceId, userId, projectId, threadId, userAuthService);
-      return;
+      
+      return null;
     }
 
-    // Post an immediate "Working..." message so the user sees responsiveness
-    // before the A2A server sends its first status-update event.
-    const statusMessage = {
-      thinking: `🧠 ${getSpinnerVerb() || 'Working'}...`,
-      activity: '',
-      todos: '',
-    };
+    return accessToken;
+}
 
-    try {
-      const immediateStatus = await chatService.sendMessage({
-        projectId,
-        spaceId,
-        threadId,
-        text: statusMessage.thinking,
-        messageReplyOption: 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD',
-      });
-      statusMessageId = immediateStatus.name || undefined;
-    } catch (err) {
-      logger.debug(`Failed to post immediate status message: ${err}`);
-    }
-
-    // ---- Context ----
-    const contextKey = contextStore.buildKey(projectId, spaceId, threadId);
-    const existingContext: ContextRecord | null = await contextStore.get(contextKey);
-    const existingContextId = existingContext?.contextId;
-
-    // ---- Build XML-wrapped request text ----
-    const isoTimestamp = new Date().toISOString();
-
-    let requestText = cleanText;
-    const isInThread = threadId !== messageId; // If thread ID differs from message ID, we're in a thread
-    let threadAttachments: GoogleChatAttachment[] = [];
-
-    const buildAttachedFilesXml = (attachments: GoogleChatAttachment[]): string => {
-      if (attachments.length === 0) return '';
-      const fileElements = attachments.map((a) => `<file name="${a.contentName}" type="${a.contentType}" />`).join('');
-      return `\n  <attachedFiles>${fileElements}</attachedFiles>`;
-    };
-
-    const currentFilesXml = eventAttachments ? buildAttachedFilesXml(eventAttachments) : '';
-
-    if (isInThread) {
-      const sinceMessageId = existingContext?.lastProcessedMessageId;
-      const threadHistoryResult = await fetchThreadHistory(
-        chatService,
-        projectId,
-        spaceId,
-        threadId,
-        messageId,
-        statusMessageId,
-        sinceMessageId
-      );
-
-      threadAttachments = threadHistoryResult.attachments || [];
-
-      if (threadHistoryResult.historyXml) {
-        requestText = `${threadHistoryResult.historyXml}\n<current_request userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</current_request>`;
-        logger.info(`Included thread history ${sinceMessageId ? 'since last interaction' : '(full)'}`);
-      } else {
-        requestText = `<message role="user" userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</message>`;
-      }
-    } else {
-      requestText = `<message role="user" userId="${userId}" timestamp="${isoTimestamp}">${cleanText}${currentFilesXml}</message>`;
-    }
-
-    // ---- Process files ----
-    const webhookUrl = new URL(`/api/v1/a2a/callback`, baseUrl).toString();
-    const webhookToken = randomUUID();
-
+async function processMessageAttachments(
+  logger: Logger,
+  chatService: GoogleChatService,
+  fileStorageService: FileStorageService,
+  projectId: string,
+  spaceId: string,
+  threadId: string,
+  userId: string,
+  userEmail: string,
+  contextKey: string,
+  eventAttachments: GoogleChatAttachment[],
+  threadAttachments: GoogleChatAttachment[],
+) {
     const seenAttachmentsNames = new Set<string>();
     const allAttachments: GoogleChatAttachment[] = [];
 
-    if (eventAttachments && eventAttachments.length > 0) {
-      for (const attachment of eventAttachments) {
-        if (!seenAttachmentsNames.has(attachment.name)) {
-          seenAttachmentsNames.add(attachment.name);
-          allAttachments.push(attachment);
-        }
+    for (const attachment of eventAttachments) {
+      if (!seenAttachmentsNames.has(attachment.name)) {
+        seenAttachmentsNames.add(attachment.name);
+        allAttachments.push(attachment);
       }
     }
 
@@ -409,7 +393,229 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       logger.info(`Successfully processed ${processedFiles.length} of ${allAttachments.length} attachment(s) to S3`);
     }
 
+    return processedFiles;
+}
+
+async function processHumanInTheLoopEvent(
+  logger: Logger,
+  chatService: GoogleChatService,
+  inFlightTaskStore: IInFlightTaskStore,
+  projectId: string,
+  spaceId: string,
+  threadId: string,
+  userId: string,
+  accumulatedTask: Task,
+  statusEvent: TaskStatusUpdateEvent,
+  config: Config,
+) {
+  logger.info({ taskId: accumulatedTask?.id }, `Received HITL interrupt via extension`);
+
+  // Extract text description from TextPart and structured data from DataPart
+  let interruptMessage = '';
+  let actionRequests: any[] = [];
+  if (statusEvent.status.message?.parts) {
+    for (const part of statusEvent.status.message.parts) {
+      if (part.kind === 'text') {
+        interruptMessage += (part as { kind: 'text'; text: string }).text;
+      } else if (part.kind === 'data') {
+        const data = (part as { kind: 'data'; data: any }).data;
+        if (data?.action_requests) {
+          actionRequests = data.action_requests;
+        }
+      }
+    }
+  }
+
+  // Determine interrupt type from action_requests
+  const toolNames = actionRequests.map((ar: any) => ar?.name).filter(Boolean);
+  const isBugReport = toolNames.includes('console_create_bug_report');
+
+  if (isBugReport) {
+    try {
+      const interruptReason =
+        actionRequests.find((ar: any) => ar.name === 'console_create_bug_report')?.args?.description ||
+        interruptMessage;
+      const bugReportCard = chatService.buildBugReportCard(config, interruptReason, {taskId: accumulatedTask.id});
+
+      logger.info({ taskId: accumulatedTask?.id }, `Posting bug report card to Google Chat`);
+
+      await chatService.sendPrivateCardMessage(
+        projectId,
+        spaceId,
+        userId,
+        [bugReportCard],
+        threadId,
+      );
+
+      // Store the interrupt context
+      await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
+        logger.error(err, `Failed to update in-flight task for interrupt: ${err}`);
+      });
+
+      return true;
+    } catch (widgetErr) {
+      logger.error(widgetErr, `Failed to post bug report card, falling back to text: ${widgetErr}`);
+      if (interruptMessage) {
+        await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
+      }
+    }
+  } else {
+    // For other HITL interrupt types, post text
+    if (interruptMessage) {
+      await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
+    }
+  }
+
+  return false;
+}
+
+async function sendFeedbackCardMessage(
+  logger: Logger,
+  chatService: GoogleChatService,
+  feedbackRequestData: { sub_agents?: string[] } | null,
+  userId: string,
+  projectId: string,
+  spaceId: string,
+  threadId: string,
+  taskId: string,
+  contextId: string,
+  config: Config,
+) {
+  try {
+    const subAgents = feedbackRequestData?.sub_agents || [];
+
+    const feedbackCard = chatService.buildFeedbackCard(config, taskId, subAgents);
+
+    await chatService.sendPrivateCardMessage(
+      projectId,
+      spaceId,
+      userId,
+      [feedbackCard],
+      threadId,
+    );
+
+    logger.info(`Sent feedback link card for context=${contextId}`);
+  } catch (err) {
+    logger.error(err, `Failed to send feedback card: ${err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Unified message handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Unified handler for Google Chat MESSAGE events.
+ *
+ * This is the single entry-point for processing user messages regardless of
+ * whether they come from a space @mention or a DM.
+ */
+export async function handleIncomingMessage(msg: NormalizedMessage, deps: HandlerDependencies): Promise<void> {
+  const logger = Logger.getLogger('handleIncomingMessage');
+  const {
+    userId,
+    userEmail,
+    projectId,
+    spaceId,
+    messageId,
+    threadId,
+    rawText,
+    attachments: eventAttachments,
+    dataParts,
+    source,
+  } = msg;
+  const {
+    userAuthService,
+    a2aClientService,
+    chatService,
+    contextStore,
+    pendingRequestStore,
+    inFlightTaskStore,
+    fileStorageService,
+    feedbackService,
+    config,
+  } = deps;
+
+  try {
+    logger.info(`${source} from user ${userId} in space ${spaceId}`);
+
+    const cleanText = rawText.trim();
+
+    if (!cleanText && (!eventAttachments || eventAttachments.length === 0) && (!dataParts || dataParts.length === 0)) {
+      return;
+    }
+
+    // Get orchestrator access token or prompt for authorization if needed. This will also store the pending request in storage so that it can be retried after the user authorizes.
+    const accessToken = await getOrchestratorAccessToken(
+      logger,
+      userAuthService,
+      pendingRequestStore,
+      chatService,
+      userId,
+      projectId,
+      spaceId,
+      threadId,
+      messageId,
+      userEmail,
+      source,
+      cleanText,
+    );
+    if (!accessToken) {
+      return;
+    }
+
+    // Post an immediate "Working..." message so the user sees responsiveness before the A2A server sends its first status-update event.
+    const statusMessage = await sendThinkingStatusMessage(logger, chatService, projectId, spaceId, threadId, userId);
+
+    // Context management: get existing context ID for this thread if it exists, so we can include it in the A2A request and keep the conversation threaded on the server side. We will update the context store with the new context ID and last processed message ID as we receive updates from the A2A server.
+    const contextKey = contextStore.buildKey(projectId, spaceId, threadId);
+    const existingContext: ContextRecord | null = await contextStore.get(contextKey);
+    const existingContextId = existingContext?.contextId;
+
+    // Get thread history if we're in a thread (i.e. threadId differs from messageId). This will be included in the A2A request so the server can have more context about the conversation. We also fetch attachments from the thread history so they can be processed and included in the A2A request if needed.
+    const isInThread = threadId !== messageId; // If thread ID differs from message ID, we're in a thread
+    let threadHistoryResult: ThreadHistoryResult | undefined = undefined;
+    if (isInThread) {
+      const sinceMessageId = existingContext?.lastProcessedMessageId;
+      threadHistoryResult = await fetchThreadHistory(
+        chatService,
+        projectId,
+        spaceId,
+        threadId,
+        messageId,
+        statusMessage.statusMessageId,
+        sinceMessageId
+      );
+    }
+
+    // Build XML-wrapped request text including thread history if in a thread, and attached file references if there are any attachments in the current message or thread history. The A2A server can use the thread history to get additional context about the conversation, and the file references to know which files to fetch from S3 when processing the request.
+    const requestText = await getRequestText(
+      userId,
+      cleanText,
+      isInThread,
+      threadHistoryResult,
+      eventAttachments,
+    );
+
+    // Process attachments from the current message and thread history (if in a thread) - upload to S3 and get accessible URLs, which will be included in the A2A request
+    const processedFiles = await processMessageAttachments(
+      logger,
+      chatService,
+      fileStorageService,
+      projectId,
+      spaceId,
+      threadId,
+      userId,
+      userEmail,
+      contextKey,
+      eventAttachments || [],
+      threadHistoryResult?.attachments || [],
+    );
+
     // ---- Build & send A2A request via streaming ----
+    const webhookUrl = new URL(`/api/v1/a2a/callback`, config.baseUrl).toString();
+    const webhookToken = randomUUID();
+
     const a2aRequest: A2AGoogleChatBasedRequest = {
       userId,
       projectId,
@@ -427,8 +633,8 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           : undefined,
       dataParts,
       contextId: existingContextId || undefined,
-      webhookUrl: isLocalMode ? undefined : webhookUrl,
-      webhookToken: isLocalMode ? undefined : webhookToken,
+      webhookUrl: config.isLocal() ? undefined : webhookUrl,
+      webhookToken: config.isLocal() ? undefined : webhookToken,
     };
 
     logger.info('Sending message via streaming');
@@ -454,7 +660,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             spaceId,
             threadId,
             messageId,
-            statusMessageId,
+            statusMessageId: statusMessage.statusMessageId,
             contextKey,
             webhookToken,
             source,
@@ -475,79 +681,26 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           accumulatedTask.status = statusEvent.status;
 
           // Handle interrupted states (input-required) with HITL extension
-          if (statusEvent.status.state === 'input-required' && statusEvent.status.message) {
-            const extensions = statusEvent.status.message.extensions || [];
-            const isHitlInterrupt = extensions.includes('urn:nannos:a2a:human-in-the-loop:1.0');
-
-            if (isHitlInterrupt) {
-              logger.info(
-                { taskId: accumulatedTask?.id },
-                `Received HITL interrupt via extension`
-              );
-
-              // Extract text description from TextPart and structured data from DataPart
-              let interruptMessage = '';
-              let actionRequests: any[] = [];
-              if (statusEvent.status.message?.parts) {
-                for (const part of statusEvent.status.message.parts) {
-                  if (part.kind === 'text') {
-                    interruptMessage += (part as { kind: 'text'; text: string }).text;
-                  } else if (part.kind === 'data') {
-                    const data = (part as { kind: 'data'; data: any }).data;
-                    if (data?.action_requests) {
-                      actionRequests = data.action_requests;
-                    }
-                  }
-                }
-              }
-
-              // Determine interrupt type from action_requests
-              const toolNames = actionRequests.map((ar: any) => ar?.name).filter(Boolean);
-              const isBugReport = toolNames.includes('console_create_bug_report');
-
-              if (isBugReport) {
-                try {
-                  const interruptReason = actionRequests.find((ar: any) => ar.name === 'console_create_bug_report')?.args?.description || interruptMessage;
-                  const bugReportCard = buildBugReportCard({
-                    taskId: accumulatedTask.id,
-                    contextId: accumulatedTask.contextId || '',
-                    reason: interruptReason,
-                  });
-
-                  logger.info(
-                    { taskId: accumulatedTask?.id },
-                    `Posting bug report card to Google Chat`
-                  );
-
-                  await chatService.sendMessage({
-                    projectId,
-                    spaceId,
-                    threadId,
-                    cardsV2: [bugReportCard],
-                  });
-                  interruptWidgetPosted = true;
-
-                  // Store the interrupt context
-                  await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
-                    logger.error(err, `Failed to update in-flight task for interrupt: ${err}`);
-                  });
-                } catch (widgetErr) {
-                  logger.error(widgetErr, `Failed to post bug report card, falling back to text: ${widgetErr}`);
-                  if (interruptMessage) {
-                    await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
-                  }
-                }
-              } else {
-                // For other HITL interrupt types, post text
-                if (interruptMessage) {
-                  await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
-                }
-              }
-            }
+          if (
+            statusEvent.status.state === 'input-required' &&
+            statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:human-in-the-loop:1.0')
+          ) {
+            interruptWidgetPosted = await processHumanInTheLoopEvent(
+              logger,
+              chatService,
+              inFlightTaskStore,
+              projectId,
+              spaceId,
+              threadId,
+              userId,
+              accumulatedTask,
+              statusEvent,
+              config,
+            );
           }
 
-          if (event.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {
-            const workPlan = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
+          if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {
+            const workPlan = statusEvent.status.message.parts.find((x) => x.kind === 'data')?.data as {
               todos: Array<{
                 name: string; // Required: task description
                 state: 'submitted' | 'working' | 'completed' | 'failed'; // Required: current state
@@ -561,33 +714,33 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                   `• ${x.state === 'completed' ? '✅' : x.state === 'working' ? '⏳' : x.state === 'failed' ? '❌' : '🔜'} ${x.name}${x.source ? ` (agent ${x.source})` : ''}${x.target ? ` [${x.target}]` : ''}`
               )
               .join('\n');
-          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:intermediate-output:1.0')) {
+          } else if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:intermediate-output:1.0')) {
             logger.debug(
               `Received status update as intermediate-output. Not updating status message details. This is thinking`
             );
-          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
-            statusMessage.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
-          } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
-            const feedbackData = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
+          } else if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
+            statusMessage.activity = statusEvent.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+          } else if (statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
+            const feedbackData = statusEvent.status.message.parts.find((x) => x.kind === 'data')?.data as {
               sub_agents?: string[];
             };
             logger.debug({ feedbackData }, `Received feedback-request extension`);
             feedbackRequestData = feedbackData;
-          } else if (event.status?.state === 'completed') {
+          } else if (statusEvent.status.state === 'completed') {
             if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
             accumulatedTask.artifacts?.push({
               artifactId: `final_response_${Date.now()}`,
-              parts: event.status.message?.parts || [],
+              parts: statusEvent.status.message?.parts || [],
             })
           } else if (statusEvent.status.state !== 'input-required') {
             // Only log if it's not an interrupt
             logger.debug(`Received status update without recognized extensions. Not updating status message details.`);
           }
           const newStatusMessage = `${statusMessage.thinking}${statusMessage.activity ? ` [${statusMessage.activity}]` : ''}${statusMessage.todos ? `\n${statusMessage.todos}` : ''}`;
-          if (statusMessageId) {
+          if (statusMessage.statusMessageId) {
             await chatService.updateMessage({
               projectId,
-              messageName: statusMessageId,
+              messageName: statusMessage.statusMessageId,
               text: newStatusMessage,
             })
           }
@@ -623,6 +776,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       logger.info({ taskId: accumulatedTask?.id }, `Skipping handleTask — interrupt widget already posted`);
       return;
     }
+
     const result = await handleTask({
       task: accumulatedTask,
       chatService,
@@ -631,9 +785,8 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         spaceId,
         threadId,
         messageId,
-        statusMessageId,
+        statusMessageId: statusMessage.statusMessageId,
       },
-      includeFeedbackButtons: false,
     });
 
     await inFlightTaskStore.delete(accumulatedTask.id);
@@ -643,91 +796,19 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
         logger.error(err, `Failed to update context store for task ${accumulatedTask?.id}: ${err}`);
       });
 
-      // Post feedback card as a separate private message with link-based buttons.
-      //
-      // Why links instead of action buttons?
-      // Google Chat Workspace Add-ons with HTTP endpoints don't route CARD_CLICKED events
-      // to the HTTP URL. Cloud logs show Google tries to invoke through its internal
-      // function dispatch (Apps Script or Cloud Functions), not via HTTP POST. The available
-      // trigger types confirm this: App command, Added to space, Message, Removed from space —
-      // no Card clicked trigger for HTTP endpoints.
-      //
-      // Pragmatic alternatives to link-based approach (untested/hypothetical):
-      // - Deploy a Cloud Function shim that receives card clicks (which Google natively routes
-      //   to Cloud Functions), then call the HTTP endpoint from there.
-      //
-      // Current solution: link-based approach opens a URL in the browser that records feedback.
-      // URLs are HMAC-signed to prevent impersonation and tampering.
-      if (feedbackService && accumulatedTask.contextId) {
-        try {
-          const subAgentId = feedbackRequestData?.sub_agents?.[0] || '';
-          // HMAC signature prevents URL tampering / impersonation
-          const sig = createHmac('sha256', deps.feedbackSigningSecret || '')
-            .update(`${accumulatedTask.contextId}:${accumulatedTask.id}:${userId}:${projectId}`)
-            .digest('hex')
-            .substring(0, 16);
-          const feedbackParams = new URLSearchParams({
-            c: accumulatedTask.contextId,
-            t: accumulatedTask.id,
-            u: userId,
-            p: projectId,
-            s: subAgentId,
-            sig,
-          });
-          const baseUrl = deps.baseUrl.replace(/\/+$/, '');
-          const positiveUrl = `${baseUrl}/api/v1/feedback?${feedbackParams.toString()}&r=positive`;
-          const negativeUrl = `${baseUrl}/api/v1/feedback?${feedbackParams.toString()}&r=negative`;
-
-          await chatService.sendMessage({
-            projectId,
-            spaceId,
-            threadId,
-            cardsV2: [
-              {
-                cardId: 'feedback_card',
-                card: {
-                  header: {
-                    title: 'Was this response helpful?',
-                  },
-                  sections: [
-                    {
-                      widgets: [
-                        {
-                          buttonList: {
-                            buttons: [
-                              {
-                                text: '👍 Yes',
-                                onClick: {
-                                  openLink: {
-                                    url: positiveUrl,
-                                  },
-                                },
-                              },
-                              {
-                                text: '👎 No',
-                                onClick: {
-                                  openLink: {
-                                    url: negativeUrl,
-                                  },
-                                },
-                              },
-                            ],
-                          },
-                        },
-                      ],
-                    },
-                  ],
-                },
-              },
-            ],
-            privateMessageViewerName: userId,
-            messageReplyOption: threadId ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' : undefined,
-          });
-
-          logger.info(`Sent feedback link card for context=${accumulatedTask.contextId}`);
-        } catch (err) {
-          logger.error(err, `Failed to send feedback card: ${err}`);
-        }
+      if (feedbackService && feedbackRequestData) {
+        await sendFeedbackCardMessage(
+          logger,
+          chatService,
+          feedbackRequestData,
+          userId,
+          projectId,
+          spaceId,
+          threadId,
+          accumulatedTask.id,
+          accumulatedTask.contextId,
+          config,
+        );
       }
     }
   } catch (error) {

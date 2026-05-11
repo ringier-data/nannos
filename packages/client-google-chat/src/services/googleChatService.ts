@@ -14,7 +14,6 @@ export interface SendMessageOptions {
   spaceId: string;
   text?: string;
   cardsV2?: chat_v1.Schema$CardWithId[];
-  accessoryWidgets?: chat_v1.Schema$AccessoryWidget[];
   threadId?: string; // Thread key to reply in
   messageReplyOption?: 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' | 'REPLY_MESSAGE_OR_FAIL';
   /** When set, the message is only visible to this user (ephemeral). Must be a User resource name, e.g. "users/123456789" */
@@ -29,7 +28,6 @@ export interface UpdateMessageOptions {
   messageName: string; // e.g. spaces/xxx/messages/yyy
   text?: string;
   cardsV2?: chat_v1.Schema$CardWithId[];
-  accessoryWidgets?: chat_v1.Schema$AccessoryWidget[];
   updateMask?: string; // e.g. 'text' or 'cardsV2'
 }
 
@@ -68,9 +66,7 @@ export class GoogleChatService {
     const auth = new google.auth.JWT({
       email: credentials.client_email,
       key: credentials.private_key,
-      scopes: [
-        'https://www.googleapis.com/auth/chat.messages.readonly',
-      ],
+      scopes: ['https://www.googleapis.com/auth/chat.messages.readonly'],
       subject: userEmail,
     });
     return google.chat({ version: 'v1', auth });
@@ -137,24 +133,6 @@ export class GoogleChatService {
   }
 
   /**
-   * Send a card message to a Google Chat space
-   */
-  async sendCardMessage(
-    projectId: string,
-    spaceId: string,
-    cardsV2: chat_v1.Schema$CardWithId[],
-    threadId?: string
-  ): Promise<chat_v1.Schema$Message> {
-    return this.sendMessage({
-      projectId,
-      spaceId,
-      cardsV2,
-      threadId,
-      messageReplyOption: threadId ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD' : undefined,
-    });
-  }
-
-  /**
    * Send a message (text, card, or both) to a Google Chat space
    */
   async sendMessage(options: SendMessageOptions): Promise<chat_v1.Schema$Message> {
@@ -167,10 +145,6 @@ export class GoogleChatService {
 
       if (options.cardsV2) {
         requestBody.cardsV2 = options.cardsV2;
-      }
-
-      if (options.accessoryWidgets) {
-        requestBody.accessoryWidgets = options.accessoryWidgets;
       }
 
       if (options.threadId) {
@@ -215,11 +189,6 @@ export class GoogleChatService {
         updateMaskFields.push('cardsV2');
       }
 
-      if (options.accessoryWidgets !== undefined) {
-        requestBody.accessoryWidgets = options.accessoryWidgets;
-        updateMaskFields.push('accessoryWidgets');
-      }
-
       const updateMask = options.updateMask || updateMaskFields.join(',');
 
       const response = await this.chatApis[options.projectId].spaces.messages.update({
@@ -252,31 +221,27 @@ export class GoogleChatService {
   async downloadAttachment(
     projectId: string,
     userEmail: string,
-    attachmentMetadata: { resourceName: string; contentType: string; fileName: string },
+    attachmentMetadata: { resourceName: string; contentType: string; fileName: string }
   ): Promise<{
     data: Buffer;
     contentType: string;
     fileName: string;
   } | null> {
     // Try bot-level download first
-    const botResult = await this.downloadAttachmentWithClient(
-      this.chatApis[projectId],
-      attachmentMetadata
-    );
+    const botResult = await this.downloadAttachmentWithClient(this.chatApis[projectId], attachmentMetadata);
     if (botResult) return botResult;
 
     // Fallback: impersonate a user via domain-wide delegation.
-    logger.info(`Bot cannot access attachment ${attachmentMetadata.resourceName}, retrying media.download with impersonation`);
+    logger.info(
+      `Bot cannot access attachment ${attachmentMetadata.resourceName}, retrying media.download with impersonation`
+    );
     try {
-        const userClient = this.createUserImpersonatedClient(projectId, userEmail);
-        const botResult = await this.downloadAttachmentWithClient(
-          userClient,
-          attachmentMetadata
-        );
-        return botResult;
-      } catch (error) {
-        logger.warn(`User-impersonation media.download failed for ${attachmentMetadata.resourceName}: ${error}`);
-      }
+      const userClient = this.createUserImpersonatedClient(projectId, userEmail);
+      const botResult = await this.downloadAttachmentWithClient(userClient, attachmentMetadata);
+      return botResult;
+    } catch (error) {
+      logger.warn(`User-impersonation media.download failed for ${attachmentMetadata.resourceName}: ${error}`);
+    }
 
     return null;
   }
@@ -286,7 +251,7 @@ export class GoogleChatService {
    */
   private async downloadAttachmentWithClient(
     client: chat_v1.Chat,
-    attachmentMetadata: { resourceName: string; contentType: string; fileName: string },
+    attachmentMetadata: { resourceName: string; contentType: string; fileName: string }
   ): Promise<{
     data: Buffer;
     contentType: string;
@@ -420,31 +385,149 @@ export class GoogleChatService {
   }
 
   /**
-   * Build a status card for showing progress
+   * Build a feedback card with "Yes" and "No" buttons for user feedback on a response.
+   * The buttons will trigger the provided handler URL with the specified parameters.
    */
-  buildStatusCard(status: string, detail?: string): chat_v1.Schema$CardWithId {
-    const widgets: chat_v1.Schema$WidgetMarkup[] = [
-      {
-        decoratedText: {
-          icon: { knownIcon: 'CLOCK' },
-          topLabel: 'Status',
-          text: status,
-        },
-      } as any,
-    ];
+  buildFeedbackCard(
+    config: Config,
+    taskId: string,
+    subAgents?: string[]
+  ): chat_v1.Schema$CardWithId {
+    const widgets: any[] = [];
 
-    if (detail) {
+    const parameters = { taskId, subAgents };
+
+    // Show involved agents if provided
+    if (subAgents && subAgents.length > 0) {
       widgets.push({
         textParagraph: {
-          text: detail,
+          text: `<i>Agents involved: ${subAgents.join(', ')}</i>`,
         },
-      } as any);
+      });
     }
 
+    // Feedback buttons
+    const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
+    widgets.push({
+      buttonList: {
+        buttons: [
+          {
+            text: '👍 Yes',
+            onClick: {
+              action: {
+                function: buttonClickHandlerUrl,
+                parameters: [
+                  { key: 'cardId', value: 'feedback_card' },
+                  { key: 'action', value: 'yes' },
+                  { key: 'parameters', value: JSON.stringify(parameters) },
+                ],
+              },
+            },
+          },
+          {
+            text: '👎 No',
+            onClick: {
+              action: {
+                function: buttonClickHandlerUrl,
+                parameters: [
+                  { key: 'cardId', value: 'feedback_card' },
+                  { key: 'action', value: 'no' },
+                  { key: 'parameters', value: JSON.stringify(parameters) },
+                ],
+              },
+            },
+          },
+        ],
+      },
+    });
+
     return {
-      cardId: 'status-card',
+      cardId: 'feedback_card',
       card: {
-        sections: [{ widgets: widgets as any }],
+        header: {
+          title: 'Was this response helpful?',
+        },
+        sections: [
+          {
+            widgets,
+          },
+        ],
+      },
+    };
+  }
+
+  buildBugReportCard(
+    config: Config,
+    reason: string,
+    parameters: Record<string, string>
+  ): chat_v1.Schema$CardWithId {
+    const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
+    return {
+      cardId: 'bug_report_card',
+      card: {
+        header: {
+          title: '🐛 Bug Report',
+          subtitle: 'Please confirm this bug report',
+          imageUrl: 'https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/bug_report/default/48px.svg',
+          imageType: 'CIRCLE',
+        },
+        sections: [
+          {
+            widgets: [
+              {
+                textParagraph: {
+                  text: `<b>Reason:</b>\n${reason}`,
+                },
+              } as any,
+              {
+                divider: {},
+              },
+              {
+                textParagraph: {
+                  text: '<b>Would you like to confirm this report?</b>',
+                },
+              } as any,
+              {
+                buttonList: {
+                  buttons: [
+                    {
+                      text: '✅ Confirm',
+                      onClick: {
+                        action: {
+                          function: buttonClickHandlerUrl,
+                          parameters: [
+                            { key: 'cardId', value: 'bug_report_card' },
+                            { key: 'action', value: 'approve' },
+                            { key: 'parameters', value: JSON.stringify(parameters) },
+                          ],
+                        },
+                      },
+                      color: {
+                        red: 0.0,
+                        green: 0.54,
+                        blue: 0.86,
+                        alpha: 1,
+                      },
+                    },
+                    {
+                      text: '❌ Decline',
+                      onClick: {
+                        action: {
+                          function: buttonClickHandlerUrl,
+                          parameters: [
+                            { key: 'cardId', value: 'bug_report_card' },
+                            { key: 'action', value: 'reject' },
+                            { key: 'parameters', value: JSON.stringify(parameters) },
+                          ],
+                        },
+                      },
+                    },
+                  ],
+                },
+              } as any,
+            ],
+          },
+        ],
       },
     };
   }
