@@ -88,6 +88,14 @@ Only if the k8s deployment name differs from the package name:
       <new-package>) echo "<deploy-name>" ;;
 ```
 
+#### e. Configure GHCR package visibility & permissions (after first push)
+
+After the first image push, `build-pkg` will print a warning with a link to the package settings page if the package is not public. Follow the instructions to:
+1. Under **Danger Zone**, change visibility to **Public**
+2. Under **Manage access**, add team **proj-nannos** with role **Write**
+
+Requires org admin permissions in GitHub.
+
 ### 4. Kubernetes Manifests
 
 Update the `example-k8s-deployment/` directory with the necessary manifests to deploy the new package as a service. Look through the existing files to see the pattern.
@@ -121,4 +129,5 @@ just pkg-image <new-package>
 | Add to `_buildable_packages` | `justfile` | If has Dockerfile |
 | Add to `pkg-image` | `justfile` | If has Dockerfile |
 | Add to `pkg-deploy` | `justfile` | If deploy name differs |
+| Configure GHCR package | GitHub UI (link in `build-pkg` output) | If has Dockerfile |
 | Add k8s manifests | `example-k8s-deployment/` | If deployed to k8s |
