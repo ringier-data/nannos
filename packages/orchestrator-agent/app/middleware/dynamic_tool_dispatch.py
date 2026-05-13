@@ -66,7 +66,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from langgraph.config import get_stream_writer
 from langgraph.errors import GraphInterrupt
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from langsmith import traceable
 from pydantic import BaseModel
 from ringier_a2a_sdk.cost_tracking.callback import CostTrackingCallback
@@ -77,6 +77,7 @@ from ringier_a2a_sdk.utils.schema_cleaning import CleanupLevel, validate_and_cle
 from app.agents.file_analyzer import FileAnalyzerRunnable
 from app.agents.gp_agent import GPAgentRunnable
 from app.agents.task_scheduler import TaskSchedulerRunnable
+from app.middleware.error_classification_middleware import classify_error
 
 from ..core.steering_state import ActiveSubagentDispatch, clear_active_subagent_dispatch, set_active_subagent_dispatch
 from ..models.config import GraphRuntimeContext
@@ -186,11 +187,37 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         self.cost_logger = cost_logger
 
     @staticmethod
+    def _classify_error_message(msg: ToolMessage) -> ToolMessage:
+        """Apply error classification to a ToolMessage.
+
+        Because ``DynamicToolDispatchMiddleware`` is the outermost middleware and
+        short-circuits ``task`` tool dispatch, error responses from sub-agents
+        never reach ``ErrorClassificationMiddleware``.  This helper applies the
+        same classification inline so the LLM sees ``[ERROR_TYPE: ...]`` prefixes
+        and can follow the bug-report guidance.
+        """
+        content = msg.content if isinstance(msg.content, str) else ""
+        classification = classify_error(content)
+        # All callers pass status="error", so default to system_error when
+        # content doesn't match specific patterns (mirrors ErrorClassificationMiddleware
+        # which only calls _classify after confirming the status is "error").
+        if classification is None and getattr(msg, "status", None) == "error":
+            classification = "system_error"
+        if classification:
+            msg.content = f"[ERROR_TYPE: {classification}]\n{content}"
+            additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+            additional_kwargs["error_classification"] = classification
+            msg.additional_kwargs = additional_kwargs
+            logger.info(f"[ERROR_CLASSIFICATION] task (subagent dispatch): {classification}")
+        return msg
+
+    @staticmethod
     def _build_agent_list(subagent_registry: dict[str, Any]) -> tuple[list[str], list[str]]:
         """Build agent description lines and name list from the subagent registry.
 
         Each agent is wrapped in ``<agent name="...">`` XML tags so that LLMs
         can clearly see where one agent's description ends and the next begins.
+        Includes the user's effective permission level when available.
 
         Args:
             subagent_registry: Mapping of agent name to CompiledSubAgent dicts.
@@ -203,7 +230,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         names: list[str] = []
         for name, subagent in subagent_registry.items():
             desc = subagent.get("description", f"Agent: {name}")
-            descriptions.append(f'<agent name="{name}">\n{desc}\n</agent>')
+            # Include effective permission when available (from DynamicLocalAgentRunnable)
+            perm = None
+            runnable = subagent.get("runnable")
+            if isinstance(runnable, DynamicLocalAgentRunnable):
+                perm = runnable.config.effective_permission
+            perm_attr = f' permission="{perm}"' if perm else ""
+            descriptions.append(f'<agent name="{name}"{perm_attr}>\n{desc}\n</agent>')
             names.append(name)
         return descriptions, names
 
@@ -590,26 +623,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
         return tool_dicts
 
-    @staticmethod
-    async def _emit_status(stream_writer: Any, message: str) -> None:
-        """Emit an a2a_status event via stream_writer for WorkingBlock display.
-
-        Accepts an explicit stream_writer (used when forwarding sub-agent status
-        from astream_a2a_agent where the contextvars writer is the sub-agent's,
-        not the orchestrator's).  Falls back to get_stream_writer() when None.
-        """
-        if stream_writer is None:
-            try:
-                stream_writer = get_stream_writer()
-            except Exception:
-                return
-        try:
-            result = stream_writer(("a2a_status", {"message": message}))
-            if inspect.iscoroutine(result):
-                await result
-        except Exception as e:
-            logger.debug(f"Failed to emit status: {e}")
-
     def _lookup_tool(self, tool_name: str, user_context: GraphRuntimeContext) -> BaseTool | None:
         """Look up a tool by name from user context or static tools.
 
@@ -946,8 +959,20 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             description_text = description
 
         if set(input_modes).issubset(_TEXT_ONLY_MODES):
-            # Agent only supports text, send text only (optimization: skip filtering)
-            logger.debug(f"Subagent '{subagent_name}' is not multimodal, sending text-only message")
+            # Agent only supports text - include file URIs as text references
+            # so the agent can access them via tools (e.g., read_file, HTTP fetch)
+            if user_context.pending_file_blocks:
+                file_refs = []
+                for block in user_context.pending_file_blocks:
+                    url = block.get("url", "")
+                    mime_type = block.get("mime_type", "unknown")
+                    filename = url.split("/")[-1].split("?")[0] if url else "unknown_file"
+                    file_refs.append(f"- {filename} ({mime_type}): {url}")
+                file_section = "\n\n[Attached files]\n" + "\n".join(file_refs)
+                description_text += file_section
+                logger.debug(f"Subagent '{subagent_name}' is text-only, appending {len(file_refs)} file URIs to text")
+            else:
+                logger.debug(f"Subagent '{subagent_name}' is text-only, no files to forward")
             return HumanMessage(content=description_text)
 
         # Subagent is multimodal - check if we have files to forward
@@ -1204,11 +1229,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Get the runnable from CompiledSubAgent
         runnable = subagent.get("runnable")
         if runnable is None:
-            return ToolMessage(
-                content=f"Error: Subagent '{subagent_type}' has no runnable",
-                name="task",
-                tool_call_id=tool_call_id,
-                status="error",
+            return self._classify_error_message(
+                ToolMessage(
+                    content=f"Error: Subagent '{subagent_type}' has no runnable",
+                    name="task",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
             )
 
         # Prepare state for subagent (exclude messages, todos)
@@ -1261,11 +1288,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             raise
         except Exception as e:
             logger.exception(f"Subagent '{subagent_type}' failed: {e}")
-            return ToolMessage(
-                content=f"Error executing subagent '{subagent_type}': {e}",
-                name="task",
-                tool_call_id=tool_call_id,
-                status="error",
+            return self._classify_error_message(
+                ToolMessage(
+                    content=f"Error executing subagent '{subagent_type}': {e}",
+                    name="task",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
             )
 
     async def _adispatch_task_tool(
@@ -1297,6 +1326,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         args = tool_call.get("args", {})
         description = args.get("description", "")
         subagent_type = args.get("subagent_type", "")
+        logger.info(
+            f"[HITL-TRACE] _adispatch_task_tool ENTER for '{subagent_type}' (tool_call_id={tool_call_id[:8]}...)"
+        )
 
         # Look up subagent in user's dynamic registry
         subagent = user_context.subagent_registry.get(subagent_type)
@@ -1316,11 +1348,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Get the runnable from CompiledSubAgent
         runnable: OrchestratorSupportedRunnables | None = subagent.get("runnable")
         if runnable is None:
-            return ToolMessage(
-                content=f"Error: Subagent '{subagent_type}' has no runnable",
-                name="task",
-                tool_call_id=tool_call_id,
-                status="error",
+            return self._classify_error_message(
+                ToolMessage(
+                    content=f"Error: Subagent '{subagent_type}' has no runnable",
+                    name="task",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
             )
 
         # Validate JSON input for agents requiring JSON
@@ -1329,11 +1363,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             description = self._validate_json_input_for_agent(description, input_modes, subagent_type)
         except ValueError as e:
             # add runnable.description and pyndatic examples to the error message for easier debugging
-            return ToolMessage(
-                content=f"JSON validation error for subagent '{subagent_type}': {e}. The agent description is: {runnable.description}",
-                name="task",
-                tool_call_id=tool_call_id,
-                status="error",
+            return self._classify_error_message(
+                ToolMessage(
+                    content=f"JSON validation error for subagent '{subagent_type}': {e}. The agent description is: {runnable.description}",
+                    name="task",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
             )
 
         # Prepare state for subagent (exclude messages, todos)
@@ -1372,19 +1408,103 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # are standalone (not subgraphs), so LangGraph writes checkpoints at the root
         # namespace. A non-empty checkpoint_ns causes get_state() to look in the wrong
         # namespace. Thread isolation is provided by unique thread_id instead.
+        # Build the canonical thread_id that the sub-agent will actually use for its
+        # checkpoint.  DynamicLocalAgentRunnable.get_thread_id() produces a "dynamic-{name}"
+        # pattern, so we must use that same key everywhere (config AND checkpoint lookup).
+        # This avoids thread_id mismatches on the HITL resume path where _instrument() is
+        # skipped and the config thread_id passes through unchanged.
+        _effective_thread_id = f"{orchestrator_conversation_id or 'unknown'}::{subagent_type}"
+        if isinstance(runnable, DynamicLocalAgentRunnable):
+            _effective_thread_id = f"{orchestrator_conversation_id or 'unknown'}::dynamic-{subagent_type}"
+
         subagent_config = create_runnable_config(
             user_sub=user_sub,
             conversation_id=orchestrator_conversation_id or "unknown",  # Fallback to "unknown" if not available
             user_id=user_id,
             assistant_id=assistant_id or user_id,  # Fallback to user_id if not in parent config
-            thread_id=f"{orchestrator_conversation_id or 'unknown'}::{subagent_type}",  # Unique thread_id for checkpoint isolation
+            thread_id=_effective_thread_id,  # Use canonical thread_id matching sub-agent's get_thread_id()
             checkpoint_ns="",  # Empty for standalone graph — thread_id provides isolation
             checkpointer=checkpointer,  # Required to prevent checkpoint_ns being treated as subgraph
         )
 
+        # Inject group_ids and effective_permission into metadata for playbook tool scope resolution.
+        # group_ids comes from the orchestrator's runtime context (user's group memberships).
+        # effective_permission comes from the sub-agent config (computed at discovery time).
+        subagent_config["metadata"]["group_ids"] = user_context.groups if user_context.groups else []
+        if isinstance(runnable, DynamicLocalAgentRunnable) and hasattr(runnable, "config"):
+            subagent_config["metadata"]["effective_permission"] = runnable.config.effective_permission
+
+        # NOTE: Do NOT propagate __pregel_task_id to sub-agent config.
+        # Setting it makes the sub-agent's Pregel set is_nested=True, which
+        # propagates GraphInterrupt as an exception.  However, is_nested is
+        # designed for *actual* parent-managed subgraphs — standalone graphs
+        # called externally cannot resume via Command(resume=...) when
+        # is_nested=True because the parent Pregel never replays their task.
+        # Instead, we keep is_nested=False (the default) and rely on a
+        # post-stream check in dynamic_agent._astream_impl to detect
+        # suppressed interrupts and re-raise GraphInterrupt.
+
+        # Check if the sub-agent has a pending HITL interrupt in its checkpoint from a previous invocation.
+        # This happens when: sub-agent interrupted → orchestrator surfaced it → user approved → orchestrator
+        # re-delegated. We must resume the sub-agent with the user's decisions, not start fresh.
+        #
+        # We query the checkpointer directly because _agent is lazily initialised (always None
+        # on the first call to a new runnable instance — runnables are recreated per request).
+        subagent_input: dict | Command = subagent_state
+        _checkpointer = subagent_config["configurable"].get("__pregel_checkpointer")
+        logger.info(
+            "[HITL] Pre-call checkpoint check for '%s': checkpointer=%s, thread_id=%s",
+            subagent_type,
+            _checkpointer is not None,
+            subagent_config["configurable"].get("thread_id", "?"),
+        )
+        if _checkpointer is not None:
+            try:
+                checkpoint_tuple = await _checkpointer.aget_tuple(subagent_config)
+                logger.info(
+                    "[HITL] Pre-call checkpoint result for '%s': found=%s, pending_writes=%d",
+                    subagent_type,
+                    checkpoint_tuple is not None,
+                    len(checkpoint_tuple.pending_writes) if checkpoint_tuple and checkpoint_tuple.pending_writes else 0,
+                )
+                if checkpoint_tuple and checkpoint_tuple.pending_writes:
+                    for _task_id, _channel, _pw_value in checkpoint_tuple.pending_writes:
+                        if _channel == "__interrupt__":
+                            # Extract interrupt value from pending writes.
+                            # _pw_value is a list of Interrupt objects (or dicts).
+                            if isinstance(_pw_value, (list, tuple)) and _pw_value:
+                                _int_obj = _pw_value[0]
+                                pending_interrupt_value = (
+                                    _int_obj.value
+                                    if hasattr(_int_obj, "value")
+                                    else (
+                                        _int_obj["value"]
+                                        if isinstance(_int_obj, dict) and "value" in _int_obj
+                                        else _int_obj
+                                    )
+                                )
+                            else:
+                                pending_interrupt_value = _pw_value
+                            logger.info(
+                                f"[HITL] Sub-agent '{subagent_type}' has pending HITL interrupt "
+                                f"(via checkpointer) — surfacing to orchestrator via interrupt()"
+                            )
+                            # First invocation: interrupt() raises → orchestrator suspends → user sees HITL dialog.
+                            # Resume invocation: interrupt() RETURNS user decisions.
+                            user_decisions = interrupt(pending_interrupt_value)
+                            # ── Resumed after user approval ──────────────────────────────────────
+                            logger.info(f"[HITL] User responded to '{subagent_type}' HITL: {user_decisions}")
+                            subagent_input = Command(resume=user_decisions if isinstance(user_decisions, dict) else {})
+                            break
+            except GraphInterrupt:
+                # interrupt() raised — orchestrator will suspend; let it propagate
+                raise
+            except Exception as e:
+                logger.warning(f"[HITL] Could not check sub-agent checkpoint via checkpointer: {e}", exc_info=True)
+
         # Use a traced function for proper LangSmith visibility
         @traceable(name=f"task:{subagent_type}", run_type="tool")
-        async def astream_a2a_agent(agent_state: dict, agent_config: dict) -> AsyncIterable[StreamEvent]:
+        async def astream_a2a_agent(agent_state: dict | Command, agent_config: dict) -> AsyncIterable[StreamEvent]:
             """Stream A2A agent with tracing, forwarding working status updates."""
             logger.info(f"[STREAMING] astream_a2a_agent START for {subagent_type}")
 
@@ -1407,7 +1527,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             item_count = 0
 
             logger.info("[STREAMING] Starting async for loop over runnable.astream()")
-            async for item in runnable.astream(agent_state, agent_config):
+            logger.info(
+                "[STREAMING] astream input type=%s, is_command=%s, config_thread_id=%s",
+                type(agent_state).__name__,
+                hasattr(agent_state, "resume"),
+                agent_config.get("configurable", {}).get("thread_id", "?"),
+            )
+            async for item in runnable.astream(agent_state, agent_config):  # type: ignore[arg-type]
                 item_count += 1
                 item_type = type(item).__name__
                 logger.info(f"[STREAMING] astream_a2a_agent received item #{item_count}: {item_type}")
@@ -1537,7 +1663,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             consumer_item_count = 0
 
             logger.info(f"[STREAMING] Consumer loop starting for {subagent_type}")
-            async for result in astream_a2a_agent(subagent_state, subagent_config):
+            async for result in astream_a2a_agent(subagent_input, subagent_config):
                 consumer_item_count += 1
                 result_type = type(result).__name__
                 logger.info(f"[STREAMING] Consumer received item #{consumer_item_count}: {result_type}")
@@ -1561,11 +1687,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 elif isinstance(result, ErrorEvent):
                     # Return error immediately
                     logger.error(f"[STREAMING] Consumer got ErrorEvent: {result.error}")
-                    return ToolMessage(
-                        content=f"Error from subagent '{subagent_type}': {result.error}",
-                        name="task",
-                        tool_call_id=tool_call_id,
-                        status="error",
+                    return self._classify_error_message(
+                        ToolMessage(
+                            content=f"Error from subagent '{subagent_type}': {result.error}",
+                            name="task",
+                            tool_call_id=tool_call_id,
+                            status="error",
+                        )
                     )
                 else:
                     logger.debug(f"[STREAMING] Consumer ignoring event type: {result_type}")
@@ -1576,11 +1704,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
 
             # Build the final command from the last result
             if final_result is None:
-                return ToolMessage(
-                    content=f"No response received from subagent '{subagent_type}'",
-                    name="task",
-                    tool_call_id=tool_call_id,
-                    status="error",
+                return self._classify_error_message(
+                    ToolMessage(
+                        content=f"No response received from subagent '{subagent_type}'",
+                        name="task",
+                        tool_call_id=tool_call_id,
+                        status="error",
+                    )
                 )
 
             # Extract content and A2A metadata, then build Command
@@ -1596,17 +1726,65 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             )
 
         except GraphInterrupt as gi:
-            # is not an error - just an interrupt from the graph execution
-            logger.info(f"[DYNAMIC TOOL DISPATCH] Subagent '{subagent_type}' interrupted: {gi}")
-            # Re-raise so orchestrator can handle it
-            raise
+            # Sub-agent's _astream_impl detected a pending interrupt in its checkpoint
+            # after streaming and re-raised GraphInterrupt.  We must surface this to
+            # the orchestrator's Pregel by calling interrupt() from the orchestrator's
+            # tool node context — a bare re-raise would propagate the sub-agent's
+            # exception without registering the interrupt value in the orchestrator's
+            # checkpoint for proper resume handling.
+            logger.info(f"[HITL] Sub-agent '{subagent_type}' raised GraphInterrupt — surfacing via interrupt()")
+            sub_interrupts = gi.args[0] if gi.args else ()
+            sub_interrupt_value = sub_interrupts[0].value if sub_interrupts else {}
+            # First call: interrupt() raises → orchestrator suspends.
+            # Resume call: interrupt() returns user decisions.
+            user_decisions = interrupt(sub_interrupt_value)
+            # ── Resumed after user approval (via except handler) ─────────────────────
+            logger.info(f"[HITL] User responded to '{subagent_type}' HITL (resume): {user_decisions}")
+            resume_command = Command(resume=user_decisions if isinstance(user_decisions, dict) else {})
+            # Re-stream the sub-agent with the resume command
+            final_result = None
+            async for result in astream_a2a_agent(resume_command, subagent_config):
+                if isinstance(result, TaskUpdate):
+                    final_result = result
+                    if result.data and result.data.state in TERMINAL_STATES:
+                        break
+                elif isinstance(result, ErrorEvent):
+                    return self._classify_error_message(
+                        ToolMessage(
+                            content=f"Error resuming subagent '{subagent_type}': {result.error}",
+                            name="task",
+                            tool_call_id=tool_call_id,
+                            status="error",
+                        )
+                    )
+            if final_result is None:
+                return self._classify_error_message(
+                    ToolMessage(
+                        content=f"No response from subagent '{subagent_type}' after HITL resume",
+                        name="task",
+                        tool_call_id=tool_call_id,
+                        status="error",
+                    )
+                )
+            final_content, final_a2a_metadata = self._extract_subagent_response(final_result, subagent_type)
+            return self._build_subagent_command(
+                final_result,
+                final_content,
+                final_a2a_metadata,
+                tool_call_id,
+                excluded_keys,
+                subagent_name=subagent_type,
+                sub_agent_id=subagent.get("sub_agent_id"),
+            )
         except Exception as e:
             logger.exception(f"Subagent '{subagent_type}' failed: {e}")
-            return ToolMessage(
-                content=f"Error executing subagent '{subagent_type}': {e}",
-                name="task",
-                tool_call_id=tool_call_id,
-                status="error",
+            return self._classify_error_message(
+                ToolMessage(
+                    content=f"Error executing subagent '{subagent_type}': {e}",
+                    name="task",
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
             )
         finally:
             # Clean up active sub-agent dispatch tracking

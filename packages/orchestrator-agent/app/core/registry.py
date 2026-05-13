@@ -98,6 +98,7 @@ class SubAgent(BaseModel):
     current_version: int = 1
     default_version: int | None = None
     config_version: SubAgentConfigVersion | None = None  # Embedded version data
+    effective_permission: str | None = None  # User's effective permission (owner/write/read)
     created_at: datetime
     updated_at: datetime
 
@@ -388,6 +389,7 @@ class RegistryService:
                             sub_agent_id=sa.id,  # Include console backend ID for tracking
                             skills=cv.skills if cv.skills else [],
                             sandbox_enabled=cv.sandbox_enabled if cv.sandbox_enabled else False,
+                            effective_permission=sa.effective_permission,
                         )
                     )
                     logger.debug(

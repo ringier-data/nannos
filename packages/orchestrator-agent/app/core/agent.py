@@ -12,9 +12,14 @@ Architecture:
 - Dynamic system prompt personalizes responses based on GraphRuntimeContext
 """
 
+from __future__ import annotations
+
 import logging
 from collections.abc import AsyncIterable
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from agent_common.core.sandbox_pool import SandboxPool
 
 from a2a.types import Part, TaskState
 from agent_common.core.s3_service import get_s3_service
@@ -127,6 +132,9 @@ class OrchestratorDeepAgent:
         self.tool_discovery_service = ToolDiscoveryService(self.config, oauth2_client=self.oauth2_client)
         self.agent_discovery_service = AgentDiscoveryService(self.config, oauth2_client=self.oauth2_client)
 
+        # Sandbox pool (set externally via app lifespan if SANDBOX_PROVIDER configured)
+        self.sandbox_pool: SandboxPool | None = None
+
     def _get_graph(
         self, model_type: ModelType | None = None, thinking_level: ThinkingLevel | None = None
     ) -> CompiledStateGraph:
@@ -143,7 +151,9 @@ class OrchestratorDeepAgent:
         """
         return self._graph_factory.get_graph(model_type, thinking_level=thinking_level)
 
-    def build_runtime_context(self, user_config: UserConfig) -> GraphRuntimeContext:
+    def build_runtime_context(
+        self, user_config: UserConfig, sandbox_pool: SandboxPool | None = None
+    ) -> GraphRuntimeContext:
         """Build GraphRuntimeContext from enriched user config.
 
         Transforms discovered tools and subagents into registries for dynamic
@@ -152,6 +162,7 @@ class OrchestratorDeepAgent:
 
         Args:
             user_config: User configuration enriched with discovered tools/agents
+            sandbox_pool: Optional SandboxPool for sandbox-enabled sub-agents
 
         Returns:
             GraphRuntimeContext: Ready for graph invocation with all registries populated
@@ -180,6 +191,7 @@ class OrchestratorDeepAgent:
             backend_url=backend_url,
             gp_graph_provider=self._graph_factory.get_gp_graph,
             task_scheduler_graph_provider=self._graph_factory.get_task_scheduler_graph,
+            sandbox_pool=sandbox_pool,
         )
 
     async def get_or_create_graph(
@@ -281,7 +293,7 @@ class OrchestratorDeepAgent:
 
         # Build GraphRuntimeContext for runtime injection (personalizes system prompt, etc.)
         # UserConfig should already have tools/agents discovered by executor via discover_capabilities()
-        runtime_context = self.build_runtime_context(user_config)
+        runtime_context = self.build_runtime_context(user_config, sandbox_pool=self.sandbox_pool)
 
         # Determine input based on whether we're resuming or starting fresh
         if resume is not None:
@@ -612,14 +624,17 @@ class OrchestratorDeepAgent:
                 )
 
         except GraphRecursionError as e:
-            # TODO: should be language-specific
-            # Handle recursion limit gracefully with an informative message
+            # Recursion limit reached — the graph state is already checkpointed at the
+            # last completed step.  Surface as input_required so the user can send a
+            # follow-up message to continue; the next astream() call will resume from
+            # the checkpoint with a fresh step counter.
             logger.error(f"Recursion limit reached during stream processing: {e}", exc_info=True)
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.input_required,
                 content="I've been working on this task for a while and need to take a break. "
                 "I've made some progress, but the task requires more steps than I can complete in one go. "
                 "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",
+                interrupt_reason="recursion_limit",
             )
 
         except Exception as e:

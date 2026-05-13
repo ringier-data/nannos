@@ -67,17 +67,21 @@ HITL_GUARDED_TOOLS = {
         "allowed_decisions": ["approve", "edit", "reject"],
         "description": "Bug report requires your confirmation before submission.",
     },
-    "update_agents_md": {
+    "console_create_skill": {
         "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Agent wants to save a learned preference to your playbook.",
+        "description": "Agent wants to create a new skill.",
     },
-    "create_skill_md": {
+    "console_update_skill": {
         "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Agent wants to create a new skill in your playbook.",
+        "description": "Agent wants to update a skill.",
     },
-    "update_skill_md": {
+    "console_remove_skill": {
         "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Agent wants to update a skill in your playbook.",
+        "description": "Agent wants to remove a skill.",
+    },
+    "console_update_playbook": {
+        "allowed_decisions": ["approve", "edit", "reject"],
+        "description": "Agent wants to update the playbook (AGENTS.md).",
     },
 }
 
@@ -293,19 +297,36 @@ class GraphFactory:
 
     @property
     def backend_factory(self) -> Any:
-        """Get the backend factory for FilesystemMiddleware.
+        """Get the backend for FilesystemMiddleware.
 
-        Returns a factory function that creates a ``CompositeBackend`` with:
+        Returns a ``CompositeBackend`` with:
         - Default: ``StateBackend`` (ephemeral storage in agent state)
         - ``/memories/``: ``IndexingStoreBackend`` (persistent storage with semantic indexing)
+        - ``/skills/``: ``LazySkillsBackend`` (request-scoped resolved skills)
 
         Delegates to ``create_indexing_backend_factory`` from ``agent_common``.
 
         Returns:
-            Callable ``(ToolRuntime) -> CompositeBackend``
+            A ``BackendProtocol`` instance (``CompositeBackend`` or ``StateBackend``)
         """
         bedrock_region = self.config.get_bedrock_region() if _has_aws_credentials() else None
-        return create_indexing_backend_factory(self.store, bedrock_region, cost_logger=self.cost_logger)
+        backend = create_indexing_backend_factory(self.store, bedrock_region, cost_logger=self.cost_logger)
+
+        # Mount lazy skills backend so ls/read_file work on /skills/ paths.
+        # Skills are resolved per-request by PlaybookInjectionMiddleware and
+        # stored in a context var; LazySkillsBackend reads from it.
+        if self._store_enabled:
+            from deepagents.backends.composite import CompositeBackend
+
+            from ..middleware.playbook_middleware import LazySkillsBackend
+
+            if isinstance(backend, CompositeBackend):
+                backend.routes["/skills/"] = LazySkillsBackend()
+                # sorted_routes is computed at init and used for dispatch;
+                # must be rebuilt after mutating routes.
+                backend.sorted_routes = sorted(backend.routes.items(), key=lambda x: len(x[0]), reverse=True)
+
+        return backend
 
     async def ensure_store_setup(self) -> None:
         """Ensure the database schema is set up for the document store.
@@ -570,12 +591,6 @@ class GraphFactory:
 
             # Add copy_file tool for efficient file copying without LLM context loading
             static_tools.append(create_copy_file_tool(self.backend_factory))
-
-            # Add playbook tools for reading/updating AGENTS.md and SKILLS.md
-            if self.store:
-                from agent_common.core.playbook_tools import create_playbook_tools
-
-                static_tools.extend(create_playbook_tools(self.store))
 
             self._static_tools_cache = static_tools
 
