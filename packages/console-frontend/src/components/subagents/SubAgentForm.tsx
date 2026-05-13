@@ -11,6 +11,10 @@ import {
   Database,
   Key,
   Users,
+  Plus,
+  Trash2,
+  ShieldAlert,
+  Pencil,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,8 +27,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
-import type { SubAgent, SubAgentType, SubAgentFormData } from './types';
+import type { SubAgent, SubAgentType, SubAgentFormData, SkillDefinition } from './types';
 import type { OrchestratorThinkingLevel } from '@/api/generated/types.gen';
+import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
 import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
@@ -85,6 +90,18 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
     })) ?? [{ billing_unit: 'requests', price_per_million: '' }]
   );
   const [isPricingOpen, setIsPricingOpen] = useState(false);
+
+  // Skills configuration (local agents only)
+  const [skills, setSkills] = useState<Array<{ name: string; description: string; body: string; files?: Array<{ path: string; content: string }> }>>(
+    (config?.skills as SkillDefinition[] | undefined)?.map((s) => ({
+      name: s.name,
+      description: s.description,
+      body: s.body,
+      files: s.files?.map((f) => ({ path: f.path, content: f.content })),
+    })) ?? []
+  );
+  const [isSkillModalOpen, setIsSkillModalOpen] = useState(false);
+  const [sandboxEnabled, setSandboxEnabled] = useState(config?.sandbox_enabled ?? false);
 
   // Query for secrets
   const { data: secretsData, isLoading: isLoadingSecrets } = useQuery({
@@ -163,6 +180,24 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
         return 'At least one API scope is required';
       }
     }
+    // Validate skills
+    const skillNamePattern = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+    const seenNames = new Set<string>();
+    for (const skill of skills) {
+      if (!skill.name.trim()) {
+        return 'Each skill must have a name';
+      }
+      if (!skillNamePattern.test(skill.name) || skill.name.includes('--')) {
+        return `Skill name "${skill.name}" must be lowercase letters, numbers, and hyphens only (no leading/trailing/consecutive hyphens)`;
+      }
+      if (seenNames.has(skill.name)) {
+        return `Duplicate skill name "${skill.name}"`;
+      }
+      seenNames.add(skill.name);
+      if (!skill.description.trim()) {
+        return `Skill "${skill.name}" must have a description`;
+      }
+    }
     return null;
   };
 
@@ -199,6 +234,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
         ...(mcpTools.length > 0 && { mcp_tools: mcpTools }),
         enable_thinking: enableThinking,
         thinking_level: thinkingLevel ?? undefined, // Convert null to undefined for API
+        ...(skills.length > 0 && { skills }),
+        sandbox_enabled: sandboxEnabled,
       };
     } else if (type === 'foundry') {
       configuration = {
@@ -233,6 +270,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
         type,
         is_public: isPublic,
         configuration: configuration!,
+        ...(type === 'local' && skills.length > 0 && { skills }),
+        ...(type === 'local' && { sandbox_enabled: sandboxEnabled }),
       });
     } catch (err) {
       toast.error('Error', { description: err instanceof Error ? err.message : 'An error occurred' });
@@ -255,6 +294,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       setFoundryScopes([]);
       setFoundryVersion('');
       setRateCardEntries([{ billing_unit: 'requests', price_per_million: '' }]);
+      setSkills([]);
+      setSandboxEnabled(false);
     } else if (newType === 'local') {
       setAgentUrl('');
       setFoundryHostname('');
@@ -271,6 +312,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       setMcpTools([]);
       setEnableThinking(false);
       setThinkingLevel('low');
+      setSkills([]);
+      setSandboxEnabled(false);
     }
   };
 
@@ -737,6 +780,103 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                   </CardContent>
                 </CollapsibleContent>
               </Collapsible>
+            </Card>
+          )}
+
+          {/* Skills Card - Compact summary + modal editor, only for local agents */}
+          {type === 'local' && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="text-left">
+                    <CardTitle className="flex items-center gap-2">
+                      Standard Skills (Optional)
+                      {skills.length > 0 && (
+                        <span className="text-sm font-normal text-muted-foreground">
+                          ({skills.length} defined)
+                        </span>
+                      )}
+                    </CardTitle>
+                    <CardDescription>
+                      {skills.length === 0
+                        ? 'No skills defined — click Edit to add workflow skills'
+                        : 'Reusable workflow skills for this agent'}
+                    </CardDescription>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setIsSkillModalOpen(true)}
+                    disabled={isSubmitting}
+                  >
+                    <Pencil className="h-4 w-4 mr-1" />
+                    Edit Skills
+                  </Button>
+                </div>
+              </CardHeader>
+              {skills.length > 0 && (
+                <CardContent className="pt-0">
+                  <div className="space-y-1">
+                    {skills.map((skill, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-2 py-1.5 px-2 rounded bg-muted/40 text-sm"
+                      >
+                        <code className="font-mono text-xs font-medium">{skill.name || '(unnamed)'}</code>
+                        {(skill.files?.length ?? 0) > 0 && (
+                          <span className="text-[10px] text-muted-foreground">
+                            {skill.files!.length} files
+                          </span>
+                        )}
+                        {skill.description && (
+                          <span className="text-xs text-muted-foreground truncate">
+                            — {skill.description}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-3">
+                    Standard skills are versioned with the agent config and available via the agent's virtual
+                    filesystem at <code className="bg-muted px-1 rounded">/skills/{'<name>'}/SKILL.md</code>.
+                  </p>
+                </CardContent>
+              )}
+            </Card>
+          )}
+
+          <SkillEditorModal
+            open={isSkillModalOpen}
+            onOpenChange={setIsSkillModalOpen}
+            skills={skills}
+            onChange={setSkills}
+            disabled={isSubmitting}
+          />
+
+          {/* Sandbox Toggle - only for local agents */}
+          {type === 'local' && (
+            <Card>
+              <CardContent className="pt-6">
+                <div className="flex items-center justify-between space-x-2">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="sandbox_enabled" className="flex items-center gap-2">
+                      <ShieldAlert className="h-4 w-4" />
+                      Sandbox Execution
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      When enabled, skill scripts will execute in an isolated sandbox environment.
+                      Requires a sandbox provider to be configured on the server.
+                    </p>
+                  </div>
+                  <Switch
+                    id="sandbox_enabled"
+                    checked={sandboxEnabled}
+                    onCheckedChange={setSandboxEnabled}
+                    disabled={isSubmitting}
+                  />
+                </div>
+              </CardContent>
             </Card>
           )}
         </div>

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ActivationSource(str, Enum):
@@ -106,6 +106,21 @@ class SkillFile(BaseModel):
 
     path: str = Field(..., description="Relative path inside the skill directory (e.g., 'scripts/check.py')")
     content: str = Field(..., description="File content")
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        """Reject path traversal, absolute paths, and excessive depth."""
+        if v.startswith("/") or v.startswith("~"):
+            raise ValueError(f"Skill file path must be relative: {v}")
+        segments = v.split("/")
+        if ".." in segments:
+            raise ValueError(f"Path traversal not allowed: {v}")
+        if len(segments) > 3:
+            raise ValueError(f"Skill file path exceeds max depth (3): {v}")
+        if not v or not all(segments):
+            raise ValueError(f"Invalid skill file path: {v}")
+        return v
 
 
 class SkillDefinition(BaseModel):
@@ -211,6 +226,7 @@ class SubAgent(BaseModel):
     is_activated: bool | None = None  # If true, user has activated this sub-agent
     activated_by: ActivationSource | None = None  # Activation source: 'user', 'group', or 'admin'
     activated_by_groups: list[int] | None = None  # List of group IDs that activated this agent
+    effective_permission: Literal["owner", "write", "read"] | None = None  # User's effective permission level
     deleted_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -271,12 +287,18 @@ class SubAgentCreate(BaseModel):
     skills: list[SkillDefinition] = Field(default_factory=list)
     sandbox_enabled: bool = False
 
+    @model_validator(mode="after")
+    def _validate_sandbox_local_only(self) -> "SubAgentCreate":
+        if self.sandbox_enabled and self.type != SubAgentType.LOCAL:
+            raise ValueError("sandbox_enabled is only supported for local agents")
+        return self
+
 
 class SubAgentUpdate(BaseModel):
     """Request model for updating a sub-agent."""
 
     name: str | None = None
-    description: str
+    description: str | None = None
     is_public: bool | None = None  # If true, accessible to all users without group permissions
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
@@ -309,8 +331,8 @@ class SubAgentUpdate(BaseModel):
     thinking_level: ThinkingLevel | None = None
 
     # Standard skills and sandbox execution
-    skills: list[SkillDefinition] = Field(default_factory=list)
-    sandbox_enabled: bool = False
+    skills: list[SkillDefinition] | None = None
+    sandbox_enabled: bool | None = None
 
     change_summary: str | None = None  # For version history
 

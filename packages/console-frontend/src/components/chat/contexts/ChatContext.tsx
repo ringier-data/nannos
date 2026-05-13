@@ -1033,7 +1033,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       // above the final response.
       const aggregated: Message[] = [];
       let pendingTimeline: TimelineEvent[] = [];
-      for (const msg of mapped) {
+      for (const msg of mapped.filter((m): m is Message => m !== null)) {
         if (msg.showMessageCard === false) {
           // Collect timeline events from hidden messages
           if (msg.timeline) pendingTimeline.push(...msg.timeline);

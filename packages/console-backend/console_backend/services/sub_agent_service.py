@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Models that support Extended Thinking
 MODELS_SUPPORTING_THINKING = {
     "claude-sonnet-4.5",
+    "claude-sonnet-4.6",
     "claude-haiku-4-5",
     "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
@@ -308,7 +309,12 @@ class SubAgentService:
                 result = await db.execute(query, {"user_id": user_id, "include_owned": include_owned})
 
         rows = result.mappings().all()
-        return [self._row_to_sub_agent_with_version(row) for row in rows]
+        sub_agents = [self._row_to_sub_agent_with_version(row) for row in rows]
+
+        # Compute effective_permission for each sub-agent
+        await self._populate_effective_permissions(db, sub_agents, user_id)
+
+        return sub_agents
 
     async def get_pending_approvals(self, db: AsyncSession) -> list[SubAgent]:
         """Get all sub-agents with versions pending approval (admin only)."""
@@ -693,6 +699,10 @@ class SubAgentService:
         if not has_write_permission:
             raise PermissionError("You don't have permission to update this sub-agent")
 
+        # Sandbox execution is only supported for local agents
+        if data.sandbox_enabled and existing.type != SubAgentType.LOCAL:
+            raise ValueError("sandbox_enabled is only supported for local agents")
+
         now = datetime.now(timezone.utc)
 
         # Update name and/or is_public on sub_agents table if provided
@@ -729,6 +739,8 @@ class SubAgentService:
             or data.pricing_config is not None
             or data.thinking_level is not None
             or data.enable_thinking is not None
+            or data.skills is not None
+            or data.sandbox_enabled is not None
         )
 
         if needs_new_version:
@@ -763,10 +775,12 @@ class SubAgentService:
             current_config = existing.config_version
 
             # Skills and sandbox_enabled apply to all agent types
-            version_skills = data.skills if data.skills else (current_config.skills if current_config else [])
+            version_skills = (
+                data.skills if data.skills is not None else (current_config.skills if current_config else [])
+            )
             version_sandbox_enabled = (
                 data.sandbox_enabled
-                if data.sandbox_enabled
+                if data.sandbox_enabled is not None
                 else (current_config.sandbox_enabled if current_config else False)
             )
 
@@ -2253,6 +2267,59 @@ class SubAgentService:
             skills=skills_list,
             sandbox_enabled=sandbox_enabled,
         )
+
+    async def _populate_effective_permissions(self, db: AsyncSession, sub_agents: list[SubAgent], user_id: str) -> None:
+        """Compute and set effective_permission for a list of sub-agents.
+
+        Uses a single batch query for group permissions, then resolves per agent:
+        - Owner → "owner"
+        - Group write/manager role with write resource permission → "write"
+        - Public or group read → "read"
+
+        Mutates sub_agents in place.
+        """
+        if not sub_agents:
+            return
+
+        # Fast path: set owner permission
+        sub_agent_ids = []
+        for sa in sub_agents:
+            if sa.owner_user_id == user_id:
+                sa.effective_permission = "owner"
+            else:
+                sub_agent_ids.append(sa.id)
+
+        if not sub_agent_ids:
+            return
+
+        # Batch query: get group permissions for all non-owned sub-agents
+        query = text("""
+            SELECT sap.sub_agent_id, sap.permissions, ugm.group_role
+            FROM sub_agent_permissions sap
+            JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
+            WHERE sap.sub_agent_id = ANY(:sub_agent_ids)
+              AND ugm.user_id = :user_id
+        """)
+        result = await db.execute(query, {"sub_agent_ids": sub_agent_ids, "user_id": user_id})
+
+        # Build a map of sub_agent_id → highest permission
+        write_agents: set[int] = set()
+        read_agents: set[int] = set()
+        for row in result.fetchall():
+            sa_id, resource_permissions, group_role = row[0], row[1], row[2]
+            if "write" in resource_permissions and check_action_allowed(group_role, "sub_agents", "write"):
+                write_agents.add(sa_id)
+            if "read" in resource_permissions and check_action_allowed(group_role, "sub_agents", "read"):
+                read_agents.add(sa_id)
+
+        # Assign effective permission (highest wins)
+        for sa in sub_agents:
+            if sa.effective_permission:
+                continue  # Already set (owner)
+            if sa.id in write_agents:
+                sa.effective_permission = "write"
+            elif sa.id in read_agents or sa.is_public:
+                sa.effective_permission = "read"
 
     def _row_to_sub_agent_with_version(self, row: Any) -> SubAgent:
         """Convert a database row (with joined version info) to a SubAgent model."""

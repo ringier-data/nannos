@@ -239,12 +239,19 @@ async def update_sub_agent(
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
 ) -> SubAgent:
-    """Update a sub-agent.
+    """Update a sub-agent's core configuration (name, system prompt, model, MCP tools).
 
-    Only the owner can update. For local sub-agents, configuration changes
-    automatically create a new version in the history.
+    **IMPORTANT**: Do NOT use this tool for skill operations (create/update/delete).
+    Use the dedicated skill tools instead — they handle ALL scopes:
+    - console_create_skill (scope='personal', 'group', or 'default')
+    - console_update_skill (scope='personal', 'group', or 'default')
+    - console_remove_skill (scope='personal', 'group', or 'default')
+    - console_update_playbook (scope='personal' or 'group')
 
-    Supports both session-based authentication and Bearer token authentication.
+    Use this tool ONLY for: system_prompt, model, name, mcp_tools, is_public.
+
+    Requires write or owner permission. Configuration changes create a new version
+    that may require approval.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
@@ -253,7 +260,14 @@ async def update_sub_agent(
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent
     except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"[ERROR_TYPE: auth] {e}. "
+                "If you want to customize this agent's behavior, try console_create_skill or "
+                "console_update_playbook with scope='personal' instead."
+            ),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:

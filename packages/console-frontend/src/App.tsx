@@ -12,6 +12,7 @@ import { SchedulerPage } from './pages/SchedulerPage';
 import { SchedulerJobDetailPage } from './pages/SchedulerJobDetailPage';
 import { DeliveryChannelsPage } from './pages/DeliveryChannelsPage';
 import { PlaybooksPage } from './pages/PlaybooksPage';
+import { SkillsPage } from './pages/SkillsPage';
 import { CatalogsPage } from './pages/CatalogsPage';
 import { CatalogDetailPage } from './pages/CatalogDetailPage';
 import { AdminRoute } from './components/AdminRoute';
@@ -70,6 +71,7 @@ function App() {
         <Route path="catalogs/:id" element={<CatalogDetailPage />} />
         <Route path="delivery-channels" element={<DeliveryChannelsPage />} />
         <Route path="playbooks" element={<PlaybooksPage />} />
+        <Route path="skills" element={<SkillsPage />} />
         <Route
           path="groups"
           element={

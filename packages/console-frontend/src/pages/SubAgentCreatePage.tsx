@@ -47,6 +47,8 @@ export function SubAgentCreatePage() {
         foundry_query_api_name: 'foundry_query_api_name' in config ? config.foundry_query_api_name : undefined,
         foundry_scopes: 'foundry_scopes' in config ? config.foundry_scopes as any : undefined,
         foundry_version: 'foundry_version' in config ? config.foundry_version : undefined,
+        skills: data.skills,
+        sandbox_enabled: data.sandbox_enabled,
       },
     });
   };

@@ -32,6 +32,10 @@ import {
   Database,
   Key,
   AlertTriangle,
+  Pencil,
+  Cpu,
+  FileText,
+  Plug,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -40,7 +44,6 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
@@ -57,12 +60,12 @@ import { ApprovalDialog } from '@/components/subagents/ApprovalDialog';
 import { SubAgentPermissionsDialog } from '@/components/subagents/SubAgentPermissionsDialog';
 import { VersionSidebar } from '@/components/subagents/VersionSidebar';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
-import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
+import { ConfigSection } from '@/components/subagents/ConfigSection';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
-import { useAvailableModels, modelSupportsThinking } from '@/config/models';
+import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
   getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions,
@@ -73,11 +76,12 @@ import {
   listSecretsApiV1SecretsGetOptions,
   getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgentConfigVersion, OrchestratorThinkingLevel } from '@/api/generated/types.gen';
+import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinition, SkillFile } from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
 import { usePlaygroundChat } from '@/hooks/usePlaygroundChat';
+import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 
 const statusConfig: Record<
   SubAgentStatus,
@@ -161,6 +165,11 @@ export function SubAgentDetailPage() {
     Array<{ billing_unit: string; price_per_million: string }>
   >([{ billing_unit: 'requests', price_per_million: '' }]);
   const [pricingExpanded, setPricingExpanded] = useState(false);
+
+  // Skills and sandbox state (local agents only)
+  const [editSkills, setEditSkills] = useState<Array<{ name: string; description: string; body: string; files?: Array<{ path: string; content: string }> }>>([]);
+  const [editSandboxEnabled, setEditSandboxEnabled] = useState(false);
+  const [isSkillModalOpen, setIsSkillModalOpen] = useState(false);
 
   // Chat input state
   const [inputValue, setInputValue] = useState('');
@@ -413,6 +422,18 @@ export function SubAgentDetailPage() {
   const displayedFoundryVersion = isViewingHistoricalVersion
     ? (viewedVersion?.foundry_version ?? subAgent?.config_version?.foundry_version ?? '')
     : (subAgent?.config_version?.foundry_version ?? '');
+  const displayedSkills = isViewingHistoricalVersion
+    ? (viewedVersion?.skills ?? subAgent?.config_version?.skills ?? [])
+    : (subAgent?.config_version?.skills ?? []);
+  const displayedSandboxEnabled = isViewingHistoricalVersion
+    ? (viewedVersion?.sandbox_enabled ?? subAgent?.config_version?.sandbox_enabled ?? false)
+    : (subAgent?.config_version?.sandbox_enabled ?? false);
+  const displayedEnableThinking = isViewingHistoricalVersion
+    ? (viewedVersion?.enable_thinking ?? subAgent?.config_version?.enable_thinking ?? false)
+    : (subAgent?.config_version?.enable_thinking ?? false);
+  const displayedThinkingLevel = isViewingHistoricalVersion
+    ? (viewedVersion?.thinking_level ?? subAgent?.config_version?.thinking_level ?? null)
+    : (subAgent?.config_version?.thinking_level ?? null);
 
   // Get active conversation
   const activeConversation = conversations.find((c) => c.id === activeConversationId);
@@ -504,6 +525,22 @@ export function SubAgentDetailPage() {
       setEditThinkingLevel((sa.config_version?.thinking_level as OrchestratorThinkingLevel) ?? null);
     }
 
+    // Initialize skills and sandbox for local agents
+    if (sa.type === 'local') {
+      const cfgSkills = sa.config_version?.skills;
+      setEditSkills(
+        Array.isArray(cfgSkills)
+          ? cfgSkills.map((s: SkillDefinition) => ({
+              name: s.name,
+              description: s.description,
+              body: s.body,
+              files: s.files?.map((f: SkillFile) => ({ path: f.path, content: f.content })),
+            }))
+          : []
+      );
+      setEditSandboxEnabled(sa.config_version?.sandbox_enabled ?? false);
+    }
+
     // Initialize pricing config for remote and foundry agents
     if (sa.type === 'remote' || sa.type === 'foundry') {
       const pricingConfig = sa.config_version?.pricing_config as any;
@@ -568,6 +605,8 @@ export function SubAgentDetailPage() {
         mcp_tools: editMcpTools.length > 0 ? editMcpTools : undefined,
         enable_thinking: editEnableThinking,
         thinking_level: editThinkingLevel ?? undefined, // Convert null to undefined for API
+        skills: editSkills.length > 0 ? editSkills : undefined,
+        sandbox_enabled: editSandboxEnabled,
       };
     }
 
@@ -977,114 +1016,117 @@ export function SubAgentDetailPage() {
             )}
 
             <ScrollArea className="flex-1 min-h-0">
-              <div className="p-4 flex flex-col gap-4 h-full">
-                {/* Name */}
-                <div className="space-y-2 flex-shrink-0">
-                  <Label htmlFor="name">Name</Label>
-                  {isEditing ? (
-                    <Input
-                      id="name"
-                      value={editName}
-                      onChange={(e) => {
-                        setEditName(e.target.value);
-                        handleFieldChange();
-                      }}
-                      onFocus={() => setActiveFocusArea('config')}
-                      onBlur={() => setActiveFocusArea(null)}
-                    />
-                  ) : (
-                    <p className="text-sm">{subAgent.name}</p>
-                  )}
-                </div>
-
-                {/* Public Access */}
-                <div className="flex items-center justify-between space-x-2 flex-shrink-0">
-                  <div className="space-y-0.5">
-                    <Label htmlFor="is_public" className="flex items-center gap-2">
-                      <Users className="h-4 w-4" />
-                      Public Access
-                    </Label>
-                    <p className="text-xs text-muted-foreground">
-                      When enabled, all users can access this sub-agent without group permissions
-                    </p>
+              <div className="p-3 flex flex-col gap-3 h-full w-full max-w-full">
+                {/* Section: Identity */}
+                <ConfigSection title="Identity" icon={FileText}>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="name" className="text-xs">Name</Label>
+                    {isEditing ? (
+                      <Input
+                        id="name"
+                        value={editName}
+                        onChange={(e) => {
+                          setEditName(e.target.value);
+                          handleFieldChange();
+                        }}
+                        onFocus={() => setActiveFocusArea('config')}
+                        onBlur={() => setActiveFocusArea(null)}
+                        className="h-8 text-sm"
+                      />
+                    ) : (
+                      <p className="text-sm">{subAgent.name}</p>
+                    )}
                   </div>
-                  {isEditing ? (
-                    <Switch
-                      id="is_public"
-                      checked={editIsPublic}
-                      onCheckedChange={(checked) => {
-                        setEditIsPublic(checked);
-                        handleFieldChange();
-                      }}
-                    />
-                  ) : (
-                    <Badge variant={subAgent.is_public ? 'default' : 'secondary'}>
-                      {subAgent.is_public ? 'Public' : 'Private'}
-                    </Badge>
-                  )}
-                </div>
 
-                {/* Description */}
-                <div className="space-y-2 flex-shrink-0">
-                  <div className="flex items-center gap-2">
-                    <Label htmlFor="description">Description</Label>
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
-                        </TooltipTrigger>
-                        <TooltipContent className="max-w-xs">
-                          <p>
-                            The orchestrator uses this description to route conversations to the appropriate sub-agent.
-                            Be clear and specific about what this agent handles.
-                          </p>
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <Label htmlFor="description" className="text-xs">Description</Label>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs">
+                            <p>
+                              The orchestrator uses this description to route conversations to the appropriate sub-agent.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                    {isEditing ? (
+                      <Textarea
+                        id="description"
+                        value={editDescription}
+                        onChange={(e) => {
+                          setEditDescription(e.target.value);
+                          handleFieldChange();
+                        }}
+                        onFocus={() => setActiveFocusArea('config')}
+                        onBlur={() => setActiveFocusArea(null)}
+                        rows={3}
+                        className="text-sm resize-none"
+                        placeholder="Describe what this sub-agent does..."
+                      />
+                    ) : (
+                      <p className="text-sm text-muted-foreground">{displayedDescription || 'No description'}</p>
+                    )}
                   </div>
-                  {isEditing ? (
-                    <Textarea
-                      id="description"
-                      value={editDescription}
-                      onChange={(e) => {
-                        setEditDescription(e.target.value);
-                        handleFieldChange();
-                      }}
-                      onFocus={() => setActiveFocusArea('config')}
-                      onBlur={() => setActiveFocusArea(null)}
-                      rows={4}
-                      placeholder="Describe what this sub-agent does and when it should be used..."
-                    />
-                  ) : (
-                    <p className="text-sm text-muted-foreground">{displayedDescription || 'No description'}</p>
-                  )}
-                </div>
 
-                <Separator className="flex-shrink-0" />
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="is_public" className="text-xs flex items-center gap-1.5">
+                        <Users className="h-3 w-3" />
+                        Public Access
+                      </Label>
+                      <p className="text-[11px] text-muted-foreground">
+                        All users can access without group permissions
+                      </p>
+                    </div>
+                    {isEditing ? (
+                      <Switch
+                        id="is_public"
+                        checked={editIsPublic}
+                        onCheckedChange={(checked) => {
+                          setEditIsPublic(checked);
+                          handleFieldChange();
+                        }}
+                      />
+                    ) : (
+                      <Badge variant={subAgent.is_public ? 'default' : 'secondary'} className="text-[10px]">
+                        {subAgent.is_public ? 'Public' : 'Private'}
+                      </Badge>
+                    )}
+                  </div>
+                </ConfigSection>
 
                 {/* Type-specific configuration */}
                 {subAgent.type === 'remote' ? (
                   <>
-                    <div className="space-y-2 flex-shrink-0">
-                      <Label htmlFor="agentUrl">Agent URL</Label>
-                      {isEditing ? (
-                        <Input
-                          id="agentUrl"
-                          value={editAgentUrl}
-                          onChange={(e) => {
-                            setEditAgentUrl(e.target.value);
-                            handleFieldChange();
-                          }}
-                          onFocus={() => setActiveFocusArea('config')}
-                          onBlur={() => setActiveFocusArea(null)}
-                          placeholder="https://..."
-                        />
-                      ) : (
-                        <p className="text-sm font-mono break-all bg-muted p-2 rounded">{displayedAgentUrl}</p>
-                      )}
-                    </div>
+                    {/* Section: Connection */}
+                    <ConfigSection title="Connection" icon={Plug}>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="agentUrl" className="text-xs">Agent URL</Label>
+                        {isEditing ? (
+                          <Input
+                            id="agentUrl"
+                            value={editAgentUrl}
+                            onChange={(e) => {
+                              setEditAgentUrl(e.target.value);
+                              handleFieldChange();
+                            }}
+                            onFocus={() => setActiveFocusArea('config')}
+                            onBlur={() => setActiveFocusArea(null)}
+                            placeholder="https://..."
+                            className="h-8 text-sm font-mono"
+                          />
+                        ) : (
+                          <p className="text-sm font-mono break-all bg-muted p-2 rounded">{displayedAgentUrl}</p>
+                        )}
+                      </div>
+                    </ConfigSection>
 
-                    {/* Pricing Configuration - For remote agents */}
+                    {/* Pricing */}
                     <PricingConfigurationSection
                       isEditing={isEditing}
                       expanded={pricingExpanded}
@@ -1098,10 +1140,10 @@ export function SubAgentDetailPage() {
                   </>
                 ) : subAgent.type === 'foundry' ? (
                   <>
-                    {/* Foundry Configuration */}
-                    <div className="space-y-4 flex-shrink-0">
-                      <div className="space-y-2">
-                        <Label htmlFor="foundryHostname">Foundry Hostname</Label>
+                    {/* Section: Foundry Connection */}
+                    <ConfigSection title="Foundry Connection" icon={Database}>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="foundryHostname" className="text-xs">Hostname</Label>
                         {isEditing ? (
                           <Input
                             id="foundryHostname"
@@ -1113,6 +1155,7 @@ export function SubAgentDetailPage() {
                             onFocus={() => setActiveFocusArea('config')}
                             onBlur={() => setActiveFocusArea(null)}
                             placeholder="example.palantirfoundry.com"
+                            className="h-8 text-sm font-mono"
                           />
                         ) : (
                           <p className="text-sm font-mono break-all bg-muted p-2 rounded">
@@ -1121,8 +1164,8 @@ export function SubAgentDetailPage() {
                         )}
                       </div>
 
-                      <div className="space-y-2">
-                        <Label htmlFor="foundryClientId">Client ID</Label>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="foundryClientId" className="text-xs">Client ID</Label>
                         {isEditing ? (
                           <Input
                             id="foundryClientId"
@@ -1134,6 +1177,7 @@ export function SubAgentDetailPage() {
                             onFocus={() => setActiveFocusArea('config')}
                             onBlur={() => setActiveFocusArea(null)}
                             placeholder="client-id"
+                            className="h-8 text-sm font-mono"
                           />
                         ) : (
                           <p className="text-sm font-mono break-all bg-muted p-2 rounded">
@@ -1142,9 +1186,9 @@ export function SubAgentDetailPage() {
                         )}
                       </div>
 
-                      <div className="space-y-2">
-                        <Label htmlFor="foundryClientSecretRef" className="flex items-center gap-2">
-                          <Key className="h-4 w-4" />
+                      <div className="space-y-1.5">
+                        <Label htmlFor="foundryClientSecretRef" className="text-xs flex items-center gap-1.5">
+                          <Key className="h-3 w-3" />
                           Client Secret
                         </Label>
                         {isEditing ? (
@@ -1155,43 +1199,37 @@ export function SubAgentDetailPage() {
                                 setEditFoundryClientSecretRef(value ? parseInt(value) : null);
                                 handleFieldChange();
                               }}
-                              disabled={false}
                             >
                               <SelectTrigger
                                 id="foundryClientSecretRef"
                                 onFocus={() => setActiveFocusArea('config')}
                                 onBlur={() => setActiveFocusArea(null)}
+                                className="h-8 text-sm"
                               >
-                                <SelectValue placeholder="Select a secret from vault" />
+                                <SelectValue placeholder="Select a secret" />
                               </SelectTrigger>
                               <SelectContent>
                                 {availableSecrets.length === 0 ? (
-                                  <div className="p-4 text-center text-sm text-muted-foreground">
-                                    No secrets available. Create a Foundry Client Secret in Settings → Secrets Vault
-                                    first.
+                                  <div className="p-3 text-center text-xs text-muted-foreground">
+                                    No secrets available. Create one in Settings → Secrets Vault.
                                   </div>
                                 ) : (
                                   availableSecrets.map((secret) => (
                                     <SelectItem key={secret.id} value={secret.id.toString()}>
                                       {secret.name}
-                                      {secret.description && (
-                                        <span className="text-xs text-muted-foreground ml-2">
-                                          - {secret.description}
-                                        </span>
-                                      )}
                                     </SelectItem>
                                   ))
                                 )}
                               </SelectContent>
                             </Select>
-                            <p className="text-xs text-muted-foreground flex items-center gap-1">
-                              <Lock className="h-3 w-3" />
-                              Select a secret from the vault. Secrets are stored securely in AWS SSM Parameter Store.
+                            <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                              <Lock className="h-2.5 w-2.5" />
+                              Stored securely in AWS SSM Parameter Store
                             </p>
                           </>
                         ) : (
-                          <p className="text-sm text-muted-foreground flex items-center gap-2">
-                            <Lock className="h-4 w-4" />
+                          <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+                            <Lock className="h-3.5 w-3.5" />
                             {displayedFoundryClientSecretRef
                               ? availableSecrets.find((s) => s.id === displayedFoundryClientSecretRef)?.name ||
                                 `Secret ID: ${displayedFoundryClientSecretRef}`
@@ -1200,8 +1238,8 @@ export function SubAgentDetailPage() {
                         )}
                       </div>
 
-                      <div className="space-y-2">
-                        <Label htmlFor="foundryOntologyRid">Ontology RID</Label>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="foundryOntologyRid" className="text-xs">Ontology RID</Label>
                         {isEditing ? (
                           <Input
                             id="foundryOntologyRid"
@@ -1213,6 +1251,7 @@ export function SubAgentDetailPage() {
                             onFocus={() => setActiveFocusArea('config')}
                             onBlur={() => setActiveFocusArea(null)}
                             placeholder="ri.ontology.main.ontology.xxx"
+                            className="h-8 text-sm font-mono"
                           />
                         ) : (
                           <p className="text-sm font-mono break-all bg-muted p-2 rounded">
@@ -1221,8 +1260,8 @@ export function SubAgentDetailPage() {
                         )}
                       </div>
 
-                      <div className="space-y-2">
-                        <Label htmlFor="foundryQueryApiName">Query API Name</Label>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="foundryQueryApiName" className="text-xs">Query API Name</Label>
                         {isEditing ? (
                           <Input
                             id="foundryQueryApiName"
@@ -1234,6 +1273,7 @@ export function SubAgentDetailPage() {
                             onFocus={() => setActiveFocusArea('config')}
                             onBlur={() => setActiveFocusArea(null)}
                             placeholder="myQueryApi"
+                            className="h-8 text-sm font-mono"
                           />
                         ) : (
                           <p className="text-sm font-mono break-all bg-muted p-2 rounded">
@@ -1242,10 +1282,10 @@ export function SubAgentDetailPage() {
                         )}
                       </div>
 
-                      <div className="space-y-2">
-                        <Label>API Scopes</Label>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">API Scopes</Label>
                         {isEditing ? (
-                          <div className="grid grid-cols-1 gap-2 p-3 border rounded">
+                          <div className="grid grid-cols-1 gap-1.5 p-2 border rounded text-xs">
                             {[
                               { value: 'api:use-ontologies-read', label: 'Ontologies Read' },
                               { value: 'api:use-ontologies-write', label: 'Ontologies Write' },
@@ -1254,7 +1294,7 @@ export function SubAgentDetailPage() {
                               { value: 'api:use-mediasets-read', label: 'Mediasets Read' },
                               { value: 'api:use-mediasets-write', label: 'Mediasets Write' },
                             ].map((scope) => (
-                              <label key={scope.value} className="flex items-center gap-2 text-sm">
+                              <label key={scope.value} className="flex items-center gap-2">
                                 <input
                                   type="checkbox"
                                   checked={editFoundryScopes.includes(scope.value)}
@@ -1289,8 +1329,8 @@ export function SubAgentDetailPage() {
                       </div>
 
                       {(isEditing || displayedFoundryVersion) && (
-                        <div className="space-y-2">
-                          <Label htmlFor="foundryVersion">Foundry Version (Optional)</Label>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="foundryVersion" className="text-xs">Version (Optional)</Label>
                           {isEditing ? (
                             <Input
                               id="foundryVersion"
@@ -1302,17 +1342,16 @@ export function SubAgentDetailPage() {
                               onFocus={() => setActiveFocusArea('config')}
                               onBlur={() => setActiveFocusArea(null)}
                               placeholder="v1"
+                              className="h-8 text-sm"
                             />
                           ) : (
-                            <p className="text-sm font-mono break-all bg-muted p-2 rounded">
-                              {displayedFoundryVersion}
-                            </p>
+                            <p className="text-sm font-mono bg-muted p-2 rounded">{displayedFoundryVersion}</p>
                           )}
                         </div>
                       )}
-                    </div>
+                    </ConfigSection>
 
-                    {/* Pricing Configuration - For remote and foundry agents */}
+                    {/* Pricing */}
                     <PricingConfigurationSection
                       isEditing={isEditing}
                       expanded={pricingExpanded}
@@ -1326,161 +1365,283 @@ export function SubAgentDetailPage() {
                   </>
                 ) : (
                   <>
-                    {/* Model - Only for local agents */}
-                    <div className="space-y-2 flex-shrink-0">
-                      <Label htmlFor="model">Model</Label>
-                      {isEditing ? (
-                        <Select
-                          value={editModel}
-                          onValueChange={(value) => {
-                            setEditModel(value);
-                            // Auto-reset thinking if new model doesn't support it
-                            if (!modelSupportsThinking(value, availableModels)) {
-                              setEditEnableThinking(false);
-                              setEditThinkingLevel(null);
-                            }
-                            handleFieldChange();
-                          }}
-                        >
-                          <SelectTrigger id="model">
-                            <SelectValue placeholder="Select a model" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {availableModels.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      ) : (
-                        <p className="text-sm text-muted-foreground">{displayedModel || 'Default'}</p>
-                      )}
-                    </div>
-
-                    {/* Extended Thinking Configuration - Only for local agents during editing */}
-                    {isEditing && (
-                      <div className="space-y-2 flex-shrink-0">
-                        <ExtendedThinkingConfig
-                          model={editModel}
-                          enableThinking={editEnableThinking}
-                          thinkingLevel={editThinkingLevel}
-                          onEnableThinkingChange={(checked) => {
-                            setEditEnableThinking(checked);
-                            if (!checked) {
-                              setEditThinkingLevel(null);
-                            } else if (editThinkingLevel === null) {
-                              setEditThinkingLevel('low');
-                            }
-                            handleFieldChange();
-                          }}
-                          onThinkingLevelChange={(level) => {
-                            setEditThinkingLevel(level);
-                            handleFieldChange();
-                          }}
-                          showAsCard={false}
-                        />
+                    {/* Section: Model & Intelligence (local agents) */}
+                    <ConfigSection title="Model" icon={Cpu}>
+                      <div className="space-y-1.5">
+                        {isEditing ? (
+                          <Select
+                            value={editModel}
+                            onValueChange={(value) => {
+                              setEditModel(value);
+                              if (!modelSupportsThinking(value, availableModels)) {
+                                setEditEnableThinking(false);
+                                setEditThinkingLevel(null);
+                              }
+                              handleFieldChange();
+                            }}
+                          >
+                            <SelectTrigger id="model" className="h-8 text-sm">
+                              <SelectValue placeholder="Select a model" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {availableModels.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <p className="text-sm">{displayedModel || 'Default'}</p>
+                        )}
                       </div>
-                    )}
 
-                    {/* MCP Tools */}
-                    <div className="space-y-2 flex-shrink-0">
-                      <Label>MCP Tools (Optional)</Label>
+                      {/* Extended Thinking */}
                       {isEditing ? (
-                        <Button variant="outline" className="w-full" onClick={() => setShowMcpToolsSheet(true)}>
-                          <Wrench className="mr-2 h-4 w-4" />
-                          {editMcpTools.length > 0 ? `${editMcpTools.length} MCP tools selected` : 'Select MCP Tools'}
-                        </Button>
-                      ) : (
-                        <Collapsible open={mcpToolsExpanded} onOpenChange={setMcpToolsExpanded}>
-                          <CollapsibleTrigger asChild>
-                            <Button variant="ghost" className="w-full justify-between p-2 h-auto">
-                              <span className="text-sm">
-                                {Array.isArray(displayedMcpTools) && displayedMcpTools.length > 0
-                                  ? `${displayedMcpTools.length} tools configured`
-                                  : 'No MCP tools'}
-                              </span>
-                              <ChevronDown
-                                className={`h-4 w-4 transition-transform ${mcpToolsExpanded ? 'rotate-180' : ''}`}
-                              />
-                            </Button>
-                          </CollapsibleTrigger>
-                          <CollapsibleContent className="pt-2">
-                            {Array.isArray(displayedMcpTools) && displayedMcpTools.length > 0 ? (
-                              <div className="space-y-1 text-sm bg-muted p-2 rounded">
-                                {displayedMcpTools.map((tool) => (
-                                  <div key={tool} className="flex items-center gap-2">
-                                    <Wrench className="h-3 w-3 text-muted-foreground" />
-                                    <code className="text-xs">{tool}</code>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">
-                                No MCP tools selected. Only essential tools (time, docstore) will be available.
-                              </p>
-                            )}
-                          </CollapsibleContent>
-                        </Collapsible>
-                      )}
-                    </div>
-
-                    {/* System Prompt */}
-                    <div className="flex flex-col gap-2 flex-1 min-h-0">
-                      <Label htmlFor="systemPrompt">System Prompt</Label>
-                      {isEditing ? (
-                        <div className="flex flex-col gap-2 flex-1 min-h-0">
-                          {/* Edit/Preview Tabs */}
-                          <div className="flex gap-1 p-1 bg-muted rounded-md">
-                            <button
-                              className={`flex-1 px-3 py-1.5 text-sm font-medium rounded transition-colors ${
-                                systemPromptTab === 'edit'
-                                  ? 'bg-background text-foreground shadow-sm'
-                                  : 'text-muted-foreground hover:text-foreground'
-                              }`}
-                              onClick={() => setSystemPromptTab('edit')}
-                            >
-                              <Code className="inline h-3.5 w-3.5 mr-1" />
-                              Edit
-                            </button>
-                            <button
-                              className={`flex-1 px-3 py-1.5 text-sm font-medium rounded transition-colors ${
-                                systemPromptTab === 'preview'
-                                  ? 'bg-background text-foreground shadow-sm'
-                                  : 'text-muted-foreground hover:text-foreground'
-                              }`}
-                              onClick={() => setSystemPromptTab('preview')}
-                            >
-                              <Eye className="inline h-3.5 w-3.5 mr-1" />
-                              Preview
-                            </button>
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <span className="text-xs font-medium text-foreground">Extended Thinking</span>
+                            <p className="text-[11px] text-muted-foreground">Enable extended thinking for complex reasoning tasks</p>
                           </div>
+                          <Switch
+                            checked={editEnableThinking}
+                            onCheckedChange={(checked) => {
+                              setEditEnableThinking(checked);
+                              if (!checked) {
+                                setEditThinkingLevel(null);
+                              } else if (editThinkingLevel === null) {
+                                setEditThinkingLevel('low');
+                              }
+                              handleFieldChange();
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        displayedEnableThinking && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-foreground">Extended Thinking</span>
+                            <Badge variant="secondary" className="text-[10px]">
+                              {displayedThinkingLevel ? displayedThinkingLevel.charAt(0).toUpperCase() + displayedThinkingLevel.slice(1) : 'On'}
+                            </Badge>
+                          </div>
+                        )
+                      )}
 
-                          {systemPromptTab === 'edit' ? (
-                            <Textarea
-                              id="systemPrompt"
-                              value={editSystemPrompt}
-                              onChange={(e) => {
-                                setEditSystemPrompt(e.target.value);
-                                handleFieldChange();
-                              }}
-                              onFocus={() => setActiveFocusArea('config')}
-                              onBlur={() => setActiveFocusArea(null)}
-                              className="font-mono text-sm flex-1 min-h-0 resize-none"
-                              placeholder="Enter the system prompt for this sub-agent..."
-                            />
-                          ) : (
-                            <div className="bg-muted p-3 rounded flex-1 min-h-0 overflow-auto border">
-                              <Markdown className="text-sm">{editSystemPrompt || '*No content to preview*'}</Markdown>
-                            </div>
+                      {isEditing && editEnableThinking && (
+                        <div className="space-y-1.5 pl-1">
+                          <span className="text-[11px] text-muted-foreground">Thinking Level</span>
+                          <Select
+                            value={editThinkingLevel || undefined}
+                            onValueChange={(value) => {
+                              setEditThinkingLevel(value as OrchestratorThinkingLevel);
+                              handleFieldChange();
+                            }}
+                          >
+                            <SelectTrigger className="h-7 text-xs w-full max-w-[180px]">
+                              <SelectValue placeholder="Select level" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {getAvailableThinkingLevels(editModel, availableModels).map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                    </ConfigSection>
+
+                    {/* Section: Tools & Skills */}
+                    <ConfigSection title="Tools & Skills" icon={Wrench}>
+                      {/* MCP Tools */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-foreground">MCP Tools</span>
+                          {isEditing && (
+                            <Button variant="outline" size="sm" className="h-6 text-[11px] px-2" onClick={() => setShowMcpToolsSheet(true)}>
+                              <Wrench className="h-2.5 w-2.5 mr-1" />
+                              {editMcpTools.length > 0 ? `${editMcpTools.length} selected` : 'Select'}
+                            </Button>
                           )}
                         </div>
-                      ) : (
-                        <div className="bg-muted p-3 rounded flex-1 min-h-0 overflow-auto border">
-                          <Markdown className="text-sm">{displayedSystemPrompt}</Markdown>
+                        {!isEditing && (
+                          Array.isArray(displayedMcpTools) && displayedMcpTools.length > 0 ? (
+                            <Collapsible open={mcpToolsExpanded} onOpenChange={setMcpToolsExpanded}>
+                              <CollapsibleTrigger asChild>
+                                <button type="button" className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors">
+                                  <ChevronDown className={`h-3 w-3 transition-transform ${mcpToolsExpanded ? '' : '-rotate-90'}`} />
+                                  {displayedMcpTools.length} tools configured
+                                </button>
+                              </CollapsibleTrigger>
+                              <CollapsibleContent className="pt-1.5">
+                                <div className="space-y-0.5 bg-muted/50 p-2 rounded">
+                                  {displayedMcpTools.map((tool) => (
+                                    <div key={tool} className="flex items-center gap-1.5">
+                                      <Wrench className="h-2.5 w-2.5 text-muted-foreground" />
+                                      <code className="text-[11px]">{tool}</code>
+                                    </div>
+                                  ))}
+                                </div>
+                              </CollapsibleContent>
+                            </Collapsible>
+                          ) : (
+                            <p className="text-[11px] text-muted-foreground">No MCP tools configured.</p>
+                          )
+                        )}
+                      </div>
+
+                      <hr className="border-border/40" />
+
+                      {/* Skills */}
+                      <div className="space-y-2 min-w-0 w-full">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-foreground">Standard Skills</span>
+                          {isEditing && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-6 text-[11px] px-2"
+                              onClick={() => setIsSkillModalOpen(true)}
+                            >
+                              <Pencil className="h-2.5 w-2.5 mr-1" />
+                              Edit
+                            </Button>
+                          )}
                         </div>
+                        {(() => {
+                          const skillsList = isEditing ? editSkills : displayedSkills;
+                          return Array.isArray(skillsList) && skillsList.length > 0 ? (
+                            <div className="space-y-1">
+                              {skillsList.map((skill: { name: string; description: string; files?: { path: string }[] }) => (
+                                <div
+                                  key={skill.name}
+                                  className="flex items-center gap-2 py-1 px-2 rounded bg-muted/40 text-[11px]"
+                                >
+                                  <code className="font-mono font-medium shrink-0 whitespace-nowrap">{skill.name || '(unnamed)'}</code>
+                                  {skill.description && (
+                                    <span className="text-muted-foreground whitespace-nowrap">
+                                      — {skill.description.length > 50 ? skill.description.slice(0, 50) + '…' : skill.description}
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-[11px] text-muted-foreground">No standard skills defined.</p>
+                          );
+                        })()}
+                        {subAgent?.type === 'local' && !isEditing && (
+                          <a
+                            href={`/app/skills?agent=${encodeURIComponent(subAgent.name)}`}
+                            className="text-[11px] text-primary hover:underline"
+                          >
+                            Manage personal & group skills →
+                          </a>
+                        )}
+                      </div>
+
+                      {isEditing && (
+                        <SkillEditorModal
+                          open={isSkillModalOpen}
+                          onOpenChange={setIsSkillModalOpen}
+                          skills={editSkills as SkillDefinition[]}
+                          onChange={(updated) => {
+                            setEditSkills(updated.map(s => ({
+                              name: s.name,
+                              description: s.description,
+                              body: s.body,
+                              files: s.files?.map(f => ({ path: f.path, content: f.content })),
+                            })));
+                            handleFieldChange();
+                          }}
+                        />
                       )}
-                    </div>
+
+                      <hr className="border-border/40" />
+
+                      {/* Sandbox Toggle */}
+                      <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                          <span className="text-xs font-medium text-foreground">Sandbox Execution</span>
+                          <p className="text-[11px] text-muted-foreground">
+                            Run skill scripts in isolation
+                          </p>
+                        </div>
+                        {isEditing ? (
+                          <Switch
+                            checked={editSandboxEnabled}
+                            onCheckedChange={(checked) => {
+                              setEditSandboxEnabled(checked);
+                              handleFieldChange();
+                            }}
+                          />
+                        ) : (
+                          <Badge variant={displayedSandboxEnabled ? 'default' : 'secondary'} className="text-[10px]">
+                            {displayedSandboxEnabled ? 'Enabled' : 'Disabled'}
+                          </Badge>
+                        )}
+                      </div>
+                    </ConfigSection>
+
+                    {/* Section: System Prompt */}
+                    <ConfigSection title="System Prompt" icon={Code} defaultOpen={true}>
+                      <div className="flex flex-col gap-2 min-h-0">
+                        {isEditing ? (
+                          <div className="flex flex-col gap-2 min-h-0">
+                            {/* Edit/Preview Tabs */}
+                            <div className="flex gap-1 p-0.5 bg-muted rounded-md">
+                              <button
+                                className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
+                                  systemPromptTab === 'edit'
+                                    ? 'bg-background text-foreground shadow-sm'
+                                    : 'text-muted-foreground hover:text-foreground'
+                                }`}
+                                onClick={() => setSystemPromptTab('edit')}
+                              >
+                                <Code className="inline h-3 w-3 mr-1" />
+                                Edit
+                              </button>
+                              <button
+                                className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
+                                  systemPromptTab === 'preview'
+                                    ? 'bg-background text-foreground shadow-sm'
+                                    : 'text-muted-foreground hover:text-foreground'
+                                }`}
+                                onClick={() => setSystemPromptTab('preview')}
+                              >
+                                <Eye className="inline h-3 w-3 mr-1" />
+                                Preview
+                              </button>
+                            </div>
+
+                            {systemPromptTab === 'edit' ? (
+                              <Textarea
+                                id="systemPrompt"
+                                value={editSystemPrompt}
+                                onChange={(e) => {
+                                  setEditSystemPrompt(e.target.value);
+                                  handleFieldChange();
+                                }}
+                                onFocus={() => setActiveFocusArea('config')}
+                                onBlur={() => setActiveFocusArea(null)}
+                                className="font-mono text-xs min-h-[200px] resize-none"
+                                placeholder="Enter the system prompt..."
+                              />
+                            ) : (
+                              <div className="bg-muted p-3 rounded min-h-[200px] overflow-auto border">
+                                <Markdown className="text-sm">{editSystemPrompt || '*No content to preview*'}</Markdown>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="bg-muted p-3 rounded min-h-[100px] max-h-[300px] overflow-auto border">
+                            <Markdown className="text-sm">{displayedSystemPrompt}</Markdown>
+                          </div>
+                        )}
+                      </div>
+                    </ConfigSection>
                   </>
                 )}
 

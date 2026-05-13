@@ -1332,6 +1332,339 @@ export type McpToolsResponse = {
 };
 
 /**
+ * McpPlaybookUpdate
+ *
+ * Request body for the console_update_playbook MCP tool.
+ *
+ * Updates the AGENTS.md playbook for an agent. For section-based updates,
+ * provide section_name and content. For full replacement, provide content only.
+ */
+export type McpPlaybookUpdate = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    /**
+     * Scope
+     *
+     * Scope: 'personal' or 'group'
+     */
+    scope: string;
+    /**
+     * Content
+     *
+     * Full Markdown content to write
+     */
+    content: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+};
+
+/**
+ * McpSkillCreate
+ *
+ * Request body for the console_create_skill MCP tool.
+ *
+ * Creates a runtime skill in the specified scope. Personal and group skills
+ * are stored in the docstore; standard skills are stored in the sub-agent
+ * config version (requires approval workflow).
+ */
+export type McpSkillCreate = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    /**
+     * Scope
+     *
+     * Where to store the skill: 'personal' (user-only, immediate), 'group' (shared with group, immediate), or 'default' (stored in sub-agent config version, requires approval)
+     */
+    scope: string;
+    /**
+     * Skill Name
+     *
+     * Skill identifier (lowercase letters, numbers, hyphens only)
+     */
+    skill_name: string;
+    /**
+     * Description
+     *
+     * What the skill does and when to use it
+     */
+    description?: string;
+    /**
+     * Body
+     *
+     * Skill instructions body (Markdown)
+     */
+    body: string;
+    /**
+     * Files
+     *
+     * Optional files to bundle with the skill
+     */
+    files?: Array<McpSkillFile> | null;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (required when scope='default')
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
+ * McpSkillDeleteFile
+ *
+ * Request body for the console_delete_skill_file MCP tool.
+ */
+export type McpSkillDeleteFile = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    /**
+     * Scope
+     *
+     * Scope of the skill: 'personal', 'group', or 'default'
+     */
+    scope: string;
+    /**
+     * Skill Name
+     *
+     * Skill identifier that the file belongs to
+     */
+    skill_name: string;
+    /**
+     * File Path
+     *
+     * Relative path of the file to delete (e.g., 'scripts/check.py')
+     */
+    file_path: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (required when scope='default')
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
+ * McpSkillFile
+ *
+ * A file to bundle with a skill.
+ */
+export type McpSkillFile = {
+    /**
+     * Path
+     *
+     * Relative path within the skill folder (e.g., 'scripts/check.py')
+     */
+    path: string;
+    /**
+     * Content
+     *
+     * File content (text)
+     */
+    content: string;
+};
+
+/**
+ * McpSkillRemove
+ *
+ * Request body for the console_remove_skill MCP tool.
+ */
+export type McpSkillRemove = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    /**
+     * Scope
+     *
+     * Scope of the skill to remove: 'personal', 'group', or 'default'
+     */
+    scope: string;
+    /**
+     * Skill Name
+     *
+     * Skill identifier to remove
+     */
+    skill_name: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (required when scope='default')
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
+ * McpSkillResponse
+ *
+ * Response from MCP skill operations.
+ */
+export type McpSkillResponse = {
+    /**
+     * Skill Name
+     */
+    skill_name: string;
+    /**
+     * Scope
+     */
+    scope: string;
+    /**
+     * Agent Name
+     */
+    agent_name: string;
+    /**
+     * Message
+     */
+    message: string;
+};
+
+/**
+ * McpSkillUpdate
+ *
+ * Request body for the console_update_skill MCP tool.
+ */
+export type McpSkillUpdate = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    /**
+     * Scope
+     *
+     * Scope of the skill to update: 'personal', 'group', or 'default'
+     */
+    scope: string;
+    /**
+     * Skill Name
+     *
+     * Skill identifier to update
+     */
+    skill_name: string;
+    /**
+     * Description
+     *
+     * Updated description (default scope only)
+     */
+    description?: string | null;
+    /**
+     * Body
+     *
+     * Updated skill instructions body (Markdown)
+     */
+    body?: string | null;
+    /**
+     * Content
+     *
+     * Full SKILL.md content including frontmatter (personal/group scope). Mutually exclusive with body.
+     */
+    content?: string | null;
+    /**
+     * Files
+     *
+     * If provided, replaces ALL bundled files. If omitted, existing files are untouched.
+     */
+    files?: Array<McpSkillFile> | null;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (required when scope='default')
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
+ * McpSkillWriteFile
+ *
+ * Request body for the console_write_skill_file MCP tool.
+ */
+export type McpSkillWriteFile = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    /**
+     * Scope
+     *
+     * Scope of the skill: 'personal', 'group', or 'default'
+     */
+    scope: string;
+    /**
+     * Skill Name
+     *
+     * Skill identifier that the file belongs to
+     */
+    skill_name: string;
+    /**
+     * File Path
+     *
+     * Relative path within the skill folder (e.g., 'scripts/check.py')
+     */
+    file_path: string;
+    /**
+     * Content
+     *
+     * File content (text)
+     */
+    content: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (required when scope='default')
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
  * MemberInfo
  *
  * Member info for group detail response.
@@ -2782,15 +3115,59 @@ export type SkillCreate = {
     /**
      * Name
      *
-     * Skill identifier (no spaces or slashes)
+     * Skill identifier (lowercase letters, numbers, hyphens only, per SKILL.md spec)
      */
     name: string;
     /**
+     * Description
+     *
+     * What the skill does and when to use it (shown in skill index)
+     */
+    description?: string;
+    /**
      * Content
      *
-     * Full Markdown content
+     * Skill instructions body (Markdown). Frontmatter is generated automatically.
      */
     content: string;
+    /**
+     * Files
+     *
+     * Optional files to bundle with the skill
+     */
+    files?: Array<McpSkillFile> | null;
+};
+
+/**
+ * SkillDefinition
+ *
+ * A standard (immutable) skill bundled with a sub-agent config version.
+ */
+export type SkillDefinition = {
+    /**
+     * Name
+     *
+     * Skill identifier (lowercase, alphanumeric + hyphens)
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * What the skill does
+     */
+    description: string;
+    /**
+     * Body
+     *
+     * SKILL.md body content (markdown)
+     */
+    body: string;
+    /**
+     * Files
+     *
+     * Optional scripts/references/assets
+     */
+    files?: Array<SkillFile>;
 };
 
 /**
@@ -2810,7 +3187,89 @@ export type SkillDetail = {
     /**
      * Content
      *
-     * Full Markdown content of the skill file
+     * Full SKILL.md content (frontmatter + body)
+     */
+    content: string;
+    /**
+     * Files
+     *
+     * Bundled file paths (excluding SKILL.md)
+     */
+    files?: Array<SkillFileSummary>;
+};
+
+/**
+ * SkillFile
+ *
+ * A file bundled with a standard skill (e.g., script, reference doc).
+ */
+export type SkillFile = {
+    /**
+     * Path
+     *
+     * Relative path inside the skill directory (e.g., 'scripts/check.py')
+     */
+    path: string;
+    /**
+     * Content
+     *
+     * File content
+     */
+    content: string;
+};
+
+/**
+ * SkillFileContent
+ *
+ * Response for reading a skill file.
+ */
+export type SkillFileContent = {
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * Content
+     */
+    content: string;
+};
+
+/**
+ * SkillFileListResponse
+ *
+ * Response for listing files in a skill.
+ */
+export type SkillFileListResponse = {
+    /**
+     * Items
+     */
+    items?: Array<SkillFileSummary>;
+};
+
+/**
+ * SkillFileSummary
+ *
+ * Summary of a file within a skill folder.
+ */
+export type SkillFileSummary = {
+    /**
+     * Path
+     *
+     * Relative path within the skill folder (e.g., 'scripts/check.py')
+     */
+    path: string;
+};
+
+/**
+ * SkillFileWrite
+ *
+ * Request body for writing a skill file.
+ */
+export type SkillFileWrite = {
+    /**
+     * Content
+     *
+     * File content (text)
      */
     content: string;
 };
@@ -2836,19 +3295,19 @@ export type SkillSummary = {
     /**
      * Name
      *
-     * Skill identifier (filename without .md)
+     * Skill identifier (lowercase, hyphens, per SKILL.md spec)
      */
     name: string;
     /**
      * Title
      *
-     * First heading from the skill file
+     * Skill name from frontmatter (or first heading for legacy)
      */
     title: string;
     /**
      * Description
      *
-     * First paragraph or description line
+     * Description from frontmatter (what the skill does and when to use it)
      */
     description?: string;
     /**
@@ -2857,6 +3316,12 @@ export type SkillSummary = {
      * 'personal' or 'group'
      */
     scope: string;
+    /**
+     * File Count
+     *
+     * Number of bundled files (excluding SKILL.md)
+     */
+    file_count?: number;
     /**
      * Group Id
      *
@@ -2883,6 +3348,12 @@ export type SkillUpdate = {
      * Full Markdown content to write
      */
     content: string;
+    /**
+     * Files
+     *
+     * If provided, replaces ALL bundled files. If omitted, existing files are untouched.
+     */
+    files?: Array<McpSkillFile> | null;
 };
 
 /**
@@ -2936,6 +3407,10 @@ export type SubAgent = {
      * Activated By Groups
      */
     activated_by_groups?: Array<number> | null;
+    /**
+     * Effective Permission
+     */
+    effective_permission?: _0Enum | null;
     /**
      * Deleted At
      */
@@ -3072,6 +3547,14 @@ export type SubAgentConfigVersion = {
     enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
     /**
+     * Skills
+     */
+    skills?: Array<SkillDefinition>;
+    /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -3178,6 +3661,14 @@ export type SubAgentCreate = {
      */
     enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
+    /**
+     * Skills
+     */
+    skills?: Array<SkillDefinition>;
+    /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean;
 };
 
 /**
@@ -3346,7 +3837,7 @@ export type SubAgentUpdate = {
     /**
      * Description
      */
-    description: string;
+    description?: string | null;
     /**
      * Is Public
      */
@@ -3408,6 +3899,14 @@ export type SubAgentUpdate = {
      */
     enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
+    /**
+     * Skills
+     */
+    skills?: Array<SkillDefinition> | null;
+    /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean | null;
     /**
      * Change Summary
      */
@@ -4279,6 +4778,8 @@ export type FlowDirectionEnum = 'input' | 'output' | 'other';
 export type OpEnum = 'add' | 'remove' | 'replace';
 
 export type ItemsEnum = 'read' | 'write';
+
+export type _0Enum = 'owner' | 'write' | 'read';
 
 /**
  * Operation
@@ -8988,7 +9489,7 @@ export type GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetData = {
         /**
          * Group Id
          *
-         * Group ID for group scope resolution
+         * Group ID (required when scope='group')
          */
         group_id?: string | null;
     };
@@ -9143,6 +9644,348 @@ export type UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutRespo
 };
 
 export type UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutResponse = UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutResponses[keyof UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutResponses];
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files';
+};
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetError = ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetErrors[keyof ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetErrors];
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillFileListResponse;
+};
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponse = ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponses[keyof ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponses];
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files/{file_path}';
+};
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteError = DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteErrors[keyof DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteErrors];
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponse = DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponses[keyof DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponses];
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files/{file_path}';
+};
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetError = GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetErrors[keyof GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetErrors];
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillFileContent;
+};
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponse = GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponses[keyof GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponses];
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutData = {
+    body: SkillFileWrite;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files/{file_path}';
+};
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutError = WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutErrors[keyof WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutErrors];
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillFileContent;
+};
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponse = WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses[keyof WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses];
+
+export type ConsoleCreateSkillData = {
+    body: McpSkillCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills';
+};
+
+export type ConsoleCreateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleCreateSkillError = ConsoleCreateSkillErrors[keyof ConsoleCreateSkillErrors];
+
+export type ConsoleCreateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    201: McpSkillResponse;
+};
+
+export type ConsoleCreateSkillResponse = ConsoleCreateSkillResponses[keyof ConsoleCreateSkillResponses];
+
+export type ConsoleUpdateSkillData = {
+    body: McpSkillUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills';
+};
+
+export type ConsoleUpdateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleUpdateSkillError = ConsoleUpdateSkillErrors[keyof ConsoleUpdateSkillErrors];
+
+export type ConsoleUpdateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleUpdateSkillResponse = ConsoleUpdateSkillResponses[keyof ConsoleUpdateSkillResponses];
+
+export type ConsoleRemoveSkillData = {
+    body: McpSkillRemove;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills/remove';
+};
+
+export type ConsoleRemoveSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleRemoveSkillError = ConsoleRemoveSkillErrors[keyof ConsoleRemoveSkillErrors];
+
+export type ConsoleRemoveSkillResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleRemoveSkillResponse = ConsoleRemoveSkillResponses[keyof ConsoleRemoveSkillResponses];
+
+export type ConsoleUpdatePlaybookData = {
+    body: McpPlaybookUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/playbook';
+};
+
+export type ConsoleUpdatePlaybookErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleUpdatePlaybookError = ConsoleUpdatePlaybookErrors[keyof ConsoleUpdatePlaybookErrors];
+
+export type ConsoleUpdatePlaybookResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleUpdatePlaybookResponse = ConsoleUpdatePlaybookResponses[keyof ConsoleUpdatePlaybookResponses];
+
+export type ConsoleWriteSkillFileData = {
+    body: McpSkillWriteFile;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills/files';
+};
+
+export type ConsoleWriteSkillFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleWriteSkillFileError = ConsoleWriteSkillFileErrors[keyof ConsoleWriteSkillFileErrors];
+
+export type ConsoleWriteSkillFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleWriteSkillFileResponse = ConsoleWriteSkillFileResponses[keyof ConsoleWriteSkillFileResponses];
+
+export type ConsoleDeleteSkillFileData = {
+    body: McpSkillDeleteFile;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills/files/remove';
+};
+
+export type ConsoleDeleteSkillFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleDeleteSkillFileError = ConsoleDeleteSkillFileErrors[keyof ConsoleDeleteSkillFileErrors];
+
+export type ConsoleDeleteSkillFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleDeleteSkillFileResponse = ConsoleDeleteSkillFileResponses[keyof ConsoleDeleteSkillFileResponses];
 
 export type ListScimTokensApiV1AdminScimTokensGetData = {
     body?: never;

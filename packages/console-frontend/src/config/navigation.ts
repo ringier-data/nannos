@@ -14,6 +14,7 @@ import {
   KeyRound,
   Globe,
   BookOpen,
+  Blocks,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -63,6 +64,11 @@ export const mainNavItems: NavItem[] = [
     title: 'Playbooks',
     url: '/app/playbooks',
     icon: BookOpen,
+  },
+  {
+    title: 'Skills',
+    url: '/app/skills',
+    icon: Blocks,
   },
 ];
 

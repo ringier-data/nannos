@@ -27,78 +27,105 @@ interface VersionDiffViewerProps {
 function formatVersionForDiff(version: SubAgentConfigVersion | null): string {
   if (!version) return '';
   
-  const sections: string[] = [];
-  
-  // Description section - crucial for orchestrator routing
-  sections.push('=== DESCRIPTION (Agent Skills) ===');
-  sections.push('# The orchestrator uses this to decide when to delegate tasks to this agent.');
-  sections.push('');
-  if (version.description) {
-    sections.push(version.description);
-  } else {
-    sections.push('(no description)');
-  }
-  sections.push('');
-  
-  // Configuration section - different for local vs remote vs Foundry agents
-  sections.push('=== CONFIGURATION ===');
-  
+  const lines: string[] = [];
+
+  // --- description ---
+  lines.push('diff --config a/description b/description');
+  lines.push('--- a/description');
+  lines.push('+++ b/description');
+  lines.push(version.description || '(no description)');
+  lines.push('');
+
+  // --- configuration ---
   if (version.system_prompt) {
-    // Local agent configuration
-    sections.push('Type: Local Agent');
-    sections.push('');
-    sections.push(`model: ${version.model || '(default)'}`);
-    if (version.enable_thinking !== undefined) {
-      sections.push(`enable_thinking: ${version.enable_thinking}`);
-    }
+    lines.push('diff --config a/config b/config');
+    lines.push('--- a/config');
+    lines.push('+++ b/config');
+    lines.push(`type: local`);
+    lines.push(`model: ${version.model || '(default)'}`);
+    lines.push(`enable_thinking: ${version.enable_thinking ?? false}`);
     if (version.enable_thinking) {
-      sections.push(`thinking_level: ${version.thinking_level || '(default)'}`);
+      lines.push(`thinking_level: ${version.thinking_level || '(default)'}`);
     }
-    sections.push('');
-    sections.push('system_prompt:');
-    sections.push('"""');
-    sections.push(version.system_prompt);
-    sections.push('"""');
-    sections.push('');
+    lines.push(`sandbox_enabled: ${version.sandbox_enabled ?? false}`);
+    lines.push('');
+
+    lines.push('diff --config a/system_prompt b/system_prompt');
+    lines.push('--- a/system_prompt');
+    lines.push('+++ b/system_prompt');
+    lines.push(version.system_prompt);
+    lines.push('');
   } else if (version.agent_url) {
-    // Remote agent configuration
-    sections.push('Type: Remote Agent');
-    sections.push('');
-    sections.push(`agent_url: ${version.agent_url}`);
-    sections.push('');
+    lines.push('diff --config a/config b/config');
+    lines.push('--- a/config');
+    lines.push('+++ b/config');
+    lines.push(`type: remote`);
+    lines.push(`agent_url: ${version.agent_url}`);
+    lines.push(`sandbox_enabled: ${version.sandbox_enabled ?? false}`);
+    lines.push('');
   } else if (version.foundry_hostname) {
-    // Foundry agent configuration
-    sections.push('Type: Foundry Agent');
-    sections.push('');
-    sections.push(`foundry_hostname: ${version.foundry_hostname}`);
-    sections.push(`foundry_client_id: ${version.foundry_client_id || '(not set)'}`);
-    sections.push(`foundry_client_secret_ref: ${version.foundry_client_secret_ref || '(not set)'}`);
-    sections.push(`foundry_ontology_rid: ${version.foundry_ontology_rid || '(not set)'}`);
-    sections.push(`foundry_query_api_name: ${version.foundry_query_api_name || '(not set)'}`);
+    lines.push('diff --config a/config b/config');
+    lines.push('--- a/config');
+    lines.push('+++ b/config');
+    lines.push(`type: foundry`);
+    lines.push(`foundry_hostname: ${version.foundry_hostname}`);
+    lines.push(`foundry_client_id: ${version.foundry_client_id || '(not set)'}`);
+    lines.push(`foundry_client_secret_ref: ${version.foundry_client_secret_ref || '(not set)'}`);
+    lines.push(`foundry_ontology_rid: ${version.foundry_ontology_rid || '(not set)'}`);
+    lines.push(`foundry_query_api_name: ${version.foundry_query_api_name || '(not set)'}`);
     if (version.foundry_scopes && version.foundry_scopes.length > 0) {
-      sections.push('foundry_scopes:');
-      version.foundry_scopes.forEach(scope => {
-        sections.push(`  - ${scope}`);
-      });
-    } else {
-      sections.push('foundry_scopes: (none)');
+      lines.push(`foundry_scopes: ${version.foundry_scopes.join(', ')}`);
     }
     if (version.foundry_version) {
-      sections.push(`foundry_version: ${version.foundry_version}`);
+      lines.push(`foundry_version: ${version.foundry_version}`);
     }
-    sections.push('');
+    lines.push(`sandbox_enabled: ${version.sandbox_enabled ?? false}`);
+    lines.push('');
   }
-  
-  // MCP Tools section
+
+  // --- mcp_tools ---
   if (version.mcp_tools && version.mcp_tools.length > 0) {
-    sections.push('=== MCP TOOLS ===');
+    lines.push('diff --config a/mcp_tools b/mcp_tools');
+    lines.push('--- a/mcp_tools');
+    lines.push('+++ b/mcp_tools');
     version.mcp_tools.forEach(tool => {
-      sections.push(`- ${tool}`);
+      lines.push(tool);
     });
-    sections.push('');
+    lines.push('');
   }
-  
-  return sections.join('\n');
+
+  // --- skills ---
+  if (version.skills && version.skills.length > 0) {
+    version.skills.forEach(skill => {
+      const skillPath = `skills/${skill.name}`;
+      lines.push(`diff --config a/${skillPath}/SKILL.md b/${skillPath}/SKILL.md`);
+      lines.push(`--- a/${skillPath}/SKILL.md`);
+      lines.push(`+++ b/${skillPath}/SKILL.md`);
+      lines.push(`# ${skill.name}`);
+      if (skill.description) {
+        lines.push(`description: ${skill.description}`);
+      }
+      if (skill.body) {
+        lines.push('');
+        lines.push(skill.body);
+      }
+      lines.push('');
+
+      if (skill.files && skill.files.length > 0) {
+        skill.files.forEach(f => {
+          lines.push(`diff --config a/${skillPath}/${f.path} b/${skillPath}/${f.path}`);
+          lines.push(`--- a/${skillPath}/${f.path}`);
+          lines.push(`+++ b/${skillPath}/${f.path}`);
+          if (f.content) {
+            lines.push(f.content);
+          }
+          lines.push('');
+        });
+      }
+    });
+  }
+
+  return lines.join('\n');
 }
 
 /**
