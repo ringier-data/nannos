@@ -88,6 +88,10 @@ class IObjectStorageService(ABC):
     ) -> StoredObject:
         """Upload object to storage.
 
+        Content is accepted as bytes for interface simplicity. This buffers the
+        entire payload in memory, which is acceptable for typical uploads (< 50 MB).
+        For large file ingestion, prefer presigned upload URLs to bypass the backend.
+
         Args:
             bucket: Bucket/container name
             key: Object key/path

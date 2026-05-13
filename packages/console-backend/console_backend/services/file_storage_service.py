@@ -190,7 +190,8 @@ class FileStorageService:
             filename=filename,
         )
 
-        # Read content
+        # Read full content into memory. Acceptable for typical uploads (< 50 MB);
+        # for large files, use presigned upload URLs to bypass the backend entirely.
         content = await upload.read()
         size = len(content)
 
