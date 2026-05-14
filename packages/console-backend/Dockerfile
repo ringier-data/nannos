@@ -23,6 +23,7 @@ RUN find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && 
     find . -name "*.pyo" -delete 2>/dev/null || true
 # Copy shared SDK from named build context
 COPY --from=ringier-a2a-sdk . ../ringier-a2a-sdk
+COPY --from=object-storage . ../object-storage
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 RUN uv pip install validators
 
@@ -42,6 +43,7 @@ RUN chmod +x /usr/local/bin/rambler
 
 WORKDIR ${WORKDIR}
 COPY --from=backend-builder ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
+COPY --from=backend-builder ${WORKDIR}/../object-storage ../object-storage
 COPY --from=backend-builder ${WORKDIR} .
 
 # Copy migration files
@@ -78,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR ${WORKDIR}
 COPY --from=backend-builder ${WORKDIR}/../ringier-a2a-sdk ../ringier-a2a-sdk
+COPY --from=backend-builder ${WORKDIR}/../object-storage ../object-storage
 COPY --from=backend-builder ${WORKDIR} .
 
 ENTRYPOINT [".venv/bin/python", "catalog_worker.py"]

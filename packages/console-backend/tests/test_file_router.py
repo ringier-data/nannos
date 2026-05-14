@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiomoto import mock_aws
 
 from console_backend.models.user import User
 
@@ -12,8 +11,7 @@ from console_backend.models.user import User
 class TestFileRouter:
     """Tests for file upload and URL regeneration endpoints."""
 
-    @mock_aws
-    async def test_regenerate_urls_success(self, client_with_db, test_user: User):
+    async def test_regenerate_urls_success(self, aws_mock, client_with_db, test_user: User):
         """Test successful URL regeneration for user's files."""
         # Mock the FileStorageService
         mock_storage = AsyncMock()
@@ -47,8 +45,7 @@ class TestFileRouter:
         assert data["files"][0]["name"] == "file.pdf"
         assert "X-Amz-Expires" in data["files"][0]["url"]
 
-    @mock_aws
-    async def test_regenerate_urls_rejects_other_users_files(self, client_with_db, test_user: User):
+    async def test_regenerate_urls_rejects_other_users_files(self, aws_mock, client_with_db, test_user: User):
         """Test that regenerating URLs for other users' files is rejected."""
         mock_storage = AsyncMock()
         mock_storage._prefix = "uploads"
@@ -73,8 +70,7 @@ class TestFileRouter:
         assert response.status_code == 403
         assert "Access denied" in response.json()["detail"]
 
-    @mock_aws
-    async def test_regenerate_urls_rejects_invalid_key_format(self, client_with_db, test_user: User):
+    async def test_regenerate_urls_rejects_invalid_key_format(self, aws_mock, client_with_db, test_user: User):
         """Test that invalid S3 key formats are rejected."""
         mock_storage = AsyncMock()
         mock_storage._prefix = "uploads"
@@ -98,8 +94,7 @@ class TestFileRouter:
         assert response.status_code == 403
         assert "Invalid file key format" in response.json()["detail"]
 
-    @mock_aws
-    async def test_regenerate_urls_requires_file_key(self, client_with_db, test_user: User):
+    async def test_regenerate_urls_requires_file_key(self, aws_mock, client_with_db, test_user: User):
         """Test that requests without file keys are rejected."""
         response = await client_with_db.post(
             "/api/v1/files/regenerate-urls",
@@ -109,8 +104,7 @@ class TestFileRouter:
         assert response.status_code == 400
         assert "must have a 'key' field" in response.json()["detail"]
 
-    @mock_aws
-    async def test_regenerate_urls_requires_at_least_one_file(self, client_with_db, test_user: User):
+    async def test_regenerate_urls_requires_at_least_one_file(self, aws_mock, client_with_db, test_user: User):
         """Test that empty file list is rejected."""
         response = await client_with_db.post(
             "/api/v1/files/regenerate-urls",
@@ -120,8 +114,7 @@ class TestFileRouter:
         assert response.status_code == 400
         assert "At least one file key must be provided" in response.json()["detail"]
 
-    @mock_aws
-    async def test_regenerate_urls_handles_multiple_files(self, client_with_db, test_user: User):
+    async def test_regenerate_urls_handles_multiple_files(self, aws_mock, client_with_db, test_user: User):
         """Test batch URL regeneration for multiple files."""
         mock_storage = AsyncMock()
         mock_storage._prefix = "uploads"

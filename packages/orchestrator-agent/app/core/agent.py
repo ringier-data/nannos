@@ -17,7 +17,7 @@ from collections.abc import AsyncIterable
 from typing import Any, Optional
 
 from a2a.types import Part, TaskState
-from agent_common.core.s3_service import get_s3_service
+from object_storage import get_object_storage_service
 from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk
@@ -173,7 +173,7 @@ class OrchestratorDeepAgent:
             checkpointer=self._graph_factory.checkpointer,
             static_tools=static_tools,
             document_store=self._graph_factory.store,
-            s3_service=get_s3_service(),
+            storage=get_object_storage_service(),
             document_store_bucket=self.config.DOCUMENT_STORE_S3_BUCKET or None,
             backend_factory=self._graph_factory.backend_factory,
             cost_logger=self._graph_factory.cost_logger,

@@ -23,6 +23,8 @@ dependencies = [
     "pydantic>=2.10.6",
     # Shared SDKs
     "ringier-a2a-sdk>=0.1.0",
+    # Object storage abstraction
+    "object-storage>=0.1.0",
     # Tracing
     "langsmith>=0.4.37",
     # AWS SDK (for boto3 in model factory)
@@ -45,10 +47,10 @@ anthropic = [
 ]
 foundry = [
     "foundry-platform-sdk==1.63.0",
-    "aiobotocore>=2.26.0",
+    "aiobotocore>=2.15.0",
 ]
 docstore = [
-    "aiobotocore>=2.26.0",
+    "aiobotocore>=2.15.0",
     "langgraph-checkpoint-postgres>=2.0.11",
     "psycopg>=3.2.0",
     "psycopg-binary>=3.2.0",
@@ -72,7 +74,7 @@ dev = [
     "langgraph-checkpoint-postgres>=2.0.11",
     "psycopg>=3.2.0",
     "psycopg-binary>=3.2.0",
-    "aiobotocore>=2.26.0",
+    "aiobotocore>=2.15.0",
 ]
 
 [tool.pytest.ini_options]
@@ -84,3 +86,4 @@ python_classes = "Test*"
 
 [tool.uv.sources]
 ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }
+object-storage = { path = "../object-storage", editable = true }

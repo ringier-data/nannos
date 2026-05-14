@@ -55,6 +55,7 @@ dev = [
 [tool.uv.sources]
 ringier-a2a-sdk = { path = "../ringier-a2a-sdk", editable = true }
 agent-common = { path = "../agent-common", editable = true }
+object-storage = { path = "../object-storage", editable = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,4 +1,4 @@
-"""Core utilities: model factory, graph utilities."""
+"""Core utilities: model factory, graph utilities, object storage."""
 
 from .model_factory import (
     MODEL_CONFIG,
@@ -9,8 +9,19 @@ from .model_factory import (
     get_thinking_budget,
     is_valid_model,
 )
+from object_storage import (
+    IObjectStorageService,
+    LocalObjectStorageService,
+    S3ObjectStorageService,
+    StoredObject,
+    create_object_storage_service,
+    get_object_storage_service,
+    parse_storage_uri,
+    reset_object_storage_service,
+)
 
 __all__ = [
+    # Model factory
     "create_model",
     "get_available_models",
     "has_aws_credentials",
@@ -18,4 +29,13 @@ __all__ = [
     "get_default_model",
     "MODEL_CONFIG",
     "get_thinking_budget",
+    # Object storage
+    "IObjectStorageService",
+    "LocalObjectStorageService",
+    "S3ObjectStorageService",
+    "StoredObject",
+    "create_object_storage_service",
+    "get_object_storage_service",
+    "parse_storage_uri",
+    "reset_object_storage_service",
 ]

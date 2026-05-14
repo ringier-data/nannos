@@ -40,7 +40,7 @@ from agent_common.core.cost_tracking_embeddings import CostTrackingBedrockEmbedd
 from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.model_factory import _has_aws_credentials, create_model, is_valid_model
-from agent_common.core.s3_service import get_s3_service
+from object_storage import get_object_storage_service
 from agent_common.models.base import DEFAULT_MODEL
 from jsonpath_ng.ext import parse as jsonpath_parse
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -964,7 +964,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             docstore_user_id = user_id or user_sub
             docstore_tools = create_document_store_tools(
                 store=self.store,
-                s3_service=get_s3_service(),
+                storage=get_object_storage_service(),
                 s3_bucket=_DOCUMENT_STORE_S3_BUCKET,
                 user_id=docstore_user_id,
             )

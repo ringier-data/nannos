@@ -23,7 +23,7 @@ from langgraph.types import interrupt
 from langsmith import traceable
 from typing_extensions import NotRequired
 
-from agent_common.core.s3_service import S3Service
+from object_storage import IObjectStorageService
 
 
 class DocumentStoreState(AgentState):
@@ -360,20 +360,20 @@ async def _export_file_impl(
     file_path: str,
     user_id: str,
     store: AsyncPostgresStore,
-    s3_service: S3Service,
+    storage: IObjectStorageService,
     s3_bucket: str,
 ) -> str:
-    """Export a file from filesystem to S3.
+    """Export a file from filesystem to object storage.
 
-    Reads persisted files from store and exports to S3. Works independently of document indexing.
+    Reads persisted files from store and exports to storage backend. Works independently of document indexing.
     Handles both personal (/memories/) and channel (/channel_memories/) files.
 
     Args:
         file_path: Path of the file to export (should start with /memories/ or /channel_memories/)
-        user_id: User ID for S3 key generation
+        user_id: User ID for storage key generation
         store: AsyncPostgresStore instance for reading files
-        s3_service: S3 service for uploads
-        s3_bucket: S3 bucket name for result storage
+        storage: Object storage service for uploads
+        s3_bucket: Bucket name for result storage
 
     Returns:
         Presigned URL for downloaded file
@@ -439,24 +439,24 @@ async def _export_file_impl(
     s3_key = f"docstore/exports/{user_id}/{timestamp}_{file_name}"
     s3_uri = f"s3://{s3_bucket}/{s3_key}"
 
-    await s3_service.upload_content(
-        content=file_content.encode("utf-8"),
+    await storage.upload(
         bucket=s3_bucket,
         key=s3_key,
+        content=file_content.encode("utf-8"),
         content_type=content_type,
     )
 
     logger.info(f"Exported '{file_path}' to {s3_uri}")
 
     # Generate presigned URL (24 hours)
-    presigned_url = await s3_service.generate_presigned_url(s3_uri, expiration=86400)
+    presigned_url = await storage.generate_presigned_url(s3_uri, expiration_seconds=86400)
 
     return f"Exported file '{file_path}' to S3.\n\nDownload link (expires in 24 hours):\n{presigned_url}"
 
 
 def create_document_store_tools(
     store: AsyncPostgresStore,
-    s3_service: S3Service,
+    storage: IObjectStorageService,
     s3_bucket: str,
     user_id: str,
 ) -> list[BaseTool]:
@@ -469,9 +469,9 @@ def create_document_store_tools(
 
     Args:
         store: AsyncPostgresStore instance
-        s3_service: S3 service for file exports
-        s3_bucket: S3 bucket for storing exported files
-        user_id: User ID for document namespacing and S3 keys
+        storage: Object storage service for file exports
+        s3_bucket: Bucket for storing exported files
+        user_id: User ID for document namespacing and storage keys
 
     Returns:
         List of document store tools (search, read_personal_file, export)
@@ -619,7 +619,7 @@ def create_document_store_tools(
             file_path=file_path,
             user_id=user_id,
             store=store,
-            s3_service=s3_service,
+            storage=storage,
             s3_bucket=s3_bucket,
         )
 

@@ -217,15 +217,13 @@ async def initialize_services(app: "FastAPI") -> None:
         app.state.conversation_service = InMemoryConversationService()
         app.state.messages_service = InMemoryMessagesService(conversation_service=app.state.conversation_service)
 
-    # Initialize file storage (S3 or local filesystem)
-    use_s3 = bool(os.getenv("FILES_S3_BUCKET"))
-    if use_s3:
-        app.state.file_storage_service = FileStorageService()
-    else:
-        logger.warning("FILES_S3_BUCKET not set — using local filesystem for file storage")
-        from .services.local_file_storage_service import LocalFileStorageService
-
-        app.state.file_storage_service = LocalFileStorageService()
+    # Initialize file storage (uses IObjectStorageService abstraction)
+    # Storage backend is determined by OBJECT_STORAGE_TYPE env var:
+    # - "s3" (default): AWS S3
+    # - "s3-compatible": MinIO, DigitalOcean Spaces, etc.
+    # - "local": Local filesystem (development)
+    app.state.file_storage_service = FileStorageService()
+    logger.info("File storage initialized using %s backend", app.state.file_storage_service.storage_type)
 
     # Initialize OAuth service
     oidc_config = config.oidc

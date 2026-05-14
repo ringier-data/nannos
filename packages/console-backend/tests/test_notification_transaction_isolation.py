@@ -8,7 +8,7 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiomoto import mock_aws
+from moto import mock_aws
 from console_backend.models.secret import SecretCreate, SecretType
 from console_backend.models.user import User
 from console_backend.services.secrets_service import SecretsService
