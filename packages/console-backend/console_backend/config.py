@@ -238,6 +238,19 @@ class CatalogConfig(BaseModel):
         return bool(self.google_oauth_client_id and self.google_oauth_client_secret.get_secret_value())
 
 
+class SkillsRegistryConfig(BaseModel):
+    """Configuration for external skills registry integration (skills.sh + GitHub)."""
+
+    skills_sh_base_url: str = Field(default_factory=lambda: os.getenv("SKILLS_SH_BASE_URL", "https://skills.sh"))
+    skills_sh_api_key: SecretStr | None = Field(
+        default_factory=lambda: SecretStr(t) if (t := os.getenv("SKILLS_SH_API_KEY")) else None
+    )
+    github_token: SecretStr | None = Field(
+        default_factory=lambda: SecretStr(t) if (t := os.getenv("GITHUB_TOKEN")) else None
+    )
+    github_api_base_url: str = Field(default_factory=lambda: os.getenv("GITHUB_API_BASE_URL", "https://api.github.com"))
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -259,6 +272,7 @@ class Config(BaseModel):
     twilio_verify: TwilioVerifyConfig = Field(default_factory=TwilioVerifyConfig)
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
     frontend: FrontendConfig = Field(default_factory=FrontendConfig)
+    skills_registry: SkillsRegistryConfig = Field(default_factory=SkillsRegistryConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"
