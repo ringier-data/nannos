@@ -1,9 +1,22 @@
 """Pydantic models for SCIM 2.0 protocol (RFC 7643/7644)."""
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+
+
+def _coerce_bool(v: Any) -> Any:
+    """Coerce string booleans to actual bool values (SCIM IdPs often send strings)."""
+    if isinstance(v, str):
+        if v.lower() in ("true", "1"):
+            return True
+        if v.lower() in ("false", "0"):
+            return False
+    return v
+
+
+CoercedBool = Annotated[bool, BeforeValidator(_coerce_bool)]
 
 # SCIM Schema URIs
 SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
@@ -42,9 +55,11 @@ class ScimName(BaseModel):
 class ScimEmail(BaseModel):
     """SCIM user email."""
 
+    model_config = ConfigDict(extra="ignore")
+
     value: str
     type: str = "work"
-    primary: bool = True
+    primary: CoercedBool = True
 
 
 class ScimGroupRef(BaseModel):
@@ -79,13 +94,31 @@ class ScimUser(BaseModel):
 class ScimUserCreate(BaseModel):
     """Inbound SCIM user creation/replacement request."""
 
+    model_config = ConfigDict(extra="allow")
+
     schemas: list[str] = Field(default_factory=lambda: [SCIM_USER_SCHEMA])
     externalId: str | None = None
     userName: str
     name: ScimName | None = None
     displayName: str | None = None
     emails: list[ScimEmail] | None = None
-    active: bool = True
+    active: CoercedBool = True
+    phoneNumbers: list[dict[str, Any]] | None = None
+
+    def extract_scim_attributes(self) -> dict[str, Any] | None:
+        """Extract extra SCIM attributes (phone numbers, enterprise extension, etc.)."""
+        attrs: dict[str, Any] = {}
+
+        if self.phoneNumbers:
+            attrs["phoneNumbers"] = self.phoneNumbers
+
+        # Collect extension schemas (any key starting with "urn:")
+        if self.model_extra:
+            for key, value in self.model_extra.items():
+                if key.startswith("urn:"):
+                    attrs[key] = value
+
+        return attrs or None
 
 
 # ─── Group ────────────────────────────────────────────────────────────────────

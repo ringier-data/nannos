@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import json
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -157,12 +159,16 @@ class ScimUserService:
         first_name = data.name.givenName if data.name else ""
         last_name = data.name.familyName if data.name else ""
 
+        scim_attributes = data.extract_scim_attributes()
+
         await db.execute(
             text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, role, status,
-                                   is_administrator, scim_external_id, scim_user_name, created_at, updated_at)
+                                   is_administrator, scim_external_id, scim_user_name,
+                                   scim_attributes, created_at, updated_at)
                 VALUES (:id, :sub, :email, :first_name, :last_name, 'member', 'active',
-                        false, :scim_external_id, :scim_user_name, :now, :now)
+                        false, :scim_external_id, :scim_user_name,
+                        :scim_attributes, :now, :now)
             """),
             {
                 "id": user_id,
@@ -172,6 +178,7 @@ class ScimUserService:
                 "last_name": last_name or "",
                 "scim_external_id": data.externalId,
                 "scim_user_name": data.userName,
+                "scim_attributes": json.dumps(scim_attributes) if scim_attributes else None,
                 "now": now,
             },
         )
@@ -245,13 +252,15 @@ class ScimUserService:
         last_name = data.name.familyName if data.name else ""
         status = "active" if data.active else "suspended"
         now = datetime.now(timezone.utc)
+        scim_attributes = data.extract_scim_attributes()
 
         await db.execute(
             text("""
                 UPDATE users
                 SET email = :email, first_name = :first_name, last_name = :last_name,
                     status = :status, scim_external_id = :scim_external_id,
-                    scim_user_name = :scim_user_name, updated_at = :now
+                    scim_user_name = :scim_user_name, scim_attributes = :scim_attributes,
+                    updated_at = :now
                 WHERE id = :id AND deleted_at IS NULL
             """),
             {
@@ -262,6 +271,7 @@ class ScimUserService:
                 "status": status,
                 "scim_external_id": data.externalId,
                 "scim_user_name": data.userName,
+                "scim_attributes": json.dumps(scim_attributes) if scim_attributes else None,
                 "now": now,
             },
         )
@@ -388,7 +398,8 @@ class ScimUserService:
         result = await db.execute(
             text("""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users
                 WHERE id = :id AND deleted_at IS NULL
             """),
@@ -420,7 +431,8 @@ class ScimUserService:
         result = await db.execute(
             text(f"""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users WHERE email = :email AND deleted_at IS NULL
                 {order_clause} LIMIT :count OFFSET :offset
             """),
@@ -438,7 +450,8 @@ class ScimUserService:
         result = await db.execute(
             text(f"""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users WHERE scim_external_id = :eid AND deleted_at IS NULL
                 {order_clause} LIMIT :count OFFSET :offset
             """),
@@ -455,7 +468,8 @@ class ScimUserService:
         result = await db.execute(
             text(f"""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users WHERE deleted_at IS NULL
                 {order_clause} LIMIT :count OFFSET :offset
             """),
