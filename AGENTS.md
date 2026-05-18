@@ -39,7 +39,7 @@ Sub-Agents (agent-creator, agent-runner, user-created agents)
 | Package | Lang | Type | Port | Purpose |
 |---------|------|------|------|---------|
 | `ringier-a2a-sdk` | Python | Lib | — | A2A protocol + OAuth2/JWT auth. Consumed by all Python services |
-| `agent-common` | Python | Lib | — | LLM model factory (OpenAI/Bedrock/Azure/Google), LangGraph checkpoints, MCP adapters. Consumed by all Python agents |
+| `agent-common` | Python | Lib | — | LLM model factory (OpenAI/Bedrock/Azure/Google), LangGraph checkpoints, MCP adapters, sandbox pool, skills resolution, self-improvement protocol. Consumed by all Python agents |
 | `orchestrator-agent` | Python | A2A Svc | 10001 | **Central coordinator**. LangGraph state machine, discovers sub-agents, plans & delegates tasks, multi-turn conversations |
 | `agent-creator` | Python | A2A Svc | 8080 | Guides users through designing new AI agents, uses MCP tools to create them |
 | `agent-runner` | Python | A2A Svc | 5005 | Executes scheduled background jobs against sub-agents. Called by console-backend scheduler |
@@ -68,6 +68,10 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
 - **Stateless services**: All conversation/checkpoint state persists in DynamoDB + PostgreSQL, enabling horizontal scaling.
 - **MCP for tools**: Model Context Protocol pattern allows dynamic tool discovery and composition at runtime.
 - **Multi-stage Docker builds**: Python services use `uv` for fast cached installs; shared libs (`ringier-a2a-sdk`, `agent-common`) are passed as Docker build contexts.
+- **Skills registry as source of truth**: All skill content lives in `skill_registry` table. Docstore is a runtime cache. Activations are content-hash pinned for version control.
+- **HITL-guarded self-improvement**: All skill/playbook mutations require user approval via `HumanInTheLoopMiddleware` interrupt. Agents propose, users approve/edit/reject.
+- **Sandbox per A2A turn**: Sandbox-enabled agents acquire a fresh sandbox per invocation (not per session) via `SandboxPool`. Sandboxes are warm-cached by `(session_id, sub_agent_name)`.
+- **Single graph per model type**: The orchestrator uses ONE compiled graph per model, shared across all users. Tools are injected at runtime via `GraphRuntimeContext`, not baked in.
 
 ### Infrastructure Requirements
 
