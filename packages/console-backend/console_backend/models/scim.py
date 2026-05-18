@@ -1,9 +1,22 @@
 """Pydantic models for SCIM 2.0 protocol (RFC 7643/7644)."""
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+
+
+def _coerce_bool(v: Any) -> Any:
+    """Coerce string booleans to actual bool values (SCIM IdPs often send strings)."""
+    if isinstance(v, str):
+        if v.lower() in ("true", "1"):
+            return True
+        if v.lower() in ("false", "0"):
+            return False
+    return v
+
+
+CoercedBool = Annotated[bool, BeforeValidator(_coerce_bool)]
 
 # SCIM Schema URIs
 SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
@@ -42,9 +55,11 @@ class ScimName(BaseModel):
 class ScimEmail(BaseModel):
     """SCIM user email."""
 
+    model_config = ConfigDict(extra="ignore")
+
     value: str
     type: str = "work"
-    primary: bool = True
+    primary: CoercedBool = True
 
 
 class ScimGroupRef(BaseModel):
@@ -61,6 +76,8 @@ class ScimGroupRef(BaseModel):
 class ScimUser(BaseModel):
     """SCIM 2.0 User resource."""
 
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
     schemas: list[str] = Field(default_factory=lambda: [SCIM_USER_SCHEMA])
     id: str | None = None
     externalId: str | None = None
@@ -68,16 +85,16 @@ class ScimUser(BaseModel):
     name: ScimName | None = None
     displayName: str | None = None
     emails: list[ScimEmail] | None = None
+    phoneNumbers: list[dict[str, Any]] | None = None
     active: bool = True
     groups: list[ScimGroupRef] | None = None
     meta: ScimMeta | None = None
 
-    class Config:
-        populate_by_name = True
-
 
 class ScimUserCreate(BaseModel):
     """Inbound SCIM user creation/replacement request."""
+
+    model_config = ConfigDict(extra="allow")
 
     schemas: list[str] = Field(default_factory=lambda: [SCIM_USER_SCHEMA])
     externalId: str | None = None
@@ -85,7 +102,26 @@ class ScimUserCreate(BaseModel):
     name: ScimName | None = None
     displayName: str | None = None
     emails: list[ScimEmail] | None = None
-    active: bool = True
+    active: CoercedBool = True
+    phoneNumbers: list[dict[str, Any]] | None = None
+
+    def extract_scim_attributes(self) -> dict[str, Any] | None:
+        """Extract all extra SCIM attributes not explicitly modelled.
+
+        Captures phoneNumbers, plus everything in model_extra (extension schemas,
+        standard SCIM attributes like title, addresses, nickName, locale, etc.).
+        """
+        attrs: dict[str, Any] = {}
+
+        if self.phoneNumbers:
+            attrs["phoneNumbers"] = self.phoneNumbers
+
+        # Capture all extra fields the IdP sent (extension URNs, standard attrs, etc.)
+        if self.model_extra:
+            for key, value in self.model_extra.items():
+                attrs[key] = value
+
+        return attrs or None
 
 
 # ─── Group ────────────────────────────────────────────────────────────────────

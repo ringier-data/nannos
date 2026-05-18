@@ -12,21 +12,8 @@ import {
 import type { UserWithGroups, ActionEnum } from '@/api/generated';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -164,7 +151,7 @@ export function UsersPage() {
       toast.error('Admin mode must be enabled to impersonate users');
       return;
     }
-    
+
     try {
       await startImpersonation(user.id);
       toast.success(`Now impersonating ${user.email}`);
@@ -220,27 +207,15 @@ export function UsersPage() {
         <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
           <span className="text-sm font-medium">{selectedUsers.size} selected</span>
           <div className="flex-1" />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleBulkAction('activate')}
-          >
+          <Button variant="outline" size="sm" onClick={() => handleBulkAction('activate')}>
             <UserCheck className="h-4 w-4 mr-1" />
             Activate
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleBulkAction('suspend')}
-          >
+          <Button variant="outline" size="sm" onClick={() => handleBulkAction('suspend')}>
             <UserX className="h-4 w-4 mr-1" />
             Suspend
           </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={() => handleBulkAction('delete')}
-          >
+          <Button variant="destructive" size="sm" onClick={() => handleBulkAction('delete')}>
             <Trash2 className="h-4 w-4 mr-1" />
             Delete
           </Button>
@@ -252,10 +227,7 @@ export function UsersPage() {
           <TableHeader>
             <TableRow>
               <TableHead className="w-12">
-                <Checkbox
-                  checked={allSelected}
-                  onCheckedChange={handleSelectAll}
-                />
+                <Checkbox checked={allSelected} onCheckedChange={handleSelectAll} />
               </TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Email</TableHead>
@@ -288,15 +260,10 @@ export function UsersPage() {
                     />
                   </TableCell>
                   <TableCell>
-                    <Link
-                      to={`/app/admin/users/${user.id}`}
-                      className="font-medium hover:underline"
-                    >
-                      {user.first_name} {user.last_name}
+                    <Link to={`/app/admin/users/${user.id}`} className="font-medium hover:underline">
+                      {`${user.first_name} ${user.last_name}`.trim() || user.email}
                     </Link>
-                    {user.is_administrator && (
-                      <span className="ml-2 text-xs text-muted-foreground">(Admin)</span>
-                    )}
+                    {user.is_administrator && <span className="ml-2 text-xs text-muted-foreground">(Admin)</span>}
                   </TableCell>
                   <TableCell>{user.email}</TableCell>
                   <TableCell>
@@ -306,9 +273,7 @@ export function UsersPage() {
                     <span className="text-sm capitalize">{user.role ?? 'member'}</span>
                   </TableCell>
                   <TableCell>
-                    <span className="text-sm text-muted-foreground">
-                      {user.groups?.length ?? 0} group(s)
-                    </span>
+                    <span className="text-sm text-muted-foreground">{user.groups?.length ?? 0} group(s)</span>
                   </TableCell>
                   <TableCell>
                     <DropdownMenu>
@@ -324,10 +289,7 @@ export function UsersPage() {
                             View Details
                           </Link>
                         </DropdownMenuItem>
-                        <DropdownMenuItem 
-                          onClick={() => handleImpersonate(user)}
-                          disabled={!adminMode}
-                        >
+                        <DropdownMenuItem onClick={() => handleImpersonate(user)} disabled={!adminMode}>
                           <UserCog className="h-4 w-4 mr-2" />
                           Impersonate User
                         </DropdownMenuItem>
@@ -362,12 +324,7 @@ export function UsersPage() {
         </Table>
       </div>
 
-      <Pagination
-        page={meta.page}
-        limit={meta.limit}
-        total={meta.total}
-        onPageChange={setPage}
-      />
+      <Pagination page={meta.page} limit={meta.limit} total={meta.total} onPageChange={setPage} />
 
       {confirmDialog && (
         <ConfirmDialog

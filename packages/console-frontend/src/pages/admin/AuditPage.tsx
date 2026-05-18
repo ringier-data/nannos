@@ -40,6 +40,7 @@ const actionColors: Record<AuditAction, 'default' | 'secondary' | 'destructive' 
   permission_update: 'secondary',
   impersonation_start: 'default',
   impersonation_end: 'outline',
+  revoke: 'destructive',
 };
 
 const entityTypeLabels: Record<AuditEntityType, string> = {
@@ -53,6 +54,8 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   delivery_channel: 'Delivery Channel',
   catalog: 'Catalog',
   bug_report: 'Bug Report',
+  scim_token: 'SCIM Token',
+  outbound_scim_endpoint: 'Outbound SCIM Endpoint',
 };
 
 export function AuditPage() {

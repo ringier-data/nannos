@@ -76,7 +76,7 @@ class UserService:
             query = text("""
                 SELECT id, sub, email, first_name, last_name, company_name,
                        is_administrator, role, status, phone_number_idp,
-                       deleted_at, created_at, updated_at
+                       scim_attributes, deleted_at, created_at, updated_at
                 FROM users
                 WHERE id = :user_id
             """)
@@ -98,6 +98,7 @@ class UserService:
                 role=row["role"],
                 status=UserStatus(row["status"]),
                 phone_number_idp=row["phone_number_idp"],
+                scim_attributes=row["scim_attributes"],
                 deleted_at=row["deleted_at"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
@@ -120,7 +121,7 @@ class UserService:
             query = text("""
                 SELECT id, sub, email, first_name, last_name, company_name,
                        is_administrator, role, status, phone_number_idp,
-                       deleted_at, created_at, updated_at
+                       scim_attributes, deleted_at, created_at, updated_at
                 FROM users
                 WHERE sub = :sub
             """)
@@ -142,6 +143,7 @@ class UserService:
                 role=row["role"],
                 status=UserStatus(row["status"]),
                 phone_number_idp=row["phone_number_idp"],
+                scim_attributes=row["scim_attributes"],
                 deleted_at=row["deleted_at"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],

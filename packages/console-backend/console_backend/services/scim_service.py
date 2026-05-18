@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import json
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -157,12 +159,16 @@ class ScimUserService:
         first_name = data.name.givenName if data.name else ""
         last_name = data.name.familyName if data.name else ""
 
+        scim_attributes = data.extract_scim_attributes()
+
         await db.execute(
             text("""
                 INSERT INTO users (id, sub, email, first_name, last_name, role, status,
-                                   is_administrator, scim_external_id, scim_user_name, created_at, updated_at)
+                                   is_administrator, scim_external_id, scim_user_name,
+                                   scim_attributes, created_at, updated_at)
                 VALUES (:id, :sub, :email, :first_name, :last_name, 'member', 'active',
-                        false, :scim_external_id, :scim_user_name, :now, :now)
+                        false, :scim_external_id, :scim_user_name,
+                        :scim_attributes, :now, :now)
             """),
             {
                 "id": user_id,
@@ -172,6 +178,7 @@ class ScimUserService:
                 "last_name": last_name or "",
                 "scim_external_id": data.externalId,
                 "scim_user_name": data.userName,
+                "scim_attributes": json.dumps(scim_attributes) if scim_attributes else None,
                 "now": now,
             },
         )
@@ -186,6 +193,7 @@ class ScimUserService:
             active=True,
             created_at=now,
             updated_at=now,
+            scim_attributes=scim_attributes,
             base_url=base_url,
         )
 
@@ -245,13 +253,15 @@ class ScimUserService:
         last_name = data.name.familyName if data.name else ""
         status = "active" if data.active else "suspended"
         now = datetime.now(timezone.utc)
+        scim_attributes = data.extract_scim_attributes()
 
         await db.execute(
             text("""
                 UPDATE users
                 SET email = :email, first_name = :first_name, last_name = :last_name,
                     status = :status, scim_external_id = :scim_external_id,
-                    scim_user_name = :scim_user_name, updated_at = :now
+                    scim_user_name = :scim_user_name, scim_attributes = :scim_attributes,
+                    updated_at = :now
                 WHERE id = :id AND deleted_at IS NULL
             """),
             {
@@ -262,6 +272,7 @@ class ScimUserService:
                 "status": status,
                 "scim_external_id": data.externalId,
                 "scim_user_name": data.userName,
+                "scim_attributes": json.dumps(scim_attributes) if scim_attributes else None,
                 "now": now,
             },
         )
@@ -276,6 +287,7 @@ class ScimUserService:
             active=data.active,
             created_at=existing.created_at,
             updated_at=now,
+            scim_attributes=scim_attributes,
             base_url=base_url,
         )
 
@@ -388,7 +400,8 @@ class ScimUserService:
         result = await db.execute(
             text("""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users
                 WHERE id = :id AND deleted_at IS NULL
             """),
@@ -420,7 +433,8 @@ class ScimUserService:
         result = await db.execute(
             text(f"""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users WHERE email = :email AND deleted_at IS NULL
                 {order_clause} LIMIT :count OFFSET :offset
             """),
@@ -438,7 +452,8 @@ class ScimUserService:
         result = await db.execute(
             text(f"""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users WHERE scim_external_id = :eid AND deleted_at IS NULL
                 {order_clause} LIMIT :count OFFSET :offset
             """),
@@ -455,7 +470,8 @@ class ScimUserService:
         result = await db.execute(
             text(f"""
                 SELECT id, sub, email, first_name, last_name, status,
-                       scim_external_id, scim_user_name, created_at, updated_at
+                       scim_external_id, scim_user_name, scim_attributes,
+                       created_at, updated_at
                 FROM users WHERE deleted_at IS NULL
                 {order_clause} LIMIT :count OFFSET :offset
             """),
@@ -464,6 +480,7 @@ class ScimUserService:
         return result.fetchall(), total
 
     def _row_to_scim_user(self, row, *, base_url: str) -> ScimUser:
+        scim_attributes = row.scim_attributes if hasattr(row, "scim_attributes") else None
         return self._build_scim_user(
             id=row.id,
             email=row.email,
@@ -474,6 +491,7 @@ class ScimUserService:
             active=row.status == "active",
             created_at=row.created_at,
             updated_at=row.updated_at,
+            scim_attributes=scim_attributes,
             base_url=base_url,
         )
 
@@ -489,17 +507,30 @@ class ScimUserService:
         active: bool,
         created_at: datetime,
         updated_at: datetime,
+        scim_attributes: dict | None = None,
         base_url: str,
     ) -> ScimUser:
         # userName: use stored SCIM userName if available, otherwise fall back to email
         resolved_user_name = userName if userName else email
-        return ScimUser(
+
+        # Extract phoneNumbers from stored attributes
+        phone_numbers = None
+        extra_fields: dict = {}
+        if scim_attributes:
+            phone_numbers = scim_attributes.get("phoneNumbers")
+            # Collect extension schemas and other extra attributes for the response
+            for key, value in scim_attributes.items():
+                if key != "phoneNumbers":
+                    extra_fields[key] = value
+
+        user = ScimUser(
             id=id,
             externalId=external_id,
             userName=resolved_user_name,
             name=ScimName(givenName=first_name, familyName=last_name, formatted=f"{first_name} {last_name}".strip()),
             displayName=f"{first_name} {last_name}".strip() or resolved_user_name,
             emails=[ScimEmail(value=email, type="work", primary=True)],
+            phoneNumbers=phone_numbers,
             active=active,
             meta=ScimMeta(
                 resourceType="User",
@@ -507,7 +538,16 @@ class ScimUserService:
                 lastModified=updated_at,
                 location=f"{base_url}/api/scim/v2/Users/{id}",
             ),
+            **extra_fields,
         )
+
+        # Include extension schemas in schemas list
+        if extra_fields:
+            for key in extra_fields:
+                if key.startswith("urn:") and key not in user.schemas:
+                    user.schemas.append(key)
+
+        return user
 
 
 # ─── Group Service ───────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 import os
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -51,6 +51,7 @@ class User(BaseModel):
     role: UserRole = UserRole.MEMBER
     status: UserStatus = UserStatus.ACTIVE
     phone_number_idp: str | None = None
+    scim_attributes: dict[str, Any] | None = None
     deleted_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

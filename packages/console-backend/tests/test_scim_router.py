@@ -302,6 +302,71 @@ class TestScimUsers:
         assert data["userName"] == "bjensen"
         assert data["emails"][0]["value"] == "barbara.jensen@example.com"
 
+    async def test_create_user_real_idp_payload(self, scim_client, pg_session):
+        """POST User with a real IdP payload containing string booleans and extra fields."""
+        response = await scim_client.post(
+            "/api/scim/v2/Users",
+            json={
+                "userName": "tobias.siegrist@ringier.ch",
+                "name": {
+                    "givenName": "Tobias",
+                    "familyName": "Siegrist",
+                    "formatted": "Tobias Siegrist",
+                },
+                "active": "true",
+                "emails": [
+                    {
+                        "value": "tobias.siegrist@ringier.ch",
+                        "type": "work",
+                        "primary": "true",
+                    }
+                ],
+                "externalId": "u00006943",
+                "phoneNumbers": [{"value": "+41442596669", "type": "work"}],
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                    "department": "IT Governance & Portfolio",
+                    "costCenter": "101550007",
+                },
+                "schemas": [
+                    "urn:ietf:params:scim:schemas:core:2.0:User",
+                    "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+                ],
+            },
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["userName"] == "tobias.siegrist@ringier.ch"
+        assert data["name"]["givenName"] == "Tobias"
+        assert data["name"]["familyName"] == "Siegrist"
+        assert data["active"] is True
+        assert data["emails"][0]["value"] == "tobias.siegrist@ringier.ch"
+        assert data["externalId"] == "u00006943"
+
+        # Verify extra attributes returned in the SCIM response
+        assert data["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
+        enterprise_ext = data["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]
+        assert enterprise_ext["department"] == "IT Governance & Portfolio"
+        assert enterprise_ext["costCenter"] == "101550007"
+        assert "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User" in data["schemas"]
+
+        # Verify attributes are also returned on GET
+        get_response = await scim_client.get(f"/api/scim/v2/Users/{data['id']}")
+        assert get_response.status_code == 200
+        get_data = get_response.json()
+        assert get_data["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
+        assert get_data["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]["department"] == "IT Governance & Portfolio"
+
+        # Verify scim_attributes stored in DB
+        row = await pg_session.execute(
+            text("SELECT scim_attributes FROM users WHERE id = :id"),
+            {"id": data["id"]},
+        )
+        db_row = row.mappings().first()
+        attrs = db_row["scim_attributes"]
+        assert attrs["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
+        assert attrs["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]["department"] == "IT Governance & Portfolio"
+        assert attrs["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]["costCenter"] == "101550007"
+
 
 # ─── Group CRUD Endpoints ───────────────────────────────────────────────────
 
