@@ -75,7 +75,6 @@ from ringier_a2a_sdk.utils import create_runnable_config
 from ringier_a2a_sdk.utils.schema_cleaning import CleanupLevel, validate_and_clean_tool_dict
 
 from app.agents.file_analyzer import FileAnalyzerRunnable
-from app.agents.gp_agent import GPAgentRunnable
 from app.agents.task_scheduler import TaskSchedulerRunnable
 from app.middleware.error_classification_middleware import classify_error
 
@@ -110,7 +109,6 @@ OrchestratorSupportedRunnables = (
     | DynamicLocalAgentRunnable
     | FoundryLocalAgentRunnable
     | FileAnalyzerRunnable
-    | GPAgentRunnable
     | TaskSchedulerRunnable
 )
 
@@ -232,11 +230,15 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             desc = subagent.get("description", f"Agent: {name}")
             # Include effective permission when available (from DynamicLocalAgentRunnable)
             perm = None
+            skills_section = ""
             runnable = subagent.get("runnable")
             if isinstance(runnable, DynamicLocalAgentRunnable):
                 perm = runnable.config.effective_permission
+                if runnable.config.skills:
+                    skill_lines = [f"  - {s.name}: {s.description}" for s in runnable.config.skills]
+                    skills_section = "\n<skills>\n" + "\n".join(skill_lines) + "\n</skills>"
             perm_attr = f' permission="{perm}"' if perm else ""
-            descriptions.append(f'<agent name="{name}"{perm_attr}>\n{desc}\n</agent>')
+            descriptions.append(f'<agent name="{name}"{perm_attr}>\n{desc}{skills_section}\n</agent>')
             names.append(name)
         return descriptions, names
 

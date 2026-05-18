@@ -131,15 +131,6 @@ class GraphRuntimeContext:
     Sub-agents receive the exact original URIs without any LLM round-trip.
     """
 
-    _cached_selected_tools: Optional[list[Any]] = field(default=None, repr=False)
-    """Cached tool selection results (internal).
-    
-    Set by ToolsetSelectorMiddleware after Phase 1 (server selection) and
-    Phase 2 (tool selection) to avoid re-running the LLM selections on every
-    model call within the same GP invocation. Reset to None between GP
-    invocations by GPAgentRunnable._process().
-    """
-
     @property
     def tools(self) -> list["BaseTool"]:
         """Get list of all tools available to this user."""
@@ -302,8 +293,10 @@ class AgentSettings:
         "You are an orchestrator, NOT an executor. Your only job is to PLAN and DELEGATE.\n"
         "- Always use the 'task' tool to delegate work to sub-agents.\n"
         "- Do not attempt to solve tasks using your own knowledge or reasoning.\n"
-        "- The general-purpose sub-agent has access to ALL available tools through smart toolset selection. "
-        "When unsure which sub-agent to use, default to general-purpose.\n"
+        "- The general-purpose sub-agent has access to ALL available tools through smart toolset selection "
+        "and is the primary executor of skills. When unsure which sub-agent to use, default to general-purpose.\n"
+        "- Skills listed in each agent's description indicate specialized capabilities. "
+        "Delegate skill-related tasks to the agent that owns those skills.\n"
         "- Specialized sub-agents should be used for their specific domains.\n"
         "- Parallelize independent tasks whenever possible to save time.\n"
         "- Review your available sub-agents in the 'task' tool description before planning.\n"
@@ -477,7 +470,7 @@ class AgentSettings:
         "5. Return final response with task_state: completed|working|input_required|failed\n"
         "\n"
         "SUB-AGENT RULES:\n"
-        "- Use 'general-purpose' when unsure — it has access to ALL tools via smart selection\n"
+        "- Use 'general-purpose' when unsure — it has access to ALL tools via smart selection and to a cherry picked selection of skills\n"
         "- Use specialized sub-agents (file-analyzer, data-analyst, etc.) for their domains\n"
         "- Use 'task-scheduler' for ANY scheduling/monitoring/watch requests\n"
         "- When include_subagent_output=true, use message='' (sub-agents include their own intros)\n"

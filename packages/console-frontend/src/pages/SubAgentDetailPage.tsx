@@ -487,14 +487,16 @@ export function SubAgentDetailPage() {
   const canSubmitForApproval = (isOwner || hasGroupWriteAccess) && currentVersionStatus === 'draft';
 
   // Left panel tab: owners/writers default to config, everyone else to personalize
+  // GP agent (system_role='general-purpose') always shows personalize (no configurable settings)
+  const isGpAgent = subAgent?.system_role === 'general-purpose';
   const [leftPanelTab, setLeftPanelTab] = useState<'config' | 'personalize'>('config');
   const leftPanelTabInitialized = useRef(false);
   useEffect(() => {
     if (!leftPanelTabInitialized.current && subAgent) {
       leftPanelTabInitialized.current = true;
-      setLeftPanelTab(canEdit ? 'config' : 'personalize');
+      setLeftPanelTab(isGpAgent ? 'personalize' : canEdit ? 'config' : 'personalize');
     }
-  }, [subAgent, canEdit]);
+  }, [subAgent, canEdit, isGpAgent]);
 
   // Get displayed data based on whether viewing historical version
   const displayedDescription = isViewingHistoricalVersion
@@ -1033,6 +1035,7 @@ export function SubAgentDetailPage() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No system role</SelectItem>
+                      <SelectItem value="general-purpose">General Purpose</SelectItem>
                       <SelectItem value="assessor">Assessor</SelectItem>
                       <SelectItem value="debug">Debug</SelectItem>
                     </SelectContent>
@@ -1121,9 +1124,11 @@ export function SubAgentDetailPage() {
                   <ArrowLeft className="h-4 w-4" />
                 </Button>
                 <TabsList className="h-8">
-                  <TabsTrigger value="config" className="text-xs px-3 h-6">
-                    Configuration
-                  </TabsTrigger>
+                  {!isGpAgent && (
+                    <TabsTrigger value="config" className="text-xs px-3 h-6">
+                      Configuration
+                    </TabsTrigger>
+                  )}
                   <TabsTrigger value="personalize" className="text-xs px-3 h-6">
                     My Skills
                   </TabsTrigger>
@@ -1800,7 +1805,18 @@ export function SubAgentDetailPage() {
                                   key={skill.name}
                                   className="flex items-center gap-2 py-1 px-2 rounded bg-muted/40 text-[11px] group/skill"
                                 >
-                                  <code className="font-mono font-medium shrink-0 whitespace-nowrap">{skill.name || '(unnamed)'}</code>
+                                  {skill.source ? (
+                                    <a
+                                      href={`/app/skill-registry?skill=${skill.source}`}
+                                      className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline inline-flex items-center gap-0.5"
+                                      title="View in skill registry"
+                                    >
+                                      {skill.name || '(unnamed)'}
+                                      <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                                    </a>
+                                  ) : (
+                                    <code className="font-mono font-medium shrink-0 whitespace-nowrap">{skill.name || '(unnamed)'}</code>
+                                  )}
                                   {skill.source && (
                                     <span className="text-[10px] text-muted-foreground bg-muted px-1 rounded shrink-0">imported</span>
                                   )}
@@ -2029,7 +2045,7 @@ export function SubAgentDetailPage() {
                   >
                     <Blocks className="h-3 w-3 text-muted-foreground shrink-0" />
                     <a
-                      href={`/app/skill-registry?skill=${activation.registry_id}`}
+                      href={`/app/skill-registry?skill=${(activation as any).skill_slug || activation.skill_name}`}
                       className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline"
                     >
                       {activation.skill_name}

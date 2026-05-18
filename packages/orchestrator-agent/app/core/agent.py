@@ -189,7 +189,6 @@ class OrchestratorDeepAgent:
             backend_factory=self._graph_factory.backend_factory,
             cost_logger=self._graph_factory.cost_logger,
             backend_url=backend_url,
-            gp_graph_provider=self._graph_factory.get_gp_graph,
             task_scheduler_graph_provider=self._graph_factory.get_task_scheduler_graph,
             sandbox_pool=sandbox_pool,
         )

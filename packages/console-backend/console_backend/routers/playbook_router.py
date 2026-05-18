@@ -6,10 +6,16 @@ Reads/writes directly to the LangGraph store table in the docstore database.
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from console_backend.services.skill_activation_service import SkillActivationService
+    from console_backend.services.skill_registry_service import SkillRegistryService
+    from console_backend.services.sub_agent_service import SubAgentService
 
 from console_backend.db.session import DbSession
 from console_backend.dependencies import require_auth, require_auth_or_bearer_token
@@ -70,7 +76,7 @@ def get_playbook_service(request: Request) -> PlaybookService:
 
 
 async def _get_user_group_context(
-    request: Request, db: Any, user: User, group_id: str | None = None
+    request: Request, db: AsyncSession, user: User, group_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Get the user's group memberships.
 
@@ -821,13 +827,17 @@ async def delete_skill_file(
 # They provide a unified interface for skill/playbook management across all scopes.
 
 
-def _get_sub_agent_service(request: Request):
+def _get_sub_agent_service(request: Request) -> "SubAgentService":
     """Get the sub-agent service from app state."""
     return request.app.state.sub_agent_service
 
 
 # Agents that do not support the skills feature.
 _SKILLS_EXCLUDED_AGENTS = frozenset({"voice-agent"})
+
+# Orchestrator delegates skill ownership to general-purpose.
+# When the orchestrator calls skill tools, resolve to GP's sub_agent_id.
+_AGENT_NAME_ALIASES: dict[str, str] = {"orchestrator": "general-purpose"}
 
 
 def _require_agent_name(agent_name: str | None) -> str:
@@ -845,34 +855,42 @@ def _require_agent_name(agent_name: str | None) -> str:
     return agent_name
 
 
-def _get_skill_activation_service(request: Request):
+def _get_skill_activation_service(request: Request) -> "SkillActivationService":
     """Get the skill activation service from app state."""
     return request.app.state.skill_activation_service
 
 
-def _get_skill_registry_service(request: Request):
+def _get_skill_registry_service(request: Request) -> "SkillRegistryService":
     """Get the skill registry service from app state."""
     return request.app.state.skill_registry_service
 
 
-async def _resolve_sub_agent_id(request: Request, db, agent_name: str, sub_agent_id: int | None) -> int:
-    """Resolve sub_agent_id from agent_name if not explicitly provided."""
+async def _resolve_sub_agent_id(
+    request: Request, db: AsyncSession, agent_name: str, sub_agent_id: int | None
+) -> tuple[int, str]:
+    """Resolve sub_agent_id from agent_name if not explicitly provided.
+
+    Applies agent name aliases (e.g., orchestrator → general-purpose) before lookup.
+    Returns (sub_agent_id, resolved_agent_name).
+    """
+    resolved_name = _AGENT_NAME_ALIASES.get(agent_name, agent_name)
+
     if sub_agent_id:
-        return sub_agent_id
+        return sub_agent_id, resolved_name
 
     from sqlalchemy import text as sa_text
 
     result = await db.execute(
         sa_text("SELECT id FROM sub_agents WHERE name = :name AND deleted_at IS NULL"),
-        {"name": agent_name},
+        {"name": resolved_name},
     )
     row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(
             status_code=404,
-            detail=f"Sub-agent '{agent_name}' not found. Cannot resolve sub_agent_id.",
+            detail=f"Sub-agent '{resolved_name}' not found. Cannot resolve sub_agent_id.",
         )
-    return row
+    return row, resolved_name
 
 
 @router.post(
@@ -913,7 +931,7 @@ async def mcp_create_skill(
     _validate_skill_name(body.skill_name)
 
     # Resolve sub_agent_id
-    sub_agent_id = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
 
     # Resolve group context
     memberships = await _get_user_group_context(request, db, user)
@@ -967,7 +985,7 @@ async def mcp_create_skill(
             db=db,
             registry_id=entry.id,
             sub_agent_id=sub_agent_id,
-            agent_name=agent_name,
+            agent_name=resolved_name,
             scope=body.scope,
             user_id=user.id,
             group_id=int(resolved_group_id) if resolved_group_id and body.scope == "group" else None,
@@ -1011,7 +1029,7 @@ async def mcp_update_skill(
     _validate_skill_name(body.skill_name)
 
     # Resolve sub_agent_id
-    sub_agent_id = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
 
     # Resolve group context
     memberships = await _get_user_group_context(request, db, user)
@@ -1089,12 +1107,13 @@ async def mcp_update_skill(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Self-update: refresh this agent's activation
+    # Self-update: refresh this agent's activation / docstore snapshot
     await activation_service.self_update(
         db=db,
         registry_id=entry.id,
         sub_agent_id=sub_agent_id,
-        agent_name=agent_name,
+        agent_name=resolved_name,
+        actor=user,
     )
 
     return McpSkillResponse(
@@ -1131,7 +1150,7 @@ async def mcp_remove_skill(
     _validate_skill_name(body.skill_name)
 
     # Resolve sub_agent_id
-    sub_agent_id = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
 
     # Resolve group context
     memberships = await _get_user_group_context(request, db, user)
@@ -1157,7 +1176,7 @@ async def mcp_remove_skill(
         skill_name=body.skill_name,
         scope=body.scope,
         user_id=user.id if body.scope == "personal" else None,
-        group_id=int(resolved_group_id) if resolved_group_id and body.scope == "group" else None,
+        group_id=int(resolved_group_id) if resolved_group_id else None,
     )
     if not activation:
         raise HTTPException(
@@ -1169,7 +1188,7 @@ async def mcp_remove_skill(
         deactivated = await activation_service.deactivate(
             db=db,
             activation_id=activation["id"],
-            agent_name=agent_name,
+            agent_name=resolved_name,
             user_id=user.id,
         )
     except ValueError as e:
@@ -1279,7 +1298,7 @@ async def mcp_write_skill_file(
     _validate_file_path(body.file_path)
 
     # Resolve sub_agent_id
-    sub_agent_id = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
 
     # Resolve group context
     memberships = await _get_user_group_context(request, db, user)
@@ -1342,12 +1361,13 @@ async def mcp_write_skill_file(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Self-update: refresh this agent's activation
+    # Self-update: refresh this agent's activation / docstore snapshot
     await activation_service.self_update(
         db=db,
         registry_id=entry.id,
         sub_agent_id=sub_agent_id,
-        agent_name=agent_name,
+        agent_name=resolved_name,
+        actor=user,
     )
 
     return McpSkillResponse(
@@ -1389,7 +1409,7 @@ async def mcp_delete_skill_file(
     _validate_file_path(body.file_path)
 
     # Resolve sub_agent_id
-    sub_agent_id = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
 
     # Resolve group context
     memberships = await _get_user_group_context(request, db, user)
@@ -1449,12 +1469,13 @@ async def mcp_delete_skill_file(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Self-update: refresh this agent's activation
+    # Self-update: refresh this agent's activation / docstore snapshot
     await activation_service.self_update(
         db=db,
         registry_id=entry.id,
         sub_agent_id=sub_agent_id,
-        agent_name=agent_name,
+        agent_name=resolved_name,
+        actor=user,
     )
 
     return McpSkillResponse(

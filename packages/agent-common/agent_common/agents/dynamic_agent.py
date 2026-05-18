@@ -172,6 +172,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         user_id: Optional[str] = None,
         group_ids: Optional[List[str]] = None,
         sandbox_pool: SandboxPool | None = None,
+        extra_middlewares: Optional[List[Any]] = None,
+        inject_all_tools: Optional[List[BaseTool]] = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -194,6 +196,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             console_backend_client_id: Console backend OIDC client ID for token exchange (defaults to CONSOLE_BACKEND_CLIENT_ID env var)
             user_id: User's stable database ID (for playbook loading)
             group_ids: User's group IDs for group playbook loading (all groups)
+            extra_middlewares: Optional list of middleware instances to prepend to the standard stack.
+            inject_all_tools: Optional pre-discovered tools to use directly (bypasses MCP discovery).
+                When set, these tools are used as the agent's MCP tools without gateway discovery.
         """
         self.config = config
         self.model = model
@@ -219,6 +224,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             f"{os.getenv('CONSOLE_BACKEND_URL', '')}/mcp" if os.getenv("CONSOLE_BACKEND_URL") else ""
         )
         self.sandbox_pool = sandbox_pool
+        self.extra_middlewares = extra_middlewares
+        self.inject_all_tools = inject_all_tools
         self._agent: CompiledStateGraph | None = None
         self._discovered_tools: Optional[List[BaseTool]] = None
         self._resolved_skills: dict = {}
@@ -755,6 +762,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         """Get the effective tools for this agent.
 
         Logic:
+        - If inject_all_tools is set: use those directly + essential orchestrator tools
         - If mcp_tools is a non-empty list: use discovered tools + essential orchestrator tools
         - Otherwise (None or empty list): only essential orchestrator tools (NO MCP tools)
 
@@ -782,6 +790,17 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         ]
         essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
 
+        # If inject_all_tools is set, use those directly (pre-discovered by orchestrator)
+        if self.inject_all_tools is not None:
+            # Deduplicate: injected tools override essential tools with same name
+            injected_names = {t.name for t in self.inject_all_tools}
+            unique_essential = [t for t in essential_tools if t.name not in injected_names]
+            logger.info(
+                f"Using {len(self.inject_all_tools)} injected tools + "
+                f"{len(unique_essential)} essential tools for '{self.name}'"
+            )
+            return list(self.inject_all_tools) + unique_essential
+
         # Check if config.mcp_tools is a non-empty list
         if self.config.mcp_tools and len(self.config.mcp_tools) > 0:
             # Non-empty list means use discovered tools + essential orchestrator tools
@@ -804,11 +823,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         """Resolve tools, skills, prompt, and build the default graph (lazy, once).
 
         On first call:
-        1. If mcp_tools is set, discover tools from Gatana gateway with whitelist filtering
-        2. Otherwise, use orchestrator tools (inheritance)
-        3. Resolve skills from store (default + group + personal)
-        4. Cache all intermediate state for _build_graph()
-        5. Build self._agent ONLY if sandbox is not active (sandbox agents build
+        1. If inject_all_tools is set, use those directly (skip gateway discovery)
+        2. Else if mcp_tools is set, discover tools from Gatana gateway with whitelist filtering
+        3. Otherwise, use orchestrator tools (inheritance)
+        4. Resolve skills from store (default + group + personal)
+        5. Cache all intermediate state for _build_graph()
+        6. Build self._agent ONLY if sandbox is not active (sandbox agents build
            a fresh graph per invocation in _astream_impl)
 
         After first call, this is a no-op (guarded by _cached_tools sentinel).
@@ -817,10 +837,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if self._cached_tools is not None:
             return
 
-        # Discover MCP tools if whitelist is configured (lazy, first invocation only)
-        # Note: Only discover if mcp_tools is a non-empty list
-        if self.config.mcp_tools and len(self.config.mcp_tools) > 0 and self._discovered_tools is None:
-            self._discovered_tools = await self._discover_mcp_tools()
+        # Discover MCP tools if whitelist is configured AND no injected tools
+        # (inject_all_tools bypasses gateway discovery entirely)
+        if self.inject_all_tools is None:
+            if self.config.mcp_tools and len(self.config.mcp_tools) > 0 and self._discovered_tools is None:
+                self._discovered_tools = await self._discover_mcp_tools()
 
         tools = self._get_effective_tools()
 
@@ -931,9 +952,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             )
         elif effective_backend_factory and self._resolved_skills:
             # backend_factory already set (e.g., from orchestrator). Replace or add
-            # /skills/ route with the sub-agent's own SkillsStoreBackend (the inherited
-            # route may point to the orchestrator's LazySkillsBackend which reads from
-            # a different context).
+            # /skills/ route with the sub-agent's own SkillsStoreBackend.
             from agent_common.backends.skills_store import SkillsStoreBackend as _SSB
 
             if isinstance(effective_backend_factory, CompositeBackend):
@@ -981,6 +1000,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 For sandbox: a sandboxed factory wrapping the base factory.
             extra_middlewares: Optional list of additional AgentMiddleware instances
                 to prepend to the standard middleware stack (e.g. SkillSandboxSyncMiddleware).
+                Combined with self.extra_middlewares (instance-level comes first).
             extra_tools: Optional list of additional tools to include alongside
                 the cached tools (e.g. copy_to_sandbox for sandbox-enabled agents).
             sandbox_enabled: When True, configures StoragePathsInstructionMiddleware
@@ -990,6 +1010,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         Returns:
             A compiled CompiledStateGraph
         """
+        # Combine instance-level extra_middlewares with call-level ones
+        combined_middlewares = list(self.extra_middlewares or []) + list(extra_middlewares or []) or None
         return build_sub_agent_graph(
             model=self.model,
             tools=self._cached_tools or [],
@@ -999,7 +1021,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             response_format=self._cached_response_format,
             backend_factory=backend_factory or None,
             hitl_guarded_tools=self._cached_hitl_guarded,
-            extra_middlewares=extra_middlewares,
+            extra_middlewares=combined_middlewares,
             extra_tools=extra_tools,
             sandbox_enabled=sandbox_enabled,
             sandbox_home=sandbox_home,
@@ -1043,6 +1065,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         sandbox_active = getattr(self.config, "sandbox_enabled", False) and self.sandbox_pool is not None
 
         try:
+            # Clear per-invocation caches on extra_middlewares (e.g. ToolsetSelectorMiddleware)
+            for mw in self.extra_middlewares or []:
+                if hasattr(mw, "clear_cache"):
+                    mw.clear_cache()
+
             # Ensure tools/skills/prompt are resolved and default agent is built (lazy init)
             await self._ensure_agent()
 
@@ -1300,6 +1327,8 @@ def create_dynamic_local_subagent(
     user_id: Optional[str] = None,
     group_ids: Optional[List[str]] = None,
     sandbox_pool: SandboxPool | None = None,
+    extra_middlewares: Optional[List[Any]] = None,
+    inject_all_tools: Optional[List[BaseTool]] = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
@@ -1324,6 +1353,8 @@ def create_dynamic_local_subagent(
         console_backend_client_id: Console backend OIDC client ID for token exchange (defaults to CONSOLE_BACKEND_CLIENT_ID env var)
         user_id: User's stable database ID (for playbook loading)
         group_ids: User's group IDs for group playbook loading (all groups)
+        extra_middlewares: Optional middleware instances to prepend to the standard stack.
+        inject_all_tools: Optional pre-discovered tools (bypasses MCP discovery).
 
     Returns:
         CompiledSubAgent that can be registered with the orchestrator
@@ -1358,6 +1389,8 @@ def create_dynamic_local_subagent(
         user_id=user_id,
         group_ids=group_ids,
         sandbox_pool=sandbox_pool,
+        extra_middlewares=extra_middlewares,
+        inject_all_tools=inject_all_tools,
     )
 
     return CompiledSubAgent(

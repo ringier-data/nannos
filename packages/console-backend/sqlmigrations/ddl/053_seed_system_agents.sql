@@ -44,14 +44,58 @@ WHERE sa.name = 'skill-assessor'
         WHERE cv.sub_agent_id = sa.id
             AND cv.version = 1
     );
+-- General Purpose: built-in execution agent for the orchestrator.
+-- Skills activated on this agent are available to both the orchestrator
+-- (for awareness) and GP (for execution).
+INSERT INTO sub_agents (
+        name,
+        owner_user_id,
+        type,
+        is_public,
+        current_version,
+        default_version,
+        system_role
+    )
+VALUES (
+        'general-purpose',
+        'system',
+        'local',
+        TRUE,
+        1,
+        1,
+        'general-purpose'
+    ) ON CONFLICT DO NOTHING;
+INSERT INTO sub_agent_config_versions (
+        sub_agent_id,
+        version,
+        release_number,
+        description,
+        system_prompt,
+        status
+    )
+SELECT sa.id,
+    1,
+    1,
+    'A general-purpose assistant capable of handling a wide variety of tasks. ' || 'It has access to all available MCP tools and can perform complex multi-step operations. ' || 'Use this agent when no specialized sub-agent is appropriate for the task.',
+    '<role>' || chr(10) || 'You are a helpful general-purpose assistant with access to a curated set of tools ' || 'that have been selected as relevant to the current task.' || chr(10) || '</role>' || chr(10) || chr(10) || '<instructions>' || chr(10) || 'Use the available tools to accomplish the user''s request thoroughly and accurately. ' || 'When you''re done, provide a clear and complete summary of what was accomplished.' || chr(10) || '</instructions>',
+    'approved'
+FROM sub_agents sa
+WHERE sa.name = 'general-purpose'
+    AND sa.owner_user_id = 'system'
+    AND NOT EXISTS (
+        SELECT 1
+        FROM sub_agent_config_versions cv
+        WHERE cv.sub_agent_id = sa.id
+            AND cv.version = 1
+    );
 -- rambler down
 DELETE FROM sub_agent_config_versions
 WHERE sub_agent_id IN (
         SELECT id
         FROM sub_agents
         WHERE owner_user_id = 'system'
-            AND name IN ('skill-assessor')
+            AND name IN ('skill-assessor', 'general-purpose')
     );
 DELETE FROM sub_agents
 WHERE owner_user_id = 'system'
-    AND name IN ('skill-assessor');
+    AND name IN ('skill-assessor', 'general-purpose');

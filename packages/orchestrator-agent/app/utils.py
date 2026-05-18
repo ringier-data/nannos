@@ -74,7 +74,6 @@ def build_runtime_context(
     backend_factory: Any = None,
     cost_logger: Any = None,
     backend_url: str | None = None,
-    gp_graph_provider: Any = None,
     task_scheduler_graph_provider: Any = None,
     sandbox_pool: SandboxPool | None = None,
 ) -> Any:  # GraphRuntimeContext
@@ -85,7 +84,7 @@ def build_runtime_context(
     - Built-in local sub-agents (like file-analyzer, task-scheduler)
     - Remote A2A agents from discovery
     - Dynamic local sub-agents from user configuration
-    - General-purpose (GP) agent (if gp_graph_provider is provided)
+    - General-purpose (GP) agent (loaded from DB as a DynamicLocalAgentRunnable)
     - Document store tools (if dependencies provided)
 
     Dynamic local sub-agents are instantiated with:
@@ -96,6 +95,11 @@ def build_runtime_context(
     - Shared document store for persistent memory (FilesystemMiddleware)
     - Shared backend factory for semantic indexing (IndexingStoreBackend)
     - Custom model selection via config.model_name (if specified)
+
+    The GP agent is special:
+    - Gets ALL tools from tool_registry (via inject_all_tools)
+    - Has ToolsetSelectorMiddleware for smart LLM-driven tool filtering
+    - Shares the same DynamicLocalAgentRunnable code path as other local agents
 
     Args:
         user_config: User configuration with tools, sub-agents, and preferences.
@@ -109,7 +113,6 @@ def build_runtime_context(
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
-        gp_graph_provider: Callable(model_type, thinking_level) -> CompiledStateGraph for GP agent.
         task_scheduler_graph_provider: Callable(model_type) -> CompiledStateGraph for task-scheduler agent.
 
     Returns:
@@ -122,11 +125,12 @@ def build_runtime_context(
     from agent_common.core.document_store_tools import create_document_store_tools
     from agent_common.core.model_factory import create_model, get_default_model, is_valid_model
     from deepagents import CompiledSubAgent
+    from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
     from .agents.file_analyzer import create_file_analyzer_subagent
-    from .agents.gp_agent import create_gp_local_subagent
     from .agents.task_scheduler import create_task_scheduler_subagent
+    from .middleware import ToolsetSelectorMiddleware
     from .models.config import GraphRuntimeContext
 
     # Convert tools list to tool_registry (name -> tool mapping)
@@ -376,6 +380,33 @@ def build_runtime_context(
                     # Pass checkpointer for multi-turn conversation state
                     # Pass store and backend_factory for FilesystemMiddleware persistence
                     # Pass user preferences for personalized sub-agent behavior
+
+                    # GP agent gets special treatment: all MCP tools injected directly
+                    # + ToolsetSelectorMiddleware for smart LLM-driven filtering
+                    gp_extra_middlewares = None
+                    gp_inject_all_tools = None
+                    if config.name == "general-purpose":
+                        # Inject ALL MCP tools from tool_registry (already discovered by orchestrator)
+                        gp_inject_all_tools = [t for t in tool_registry.values() if isinstance(t, BaseTool)]
+                        # Add ToolsetSelectorMiddleware for smart tool filtering
+                        gp_extra_middlewares = [
+                            ToolsetSelectorMiddleware(
+                                always_include=[
+                                    "get_current_time",
+                                    "generate_presigned_url",
+                                    "docstore_search",
+                                    "read_personal_file",
+                                    "docstore_export",
+                                    "copy_file",
+                                ],
+                                cost_logger=cost_logger,
+                            ),
+                        ]
+                        logger.info(
+                            f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
+                            f"with ToolsetSelectorMiddleware"
+                        )
+
                     dynamic_subagent = create_dynamic_local_subagent(
                         config=config,
                         model=subagent_model,
@@ -394,6 +425,8 @@ def build_runtime_context(
                         user_id=user_config.user_id,
                         group_ids=user_config.groups if user_config.groups else None,
                         sandbox_pool=sandbox_pool if getattr(config, "sandbox_enabled", False) else None,
+                        extra_middlewares=gp_extra_middlewares,
+                        inject_all_tools=gp_inject_all_tools,
                     )
                     # Log if sandbox_enabled but no pool configured
                     if getattr(config, "sandbox_enabled", False) and not sandbox_pool:
@@ -434,23 +467,5 @@ def build_runtime_context(
         subagent_registry=subagent_registry,
         whitelisted_tool_names=whitelisted_tool_names,
     )
-
-    # Register general-purpose (GP) agent as a local sub-agent.
-    # This is done after GraphRuntimeContext creation because the GP agent needs
-    # the context reference for runtime tool injection (context_schema=GraphRuntimeContext).
-    # Since subagent_registry is a mutable dict, updating it here also updates the
-    # reference inside context.
-    if gp_graph_provider:
-        model_type = user_config.model or get_default_model()
-        thinking_level = user_config.thinking_level
-        subagent_registry["general-purpose"] = create_gp_local_subagent(
-            gp_graph_provider=gp_graph_provider,
-            user_context=context,
-            model_type=model_type,
-            user_sub=user_config.user_sub,
-            thinking_level=thinking_level,
-            cost_logger=cost_logger,
-        )
-        logger.info(f"Registered GP local sub-agent (model: {model_type}, thinking: {thinking_level})")
 
     return context

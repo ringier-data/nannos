@@ -63,13 +63,13 @@ class TestSkillsStoreIntegration:
 
         # Agent A can see skill-a but not skill-b
         ls_a = asyncio.run(backend_a.als("/skills/"))
-        names_a = [e["path"].rstrip("/") for e in ls_a.entries]
+        names_a = [e["path"].strip("/") for e in ls_a.entries]
         assert "skill-a" in names_a
         assert "skill-b" not in names_a
 
         # Agent B can see skill-b but not skill-a
         ls_b = asyncio.run(backend_b.als("/skills/"))
-        names_b = [e["path"].rstrip("/") for e in ls_b.entries]
+        names_b = [e["path"].strip("/") for e in ls_b.entries]
         assert "skill-b" in names_b
         assert "skill-a" not in names_b
 

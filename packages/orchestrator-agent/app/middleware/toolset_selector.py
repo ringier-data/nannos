@@ -14,27 +14,21 @@ middleware** (cached across model calls within the same GP invocation):
    ``TOOL_SELECTION_THRESHOLD`` (default 20), a second LLM call picks the most
    relevant individual tools.
 
-Both phases are cached on ``GraphRuntimeContext._cached_selected_tools`` so
-that subsequent model calls within the same GP invocation skip the LLM calls.
-
-**INTEGRATION STATUS: ACTIVE**
-
-This middleware runs inside the custom GP graph created by
-:meth:`GraphFactory._create_gp_graph` (using ``langchain.agents.create_agent``).
-The custom GP graph bypasses deepagents' built-in GP, which has limitations
-(no context_schema, no MCP tools, no customizable middleware).
+Both phases are cached per-invocation via a ``contextvars.ContextVar`` so that
+concurrent async invocations sharing the same middleware instance do not
+interfere with each other.  Call ``clear_cache()`` before each new invocation
+to reset state for the current task.
 
 Architecture:
   - The orchestrator calls ``task(subagent_type="general-purpose", ...)``
   - ``DynamicToolDispatchMiddleware._adispatch_task_tool`` intercepts the call
-  - The GP graph runs with this middleware in its stack:
-    1. ``ToolsetSelectorMiddleware`` — reads ALL MCP tools from ``tool_registry``,
+  - The GP DynamicLocalAgentRunnable runs with this middleware in its extra_middlewares:
+    1. ``ToolsetSelectorMiddleware`` — reads ALL tools from ``request.tools``,
        Phase 1 server selection + Phase 2 tool selection (both cached)
-    2. ``DynamicToolDispatchMiddleware(skip_tool_injection=True)`` — converts tools
-       to dicts for model binding (Gemini compatibility), handles MCP tool execution
-    3. ``ToolRetryMiddleware`` — retries on transient errors
+    2. Standard common middleware stack (FilesystemMiddleware, caching, retry, etc.)
 """
 
+import contextvars
 import logging
 import textwrap
 from collections.abc import Awaitable, Callable
@@ -53,9 +47,15 @@ from langgraph.constants import TAG_NOSTREAM
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
-from ..models.config import AgentSettings, GraphRuntimeContext
+from ..models.config import AgentSettings
 
 logger = logging.getLogger(__name__)
+
+# Per-task cache for selected tools — isolates concurrent invocations sharing
+# the same ToolsetSelectorMiddleware instance.
+_selected_tools_var: contextvars.ContextVar[list[BaseTool] | None] = contextvars.ContextVar(
+    "toolset_selector_cache", default=None
+)
 
 
 class ServerSelection(BaseModel):
@@ -70,7 +70,7 @@ class ToolSelection(BaseModel):
     tools: Annotated[list[str], Field(description="List of selected tool names in order of relevance")]
 
 
-class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]):
+class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, None]):
     """Middleware for smart toolset selection in the general-purpose agent.
 
     Filters tools in two phases (both executed here, cached across model calls):
@@ -80,6 +80,10 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
        count > ``TOOL_SELECTION_THRESHOLD``.
 
     Always includes static orchestrator tools (time, presigned_url, docstore).
+
+    Cache is scoped per-task via ``contextvars.ContextVar``, making it safe for
+    concurrent async invocations.  Call ``clear_cache()`` between invocations to
+    reset state for the current task.
     """
 
     def __init__(self, always_include: list[str] | None = None, cost_logger: CostLogger | None = None):
@@ -94,55 +98,43 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
         self.always_include = always_include or []
         self._cost_logger = cost_logger
 
+    def clear_cache(self) -> None:
+        """Clear cached tool selection for the current task."""
+        _selected_tools_var.set(None)
+
     async def awrap_model_call(
         self,
-        request: ModelRequest[GraphRuntimeContext],
-        handler: Callable[[ModelRequest[GraphRuntimeContext]], Awaitable[ModelResponse]],
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | AIMessage:
         """Filter tools before model call based on server selection and LLM selection.
 
         Args:
-            request: Model request with user context
+            request: Model request with tools
             handler: Async callback to execute the model
 
         Returns:
             Model response from handler with filtered tools
         """
-        user_context = request.runtime.context
-        if not isinstance(user_context, GraphRuntimeContext):
-            logger.warning("ToolsetSelectorMiddleware: context is not GraphRuntimeContext, skipping")
-            return await handler(request)
-
-        # Get all available tools from user context (MCP tools + request tools)
-        # MCP tools are in tool_registry, request.tools has base tools (task, write_todos, etc.)
+        # Get all available tools from request.tools
         all_tools: list[BaseTool] = []
-        seen_names: set[str] = set()
-
-        # Add MCP tools from tool_registry (discovered tools with server metadata)
-        for tool_name, tool in user_context.tool_registry.items():
-            if isinstance(tool, BaseTool) and tool_name not in seen_names:
-                all_tools.append(tool)
-                seen_names.add(tool_name)
-
-        # Add base tools from request that aren't already included
         for tool in request.tools or []:
-            if isinstance(tool, BaseTool) and tool.name not in seen_names:
+            if isinstance(tool, BaseTool):
                 all_tools.append(tool)
-                seen_names.add(tool.name)
 
         if not all_tools:
             return await handler(request)
 
         # Use cached selection from a previous model call in this GP invocation
         # (the graph makes multiple model calls in a loop; avoid re-running LLMs)
-        cached_tools = getattr(user_context, "_cached_selected_tools", None)
-        if cached_tools is not None:
-            filtered_tools = cached_tools
+        cached = _selected_tools_var.get()
+        if cached is not None:
+            filtered_tools = cached
             logger.debug(f"ToolsetSelector: Using cached selection ({len(filtered_tools)} tools)")
         else:
             filtered_tools = await self._select_tools(all_tools, request.messages)
             # Cache the result for subsequent model calls in this invocation
-            user_context._cached_selected_tools = filtered_tools
+            _selected_tools_var.set(filtered_tools)
 
         # Always include essential orchestrator tools (even if not in filtered set)
         always_included = [
