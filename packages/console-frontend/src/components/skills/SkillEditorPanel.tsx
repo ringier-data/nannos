@@ -17,7 +17,7 @@ import {
   updateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutMutation,
   listSkillsApiV1PlaybooksAgentsAgentNameSkillsGetQueryKey,
 } from '@/api/generated/@tanstack/react-query.gen';
-import { listSkillFiles, getSkillFile, writeSkillFile, deleteSkillFile } from '@/api/skillFiles';
+import { listSkillFiles, getSkillFile, writeSkillFile, deleteSkillFile } from '@/api/skill-files';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';

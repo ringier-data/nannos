@@ -1054,7 +1054,7 @@ export type CopyRequest = {
     /**
      * Slug
      *
-     * Slug for the copy (defaults to original + '-copy')
+     * Slug for the copy. Auto-derived from name if omitted.
      */
     slug?: string | null;
 };
@@ -1480,7 +1480,7 @@ export type McpActivateSkillInput = {
     /**
      * Scope
      *
-     * Activation scope: 'personal' or 'group'
+     * Activation scope: 'personal' (only you), 'group' (shared with group members), or 'default' (baked into sub-agent config, visible to all users — requires owner/write access)
      */
     scope?: string;
     /**
@@ -1640,12 +1640,7 @@ export type McpPlaybookUpdate = {
      * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
      */
     agent_name?: string | null;
-    /**
-     * Scope
-     *
-     * Scope: 'personal' or 'group'
-     */
-    scope: string;
+    scope: ScopeEnum;
     /**
      * Content
      *
@@ -1755,12 +1750,7 @@ export type McpSkillCreate = {
      * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
      */
     agent_name?: string | null;
-    /**
-     * Scope
-     *
-     * Activation scope: 'personal' (user-only, immediate), or 'group' (shared with group, immediate)
-     */
-    scope: string;
+    scope: ScopeEnum2;
     /**
      * Skill Name
      *
@@ -1817,12 +1807,7 @@ export type McpSkillDeleteFile = {
      * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
      */
     agent_name?: string | null;
-    /**
-     * Scope
-     *
-     * Scope of the skill: 'personal' or 'group'
-     */
-    scope: string;
+    scope: ScopeEnum2;
     /**
      * Skill Name
      *
@@ -1884,12 +1869,7 @@ export type McpSkillRemove = {
      * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
      */
     agent_name?: string | null;
-    /**
-     * Scope
-     *
-     * Scope of the skill to remove: 'personal' or 'group'
-     */
-    scope: string;
+    scope: ScopeEnum2;
     /**
      * Skill Name
      *
@@ -1920,10 +1900,7 @@ export type McpSkillResponse = {
      * Skill Name
      */
     skill_name: string;
-    /**
-     * Scope
-     */
-    scope: string;
+    scope: ScopeEnum2;
     /**
      * Agent Name
      */
@@ -1955,12 +1932,7 @@ export type McpSkillUpdate = {
      * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
      */
     agent_name?: string | null;
-    /**
-     * Scope
-     *
-     * Scope of the skill to update: 'personal' or 'group'
-     */
-    scope: string;
+    scope: ScopeEnum2;
     /**
      * Skill Name
      *
@@ -2023,12 +1995,7 @@ export type McpSkillWriteFile = {
      * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
      */
     agent_name?: string | null;
-    /**
-     * Scope
-     *
-     * Scope of the skill: 'personal' or 'group'
-     */
-    scope: string;
+    scope: ScopeEnum2;
     /**
      * Skill Name
      *
@@ -2455,12 +2422,7 @@ export type PlaybookContent = {
      * Agent Name
      */
     agent_name: string;
-    /**
-     * Scope
-     *
-     * 'personal' or 'group'
-     */
-    scope: string;
+    scope: ScopeEnum;
     /**
      * Content
      *
@@ -2730,9 +2692,9 @@ export type RegistryCreateRequest = {
     /**
      * Slug
      *
-     * URL-safe identifier (lowercase, hyphens)
+     * URL-safe identifier. Auto-derived from name if omitted.
      */
-    slug: string;
+    slug?: string | null;
     /**
      * Description
      *
@@ -3692,6 +3654,12 @@ export type SkillActivationWithStatus = {
      */
     activated_by: string;
     /**
+     * Skill Slug
+     *
+     * Skill identifier (slug) for use in MCP tool calls
+     */
+    skill_slug: string;
+    /**
      * Skill Name
      */
     skill_name: string;
@@ -3971,10 +3939,7 @@ export type SkillDetail = {
      * Name
      */
     name: string;
-    /**
-     * Scope
-     */
-    scope: string;
+    scope: ScopeEnum2;
     /**
      * Content
      *
@@ -4186,7 +4151,7 @@ export type SkillListResponse = {
     /**
      * Items
      */
-    items?: Array<SkillSummary>;
+    items?: Array<ConsoleBackendModelsPlaybookSkillSummary>;
 };
 
 /**
@@ -4432,56 +4397,6 @@ export type SkillSourceInfo = {
 };
 
 /**
- * SkillSummary
- *
- * Summary of a skill file (for listing).
- */
-export type SkillSummary = {
-    /**
-     * Name
-     *
-     * Skill identifier (lowercase, hyphens, per SKILL.md spec)
-     */
-    name: string;
-    /**
-     * Title
-     *
-     * Skill name from frontmatter (or first heading for legacy)
-     */
-    title: string;
-    /**
-     * Description
-     *
-     * Description from frontmatter (what the skill does and when to use it)
-     */
-    description?: string;
-    /**
-     * Scope
-     *
-     * 'personal' or 'group'
-     */
-    scope: string;
-    /**
-     * File Count
-     *
-     * Number of bundled files (excluding SKILL.md)
-     */
-    file_count?: number;
-    /**
-     * Group Id
-     *
-     * Group ID (present for group scope)
-     */
-    group_id?: string | null;
-    /**
-     * Group Name
-     *
-     * Group display name (present for group scope)
-     */
-    group_name?: string | null;
-};
-
-/**
  * SkillUpdate
  *
  * Request body for updating a skill.
@@ -4504,7 +4419,7 @@ export type SkillUpdate = {
 /**
  * SubAgent
  *
- * Sub-agent model.
+ * Sub-agent model with full config version (including skill body/files).
  *
  * Metadata (name, owner, type) lives on sub_agents table.
  * Configuration data (description, model, config, status) lives on sub_agent_config_versions.
@@ -4538,7 +4453,6 @@ export type SubAgent = {
      * Default Version
      */
     default_version?: number | null;
-    config_version?: SubAgentConfigVersion | null;
     /**
      * Is Public
      */
@@ -4568,6 +4482,7 @@ export type SubAgent = {
      * Updated At
      */
     updated_at?: string;
+    config_version?: SubAgentConfigVersion | null;
 };
 
 /**
@@ -4601,7 +4516,7 @@ export type SubAgentApproval = {
 /**
  * SubAgentConfigVersion
  *
- * Version history entry for sub-agent configurations.
+ * Full version with complete skill content (body + files).
  */
 export type SubAgentConfigVersion = {
     /**
@@ -4692,9 +4607,137 @@ export type SubAgentConfigVersion = {
     enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
     /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean;
+    /**
+     * Change Summary
+     */
+    change_summary?: string | null;
+    status?: SubAgentStatus;
+    /**
+     * Submitted By User Id
+     */
+    submitted_by_user_id?: string | null;
+    /**
+     * Approved By User Id
+     */
+    approved_by_user_id?: string | null;
+    /**
+     * Approved At
+     */
+    approved_at?: string | null;
+    /**
+     * Rejection Reason
+     */
+    rejection_reason?: string | null;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
      * Skills
      */
     skills?: Array<SkillDefinitionOutput>;
+};
+
+/**
+ * SubAgentConfigVersionSummary
+ *
+ * Lightweight config version for list responses (skills without body/files).
+ */
+export type SubAgentConfigVersionSummary = {
+    /**
+     * Id
+     */
+    id?: number | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Version
+     */
+    version: number;
+    /**
+     * Version Hash
+     */
+    version_hash?: string | null;
+    /**
+     * Release Number
+     */
+    release_number?: number | null;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Model
+     */
+    model?: string | null;
+    /**
+     * System Prompt
+     */
+    system_prompt?: string | null;
+    /**
+     * Agent Url
+     */
+    agent_url?: string | null;
+    /**
+     * Mcp Tools
+     */
+    mcp_tools?: Array<string>;
+    /**
+     * Foundry Hostname
+     */
+    foundry_hostname?: string | null;
+    /**
+     * Foundry Client Id
+     */
+    foundry_client_id?: string | null;
+    /**
+     * Foundry Client Secret Ref
+     */
+    foundry_client_secret_ref?: number | null;
+    /**
+     * Foundry Client Secret Ssmkey
+     *
+     * SSM Parameter Store name for Foundry client secret. Is retrieved conditionally just when needed by the orchestrator.
+     */
+    foundry_client_secret_ssmkey?: string | null;
+    /**
+     * Foundry Ontology Rid
+     */
+    foundry_ontology_rid?: string | null;
+    /**
+     * Foundry Query Api Name
+     */
+    foundry_query_api_name?: string | null;
+    /**
+     * Foundry Scopes
+     */
+    foundry_scopes?: Array<string> | null;
+    /**
+     * Foundry Version
+     */
+    foundry_version?: string | null;
+    /**
+     * Pricing Config
+     *
+     * Agent-specific rate card configuration. Only applicable for remote and foundry agents. Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} or {'price_per_million_requests': 0.05}
+     */
+    pricing_config?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: ThinkingLevel | null;
     /**
      * Sandbox Enabled
      */
@@ -4728,6 +4771,10 @@ export type SubAgentConfigVersion = {
      * Created At
      */
     created_at: string;
+    /**
+     * Skills
+     */
+    skills?: Array<ConsoleBackendModelsSubAgentSkillSummary>;
 };
 
 /**
@@ -4853,6 +4900,71 @@ export type SubAgentGroupPermissionResponse = {
 };
 
 /**
+ * SubAgentListItem
+ *
+ * Lightweight sub-agent for list responses (skills without body/files).
+ */
+export type SubAgentListItem = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    owner?: SubAgentOwner | null;
+    owner_status?: OwnerStatus;
+    type: SubAgentType;
+    /**
+     * System Role
+     */
+    system_role?: string | null;
+    /**
+     * Current Version
+     */
+    current_version?: number;
+    /**
+     * Default Version
+     */
+    default_version?: number | null;
+    /**
+     * Is Public
+     */
+    is_public?: boolean | null;
+    /**
+     * Is Activated
+     */
+    is_activated?: boolean | null;
+    activated_by?: ActivationSource | null;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
+    /**
+     * Effective Permission
+     */
+    effective_permission?: _0Enum | null;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+    config_version?: SubAgentConfigVersionSummary | null;
+};
+
+/**
  * SubAgentListResponse
  *
  * Response model for listing sub-agents.
@@ -4861,7 +4973,7 @@ export type SubAgentListResponse = {
     /**
      * Items
      */
-    items: Array<SubAgent>;
+    items: Array<SubAgentListItem>;
     /**
      * Total
      */
@@ -5912,6 +6024,51 @@ export type VisibilityUpdate = {
 };
 
 /**
+ * SkillSummary
+ *
+ * Summary of a skill file (for listing).
+ */
+export type ConsoleBackendModelsPlaybookSkillSummary = {
+    /**
+     * Name
+     *
+     * Skill identifier (lowercase, hyphens, per SKILL.md spec)
+     */
+    name: string;
+    /**
+     * Title
+     *
+     * Skill name from frontmatter (or first heading for legacy)
+     */
+    title: string;
+    /**
+     * Description
+     *
+     * Description from frontmatter (what the skill does and when to use it)
+     */
+    description?: string;
+    scope: ScopeEnum2;
+    /**
+     * File Count
+     *
+     * Number of bundled files (excluding SKILL.md)
+     */
+    file_count?: number;
+    /**
+     * Group Id
+     *
+     * Group ID (present for group scope)
+     */
+    group_id?: string | null;
+    /**
+     * Group Name
+     *
+     * Group display name (present for group scope)
+     */
+    group_name?: string | null;
+};
+
+/**
  * SkillFile
  *
  * A single file within a skill (SKILL.md, examples, etc.).
@@ -5958,6 +6115,42 @@ export type ConsoleBackendModelsSubAgentSkillFile = {
 };
 
 /**
+ * SkillSummary
+ *
+ * Lightweight skill metadata for list responses (no body/files content).
+ */
+export type ConsoleBackendModelsSubAgentSkillSummary = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string;
+    /**
+     * Source
+     */
+    source?: string | null;
+    /**
+     * Source Hash
+     */
+    source_hash?: string | null;
+    /**
+     * Update Available
+     */
+    update_available?: boolean;
+    /**
+     * Latest Hash
+     */
+    latest_hash?: string | null;
+    /**
+     * Sandbox Required
+     */
+    sandbox_required?: boolean;
+};
+
+/**
  * Model
  */
 export type ModelEnum = 'gpt-4o' | 'gpt-4o-mini' | 'claude-sonnet-4.5' | 'claude-sonnet-4.6' | 'claude-haiku-4-5' | 'gemini-3.1-pro-preview' | 'gemini-3-flash-preview';
@@ -5971,6 +6164,20 @@ export type ActionEnum = 'suspend' | 'activate' | 'delete';
  * Role
  */
 export type RoleEnum = 'read' | 'write' | 'manager';
+
+/**
+ * Scope
+ *
+ * Scope: 'personal' or 'group'
+ */
+export type ScopeEnum = 'personal' | 'group';
+
+/**
+ * Scope
+ *
+ * Activation scope: 'personal' (user-only), 'group' (shared with group), or 'default' (baked into sub-agent config for all users)
+ */
+export type ScopeEnum2 = 'personal' | 'group' | 'default';
 
 /**
  * Flow Direction
@@ -11624,6 +11831,31 @@ export type ApplySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostResponses =
     200: unknown;
 };
 
+export type ConsoleActivateSkillData = {
+    body: McpActivateSkillInput;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/activate';
+};
+
+export type ConsoleActivateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleActivateSkillError = ConsoleActivateSkillErrors[keyof ConsoleActivateSkillErrors];
+
+export type ConsoleActivateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    201: McpActivateSkillResponse;
+};
+
+export type ConsoleActivateSkillResponse = ConsoleActivateSkillResponses[keyof ConsoleActivateSkillResponses];
+
 export type ActivateSkillApiV1SkillsRegistrySkillIdActivatePostData = {
     body: ActivateRequest;
     path: {
@@ -11729,31 +11961,6 @@ export type ConsoleImportSkillResponses = {
 };
 
 export type ConsoleImportSkillResponse = ConsoleImportSkillResponses[keyof ConsoleImportSkillResponses];
-
-export type ConsoleActivateSkillData = {
-    body: McpActivateSkillInput;
-    path?: never;
-    query?: never;
-    url: '/api/v1/skills/registry/mcp/activate';
-};
-
-export type ConsoleActivateSkillErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleActivateSkillError = ConsoleActivateSkillErrors[keyof ConsoleActivateSkillErrors];
-
-export type ConsoleActivateSkillResponses = {
-    /**
-     * Successful Response
-     */
-    201: McpActivateSkillResponse;
-};
-
-export type ConsoleActivateSkillResponse = ConsoleActivateSkillResponses[keyof ConsoleActivateSkillResponses];
 
 export type ListActivationsApiV1SkillsActivationsSubAgentIdGetData = {
     body?: never;

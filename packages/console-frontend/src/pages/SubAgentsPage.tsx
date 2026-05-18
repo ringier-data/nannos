@@ -8,7 +8,7 @@ import {
   consoleListSubAgentsOptions,
   listPendingApprovalsApiV1SubAgentsPendingGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgent, SubAgentListResponse } from '@/api/generated/types.gen';
+import type { SubAgentListItem, SubAgentListResponse } from '@/api/generated/types.gen';
 import { useAuth } from '@/contexts/AuthContext';
 
 type TabId = 'my' | 'accessible' | 'pending';
@@ -63,7 +63,7 @@ export function SubAgentsPage() {
     (tab) => !tab.requiresAdmin || adminMode
   );
 
-  const getSubAgentsForTab = (): SubAgent[] => {
+  const getSubAgentsForTab = (): SubAgentListItem[] => {
     switch (activeTab) {
       case 'my':
         return (ownedData as SubAgentListResponse)?.items ?? [];
@@ -90,7 +90,7 @@ export function SubAgentsPage() {
     }
   };
 
-  const handleSelectSubAgent = (subAgent: SubAgent) => {
+  const handleSelectSubAgent = (subAgent: SubAgentListItem) => {
     navigate(`/app/subagents/${subAgent.id}`);
   };
 

@@ -1,6 +1,7 @@
 // Re-export types from generated SDK for consistency
 export type {
   SubAgent,
+  SubAgentListItem,
   SubAgentType,
   SubAgentStatus,
   SubAgentOwner,

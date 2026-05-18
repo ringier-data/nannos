@@ -4206,7 +4206,7 @@ export const getSkillDetailApiV1SkillsRegistryDetailSkillIdGetQueryKey = (option
 /**
  * Get Skill Detail
  *
- * Get a skill's detail from the internal registry by ID.
+ * Get a skill's detail from the internal registry by ID or slug.
  */
 export const getSkillDetailApiV1SkillsRegistryDetailSkillIdGetOptions = (options: Options<GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetData>) => queryOptions<unknown, GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetError, unknown, ReturnType<typeof getSkillDetailApiV1SkillsRegistryDetailSkillIdGetQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {
@@ -4464,6 +4464,30 @@ export const applySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostMutation =
 };
 
 /**
+ * Mcp Activate Skill
+ *
+ * Activate an existing registry skill on the calling agent.
+ *
+ * Use this to adopt a skill created by someone else, or to re-activate
+ * a previously deactivated skill. The skill must exist in the registry.
+ *
+ * Provide either registry_id (exact) or skill_name (searches by slug).
+ */
+export const consoleActivateSkillMutation = (options?: Partial<Options<ConsoleActivateSkillData>>): UseMutationOptions<ConsoleActivateSkillResponse, ConsoleActivateSkillError, Options<ConsoleActivateSkillData>> => {
+    const mutationOptions: UseMutationOptions<ConsoleActivateSkillResponse, ConsoleActivateSkillError, Options<ConsoleActivateSkillData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await consoleActivateSkill({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
  * Activate Skill
  *
  * Activate a registry skill for an agent/scope (copy to filesystem).
@@ -4548,30 +4572,6 @@ export const consoleImportSkillMutation = (options?: Partial<Options<ConsoleImpo
     const mutationOptions: UseMutationOptions<ConsoleImportSkillResponse, ConsoleImportSkillError, Options<ConsoleImportSkillData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await consoleImportSkill({
-                ...options,
-                ...fnOptions,
-                throwOnError: true
-            });
-            return data;
-        }
-    };
-    return mutationOptions;
-};
-
-/**
- * Mcp Activate Skill
- *
- * Activate an existing registry skill on the calling agent.
- *
- * Use this to adopt a skill created by someone else, or to re-activate
- * a previously deactivated skill. The skill must exist in the registry.
- *
- * Provide either registry_id (exact) or skill_name (searches by slug).
- */
-export const consoleActivateSkillMutation = (options?: Partial<Options<ConsoleActivateSkillData>>): UseMutationOptions<ConsoleActivateSkillResponse, ConsoleActivateSkillError, Options<ConsoleActivateSkillData>> => {
-    const mutationOptions: UseMutationOptions<ConsoleActivateSkillResponse, ConsoleActivateSkillError, Options<ConsoleActivateSkillData>> = {
-        mutationFn: async (fnOptions) => {
-            const { data } = await consoleActivateSkill({
                 ...options,
                 ...fnOptions,
                 throwOnError: true

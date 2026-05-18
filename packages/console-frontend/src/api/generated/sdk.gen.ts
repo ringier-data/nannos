@@ -2132,7 +2132,7 @@ export const browseRepoApiV1SkillsRegistryBrowseGet = <ThrowOnError extends bool
 /**
  * Get Skill Detail
  *
- * Get a skill's detail from the internal registry by ID.
+ * Get a skill's detail from the internal registry by ID or slug.
  */
 export const getSkillDetailApiV1SkillsRegistryDetailSkillIdGet = <ThrowOnError extends boolean = false>(options: Options<GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetData, ThrowOnError>) => (options.client ?? client).get<GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetResponses, GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetErrors, ThrowOnError>({ url: '/api/v1/skills/registry/detail/{skill_id}', ...options });
 
@@ -2287,6 +2287,25 @@ export const applySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePost = <ThrowO
 });
 
 /**
+ * Mcp Activate Skill
+ *
+ * Activate an existing registry skill on the calling agent.
+ *
+ * Use this to adopt a skill created by someone else, or to re-activate
+ * a previously deactivated skill. The skill must exist in the registry.
+ *
+ * Provide either registry_id (exact) or skill_name (searches by slug).
+ */
+export const consoleActivateSkill = <ThrowOnError extends boolean = false>(options: Options<ConsoleActivateSkillData, ThrowOnError>) => (options.client ?? client).post<ConsoleActivateSkillResponses, ConsoleActivateSkillErrors, ThrowOnError>({
+    url: '/api/v1/skills/registry/mcp/activate',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Activate Skill
  *
  * Activate a registry skill for an agent/scope (copy to filesystem).
@@ -2354,25 +2373,6 @@ export const consoleSearchSkills = <ThrowOnError extends boolean = false>(option
  */
 export const consoleImportSkill = <ThrowOnError extends boolean = false>(options: Options<ConsoleImportSkillData, ThrowOnError>) => (options.client ?? client).post<ConsoleImportSkillResponses, ConsoleImportSkillErrors, ThrowOnError>({
     url: '/api/v1/skills/registry/mcp/import',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-/**
- * Mcp Activate Skill
- *
- * Activate an existing registry skill on the calling agent.
- *
- * Use this to adopt a skill created by someone else, or to re-activate
- * a previously deactivated skill. The skill must exist in the registry.
- *
- * Provide either registry_id (exact) or skill_name (searches by slug).
- */
-export const consoleActivateSkill = <ThrowOnError extends boolean = false>(options: Options<ConsoleActivateSkillData, ThrowOnError>) => (options.client ?? client).post<ConsoleActivateSkillResponses, ConsoleActivateSkillErrors, ThrowOnError>({
-    url: '/api/v1/skills/registry/mcp/activate',
     ...options,
     headers: {
         'Content-Type': 'application/json',

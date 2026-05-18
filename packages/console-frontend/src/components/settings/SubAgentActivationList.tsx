@@ -8,7 +8,7 @@ import {
   activateSubAgentApiV1SubAgentsSubAgentIdActivatePostMutation,
   deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgent, SubAgentListResponse } from '@/api/generated/types.gen';
+import type { SubAgentListItem, SubAgentListResponse } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -71,7 +71,7 @@ export function SubAgentActivationList() {
     }
   }, [subAgents]);
 
-  const handleToggle = (subAgent: SubAgent) => {
+  const handleToggle = (subAgent: SubAgentListItem) => {
     if (!subAgent.default_version) {
       return; // Cannot activate non-approved sub-agents
     }
@@ -111,7 +111,7 @@ export function SubAgentActivationList() {
     }
   };
 
-  const getFilteredSubAgents = (): SubAgent[] => {
+  const getFilteredSubAgents = (): SubAgentListItem[] => {
     let result = subAgents;
 
     // Apply tab filter
@@ -144,7 +144,7 @@ export function SubAgentActivationList() {
   const activatedCount = subAgents.filter((sa) => sa.is_activated).length;
   const availableCount = subAgents.filter((sa) => !sa.is_activated && sa.default_version).length;
 
-  const isApproved = (subAgent: SubAgent) => subAgent.default_version !== null;
+  const isApproved = (subAgent: SubAgentListItem) => subAgent.default_version !== null;
   const allSelected = filteredSubAgents.length > 0 && filteredSubAgents.every((sa) => sa.is_activated);
   const someSelected = filteredSubAgents.some((sa) => sa.is_activated) && !allSelected;
 

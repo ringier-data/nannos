@@ -38,7 +38,6 @@ import {
   deleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDelete,
   createRegistrySkillApiV1SkillsRegistryPost,
   updateRegistrySkillApiV1SkillsRegistrySkillIdPut,
-  searchSkillsApiV1SkillsRegistrySearchGet,
 } from '@/api/generated/sdk.gen';
 import type { SkillSearchResult } from '@/api/generated/types.gen';
 import { client } from '@/api/generated/client.gen';

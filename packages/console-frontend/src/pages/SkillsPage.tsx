@@ -26,7 +26,7 @@ import {
   listMyGroupsApiV1GroupsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { getSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGet, deleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDelete, createSkillApiV1PlaybooksAgentsAgentNameSkillsScopePost, listSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGet, getSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGet, writeSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPut } from '@/api/generated/sdk.gen';
-import type { SkillSummary, SkillDefinitionInput as SkillDefinition } from '@/api/generated/types.gen';
+import type { ConsoleBackendModelsPlaybookSkillSummary as SkillSummary, SkillDefinitionInput as SkillDefinition } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -140,7 +140,7 @@ export function SkillsPage() {
   const selectedSubAgent = subAgentsData?.items?.find((a) => a.name === selectedAgent);
   const standardSkills: Array<SkillDefinition & { scope: 'standard' }> = (
     selectedSubAgent?.config_version?.skills ?? []
-  ).map((s) => ({ ...s, scope: 'standard' as const }));
+  ).map((s) => ({ ...s, description: s.description ?? '', scope: 'standard' as const }));
 
   const standardSkillNames = new Set(standardSkills.map((s) => s.name));
   const isOverride = (skill: SkillSummary) => standardSkillNames.has(skill.name);
