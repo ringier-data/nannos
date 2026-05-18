@@ -52,6 +52,7 @@ from console_backend.models.socket_session import SocketSession
 from console_backend.models.user import User
 from console_backend.routers.admin_audit_router import router as admin_audit_router
 from console_backend.routers.admin_group_router import router as admin_group_router
+from console_backend.routers.admin_mcp_gateway_server_access_router import router as admin_mcp_gateway_server_access_router
 from console_backend.routers.admin_user_router import router as admin_user_router
 from console_backend.routers.auth_router import router as auth_router
 from console_backend.routers.bug_report_mcp_tools import router as bug_report_mcp_router
@@ -308,6 +309,7 @@ app.include_router(secrets_router)
 app.include_router(sub_agent_router)
 app.include_router(admin_user_router)
 app.include_router(admin_group_router)
+app.include_router(admin_mcp_gateway_server_access_router)
 app.include_router(admin_audit_router)
 app.include_router(group_router)
 app.include_router(usage_router)

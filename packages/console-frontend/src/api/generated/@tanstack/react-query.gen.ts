@@ -1842,6 +1842,84 @@ export const bulkDeleteGroupsApiV1AdminGroupsBulkDeleteMutation = (options?: Par
     return mutationOptions;
 };
 
+export const getMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetQueryKey = (options: Options<GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetData>) => createQueryKey('getMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGet', options);
+
+/**
+ * Check if a group is managed by the MCP gateway
+ *
+ * Returns whether the group has been synced to the MCP gateway via outbound SCIM and its team ID.
+ */
+export const getMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetOptions = (options: Options<GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetData>) => queryOptions<GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetResponse, GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetError, GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetResponse, ReturnType<typeof getMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await getMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGet({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetQueryKey(options)
+});
+
+export const listMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetQueryKey = (options: Options<ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetData>) => createQueryKey('listMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGet', options);
+
+/**
+ * List MCP server access for a group
+ *
+ * Returns the list of MCP servers that the group has access to via the gateway.
+ */
+export const listMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetOptions = (options: Options<ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetData>) => queryOptions<ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetResponse, ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetError, ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetResponse, ReturnType<typeof listMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await listMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGet({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: listMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetQueryKey(options)
+});
+
+/**
+ * Revoke MCP server access for a group
+ *
+ * Revokes the group's access to a specific MCP server.
+ */
+export const revokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteMutation = (options?: Partial<Options<RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteData>>): UseMutationOptions<RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteResponse, RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteError, Options<RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteData>> => {
+    const mutationOptions: UseMutationOptions<RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteResponse, RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteError, Options<RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await revokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDelete({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Grant or update MCP server access for a group
+ *
+ * Grants or updates the access role for a group on a specific MCP server.
+ */
+export const grantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutMutation = (options?: Partial<Options<GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutData>>): UseMutationOptions<GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutResponse, GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutError, Options<GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutData>> => {
+    const mutationOptions: UseMutationOptions<GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutResponse, GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutError, Options<GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await grantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPut({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
 export const listAuditLogsApiV1AdminAuditLogsGetQueryKey = (options?: Options<ListAuditLogsApiV1AdminAuditLogsGetData>) => createQueryKey('listAuditLogsApiV1AdminAuditLogsGet', options);
 
 /**
@@ -5396,6 +5474,28 @@ export const testOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTe
     const mutationOptions: UseMutationOptions<TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponse, TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostError, Options<TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await testOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPost({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Push All To Endpoint
+ *
+ * Push all users and groups to a specific outbound SCIM endpoint.
+ *
+ * Enqueues all active users and groups for push. The actual push runs in the
+ * background — this endpoint returns immediately with the number of items queued.
+ */
+export const pushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostMutation = (options?: Partial<Options<PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostData>>): UseMutationOptions<PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponse, PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostError, Options<PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostData>> => {
+    const mutationOptions: UseMutationOptions<PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponse, PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostError, Options<PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await pushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPost({
                 ...options,
                 ...fnOptions,
                 throwOnError: true

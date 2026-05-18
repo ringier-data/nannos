@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { config } from '@/config';
+import { client } from '@/api/generated/client.gen';
 import {
   getGroupApiV1AdminGroupsGroupIdGetOptions,
   getGroupApiV1GroupsGroupIdGetOptions,
@@ -16,6 +17,7 @@ import {
   listUsersApiV1AdminUsersGetOptions,
   getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
   setGroupDefaultAgentsApiV1GroupsGroupIdDefaultAgentsPutMutation,
+  consoleListMcpServersOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { RoleEnum } from '@/api/generated';
 import { Button } from '@/components/ui/button';
@@ -48,7 +50,23 @@ import {
 } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
 import { Pagination } from '@/components/admin/Pagination';
+
+interface McpGatewayStatusResponse {
+  managed: boolean;
+  team_id: string | null;
+}
+
+interface McpGatewayServerPermission {
+  server_slug: string;
+  server_name: string;
+  role: string;
+}
+
+interface McpGatewayServerPermissionsResponse {
+  permissions: McpGatewayServerPermission[];
+}
 
 export function GroupDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -70,6 +88,11 @@ export function GroupDetailPage() {
   const [selectedMembersToRemove, setSelectedMembersToRemove] = useState<Set<string>>(new Set());
 
   const [membersPage, setMembersPage] = useState(1);
+
+  // MCP Gateway server access state
+  const [grantServerDialogOpen, setGrantServerDialogOpen] = useState(false);
+  const [selectedServerSlug, setSelectedServerSlug] = useState('');
+  const [selectedServerRole, setSelectedServerRole] = useState<'admin' | 'maintainer' | 'member'>('member');
 
   // Admin endpoint - full access
   const { data: adminGroupData, isLoading: isLoadingAdmin } = useQuery({
@@ -111,6 +134,34 @@ export function GroupDetailPage() {
       path: { group_id: groupId },
     }),
     enabled: !isNaN(groupId),
+  });
+
+  // MCP Gateway server access queries
+  const { data: gatewayStatus } = useQuery<McpGatewayStatusResponse>({
+    queryKey: ['mcpGatewayStatus', groupId],
+    queryFn: async () => {
+      const res = await client.get<McpGatewayStatusResponse>({
+        url: `/api/v1/admin/groups/${groupId}/mcp-gateway-status`,
+      });
+      return res.data as McpGatewayStatusResponse;
+    },
+    enabled: !isNaN(groupId) && isAdminView,
+  });
+
+  const { data: gatewayServers, isLoading: gatewayServersLoading } = useQuery<McpGatewayServerPermissionsResponse>({
+    queryKey: ['mcpGatewayServers', groupId],
+    queryFn: async () => {
+      const res = await client.get<McpGatewayServerPermissionsResponse>({
+        url: `/api/v1/admin/groups/${groupId}/mcp-gateway-servers`,
+      });
+      return res.data as McpGatewayServerPermissionsResponse;
+    },
+    enabled: !isNaN(groupId) && isAdminView && gatewayStatus?.managed === true,
+  });
+
+  const { data: availableServersData } = useQuery({
+    ...consoleListMcpServersOptions(),
+    enabled: grantServerDialogOpen,
   });
 
   const updateMutation = useMutation({
@@ -220,6 +271,42 @@ export function GroupDetailPage() {
     },
   });
 
+  const grantServerAccessMutation = useMutation({
+    mutationFn: async ({ serverSlug, role }: { serverSlug: string; role: string }) => {
+      await client.put({
+        url: `/api/v1/admin/groups/${groupId}/mcp-gateway-servers/${serverSlug}`,
+        body: { role },
+      });
+    },
+    onSuccess: () => {
+      toast.success('Server access granted');
+      setGrantServerDialogOpen(false);
+      setSelectedServerSlug('');
+      setSelectedServerRole('member');
+      queryClient.invalidateQueries({ queryKey: ['mcpGatewayServers', groupId] });
+    },
+    onError: (error: any) => {
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to grant server access';
+      toast.error(message);
+    },
+  });
+
+  const revokeServerAccessMutation = useMutation({
+    mutationFn: async (serverSlug: string) => {
+      await client.delete({
+        url: `/api/v1/admin/groups/${groupId}/mcp-gateway-servers/${serverSlug}`,
+      });
+    },
+    onSuccess: () => {
+      toast.success('Server access revoked');
+      queryClient.invalidateQueries({ queryKey: ['mcpGatewayServers', groupId] });
+    },
+    onError: (error: any) => {
+      const message = error?.detail || error?.response?.data?.detail || 'Failed to revoke server access';
+      toast.error(message);
+    },
+  });
+
   const group = groupData?.data;
   const members = membersData?.data ?? [];
   const membersMeta = membersData?.meta ?? { page: 1, limit: 20, total: 0 };
@@ -229,6 +316,13 @@ export function GroupDetailPage() {
 
   const accessibleAgents = defaultAgentsData ?? [];
   const defaultAgents = accessibleAgents.filter((a: any) => a.is_default);
+
+  const gatewayPermissions = gatewayServers?.permissions ?? [];
+  const grantedSlugs = new Set(gatewayPermissions.map((p) => p.server_slug));
+  // Available servers use "name" field which is actually the slug from Gatana
+  const availableServers = (availableServersData?.servers ?? [])
+    .filter((s) => s.name !== 'console')
+    .filter((s) => !grantedSlugs.has(s.name));
 
   const startEditing = () => {
     if (!group) return;
@@ -474,6 +568,77 @@ export function GroupDetailPage() {
         </CardContent>
       </Card>
 
+      {/* MCP Gateway Server Access */}
+      {isAdminView && gatewayStatus?.managed && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Server className="h-5 w-5" />
+                MCP Gateway Servers
+              </CardTitle>
+              <CardDescription>
+                Manage which MCP gateway servers this group can access.
+              </CardDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary">Managed</Badge>
+              <Button size="sm" onClick={() => setGrantServerDialogOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Grant Access
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="border rounded-lg">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Server</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead className="w-20"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {gatewayServersLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={3} className="text-center py-8">
+                        Loading...
+                      </TableCell>
+                    </TableRow>
+                  ) : gatewayPermissions.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={3} className="text-center py-8 text-muted-foreground">
+                        No server access configured.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    gatewayPermissions.map((perm) => (
+                      <TableRow key={perm.server_slug}>
+                        <TableCell className="font-medium">{perm.server_slug}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{perm.role}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => revokeServerAccessMutation.mutate(perm.server_slug)}
+                            disabled={revokeServerAccessMutation.isPending}
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
@@ -655,6 +820,59 @@ export function GroupDetailPage() {
             >
               <Plus className="h-4 w-4 mr-1" />
               {addMembersMutation.isPending ? 'Adding...' : `Add ${selectedUsersToAdd.size} User(s)`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Grant Server Access Dialog */}
+      <Dialog open={grantServerDialogOpen} onOpenChange={setGrantServerDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Grant Server Access</DialogTitle>
+            <DialogDescription>
+              Select an MCP gateway server and role to grant access to this group.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Server</Label>
+              <Select value={selectedServerSlug} onValueChange={setSelectedServerSlug}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a server..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableServers.map((server) => (
+                    <SelectItem key={server.name} value={server.name}>
+                      {server.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Role</Label>
+              <Select value={selectedServerRole} onValueChange={(v) => setSelectedServerRole(v as 'admin' | 'maintainer' | 'member')}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="member">Member</SelectItem>
+                  <SelectItem value="maintainer">Maintainer</SelectItem>
+                  <SelectItem value="admin">Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setGrantServerDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => grantServerAccessMutation.mutate({ serverSlug: selectedServerSlug, role: selectedServerRole })}
+              disabled={!selectedServerSlug || grantServerAccessMutation.isPending}
+            >
+              {grantServerAccessMutation.isPending ? 'Granting...' : 'Grant Access'}
             </Button>
           </DialogFooter>
         </DialogContent>
