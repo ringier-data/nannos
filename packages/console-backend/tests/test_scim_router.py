@@ -342,6 +342,20 @@ class TestScimUsers:
         assert data["emails"][0]["value"] == "tobias.siegrist@ringier.ch"
         assert data["externalId"] == "u00006943"
 
+        # Verify extra attributes returned in the SCIM response
+        assert data["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
+        enterprise_ext = data["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]
+        assert enterprise_ext["department"] == "IT Governance & Portfolio"
+        assert enterprise_ext["costCenter"] == "101550007"
+        assert "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User" in data["schemas"]
+
+        # Verify attributes are also returned on GET
+        get_response = await scim_client.get(f"/api/scim/v2/Users/{data['id']}")
+        assert get_response.status_code == 200
+        get_data = get_response.json()
+        assert get_data["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
+        assert get_data["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]["department"] == "IT Governance & Portfolio"
+
         # Verify scim_attributes stored in DB
         row = await pg_session.execute(
             text("SELECT scim_attributes FROM users WHERE id = :id"),

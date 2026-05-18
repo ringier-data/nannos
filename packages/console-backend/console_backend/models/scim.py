@@ -76,6 +76,8 @@ class ScimGroupRef(BaseModel):
 class ScimUser(BaseModel):
     """SCIM 2.0 User resource."""
 
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
     schemas: list[str] = Field(default_factory=lambda: [SCIM_USER_SCHEMA])
     id: str | None = None
     externalId: str | None = None
@@ -83,12 +85,10 @@ class ScimUser(BaseModel):
     name: ScimName | None = None
     displayName: str | None = None
     emails: list[ScimEmail] | None = None
+    phoneNumbers: list[dict[str, Any]] | None = None
     active: bool = True
     groups: list[ScimGroupRef] | None = None
     meta: ScimMeta | None = None
-
-    class Config:
-        populate_by_name = True
 
 
 class ScimUserCreate(BaseModel):
@@ -106,17 +106,20 @@ class ScimUserCreate(BaseModel):
     phoneNumbers: list[dict[str, Any]] | None = None
 
     def extract_scim_attributes(self) -> dict[str, Any] | None:
-        """Extract extra SCIM attributes (phone numbers, enterprise extension, etc.)."""
+        """Extract all extra SCIM attributes not explicitly modelled.
+
+        Captures phoneNumbers, plus everything in model_extra (extension schemas,
+        standard SCIM attributes like title, addresses, nickName, locale, etc.).
+        """
         attrs: dict[str, Any] = {}
 
         if self.phoneNumbers:
             attrs["phoneNumbers"] = self.phoneNumbers
 
-        # Collect extension schemas (any key starting with "urn:")
+        # Capture all extra fields the IdP sent (extension URNs, standard attrs, etc.)
         if self.model_extra:
             for key, value in self.model_extra.items():
-                if key.startswith("urn:"):
-                    attrs[key] = value
+                attrs[key] = value
 
         return attrs or None
 

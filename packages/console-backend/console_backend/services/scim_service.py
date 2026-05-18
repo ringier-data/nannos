@@ -193,6 +193,7 @@ class ScimUserService:
             active=True,
             created_at=now,
             updated_at=now,
+            scim_attributes=scim_attributes,
             base_url=base_url,
         )
 
@@ -286,6 +287,7 @@ class ScimUserService:
             active=data.active,
             created_at=existing.created_at,
             updated_at=now,
+            scim_attributes=scim_attributes,
             base_url=base_url,
         )
 
@@ -478,6 +480,7 @@ class ScimUserService:
         return result.fetchall(), total
 
     def _row_to_scim_user(self, row, *, base_url: str) -> ScimUser:
+        scim_attributes = row.scim_attributes if hasattr(row, "scim_attributes") else None
         return self._build_scim_user(
             id=row.id,
             email=row.email,
@@ -488,6 +491,7 @@ class ScimUserService:
             active=row.status == "active",
             created_at=row.created_at,
             updated_at=row.updated_at,
+            scim_attributes=scim_attributes,
             base_url=base_url,
         )
 
@@ -503,17 +507,30 @@ class ScimUserService:
         active: bool,
         created_at: datetime,
         updated_at: datetime,
+        scim_attributes: dict | None = None,
         base_url: str,
     ) -> ScimUser:
         # userName: use stored SCIM userName if available, otherwise fall back to email
         resolved_user_name = userName if userName else email
-        return ScimUser(
+
+        # Extract phoneNumbers from stored attributes
+        phone_numbers = None
+        extra_fields: dict = {}
+        if scim_attributes:
+            phone_numbers = scim_attributes.get("phoneNumbers")
+            # Collect extension schemas and other extra attributes for the response
+            for key, value in scim_attributes.items():
+                if key != "phoneNumbers":
+                    extra_fields[key] = value
+
+        user = ScimUser(
             id=id,
             externalId=external_id,
             userName=resolved_user_name,
             name=ScimName(givenName=first_name, familyName=last_name, formatted=f"{first_name} {last_name}".strip()),
             displayName=f"{first_name} {last_name}".strip() or resolved_user_name,
             emails=[ScimEmail(value=email, type="work", primary=True)],
+            phoneNumbers=phone_numbers,
             active=active,
             meta=ScimMeta(
                 resourceType="User",
@@ -521,7 +538,16 @@ class ScimUserService:
                 lastModified=updated_at,
                 location=f"{base_url}/api/scim/v2/Users/{id}",
             ),
+            **extra_fields,
         )
+
+        # Include extension schemas in schemas list
+        if extra_fields:
+            for key in extra_fields:
+                if key.startswith("urn:") and key not in user.schemas:
+                    user.schemas.append(key)
+
+        return user
 
 
 # ─── Group Service ───────────────────────────────────────────────────────────
