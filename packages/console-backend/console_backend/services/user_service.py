@@ -496,6 +496,17 @@ class UserService:
                     },
                 )
                 logger.info(f"Created new user (audited): {sub}")
+
+                # First user in the system becomes admin automatically
+                count_result = await db.execute(text("SELECT COUNT(*) FROM users"))
+                total_users = count_result.scalar()
+                if total_users == 1:
+                    await db.execute(
+                        text("UPDATE users SET is_administrator = TRUE WHERE id = :id"),
+                        {"id": user.id},
+                    )
+                    user.is_administrator = True
+                    logger.info(f"First user {sub} promoted to administrator")
             else:
                 if sub != old_sub:
                     # Audit sub change if it differs from previous

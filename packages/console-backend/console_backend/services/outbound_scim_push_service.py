@@ -88,6 +88,92 @@ class OutboundScimPushService:
             name=f"outbound-scim-push-group-{group_id}-{operation}",
         )
 
+    async def push_all(self, endpoint_id: int) -> dict:
+        """Push all users and groups to a specific endpoint.
+
+        Fetches all active users and groups from the DB, then spawns a background
+        task to push each one. Returns immediately with counts of queued items.
+        """
+        async with self.db_session_factory() as db:
+            # Verify endpoint exists and get its config
+            result = await db.execute(
+                text("""
+                    SELECT id, endpoint_url, bearer_token, push_users, push_groups
+                    FROM outbound_scim_endpoints
+                    WHERE id = :id AND deleted_at IS NULL AND enabled = true
+                """),
+                {"id": endpoint_id},
+            )
+            ep_row = result.fetchone()
+            if not ep_row:
+                return {"users_queued": 0, "groups_queued": 0, "error": "Endpoint not found or disabled"}
+
+            endpoint = {
+                "id": ep_row.id,
+                "endpoint_url": ep_row.endpoint_url,
+                "bearer_token": ep_row.bearer_token,
+                "push_users": ep_row.push_users,
+                "push_groups": ep_row.push_groups,
+            }
+
+            users_queued = 0
+            groups_queued = 0
+
+            if endpoint["push_users"]:
+                user_result = await db.execute(
+                    text("SELECT id FROM users WHERE deleted_at IS NULL AND status = 'active'")
+                )
+                user_ids = [row.id for row in user_result.fetchall()]
+                users_queued = len(user_ids)
+
+            if endpoint["push_groups"]:
+                group_result = await db.execute(
+                    text("SELECT id FROM user_groups WHERE deleted_at IS NULL")
+                )
+                group_ids = [row.id for row in group_result.fetchall()]
+                groups_queued = len(group_ids)
+
+        # Spawn a single background task that processes everything sequentially
+        # to avoid overwhelming the remote endpoint
+        asyncio.create_task(
+            self._push_all_to_endpoint(endpoint, user_ids if endpoint["push_users"] else [], group_ids if endpoint["push_groups"] else []),
+            name=f"outbound-scim-push-all-{endpoint_id}",
+        )
+
+        return {"users_queued": users_queued, "groups_queued": groups_queued}
+
+    async def _push_all_to_endpoint(self, endpoint: dict, user_ids: list[str], group_ids: list[int]) -> None:
+        """Background task: push all users and groups to a single endpoint."""
+        endpoint_id = endpoint["id"]
+        logger.info(
+            f"Outbound SCIM push-all: starting for endpoint {endpoint_id} "
+            f"({len(user_ids)} users, {len(group_ids)} groups)"
+        )
+
+        success_count = 0
+        error_count = 0
+
+        for user_id in user_ids:
+            try:
+                await self._push_user_to_endpoint(endpoint, user_id, "update")
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Outbound SCIM push-all: failed to push user {user_id}: {e}")
+
+        for group_id in group_ids:
+            try:
+                await self._push_group_to_endpoint(endpoint, group_id, "update")
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Outbound SCIM push-all: failed to push group {group_id}: {e}")
+
+        logger.info(
+            f"Outbound SCIM push-all: completed for endpoint {endpoint_id} "
+            f"({success_count} succeeded, {error_count} failed)"
+        )
+
     async def _push_user_async(self, user_id: str, operation: str) -> None:
         """Push user to all active endpoints (background task)."""
         try:
@@ -261,7 +347,7 @@ class OutboundScimPushService:
             try:
                 async with self.db_session_factory() as db:
                     # Load group data
-                    group_row, members = await self._fetch_group_with_members(db, group_id)
+                    group_row, members = await self._fetch_group_with_members(db, group_id, endpoint_id)
                     if not group_row:
                         logger.warning(f"Outbound SCIM: group {group_id} not found, skipping push")
                         return
@@ -424,7 +510,7 @@ class OutboundScimPushService:
         result = await db.execute(
             text("""
                 SELECT id, email, first_name, last_name, scim_external_id, scim_user_name,
-                       status, phone_number, phone_number_idp, created_at, updated_at
+                       status, phone_number_idp, created_at, updated_at
                 FROM users
                 WHERE id = :id AND deleted_at IS NULL
             """),
@@ -432,8 +518,13 @@ class OutboundScimPushService:
         )
         return result.fetchone()
 
-    async def _fetch_group_with_members(self, db: AsyncSession, group_id: int):
-        """Fetch group row and its members from database."""
+    async def _fetch_group_with_members(self, db: AsyncSession, group_id: int, endpoint_id: int):
+        """Fetch group row and its members from database.
+
+        Members are joined with the sync state table to resolve their remote IDs
+        at the target endpoint. Members without a remote ID (not yet synced) are
+        excluded because the remote SCIM server wouldn't recognise our internal IDs.
+        """
         # Fetch group
         result = await db.execute(
             text("""
@@ -447,15 +538,20 @@ class OutboundScimPushService:
         if not group_row:
             return None, []
 
-        # Fetch members
+        # Fetch members with their remote IDs at this endpoint
         result = await db.execute(
             text("""
-                SELECT u.id, u.email, u.first_name, u.last_name
+                SELECT u.id, u.email, u.first_name, u.last_name,
+                       ss.remote_id AS remote_id
                 FROM user_group_members ugm
                 JOIN users u ON u.id = ugm.user_id
+                LEFT JOIN outbound_scim_sync_state ss
+                    ON ss.entity_type = 'user'
+                    AND ss.entity_id = u.id
+                    AND ss.endpoint_id = :endpoint_id
                 WHERE ugm.user_group_id = :group_id AND u.deleted_at IS NULL
             """),
-            {"group_id": group_id},
+            {"group_id": group_id, "endpoint_id": endpoint_id},
         )
         members = result.fetchall()
         return group_row, members
@@ -488,7 +584,7 @@ class OutboundScimPushService:
         if display_name:
             payload["displayName"] = display_name
 
-        phone = user_row.phone_number_idp or user_row.phone_number
+        phone = user_row.phone_number_idp
         if phone:
             payload["phoneNumbers"] = [{"value": phone, "type": "work"}]
 
@@ -501,10 +597,11 @@ class OutboundScimPushService:
             "displayName": group_row.name,
             "members": [
                 {
-                    "value": member.id,
+                    "value": member.remote_id,
                     "display": f"{member.first_name or ''} {member.last_name or ''}".strip() or member.email,
                 }
                 for member in members
+                if member.remote_id
             ],
         }
 

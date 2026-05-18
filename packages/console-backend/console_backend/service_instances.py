@@ -51,6 +51,7 @@ from .services.scheduler_token_service import SchedulerTokenService
 from .services.scim_service import ScimGroupService, ScimUserService
 from .services.scim_token_service import ScimTokenService
 from .services.skill_registry_service import SkillRegistryService
+from .services.mcp_gateway_server_access_service import McpGatewayServerAccessService
 from .services.sub_agent_service import SubAgentService
 from .services.tool_risk_service import ToolRiskService
 from .services.usage_service import UsageService
@@ -192,6 +193,10 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.scim_user_service.set_outbound_scim_push_service(app.state.outbound_scim_push_service)
     app.state.scim_group_service.set_outbound_scim_push_service(app.state.outbound_scim_push_service)
     app.state.user_group_service.set_outbound_scim_push_service(app.state.outbound_scim_push_service)
+
+    # Initialize MCP gateway server access service
+    app.state.mcp_gateway_server_access_service = McpGatewayServerAccessService()
+    app.state.mcp_gateway_server_access_service.set_db_session_factory(get_async_session_factory())
 
     app.state.rate_card_service = RateCardService()
     app.state.rate_card_service.set_repository(app.state.rate_card_repository)
