@@ -853,6 +853,7 @@ async def health_check() -> JSONResponse:
 _frontend_config_response = config.frontend.build_response(
     oidc_issuer=config.oidc.issuer,
     orchestrator_base_domain=config.orchestrator.base_domain,
+    external_skill_search=config.skills_registry.registry_api_key is not None,
 )
 
 

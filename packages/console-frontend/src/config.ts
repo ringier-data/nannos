@@ -11,6 +11,9 @@ export interface AppConfig {
     maxSystemPromptLength: number;
     maxMcpToolsCount: number;
   };
+  features: {
+    externalSkillSearch: boolean;
+  };
 }
 
 // Defaults used until loadConfig() completes (and as fallbacks on error).
@@ -21,6 +24,7 @@ export let config: AppConfig = {
   keycloakRealm: '',
   langsmith: { organizationId: '', projectId: '' },
   autoApprove: { maxSystemPromptLength: 500, maxMcpToolsCount: 3 },
+  features: { externalSkillSearch: false },
 };
 
 /**

@@ -157,7 +157,9 @@ class FrontendConfig(BaseModel):
     langsmith: LangsmithConfig = Field(default_factory=LangsmithConfig)
     auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
 
-    def build_response(self, *, oidc_issuer: str, orchestrator_base_domain: str) -> dict:
+    def build_response(
+        self, *, oidc_issuer: str, orchestrator_base_domain: str, external_skill_search: bool = False
+    ) -> dict:
         """Build the JSON response for GET /api/v1/config.
 
         Derives keycloak and orchestrator URLs from existing backend config
@@ -190,6 +192,9 @@ class FrontendConfig(BaseModel):
             "autoApprove": {
                 "maxSystemPromptLength": self.auto_approve.max_system_prompt_length,
                 "maxMcpToolsCount": self.auto_approve.max_mcp_tools_count,
+            },
+            "features": {
+                "externalSkillSearch": external_skill_search,
             },
         }
 
@@ -252,9 +257,7 @@ class SkillsRegistryConfig(BaseModel):
     github_api_base_url: str = Field(default_factory=lambda: os.getenv("GITHUB_API_BASE_URL", "https://api.github.com"))
 
     # Registry adapter (optional discovery/search layer)
-    registry_url: str = Field(
-        default_factory=lambda: os.getenv("SKILL_REGISTRY_URL", "https://skills.sh")
-    )
+    registry_url: str = Field(default_factory=lambda: os.getenv("SKILL_REGISTRY_URL", "https://skills.sh"))
     registry_api_key: SecretStr | None = Field(
         default_factory=lambda: SecretStr(t) if (t := os.getenv("SKILL_REGISTRY_API_KEY")) else None
     )

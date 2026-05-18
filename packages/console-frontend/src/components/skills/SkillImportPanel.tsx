@@ -38,6 +38,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { config } from '@/config';
 
 // --- Security Verdict Badge ---
 
@@ -147,7 +148,8 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
-  const [mode, setMode] = useState<'external' | 'browse'>('external');
+  const showCommunityTab = config.features.externalSkillSearch;
+  const [mode, setMode] = useState<'external' | 'browse'>(showCommunityTab ? 'external' : 'browse');
 
   // Browse repo state
   const [repoInput, setRepoInput] = useState('');
@@ -315,6 +317,7 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
 
       <div className="flex-1 min-h-0 flex flex-col p-4 gap-4 overflow-y-auto">
         {/* Source mode toggle */}
+        {showCommunityTab && (
         <div className="flex items-center gap-2">
           <div className="inline-flex rounded-md border">
             {(['external', 'browse'] as const).map((m) => (
@@ -330,6 +333,7 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
             ))}
           </div>
         </div>
+        )}
 
         {/* Search / Browse input */}
         {mode !== 'browse' ? (
