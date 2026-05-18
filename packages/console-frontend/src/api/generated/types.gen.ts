@@ -73,14 +73,14 @@ export type AdminModeToggleResponse = {
  *
  * Audit action enum.
  */
-export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update' | 'impersonation_start' | 'impersonation_end';
+export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' | 'assign' | 'unassign' | 'admin_mode_activated' | 'submit_for_approval' | 'activate' | 'deactivate' | 'set_default' | 'revert' | 'permission_update' | 'impersonation_start' | 'impersonation_end' | 'revoke';
 
 /**
  * AuditEntityType
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint';
 
 /**
  * AuditLog
@@ -1453,6 +1453,210 @@ export type NotificationType = 'agent_activated' | 'agent_deactivated' | 'agent_
 export type OrchestratorThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
 
 /**
+ * OutboundScimEndpoint
+ *
+ * Outbound SCIM endpoint metadata (bearer token masked).
+ */
+export type OutboundScimEndpoint = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Endpoint Url
+     */
+    endpoint_url: string;
+    /**
+     * Token Hint
+     *
+     * Last 4 characters of the bearer token
+     */
+    token_hint: string;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Push Users
+     */
+    push_users: boolean;
+    /**
+     * Push Groups
+     */
+    push_groups: boolean;
+    /**
+     * Created By
+     */
+    created_by: string;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * OutboundScimEndpointCreate
+ *
+ * Request to create an outbound SCIM endpoint.
+ */
+export type OutboundScimEndpointCreate = {
+    /**
+     * Name
+     *
+     * Human-readable label
+     */
+    name: string;
+    /**
+     * Endpoint Url
+     *
+     * Base URL of the remote SCIM server
+     */
+    endpoint_url: string;
+    /**
+     * Bearer Token
+     *
+     * Bearer token for authenticating with the remote SCIM server
+     */
+    bearer_token: string;
+    /**
+     * Push Users
+     *
+     * Whether to push user changes to this endpoint
+     */
+    push_users?: boolean;
+    /**
+     * Push Groups
+     *
+     * Whether to push group changes to this endpoint
+     */
+    push_groups?: boolean;
+};
+
+/**
+ * OutboundScimEndpointCreated
+ *
+ * Response after creating an outbound SCIM endpoint. Contains the full token (shown only once).
+ */
+export type OutboundScimEndpointCreated = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Endpoint Url
+     */
+    endpoint_url: string;
+    /**
+     * Bearer Token
+     *
+     * The full bearer token. Only shown at creation time.
+     */
+    bearer_token: string;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Push Users
+     */
+    push_users: boolean;
+    /**
+     * Push Groups
+     */
+    push_groups: boolean;
+    /**
+     * Created At
+     */
+    created_at: string;
+};
+
+/**
+ * OutboundScimEndpointDetailResponse
+ *
+ * Single outbound SCIM endpoint detail response.
+ */
+export type OutboundScimEndpointDetailResponse = {
+    data: OutboundScimEndpoint;
+};
+
+/**
+ * OutboundScimEndpointListResponse
+ *
+ * Paginated outbound SCIM endpoint list response.
+ */
+export type OutboundScimEndpointListResponse = {
+    /**
+     * Data
+     */
+    data: Array<OutboundScimEndpoint>;
+    meta: PaginationMeta;
+};
+
+/**
+ * OutboundScimEndpointUpdate
+ *
+ * Request to update an outbound SCIM endpoint.
+ */
+export type OutboundScimEndpointUpdate = {
+    /**
+     * Name
+     */
+    name?: string | null;
+    /**
+     * Endpoint Url
+     */
+    endpoint_url?: string | null;
+    /**
+     * Bearer Token
+     */
+    bearer_token?: string | null;
+    /**
+     * Enabled
+     */
+    enabled?: boolean | null;
+    /**
+     * Push Users
+     */
+    push_users?: boolean | null;
+    /**
+     * Push Groups
+     */
+    push_groups?: boolean | null;
+};
+
+/**
+ * OutboundScimTestResult
+ *
+ * Result of testing connectivity to an outbound SCIM endpoint.
+ */
+export type OutboundScimTestResult = {
+    /**
+     * Success
+     */
+    success: boolean;
+    /**
+     * Status Code
+     */
+    status_code?: number | null;
+    /**
+     * Detail
+     */
+    detail?: string | null;
+};
+
+/**
  * OwnerStatus
  *
  * Owner status enum matching database enum.
@@ -2091,6 +2295,293 @@ export type ScheduledJobUpdate = {
      * Max Failures
      */
     max_failures?: number | null;
+};
+
+/**
+ * ScimEmail
+ *
+ * SCIM user email.
+ */
+export type ScimEmail = {
+    /**
+     * Value
+     */
+    value: string;
+    /**
+     * Type
+     */
+    type?: string;
+    /**
+     * Primary
+     */
+    primary?: boolean;
+};
+
+/**
+ * ScimGroupCreate
+ *
+ * Inbound SCIM group creation/replacement request.
+ */
+export type ScimGroupCreate = {
+    /**
+     * Schemas
+     */
+    schemas?: Array<string>;
+    /**
+     * Externalid
+     */
+    externalId?: string | null;
+    /**
+     * Displayname
+     */
+    displayName: string;
+    /**
+     * Members
+     */
+    members?: Array<ScimMember> | null;
+};
+
+/**
+ * ScimMember
+ *
+ * SCIM group member reference.
+ */
+export type ScimMember = {
+    /**
+     * Value
+     */
+    value: string;
+    /**
+     * Display
+     */
+    display?: string | null;
+    /**
+     * $Ref
+     */
+    $ref?: string | null;
+};
+
+/**
+ * ScimName
+ *
+ * SCIM user name component.
+ */
+export type ScimName = {
+    /**
+     * Givenname
+     */
+    givenName?: string | null;
+    /**
+     * Familyname
+     */
+    familyName?: string | null;
+    /**
+     * Formatted
+     */
+    formatted?: string | null;
+};
+
+/**
+ * ScimPatchOp
+ *
+ * SCIM PATCH request body.
+ */
+export type ScimPatchOp = {
+    /**
+     * Schemas
+     */
+    schemas?: Array<string>;
+    /**
+     * Operations
+     */
+    Operations: Array<ScimPatchOperation>;
+};
+
+/**
+ * ScimPatchOperation
+ *
+ * Single SCIM PATCH operation.
+ */
+export type ScimPatchOperation = {
+    op: OpEnum;
+    /**
+     * Path
+     */
+    path?: string | null;
+    /**
+     * Value
+     */
+    value?: unknown;
+};
+
+/**
+ * ScimToken
+ *
+ * SCIM token metadata (token value masked).
+ */
+export type ScimToken = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Token Hint
+     *
+     * Last 4 characters of the token for identification
+     */
+    token_hint: string;
+    /**
+     * Created By
+     */
+    created_by: string;
+    /**
+     * Last Used At
+     */
+    last_used_at?: string | null;
+    /**
+     * Expires At
+     */
+    expires_at?: string | null;
+    /**
+     * Revoked At
+     */
+    revoked_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+};
+
+/**
+ * ScimTokenCreate
+ *
+ * Request to create a SCIM bearer token.
+ */
+export type ScimTokenCreate = {
+    /**
+     * Name
+     *
+     * Human-readable label for the token
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * Optional description
+     */
+    description?: string | null;
+    /**
+     * Expires At
+     *
+     * Optional expiry time (null = never expires)
+     */
+    expires_at?: string | null;
+};
+
+/**
+ * ScimTokenCreated
+ *
+ * Response after creating a SCIM token. Contains the full token value (shown only once).
+ */
+export type ScimTokenCreated = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string | null;
+    /**
+     * Token
+     *
+     * The full bearer token value. Only shown at creation time.
+     */
+    token: string;
+    /**
+     * Expires At
+     */
+    expires_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+};
+
+/**
+ * ScimTokenDetailResponse
+ *
+ * Single SCIM token detail response.
+ */
+export type ScimTokenDetailResponse = {
+    data: ScimToken;
+};
+
+/**
+ * ScimTokenListResponse
+ *
+ * Paginated SCIM token list response.
+ */
+export type ScimTokenListResponse = {
+    /**
+     * Data
+     */
+    data: Array<ScimToken>;
+    meta: PaginationMeta;
+};
+
+/**
+ * ScimUserCreate
+ *
+ * Inbound SCIM user creation/replacement request.
+ */
+export type ScimUserCreate = {
+    /**
+     * Schemas
+     */
+    schemas?: Array<string>;
+    /**
+     * Externalid
+     */
+    externalId?: string | null;
+    /**
+     * Username
+     */
+    userName: string;
+    name?: ScimName | null;
+    /**
+     * Displayname
+     */
+    displayName?: string | null;
+    /**
+     * Emails
+     */
+    emails?: Array<ScimEmail> | null;
+    /**
+     * Active
+     */
+    active?: boolean;
+    /**
+     * Phonenumbers
+     */
+    phoneNumbers?: Array<{
+        [key: string]: unknown;
+    }> | null;
+    [key: string]: unknown | Array<string> | string | null | string | ScimName | null | string | null | Array<ScimEmail> | null | boolean | Array<{
+        [key: string]: unknown;
+    }> | null | undefined;
 };
 
 /**
@@ -3549,6 +4040,12 @@ export type UserWithGroups = {
      */
     phone_number_idp?: string | null;
     /**
+     * Scim Attributes
+     */
+    scim_attributes?: {
+        [key: string]: unknown;
+    } | null;
+    /**
      * Deleted At
      */
     deleted_at?: string | null;
@@ -3613,6 +4110,11 @@ export type RoleEnum = 'read' | 'write' | 'manager';
  * Flow Direction
  */
 export type FlowDirectionEnum = 'input' | 'output' | 'other';
+
+/**
+ * Op
+ */
+export type OpEnum = 'add' | 'remove' | 'replace';
 
 export type ItemsEnum = 'read' | 'write';
 
@@ -4059,6 +4561,38 @@ export type ServeLocalFileApiV1FilesLocalFilePathGetErrors = {
 export type ServeLocalFileApiV1FilesLocalFilePathGetError = ServeLocalFileApiV1FilesLocalFilePathGetErrors[keyof ServeLocalFileApiV1FilesLocalFilePathGetErrors];
 
 export type ServeLocalFileApiV1FilesLocalFilePathGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type DownloadStorageFileApiV1FilesDownloadBucketFilePathGetData = {
+    body?: never;
+    path: {
+        /**
+         * Bucket
+         */
+        bucket: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query?: never;
+    url: '/api/v1/files/download/{bucket}/{file_path}';
+};
+
+export type DownloadStorageFileApiV1FilesDownloadBucketFilePathGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DownloadStorageFileApiV1FilesDownloadBucketFilePathGetError = DownloadStorageFileApiV1FilesDownloadBucketFilePathGetErrors[keyof DownloadStorageFileApiV1FilesDownloadBucketFilePathGetErrors];
+
+export type DownloadStorageFileApiV1FilesDownloadBucketFilePathGetResponses = {
     /**
      * Successful Response
      */
@@ -7921,6 +8455,50 @@ export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses = {
 
 export type TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponse = TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses[keyof TriggerDebugAgentApiV1BugReportsReportIdDebugPostResponses];
 
+export type ConsoleCreateBugReportData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Conversation Id
+         *
+         * The conversation ID where the error occurred.
+         */
+        conversation_id: string;
+        /**
+         * Description
+         *
+         * Description of the bug — what went wrong and why it's unrecoverable.
+         */
+        description: string;
+        /**
+         * Task Id
+         *
+         * The A2A task ID associated with the error.
+         */
+        task_id?: string | null;
+    };
+    url: '/api/v1/bug-reports/mcp-create';
+};
+
+export type ConsoleCreateBugReportErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleCreateBugReportError = ConsoleCreateBugReportErrors[keyof ConsoleCreateBugReportErrors];
+
+export type ConsoleCreateBugReportResponses = {
+    /**
+     * Successful Response
+     */
+    201: BugReportResponse;
+};
+
+export type ConsoleCreateBugReportResponse = ConsoleCreateBugReportResponses[keyof ConsoleCreateBugReportResponses];
+
 export type ConsoleUpdateBugReportStatusData = {
     body?: never;
     path: {
@@ -8117,6 +8695,708 @@ export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPo
 };
 
 export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponse = SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponses[keyof SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponses];
+
+export type ListScimTokensApiV1AdminScimTokensGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/scim-tokens';
+};
+
+export type ListScimTokensApiV1AdminScimTokensGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScimTokenListResponse;
+};
+
+export type ListScimTokensApiV1AdminScimTokensGetResponse = ListScimTokensApiV1AdminScimTokensGetResponses[keyof ListScimTokensApiV1AdminScimTokensGetResponses];
+
+export type CreateScimTokenApiV1AdminScimTokensPostData = {
+    body: ScimTokenCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/scim-tokens';
+};
+
+export type CreateScimTokenApiV1AdminScimTokensPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateScimTokenApiV1AdminScimTokensPostError = CreateScimTokenApiV1AdminScimTokensPostErrors[keyof CreateScimTokenApiV1AdminScimTokensPostErrors];
+
+export type CreateScimTokenApiV1AdminScimTokensPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: ScimTokenCreated;
+};
+
+export type CreateScimTokenApiV1AdminScimTokensPostResponse = CreateScimTokenApiV1AdminScimTokensPostResponses[keyof CreateScimTokenApiV1AdminScimTokensPostResponses];
+
+export type RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Token Id
+         */
+        token_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/scim-tokens/{token_id}';
+};
+
+export type RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteError = RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteErrors[keyof RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteErrors];
+
+export type RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScimTokenDetailResponse;
+};
+
+export type RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteResponse = RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteResponses[keyof RevokeScimTokenApiV1AdminScimTokensTokenIdDeleteResponses];
+
+export type GetScimTokenApiV1AdminScimTokensTokenIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Token Id
+         */
+        token_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/scim-tokens/{token_id}';
+};
+
+export type GetScimTokenApiV1AdminScimTokensTokenIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetScimTokenApiV1AdminScimTokensTokenIdGetError = GetScimTokenApiV1AdminScimTokensTokenIdGetErrors[keyof GetScimTokenApiV1AdminScimTokensTokenIdGetErrors];
+
+export type GetScimTokenApiV1AdminScimTokensTokenIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: ScimTokenDetailResponse;
+};
+
+export type GetScimTokenApiV1AdminScimTokensTokenIdGetResponse = GetScimTokenApiV1AdminScimTokensTokenIdGetResponses[keyof GetScimTokenApiV1AdminScimTokensTokenIdGetResponses];
+
+export type GetServiceProviderConfigApiScimV2ServiceProviderConfigGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/scim/v2/ServiceProviderConfig';
+};
+
+export type GetServiceProviderConfigApiScimV2ServiceProviderConfigGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type GetResourceTypesApiScimV2ResourceTypesGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/scim/v2/ResourceTypes';
+};
+
+export type GetResourceTypesApiScimV2ResourceTypesGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type GetSchemasApiScimV2SchemasGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/scim/v2/Schemas';
+};
+
+export type GetSchemasApiScimV2SchemasGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type GetSchemaApiScimV2SchemasSchemaIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Schema Id
+         */
+        schema_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Schemas/{schema_id}';
+};
+
+export type GetSchemaApiScimV2SchemasSchemaIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSchemaApiScimV2SchemasSchemaIdGetError = GetSchemaApiScimV2SchemasSchemaIdGetErrors[keyof GetSchemaApiScimV2SchemasSchemaIdGetErrors];
+
+export type GetSchemaApiScimV2SchemasSchemaIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ListUsersApiScimV2UsersGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Filter
+         *
+         * SCIM filter expression
+         */
+        filter?: string | null;
+        /**
+         * Startindex
+         *
+         * 1-based start index
+         */
+        startIndex?: number;
+        /**
+         * Count
+         *
+         * Number of results
+         */
+        count?: number;
+        /**
+         * Sortby
+         *
+         * Attribute to sort by
+         */
+        sortBy?: string | null;
+        /**
+         * Sortorder
+         *
+         * Sort order: ascending or descending
+         */
+        sortOrder?: string;
+    };
+    url: '/api/scim/v2/Users';
+};
+
+export type ListUsersApiScimV2UsersGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListUsersApiScimV2UsersGetError = ListUsersApiScimV2UsersGetErrors[keyof ListUsersApiScimV2UsersGetErrors];
+
+export type ListUsersApiScimV2UsersGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type CreateUserApiScimV2UsersPostData = {
+    body: ScimUserCreate;
+    path?: never;
+    query?: never;
+    url: '/api/scim/v2/Users';
+};
+
+export type CreateUserApiScimV2UsersPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateUserApiScimV2UsersPostError = CreateUserApiScimV2UsersPostErrors[keyof CreateUserApiScimV2UsersPostErrors];
+
+export type CreateUserApiScimV2UsersPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type DeleteUserApiScimV2UsersUserIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Users/{user_id}';
+};
+
+export type DeleteUserApiScimV2UsersUserIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteUserApiScimV2UsersUserIdDeleteError = DeleteUserApiScimV2UsersUserIdDeleteErrors[keyof DeleteUserApiScimV2UsersUserIdDeleteErrors];
+
+export type DeleteUserApiScimV2UsersUserIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteUserApiScimV2UsersUserIdDeleteResponse = DeleteUserApiScimV2UsersUserIdDeleteResponses[keyof DeleteUserApiScimV2UsersUserIdDeleteResponses];
+
+export type GetUserApiScimV2UsersUserIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Users/{user_id}';
+};
+
+export type GetUserApiScimV2UsersUserIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetUserApiScimV2UsersUserIdGetError = GetUserApiScimV2UsersUserIdGetErrors[keyof GetUserApiScimV2UsersUserIdGetErrors];
+
+export type GetUserApiScimV2UsersUserIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type PatchUserApiScimV2UsersUserIdPatchData = {
+    body: ScimPatchOp;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Users/{user_id}';
+};
+
+export type PatchUserApiScimV2UsersUserIdPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PatchUserApiScimV2UsersUserIdPatchError = PatchUserApiScimV2UsersUserIdPatchErrors[keyof PatchUserApiScimV2UsersUserIdPatchErrors];
+
+export type PatchUserApiScimV2UsersUserIdPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ReplaceUserApiScimV2UsersUserIdPutData = {
+    body: ScimUserCreate;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Users/{user_id}';
+};
+
+export type ReplaceUserApiScimV2UsersUserIdPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ReplaceUserApiScimV2UsersUserIdPutError = ReplaceUserApiScimV2UsersUserIdPutErrors[keyof ReplaceUserApiScimV2UsersUserIdPutErrors];
+
+export type ReplaceUserApiScimV2UsersUserIdPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ListGroupsApiScimV2GroupsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Filter
+         *
+         * SCIM filter expression
+         */
+        filter?: string | null;
+        /**
+         * Startindex
+         *
+         * 1-based start index
+         */
+        startIndex?: number;
+        /**
+         * Count
+         *
+         * Number of results
+         */
+        count?: number;
+    };
+    url: '/api/scim/v2/Groups';
+};
+
+export type ListGroupsApiScimV2GroupsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListGroupsApiScimV2GroupsGetError = ListGroupsApiScimV2GroupsGetErrors[keyof ListGroupsApiScimV2GroupsGetErrors];
+
+export type ListGroupsApiScimV2GroupsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type CreateGroupApiScimV2GroupsPostData = {
+    body: ScimGroupCreate;
+    path?: never;
+    query?: never;
+    url: '/api/scim/v2/Groups';
+};
+
+export type CreateGroupApiScimV2GroupsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateGroupApiScimV2GroupsPostError = CreateGroupApiScimV2GroupsPostErrors[keyof CreateGroupApiScimV2GroupsPostErrors];
+
+export type CreateGroupApiScimV2GroupsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type DeleteGroupApiScimV2GroupsGroupIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Groups/{group_id}';
+};
+
+export type DeleteGroupApiScimV2GroupsGroupIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteGroupApiScimV2GroupsGroupIdDeleteError = DeleteGroupApiScimV2GroupsGroupIdDeleteErrors[keyof DeleteGroupApiScimV2GroupsGroupIdDeleteErrors];
+
+export type DeleteGroupApiScimV2GroupsGroupIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteGroupApiScimV2GroupsGroupIdDeleteResponse = DeleteGroupApiScimV2GroupsGroupIdDeleteResponses[keyof DeleteGroupApiScimV2GroupsGroupIdDeleteResponses];
+
+export type GetGroupApiScimV2GroupsGroupIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Groups/{group_id}';
+};
+
+export type GetGroupApiScimV2GroupsGroupIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetGroupApiScimV2GroupsGroupIdGetError = GetGroupApiScimV2GroupsGroupIdGetErrors[keyof GetGroupApiScimV2GroupsGroupIdGetErrors];
+
+export type GetGroupApiScimV2GroupsGroupIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type PatchGroupApiScimV2GroupsGroupIdPatchData = {
+    body: ScimPatchOp;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Groups/{group_id}';
+};
+
+export type PatchGroupApiScimV2GroupsGroupIdPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PatchGroupApiScimV2GroupsGroupIdPatchError = PatchGroupApiScimV2GroupsGroupIdPatchErrors[keyof PatchGroupApiScimV2GroupsGroupIdPatchErrors];
+
+export type PatchGroupApiScimV2GroupsGroupIdPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ReplaceGroupApiScimV2GroupsGroupIdPutData = {
+    body: ScimGroupCreate;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: string;
+    };
+    query?: never;
+    url: '/api/scim/v2/Groups/{group_id}';
+};
+
+export type ReplaceGroupApiScimV2GroupsGroupIdPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ReplaceGroupApiScimV2GroupsGroupIdPutError = ReplaceGroupApiScimV2GroupsGroupIdPutErrors[keyof ReplaceGroupApiScimV2GroupsGroupIdPutErrors];
+
+export type ReplaceGroupApiScimV2GroupsGroupIdPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/outbound-scim-endpoints';
+};
+
+export type ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: OutboundScimEndpointListResponse;
+};
+
+export type ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetResponse = ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetResponses[keyof ListOutboundScimEndpointsApiV1AdminOutboundScimEndpointsGetResponses];
+
+export type CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostData = {
+    body: OutboundScimEndpointCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/outbound-scim-endpoints';
+};
+
+export type CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostError = CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostErrors[keyof CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostErrors];
+
+export type CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: OutboundScimEndpointCreated;
+};
+
+export type CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostResponse = CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostResponses[keyof CreateOutboundScimEndpointApiV1AdminOutboundScimEndpointsPostResponses];
+
+export type DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint Id
+         */
+        endpoint_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/outbound-scim-endpoints/{endpoint_id}';
+};
+
+export type DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteError = DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteErrors[keyof DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteErrors];
+
+export type DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteResponse = DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteResponses[keyof DeleteOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdDeleteResponses];
+
+export type GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint Id
+         */
+        endpoint_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/outbound-scim-endpoints/{endpoint_id}';
+};
+
+export type GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetError = GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetErrors[keyof GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetErrors];
+
+export type GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: OutboundScimEndpointDetailResponse;
+};
+
+export type GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetResponse = GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetResponses[keyof GetOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdGetResponses];
+
+export type UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchData = {
+    body: OutboundScimEndpointUpdate;
+    path: {
+        /**
+         * Endpoint Id
+         */
+        endpoint_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/outbound-scim-endpoints/{endpoint_id}';
+};
+
+export type UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchError = UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchErrors[keyof UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchErrors];
+
+export type UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: OutboundScimEndpointDetailResponse;
+};
+
+export type UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchResponse = UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchResponses[keyof UpdateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchResponses];
+
+export type TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint Id
+         */
+        endpoint_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/outbound-scim-endpoints/{endpoint_id}/test';
+};
+
+export type TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostError = TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostErrors[keyof TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostErrors];
+
+export type TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: OutboundScimTestResult;
+};
+
+export type TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponse = TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponses[keyof TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponses];
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;

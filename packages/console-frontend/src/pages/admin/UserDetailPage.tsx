@@ -423,6 +423,50 @@ export function UserDetailPage() {
         </Card>
       </div>
 
+      {user.scim_attributes && Object.keys(user.scim_attributes).length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>IdP Attributes</CardTitle>
+            <CardDescription>Extra attributes provisioned via SCIM</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              {Array.isArray(user.scim_attributes.phoneNumbers) && (
+                <div>
+                  <p className="text-sm text-muted-foreground">Phone</p>
+                  <p className="font-medium">
+                    {(user.scim_attributes.phoneNumbers as Array<{ value: string; type?: string }>)
+                      .map((p) => p.value)
+                      .join(', ')}
+                  </p>
+                </div>
+              )}
+              {Object.entries(user.scim_attributes)
+                .filter(([key]) => key.startsWith('urn:'))
+                .flatMap(([, ext]) =>
+                  Object.entries(ext as Record<string, unknown>)
+                )
+                .map(([key, value]) => (
+                  <div key={key}>
+                    <p className="text-sm text-muted-foreground">{key}</p>
+                    <p className="font-medium">{String(value)}</p>
+                  </div>
+                ))}
+              {Object.entries(user.scim_attributes)
+                .filter(([key]) => key !== 'phoneNumbers' && !key.startsWith('urn:'))
+                .map(([key, value]) => (
+                  <div key={key}>
+                    <p className="text-sm text-muted-foreground">{key}</p>
+                    <p className="font-medium">
+                      {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                    </p>
+                  </div>
+                ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Group Memberships</CardTitle>
