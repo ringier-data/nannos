@@ -16,7 +16,7 @@ import {
   SettingsModal,
 } from './components';
 import { WorkingBlock } from './components/WorkingBlock';
-import { BugReportConfirmCard } from './components/BugReportConfirmCard';
+import { InterruptConfirmCard } from './components/InterruptConfirmCard';
 
 export function ChatApp() {
   const { isAdmin } = useAuth();
@@ -169,8 +169,8 @@ export function ChatApp() {
           </div>
         )}
 
-        {/* Bug Report Confirmation Card — shown when orchestrator triggers bug report interrupt */}
-        <BugReportConfirmCard />
+        {/* HITL Interrupt Confirmation Card — shown when agent requests user approval */}
+        <InterruptConfirmCard />
 
         {/* Chat Input */}
         <ChatInput />

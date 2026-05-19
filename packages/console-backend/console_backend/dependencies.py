@@ -570,4 +570,3 @@ async def require_scim_token(request: Request, db: DbSession) -> None:
             detail="Invalid, expired, or revoked SCIM token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-

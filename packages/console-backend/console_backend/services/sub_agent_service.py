@@ -14,6 +14,7 @@ from ..config import config
 from ..models.notification import NotificationData, NotificationType
 from ..models.sub_agent import (
     ActivationSource,
+    SkillFile,
     SubAgent,
     SubAgentConfigVersion,
     SubAgentCreate,
@@ -29,6 +30,7 @@ from ..services.notification_service import NotificationService
 
 if TYPE_CHECKING:
     from ..repositories.sub_agent_repository import SubAgentRepository
+    from ..services.skill_registry_service import SkillRegistryService
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,7 @@ logger = logging.getLogger(__name__)
 # Models that support Extended Thinking
 MODELS_SUPPORTING_THINKING = {
     "claude-sonnet-4.5",
+    "claude-sonnet-4.6",
     "claude-haiku-4-5",
     "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
@@ -74,6 +77,17 @@ def _meets_auto_approve_constraints(
         and len(mcp_tools or []) <= config.auto_approve.max_mcp_tools_count
         and not (is_public if is_public is not None else False)
     )
+
+
+def _strip_skill_frontmatter(content: str) -> str:
+    """Strip YAML frontmatter from SKILL.md, returning only the body."""
+    trimmed = content.strip()
+    if not trimmed.startswith("---"):
+        return trimmed
+    end_idx = trimmed.find("---", 3)
+    if end_idx == -1:
+        return trimmed
+    return trimmed[end_idx + 3 :].lstrip("\n")
 
 
 def _normalize_thinking_config(
@@ -137,6 +151,7 @@ class SubAgentService:
         """
         self._repo = sub_agent_repository
         self._notification_service = notification_service
+        self._skill_registry_service: "SkillRegistryService | None" = None
 
     def set_repository(self, sub_agent_repository: "SubAgentRepository") -> None:
         """Set the sub-agent repository (dependency injection)."""
@@ -152,6 +167,10 @@ class SubAgentService:
     def set_notification_service(self, notification_service: NotificationService) -> None:
         """Set the notification service (dependency injection)."""
         self._notification_service = notification_service
+
+    def set_skill_registry_service(self, service: "SkillRegistryService") -> None:
+        """Set the skill registry service (dependency injection)."""
+        self._skill_registry_service = service
 
     @property
     def notification_service(self) -> NotificationService | None:
@@ -202,6 +221,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -267,6 +288,8 @@ class SubAgentService:
                        cv.pricing_config as cv_pricing_config,
                        cv.enable_thinking as cv_enable_thinking,
                        cv.thinking_level as cv_thinking_level,
+                       cv.skills as cv_skills,
+                       cv.sandbox_enabled as cv_sandbox_enabled,
                        cv.change_summary as cv_change_summary, cv.status as cv_status,
                        cv.submitted_by_user_id as cv_submitted_by_user_id,
                        cv.approved_by_user_id as cv_approved_by_user_id,
@@ -304,7 +327,12 @@ class SubAgentService:
                 result = await db.execute(query, {"user_id": user_id, "include_owned": include_owned})
 
         rows = result.mappings().all()
-        return [self._row_to_sub_agent_with_version(row) for row in rows]
+        sub_agents = [self._row_to_sub_agent_with_version(row) for row in rows]
+
+        # Compute effective_permission for each sub-agent
+        await self._populate_effective_permissions(db, sub_agents, user_id)
+
+        return sub_agents
 
     async def get_pending_approvals(self, db: AsyncSession) -> list[SubAgent]:
         """Get all sub-agents with versions pending approval (admin only)."""
@@ -330,6 +358,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -381,6 +411,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -432,6 +464,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -481,6 +515,8 @@ class SubAgentService:
                    cv.foundry_scopes as cv_foundry_scopes,
                    cv.foundry_version as cv_foundry_version,
                    cv.pricing_config as cv_pricing_config,
+                   cv.skills as cv_skills,
+                   cv.sandbox_enabled as cv_sandbox_enabled,
                    cv.change_summary as cv_change_summary, cv.status as cv_status,
                    cv.submitted_by_user_id as cv_submitted_by_user_id,
                    cv.approved_by_user_id as cv_approved_by_user_id,
@@ -521,6 +557,7 @@ class SubAgentService:
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
                        cv.pricing_config, cv.enable_thinking, cv.thinking_level,
+                       cv.skills, cv.sandbox_enabled,
                        cv.change_summary, cv.status, 
                        cv.submitted_by_user_id,
                        cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
@@ -537,6 +574,7 @@ class SubAgentService:
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
                        cv.pricing_config, cv.enable_thinking, cv.thinking_level,
+                       cv.skills, cv.sandbox_enabled,
                        cv.change_summary, cv.status, 
                        cv.submitted_by_user_id,
                        cv.approved_by_user_id, cv.approved_at, cv.rejection_reason, cv.deleted_at, cv.created_at
@@ -629,6 +667,8 @@ class SubAgentService:
             pricing_config=data.pricing_config,
             enable_thinking=normalized_enable_thinking,
             thinking_level=normalized_thinking_level,
+            skills=data.skills,
+            sandbox_enabled=data.sandbox_enabled,
         )
         await db.commit()
 
@@ -677,6 +717,10 @@ class SubAgentService:
         if not has_write_permission:
             raise PermissionError("You don't have permission to update this sub-agent")
 
+        # Sandbox execution is only supported for local agents
+        if data.sandbox_enabled and existing.type != SubAgentType.LOCAL:
+            raise ValueError("sandbox_enabled is only supported for local agents")
+
         now = datetime.now(timezone.utc)
 
         # Update name and/or is_public on sub_agents table if provided
@@ -713,6 +757,8 @@ class SubAgentService:
             or data.pricing_config is not None
             or data.thinking_level is not None
             or data.enable_thinking is not None
+            or data.skills is not None
+            or data.sandbox_enabled is not None
         )
 
         if needs_new_version:
@@ -745,6 +791,16 @@ class SubAgentService:
 
             # Get current version values to use as defaults
             current_config = existing.config_version
+
+            # Skills and sandbox_enabled apply to all agent types
+            version_skills = (
+                data.skills if data.skills is not None else (current_config.skills if current_config else [])
+            )
+            version_sandbox_enabled = (
+                data.sandbox_enabled
+                if data.sandbox_enabled is not None
+                else (current_config.sandbox_enabled if current_config else False)
+            )
 
             # For local/automated agents, only use system_prompt. For remote agents, only use agent_url. For Foundry agents, use foundry_* fields.
             # This ensures we don't violate the CHECK constraint.
@@ -919,6 +975,8 @@ class SubAgentService:
                 pricing_config=version_pricing_config,
                 enable_thinking=version_enable_thinking,
                 thinking_level=version_thinking_level,
+                skills=version_skills,
+                sandbox_enabled=version_sandbox_enabled,
             )
 
             # Update current_version pointer
@@ -1808,6 +1866,140 @@ class SubAgentService:
         await db.commit()
         return await self.get_sub_agent_by_id(db, sub_agent_id)
 
+    async def add_skill_to_config(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        registry_id: str,
+        skill_name: str,
+        skill_description: str,
+        content_hash: str,
+        actor: User,
+    ) -> None:
+        """Add a registry skill reference to the agent's config by creating a new version.
+
+        Appends the skill to the current default config version's skills list,
+        creating a new auto-approved version. Idempotent — skips if already present.
+
+        Args:
+            db: Database session
+            sub_agent_id: Target sub-agent ID
+            registry_id: UUID of the skill in the registry
+            skill_name: Display name of the skill
+            skill_description: Skill description
+            content_hash: Content hash at activation time (for pinning)
+            actor: User performing the action
+
+        Raises:
+            ValueError: If the agent has no default version
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing or not existing.config_version:
+            raise ValueError(
+                f"Sub-agent {sub_agent_id} has no default config version. "
+                "Approve a config version first, then activate default skills."
+            )
+
+        current_skills = existing.config_version.skills or []
+
+        # Idempotent: skip if skill already in config (by source reference)
+        for s in current_skills:
+            source = s.source if hasattr(s, "source") else (s.get("source") if isinstance(s, dict) else None)
+            if source == registry_id:
+                return
+
+        # Build the new skill reference
+        from console_backend.models.sub_agent import SkillDefinition
+
+        new_skill = SkillDefinition(
+            name=skill_name,
+            description=skill_description,
+            source=registry_id,
+            source_hash=content_hash,
+            body="",
+            files=[],
+        )
+        updated_skills = list(current_skills) + [new_skill]
+
+        # Create a new version via the standard update path
+        from console_backend.models.sub_agent import SubAgentUpdate
+
+        await self.update_sub_agent(
+            db=db,
+            sub_agent_id=sub_agent_id,
+            data=SubAgentUpdate(skills=updated_skills),
+            actor=actor,
+        )
+
+    async def update_skill_hash_in_config(
+        self,
+        db: AsyncSession,
+        sub_agent_id: int,
+        registry_id: str,
+        new_hash: str,
+        actor: User,
+    ) -> None:
+        """Update a skill's source_hash in the config by creating a new version.
+
+        Finds the skill by its source (registry_id) in the current default
+        config's skills list, updates the source_hash, and creates a new
+        immutable config version with the change.
+
+        No-op if the skill is not found in the current config or hash is unchanged.
+
+        Args:
+            db: Database session
+            sub_agent_id: Target sub-agent ID
+            registry_id: UUID identifying the skill in the skills list
+            new_hash: Updated content hash
+            actor: User performing the update
+        """
+        existing = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if not existing or not existing.config_version:
+            return
+
+        current_skills = existing.config_version.skills or []
+        updated = False
+        updated_skills = []
+
+        for skill in current_skills:
+            # Handle both Pydantic models and dicts
+            if hasattr(skill, "source"):
+                source = skill.source
+            elif isinstance(skill, dict):
+                source = skill.get("source")
+            else:
+                updated_skills.append(skill)
+                continue
+
+            if source == registry_id:
+                # Clone with updated hash
+                from console_backend.models.sub_agent import SkillDefinition
+
+                if hasattr(skill, "model_copy"):
+                    new_skill = skill.model_copy(update={"source_hash": new_hash})
+                elif isinstance(skill, dict):
+                    new_skill = SkillDefinition(**{**skill, "source_hash": new_hash})
+                else:
+                    updated_skills.append(skill)
+                    continue
+                updated_skills.append(new_skill)
+                updated = True
+            else:
+                updated_skills.append(skill)
+
+        if not updated:
+            return
+
+        from console_backend.models.sub_agent import SubAgentUpdate
+
+        await self.update_sub_agent(
+            db=db,
+            sub_agent_id=sub_agent_id,
+            data=SubAgentUpdate(skills=updated_skills),
+            actor=actor,
+        )
+
     async def set_system_role(
         self,
         db: AsyncSession,
@@ -1886,6 +2078,8 @@ class SubAgentService:
             pricing_config=target.config_version.pricing_config,
             thinking_level=target.config_version.thinking_level,
             enable_thinking=target.config_version.enable_thinking,
+            skills=target.config_version.skills,
+            sandbox_enabled=target.config_version.sandbox_enabled,
         )
 
         await self.repo.update_current_version(
@@ -2146,12 +2340,381 @@ class SubAgentService:
         ]
 
     def _generate_version_hash(
-        self, system_prompt: str | None, agent_url: str | None, mcp_tools: list[str], timestamp: datetime
+        self,
+        system_prompt: str | None,
+        agent_url: str | None,
+        mcp_tools: list[str],
+        skills: list,
+        sandbox_enabled: bool,
+        timestamp: datetime,
     ) -> str:
         """Generate a 12-character hash for a version based on content and timestamp."""
-        content_dict = {"system_prompt": system_prompt, "agent_url": agent_url, "mcp_tools": mcp_tools}
+        content_dict = {
+            "system_prompt": system_prompt,
+            "agent_url": agent_url,
+            "mcp_tools": mcp_tools,
+            "skills": [s.model_dump() if hasattr(s, "model_dump") else s for s in skills],
+            "sandbox_enabled": sandbox_enabled,
+        }
         content = json.dumps(content_dict, sort_keys=True) + timestamp.isoformat()
         return hashlib.sha256(content.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _strip_imported_skill_content(skills: list) -> list:
+        """Strip body and files from imported skills to store only the reference.
+
+        Imported skills (those with a 'source' field) are stored as lightweight
+        references in the config version JSONB. Full content is resolved from the
+        skill_registry table at read time.
+        """
+        result = []
+        for skill in skills:
+            if hasattr(skill, "model_dump"):
+                d = skill.model_dump()
+            else:
+                d = dict(skill) if not isinstance(skill, dict) else skill
+            if d.get("source"):
+                # Keep only the reference fields
+                d = {
+                    "name": d["name"],
+                    "description": d.get("description", ""),
+                    "source": d["source"],
+                    "source_hash": d.get("source_hash"),
+                    "body": "",
+                    "files": [],
+                }
+            result.append(d)
+        return result
+
+    async def _persist_and_strip_skills(
+        self,
+        db: AsyncSession,
+        actor: User,
+        sub_agent_id: int,
+        skills: list,
+    ) -> list:
+        """Persist all skills to the registry and return stripped references.
+
+        - Imported skills (source set): stripped as before (body/files removed).
+        - Custom skills (no source): upserted into skill_registry with scope='sub-agent',
+          then stripped to a reference with the new registry ID and content_hash.
+
+        This makes the storage model consistent: ALL skills are references to the registry.
+        """
+        from ..models.skills_registry import SkillFile as RegistrySkillFile
+
+        if self._skill_registry_service is None:
+            raise RuntimeError(
+                "SkillRegistryService not injected. Call set_skill_registry_service() during initialization."
+            )
+        registry_service = self._skill_registry_service
+
+        result = []
+        for skill in skills:
+            if hasattr(skill, "model_dump"):
+                d = skill.model_dump()
+            else:
+                d = dict(skill) if not isinstance(skill, dict) else skill
+
+            if d.get("source"):
+                # Already imported — just strip content
+                d = {
+                    "name": d["name"],
+                    "description": d.get("description", ""),
+                    "source": d["source"],
+                    "source_hash": d.get("source_hash"),
+                    "body": "",
+                    "files": [],
+                }
+            else:
+                # Custom skill — upsert to registry, then strip
+                body = d.get("body", "")
+                description = d.get("description", "")
+                skill_name = d["name"]
+                skill_files_raw = d.get("files") or []
+
+                # Compose SKILL.md with frontmatter so the registry page can parse it
+                skill_md_lines = ["---", f"name: {skill_name}"]
+                if description:
+                    skill_md_lines.append(f"description: {description}")
+                skill_md_lines.append("---")
+                skill_md_lines.append("")
+                if body:
+                    skill_md_lines.append(body)
+                skill_md_content = "\n".join(skill_md_lines)
+                if not skill_md_content.endswith("\n"):
+                    skill_md_content += "\n"
+
+                # Build registry SkillFile list (uses .contents, not .content)
+                registry_files: list[RegistrySkillFile] = []
+                registry_files.append(RegistrySkillFile(path="SKILL.md", contents=skill_md_content))
+                for sf in skill_files_raw:
+                    if isinstance(sf, dict):
+                        registry_files.append(
+                            RegistrySkillFile(
+                                path=sf.get("path", ""), contents=sf.get("content", sf.get("contents", ""))
+                            )
+                        )
+                    elif hasattr(sf, "content"):
+                        # sub_agent.SkillFile uses .content (singular)
+                        registry_files.append(RegistrySkillFile(path=sf.path, contents=sf.content))
+                    else:
+                        registry_files.append(RegistrySkillFile(path=sf.path, contents=sf.contents))
+
+                # Upsert into skill_registry with scope='sub-agent'
+                skill_id, content_hash = await registry_service.upsert_agent_skill(
+                    db=db,
+                    actor=actor,
+                    sub_agent_id=sub_agent_id,
+                    name=d["name"],
+                    description=d.get("description", ""),
+                    files=registry_files,
+                )
+
+                d = {
+                    "name": d["name"],
+                    "description": d.get("description", ""),
+                    "source": skill_id,
+                    "source_hash": content_hash,
+                    "body": "",
+                    "files": [],
+                }
+            result.append(d)
+        return result
+
+    async def resolve_imported_skills(self, db: AsyncSession, sub_agent: "SubAgent") -> None:
+        """Resolve skill references in-place by fetching content from the skill registry.
+
+        All skills are stored as lightweight references (name, description, source, source_hash)
+        without body/files content. This method populates body and files from the registry table.
+
+        For agent-scoped skills (custom), the source field is cleared after resolution so
+        the frontend treats them as editable custom skills.
+
+        Skills are pinned to their source_hash version. If the registry has a newer version,
+        update_available is set to True and latest_hash is populated.
+
+        Mutates sub_agent.config_version.skills in-place.
+        """
+        if not sub_agent or not sub_agent.config_version or not sub_agent.config_version.skills:
+            return
+
+        # Collect source IDs that need resolution
+        source_ids = [s.source for s in sub_agent.config_version.skills if s.source and not s.body]
+        if not source_ids:
+            return
+
+        # Batch-fetch from skill_registry (include scope and content_hash)
+        result = await db.execute(
+            text(
+                "SELECT id, files, scope, sandbox_required, description, content_hash FROM skill_registry WHERE id = ANY(:ids)"
+            ),
+            {"ids": source_ids},
+        )
+        registry_map: dict[str, dict] = {}
+        for row in result.mappings().all():
+            registry_map[str(row["id"])] = {
+                "files": row["files"] or [],
+                "scope": row.get("scope") or "standalone",
+                "sandbox_required": row.get("sandbox_required", False),
+                "description": row.get("description") or "",
+                "content_hash": row.get("content_hash") or "",
+            }
+
+        # Identify skills that need pinned versions (source_hash differs from current)
+        pinned_lookups: list[tuple[str, str]] = []  # (skill_id, source_hash)
+        for skill in sub_agent.config_version.skills:
+            if (
+                skill.source
+                and not skill.body
+                and skill.source in registry_map
+                and skill.source_hash
+                and skill.source_hash != registry_map[skill.source]["content_hash"]
+            ):
+                pinned_lookups.append((skill.source, skill.source_hash))
+
+        # Batch-fetch pinned versions from skill_registry_versions
+        pinned_map: dict[tuple[str, str], dict] = {}
+        if pinned_lookups:
+            # Build condition for batch lookup
+            conditions = []
+            params: dict = {}
+            for i, (sid, shash) in enumerate(pinned_lookups):
+                conditions.append(f"(skill_id = :sid_{i} AND content_hash = :hash_{i})")
+                params[f"sid_{i}"] = sid
+                params[f"hash_{i}"] = shash
+            where_clause = " OR ".join(conditions)
+            ver_result = await db.execute(
+                text(
+                    f"SELECT skill_id, content_hash, files, description FROM skill_registry_versions WHERE {where_clause}"
+                ),
+                params,
+            )
+            for row in ver_result.mappings().all():
+                pinned_map[(str(row["skill_id"]), row["content_hash"])] = {
+                    "files": row["files"] or [],
+                    "description": row.get("description") or "",
+                }
+
+        # Populate skills in-place
+        for skill in sub_agent.config_version.skills:
+            if skill.source and not skill.body and skill.source in registry_map:
+                entry = registry_map[skill.source]
+                current_hash = entry["content_hash"]
+
+                # Determine if we should use pinned version or current
+                use_pinned = (
+                    skill.source_hash
+                    and skill.source_hash != current_hash
+                    and (skill.source, skill.source_hash) in pinned_map
+                )
+
+                if use_pinned:
+                    assert skill.source_hash is not None
+                    pinned = pinned_map[(skill.source, skill.source_hash)]
+                    files = pinned["files"]
+                    if not skill.description and pinned["description"]:
+                        skill.description = pinned["description"]
+                    skill.update_available = True
+                    skill.latest_hash = current_hash
+                else:
+                    files = entry["files"]
+                    if not skill.description and entry["description"]:
+                        skill.description = entry["description"]
+                    # If source_hash differs but pinned version not found (legacy), use latest
+                    if skill.source_hash and skill.source_hash != current_hash:
+                        skill.update_available = True
+                        skill.latest_hash = current_hash
+                        skill.source_hash = current_hash  # Auto-update hash for legacy
+
+                # Extract SKILL.md body and other files
+                for f in files:
+                    if f.get("path") == "SKILL.md":
+                        skill.body = _strip_skill_frontmatter(f.get("contents", ""))
+                    else:
+                        skill.files.append(SkillFile(path=f["path"], content=f.get("contents", "")))
+                skill.sandbox_required = entry["sandbox_required"]
+                # Agent-scoped skills are editable custom skills — clear source for frontend
+                if entry["scope"] == "sub-agent":
+                    skill.source = None
+                    skill.source_hash = None
+                    skill.update_available = False
+                    skill.latest_hash = None
+
+    async def resolve_imported_skills_bulk(self, db: AsyncSession, sub_agents: list["SubAgent"]) -> None:
+        """Resolve skill references for multiple sub-agents in a single batch query.
+
+        Skills are pinned to their source_hash. If a newer version exists,
+        update_available is set and latest_hash is populated.
+        """
+        # Collect all source IDs across all agents
+        source_ids: list[str] = []
+        for sa in sub_agents:
+            if sa.config_version and sa.config_version.skills:
+                for s in sa.config_version.skills:
+                    if s.source and not s.body:
+                        source_ids.append(s.source)
+
+        if not source_ids:
+            return
+
+        # Deduplicate and batch-fetch
+        unique_ids = list(set(source_ids))
+        result = await db.execute(
+            text(
+                "SELECT id, files, scope, sandbox_required, description, content_hash FROM skill_registry WHERE id = ANY(:ids)"
+            ),
+            {"ids": unique_ids},
+        )
+        registry_map: dict[str, dict] = {}
+        for row in result.mappings().all():
+            registry_map[str(row["id"])] = {
+                "files": row["files"] or [],
+                "scope": row.get("scope") or "standalone",
+                "sandbox_required": row.get("sandbox_required", False),
+                "description": row.get("description") or "",
+                "content_hash": row.get("content_hash") or "",
+            }
+
+        # Identify skills that need pinned versions
+        pinned_lookups: set[tuple[str, str]] = set()
+        for sa in sub_agents:
+            if sa.config_version and sa.config_version.skills:
+                for skill in sa.config_version.skills:
+                    if (
+                        skill.source
+                        and not skill.body
+                        and skill.source in registry_map
+                        and skill.source_hash
+                        and skill.source_hash != registry_map[skill.source]["content_hash"]
+                    ):
+                        pinned_lookups.add((skill.source, skill.source_hash))
+
+        # Batch-fetch pinned versions
+        pinned_map: dict[tuple[str, str], dict] = {}
+        if pinned_lookups:
+            conditions = []
+            params: dict = {}
+            for i, (sid, shash) in enumerate(pinned_lookups):
+                conditions.append(f"(skill_id = :sid_{i} AND content_hash = :hash_{i})")
+                params[f"sid_{i}"] = sid
+                params[f"hash_{i}"] = shash
+            where_clause = " OR ".join(conditions)
+            ver_result = await db.execute(
+                text(
+                    f"SELECT skill_id, content_hash, files, description FROM skill_registry_versions WHERE {where_clause}"
+                ),
+                params,
+            )
+            for row in ver_result.mappings().all():
+                pinned_map[(str(row["skill_id"]), row["content_hash"])] = {
+                    "files": row["files"] or [],
+                    "description": row.get("description") or "",
+                }
+
+        # Populate all skills in-place
+        for sa in sub_agents:
+            if sa.config_version and sa.config_version.skills:
+                for skill in sa.config_version.skills:
+                    if skill.source and not skill.body and skill.source in registry_map:
+                        entry = registry_map[skill.source]
+                        current_hash = entry["content_hash"]
+
+                        use_pinned = (
+                            skill.source_hash
+                            and skill.source_hash != current_hash
+                            and (skill.source, skill.source_hash) in pinned_map
+                        )
+
+                        if use_pinned:
+                            assert skill.source_hash is not None
+                            pinned = pinned_map[(skill.source, skill.source_hash)]
+                            files = pinned["files"]
+                            if not skill.description and pinned["description"]:
+                                skill.description = pinned["description"]
+                            skill.update_available = True
+                            skill.latest_hash = current_hash
+                        else:
+                            files = entry["files"]
+                            if not skill.description and entry["description"]:
+                                skill.description = entry["description"]
+                            if skill.source_hash and skill.source_hash != current_hash:
+                                skill.update_available = True
+                                skill.latest_hash = current_hash
+                                skill.source_hash = current_hash
+
+                        for f in files:
+                            if f.get("path") == "SKILL.md":
+                                skill.body = _strip_skill_frontmatter(f.get("contents", ""))
+                            else:
+                                skill.files.append(SkillFile(path=f["path"], content=f.get("contents", "")))
+                        skill.sandbox_required = entry["sandbox_required"]
+                        # Agent-scoped skills are editable custom skills
+                        if entry["scope"] == "sub-agent":
+                            skill.source = None
+                            skill.source_hash = None
+                            skill.update_available = False
+                            skill.latest_hash = None
 
     async def _create_config_version(
         self,
@@ -2176,11 +2739,21 @@ class SubAgentService:
         pricing_config: dict | None = None,
         enable_thinking: bool | None = None,
         thinking_level: ThinkingLevel | None = None,
+        skills: list | None = None,
+        sandbox_enabled: bool = False,
     ) -> int:
         """Create a new configuration version entry. Returns the new version ID."""
         now = datetime.now(timezone.utc)
         mcp_tools_list = mcp_tools if mcp_tools is not None else []
-        version_hash = self._generate_version_hash(system_prompt, agent_url, mcp_tools_list, now)
+        skills_list = skills if skills is not None else []
+
+        # Persist all skills (custom + imported) to the registry and strip to references.
+        # Full content lives in the skill_registry table and is resolved on read.
+        skills_list = await self._persist_and_strip_skills(db, actor, sub_agent_id, skills_list)
+
+        version_hash = self._generate_version_hash(
+            system_prompt, agent_url, mcp_tools_list, skills_list, sandbox_enabled, now
+        )
 
         return await self.repo.create_config_version(
             db=db,
@@ -2205,7 +2778,62 @@ class SubAgentService:
             pricing_config=pricing_config,
             enable_thinking=enable_thinking,
             thinking_level=thinking_level,
+            skills=skills_list,
+            sandbox_enabled=sandbox_enabled,
         )
+
+    async def _populate_effective_permissions(self, db: AsyncSession, sub_agents: list[SubAgent], user_id: str) -> None:
+        """Compute and set effective_permission for a list of sub-agents.
+
+        Uses a single batch query for group permissions, then resolves per agent:
+        - Owner → "owner"
+        - Group write/manager role with write resource permission → "write"
+        - Public or group read → "read"
+
+        Mutates sub_agents in place.
+        """
+        if not sub_agents:
+            return
+
+        # Fast path: set owner permission
+        sub_agent_ids = []
+        for sa in sub_agents:
+            if sa.owner_user_id == user_id:
+                sa.effective_permission = "owner"
+            else:
+                sub_agent_ids.append(sa.id)
+
+        if not sub_agent_ids:
+            return
+
+        # Batch query: get group permissions for all non-owned sub-agents
+        query = text("""
+            SELECT sap.sub_agent_id, sap.permissions, ugm.group_role
+            FROM sub_agent_permissions sap
+            JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
+            WHERE sap.sub_agent_id = ANY(:sub_agent_ids)
+              AND ugm.user_id = :user_id
+        """)
+        result = await db.execute(query, {"sub_agent_ids": sub_agent_ids, "user_id": user_id})
+
+        # Build a map of sub_agent_id → highest permission
+        write_agents: set[int] = set()
+        read_agents: set[int] = set()
+        for row in result.fetchall():
+            sa_id, resource_permissions, group_role = row[0], row[1], row[2]
+            if "write" in resource_permissions and check_action_allowed(group_role, "sub_agents", "write"):
+                write_agents.add(sa_id)
+            if "read" in resource_permissions and check_action_allowed(group_role, "sub_agents", "read"):
+                read_agents.add(sa_id)
+
+        # Assign effective permission (highest wins)
+        for sa in sub_agents:
+            if sa.effective_permission:
+                continue  # Already set (owner)
+            if sa.id in write_agents:
+                sa.effective_permission = "write"
+            elif sa.id in read_agents or sa.is_public:
+                sa.effective_permission = "read"
 
     def _row_to_sub_agent_with_version(self, row: Any) -> SubAgent:
         """Convert a database row (with joined version info) to a SubAgent model."""
@@ -2240,6 +2868,8 @@ class SubAgentService:
                 foundry_scopes=row.get("cv_foundry_scopes"),
                 foundry_version=row.get("cv_foundry_version"),
                 pricing_config=row.get("cv_pricing_config"),
+                skills=row.get("cv_skills", []),
+                sandbox_enabled=row.get("cv_sandbox_enabled", False),
                 change_summary=row["cv_change_summary"],
                 status=row["cv_status"],
                 submitted_by_user_id=row.get("cv_submitted_by_user_id"),
@@ -2292,6 +2922,8 @@ class SubAgentService:
             foundry_scopes=row.get("foundry_scopes"),
             foundry_version=row.get("foundry_version"),
             pricing_config=row.get("pricing_config"),
+            skills=row.get("skills", []),
+            sandbox_enabled=row.get("sandbox_enabled", False),
             enable_thinking=row.get("enable_thinking", False),
             thinking_level=row.get("thinking_level", "low"),
             change_summary=row["change_summary"],

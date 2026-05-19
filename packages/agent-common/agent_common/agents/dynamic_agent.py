@@ -24,12 +24,16 @@ Users can configure personal sub-agents via console backend with custom prompts 
 tool whitelists, enabling specialized assistants without deploying separate A2A services.
 """
 
+from __future__ import annotations
+
 import logging
 import os
-from collections.abc import AsyncIterable
-from typing import Any, Dict, List, Optional
+from collections.abc import AsyncIterable, Callable
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from deepagents import CompiledSubAgent
+from deepagents.backends import StateBackend
+from deepagents.backends.composite import CompositeBackend
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk
 from langchain_core.tools import BaseTool
@@ -39,6 +43,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphInterrupt
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
@@ -69,6 +74,9 @@ from agent_common.a2a.structured_response import (
 from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.utils import get_language_display_name
+
+if TYPE_CHECKING:
+    from agent_common.core.sandbox_pool import SandboxPool
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +171,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         mcp_gateway_url: Optional[str] = None,
         mcp_gateway_client_id: Optional[str] = None,
         console_backend_client_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        group_ids: Optional[List[str]] = None,
+        sandbox_pool: SandboxPool | None = None,
+        extra_middlewares: Optional[List[Any]] = None,
+        inject_all_tools: Optional[List[BaseTool]] = None,
     ):
         """Initialize the dynamic local agent runnable.
 
@@ -183,6 +196,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             mcp_gateway_url: MCP gateway URL (defaults to MCP_GATEWAY_URL env var)
             mcp_gateway_client_id: MCP gateway client ID (defaults to MCP_GATEWAY_CLIENT_ID env var)
             console_backend_client_id: Console backend OIDC client ID for token exchange (defaults to CONSOLE_BACKEND_CLIENT_ID env var)
+            user_id: User's stable database ID (for playbook loading)
+            group_ids: User's group IDs for group playbook loading (all groups)
+            extra_middlewares: Optional list of middleware instances to prepend to the standard stack.
+            inject_all_tools: Optional pre-discovered tools to use directly (bypasses MCP discovery).
+                When set, these tools are used as the agent's MCP tools without gateway discovery.
         """
         self.config = config
         self.model = model
@@ -197,6 +215,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self.custom_prompt = custom_prompt
         self.store = store
         self.backend_factory = backend_factory
+        self.user_id = user_id
+        self.group_ids = group_ids
         self.mcp_gateway_url = mcp_gateway_url or os.getenv("MCP_GATEWAY_URL", "")
         self.mcp_gateway_client_id = mcp_gateway_client_id or os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
         self.console_backend_client_id = console_backend_client_id or os.getenv(
@@ -205,8 +225,18 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self.console_backend_mcp_url = os.getenv("CONSOLE_BACKEND_MCP_URL", "") or (
             f"{os.getenv('CONSOLE_BACKEND_URL', '')}/mcp" if os.getenv("CONSOLE_BACKEND_URL") else ""
         )
-        self._agent = None
+        self.sandbox_pool = sandbox_pool
+        self.extra_middlewares = extra_middlewares
+        self.inject_all_tools = inject_all_tools
+        self._agent: CompiledStateGraph | None = None
         self._discovered_tools: Optional[List[BaseTool]] = None
+        self._resolved_skills: dict = {}
+        # Cached intermediate state for per-invocation sandbox graph rebuild
+        self._cached_tools: list[BaseTool] | None = None
+        self._cached_system_prompt: str | None = None
+        self._cached_response_format: Any = None
+        self._cached_hitl_guarded: dict[str, dict] | None = None
+        self._cached_effective_backend_factory: Callable | None = None
 
     @property
     def name(self) -> str:
@@ -318,6 +348,138 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         )
 
         return addendum
+
+    async def _build_playbook_addendum(self) -> str:
+        """Build the playbook addendum for the system prompt.
+
+        Reads AGENTS.md from both group and personal scopes, plus builds
+        a Skills System block listing all resolved skills (default + group + personal).
+
+        Returns:
+            Formatted string to append to the system prompt, or empty string if no playbooks
+        """
+        if not self.store or not self.user_id:
+            return ""
+
+        from agent_common.core.playbook_reader import PlaybookReaderService
+
+        reader = PlaybookReaderService(self.store)
+        parts: List[str] = []
+
+        # Load AGENTS.md from group and personal scopes
+        group_content, personal_content = await reader.read_agents_md(
+            user_id=self.user_id,
+            agent_name=self.name,
+            group_ids=self.group_ids,
+        )
+
+        if group_content:
+            parts.append(f"<group_playbook>\n{group_content}\n</group_playbook>")
+
+        if personal_content:
+            parts.append(f"<personal_playbook>\n{personal_content}\n</personal_playbook>")
+
+        if group_content and personal_content:
+            parts.append(
+                "<playbook_conflict_resolution>\n"
+                "If the personal playbook contradicts the group playbook, follow the personal playbook.\n"
+                "</playbook_conflict_resolution>"
+            )
+
+        # Build Skills System block from resolved skills
+        if self._resolved_skills:
+            skill_lines = []
+            for skill in sorted(self._resolved_skills.values(), key=lambda s: s.name):
+                scope_label = skill.scope
+                if skill.overrides:
+                    scope_label += f", overrides {skill.overrides}"
+                skill_lines.append(f"- `{skill.name}` ({scope_label}): {skill.description}")
+
+            parts.append(
+                "## Skills System\n"
+                "You have access to the following skills. Each skill is a directory under /skills/\n"
+                "containing a SKILL.md file (and optionally scripts, references, assets).\n\n"
+                "To use a skill:\n"
+                "1. Match the user's request to a skill description below.\n"
+                "2. Read the full SKILL.md with read_file('/skills/<name>/SKILL.md').\n"
+                "3. Follow its instructions; read any referenced files as needed.\n\n"
+                "Available skills:\n" + "\n".join(skill_lines)
+            )
+
+        if not parts:
+            return ""
+
+        return "\n\n" + "\n".join(parts)
+
+    def _build_self_improvement_addendum(self) -> str:
+        """Build the self-improvement decision tree for the system prompt.
+
+        Guides the agent on when and how to use skill/playbook tools based on
+        its effective permission level and the outcome of conversations.
+
+        Returns:
+            Formatted string to append to the system prompt, or empty string
+        """
+        permission = self.config.effective_permission
+
+        # Build scope guidance based on permission level
+        if permission == "owner" or permission == "write":
+            scope_guidance = (
+                "You have **write** access to this agent's configuration.\n"
+                "- Use scope='personal' for quick experiments or user-specific preferences.\n"
+                "- Use scope='group' to share improvements with your team.\n"
+                "- Skills are created in the registry and activated on your agent automatically."
+            )
+        elif permission == "read":
+            scope_guidance = (
+                "You have **read-only** access to this agent's default skills.\n"
+                "- Use scope='personal' to save skills/playbooks for the current user only.\n"
+                "- Use scope='group' to share improvements with the user's team."
+            )
+        else:
+            scope_guidance = (
+                "- Use scope='personal' to save skills/playbooks for the current user.\n"
+                "- Use scope='group' to share with the user's team."
+            )
+
+        return (
+            "\n\n<self_improvement>\n"
+            "## Self-Improvement Protocol\n\n"
+            "After completing a task, evaluate whether you learned something that should be preserved:\n\n"
+            "**When to create a skill** (console_create_skill):\n"
+            "- You discovered a multi-step procedure that worked well and could be reused\n"
+            "- The user taught you a domain-specific workflow or pattern\n"
+            "- You built a solution that required non-obvious steps worth documenting\n"
+            "- Note: This creates the skill in the registry AND activates it on your agent\n\n"
+            "**When to update a skill** (console_update_skill):\n"
+            "- An existing skill's instructions were incomplete or incorrect\n"
+            "- You found a better approach than what a skill currently describes\n"
+            "- The user corrected your behavior on something a skill covers\n"
+            "- Note: This updates the registry and self-updates your activation instantly\n\n"
+            "**When to activate an existing skill** (console_activate_skill):\n"
+            "- You found a skill in the registry (via console_search_skills) that should be active\n"
+            "- A previously deactivated skill needs to be re-enabled\n\n"
+            "**When to update the playbook** (console_update_playbook):\n"
+            "- The user expressed a preference about how you should behave (tone, format, approach)\n"
+            "- You learned a constraint or context that affects future interactions\n"
+            "- The user corrected a behavioral pattern (not a skill procedure)\n\n"
+            "**When NOT to self-improve**:\n"
+            "- One-off tasks with no reusable pattern\n"
+            "- The user explicitly said not to remember something\n"
+            "- The interaction was routine with no new insights\n\n"
+            "### Multi-File Skills\n"
+            "Skills can include bundled files (scripts, configs, templates) alongside SKILL.md:\n"
+            "- Use console_write_skill_file to add/update files in a skill folder.\n"
+            "- Use console_delete_skill_file to remove files from a skill folder.\n"
+            "- Files are available at /skills/{skill_name}/{file_path} in the sandbox.\n"
+            "- Max 20 files per skill, max 256KB per file, max 3 directory levels.\n"
+            "- Good candidates for bundled files: validation scripts, config templates, "
+            "JSON schemas, example files.\n\n"
+            f"### Scope Selection\n{scope_guidance}\n\n"
+            "**Important**: Always use the console_* MCP tools for self-improvement.\n"
+            "All self-improvement actions require user approval via HITL interrupt.\n"
+            "</self_improvement>"
+        )
 
     async def _discover_mcp_tools(self) -> List[BaseTool]:
         """Discover tools from MCP servers with authentication.
@@ -463,10 +625,146 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # Should never reach here, but just in case
         raise last_error or Exception(f"Failed to discover MCP tools for {self.name}")
 
+    # Tools that sub-agents always get from console-backend MCP for self-improvement
+    _CONSOLE_SELF_IMPROVEMENT_TOOLS = frozenset(
+        {
+            "console_create_skill",
+            "console_update_skill",
+            "console_remove_skill",
+            "console_activate_skill",
+            "console_update_playbook",
+            "console_write_skill_file",
+            "console_delete_skill_file",
+            "console_search_skills",
+            "console_import_skill",
+        }
+    )
+
+    def _wrap_with_agent_name(self, tool: BaseTool) -> BaseTool:
+        """Wrap a tool to auto-inject agent_name and sub_agent_id, hiding them from the LLM schema.
+
+        The sub-agent's name and ID are injected automatically so the LLM doesn't
+        need to guess or hallucinate them.
+        """
+        from langchain_core.tools import StructuredTool
+        from pydantic import Field as PydanticField
+        from pydantic import create_model
+
+        original_coroutine = tool.coroutine
+        agent_name = self.name
+        sub_agent_id = self.sub_agent_id
+        auto_inject_fields = {"agent_name"}
+        if sub_agent_id:
+            auto_inject_fields.add("sub_agent_id")
+
+        async def wrapped_coroutine(**kwargs):
+            kwargs["agent_name"] = agent_name
+            if sub_agent_id:
+                kwargs.setdefault("sub_agent_id", sub_agent_id)
+            return await original_coroutine(**kwargs)
+
+        # Build new schema without auto-injected fields.
+        # MCP tools may have a Pydantic model class or a raw dict (JSON schema).
+        new_schema = None
+        original_schema = tool.args_schema
+        if original_schema and isinstance(original_schema, type) and hasattr(original_schema, "model_fields"):
+            # Pydantic model class — rebuild without auto-injected fields
+            from pydantic_core import PydanticUndefined
+
+            new_fields = {}
+            for name, field_info in original_schema.model_fields.items():
+                if name in auto_inject_fields:
+                    continue
+                default = field_info.default if field_info.default is not PydanticUndefined else ...
+                new_fields[name] = (
+                    field_info.annotation,
+                    PydanticField(
+                        default=default,
+                        description=field_info.description,
+                    ),
+                )
+            new_schema = create_model(f"{original_schema.__name__}Wrapped", **new_fields)
+        elif isinstance(original_schema, dict):
+            # Raw JSON schema dict — remove auto-injected fields from properties/required
+            import copy
+
+            new_schema = copy.deepcopy(original_schema)
+            props = new_schema.get("properties", {})
+            for field_name in auto_inject_fields:
+                props.pop(field_name, None)
+            required = new_schema.get("required", [])
+            new_required = [r for r in required if r not in auto_inject_fields]
+            if new_required != required:
+                new_schema["required"] = new_required
+
+        return StructuredTool(
+            name=tool.name,
+            description=tool.description,
+            args_schema=new_schema,
+            coroutine=wrapped_coroutine,
+            metadata=tool.metadata,
+        )
+
+    async def _discover_console_self_improvement_tools(self) -> List[BaseTool]:
+        """Discover self-improvement tools from console-backend MCP.
+
+        Always called (independent of config.mcp_tools) so every sub-agent can
+        create/update/remove skills and update playbooks via console-backend.
+
+        Only returns the 4 self-improvement tools; other console_* tools are
+        excluded (they come via the orchestrator's tool discovery instead).
+
+        Returns:
+            List of discovered self-improvement tools, or empty list on failure.
+        """
+        if not self.console_backend_mcp_url:
+            logger.debug(f"No console backend MCP URL configured for {self.name}, skipping self-improvement tools")
+            return []
+
+        try:
+            console_headers: dict[str, str] = {}
+            if self.oauth2_client and self.user_token:
+                console_token = await self.oauth2_client.exchange_token(
+                    subject_token=self.user_token,
+                    target_client_id=self.console_backend_client_id,
+                    requested_scopes=["openid", "profile", "offline_access"],
+                )
+                console_headers["Authorization"] = f"Bearer {console_token}"
+            elif self.user_token:
+                console_headers["Authorization"] = f"Bearer {self.user_token}"
+
+            client = MultiServerMCPClient(
+                connections={
+                    "console": StreamableHttpConnection(
+                        transport="streamable_http",
+                        url=self.console_backend_mcp_url,
+                        headers=console_headers if console_headers else None,
+                    ),
+                },
+                callbacks=Callbacks(on_progress=on_mcp_progress),
+            )
+
+            tools = await client.get_tools()
+            tools = [t for t in tools if t.name in self._CONSOLE_SELF_IMPROVEMENT_TOOLS]
+            validated = [_validate_tool_schema(t) for t in tools]
+
+            # Wrap tools to auto-inject agent_name so the LLM doesn't need to provide it
+            wrapped = [self._wrap_with_agent_name(t) for t in validated]
+            logger.info(f"Discovered {len(wrapped)} console self-improvement tools for {self.name}")
+            return wrapped
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to discover console self-improvement tools for {self.name}: {e}. "
+                f"Self-improvement will not be available this session."
+            )
+            return []
+
     def _get_effective_tools(self) -> List[BaseTool]:
         """Get the effective tools for this agent.
 
         Logic:
+        - If inject_all_tools is set: use those directly + essential orchestrator tools
         - If mcp_tools is a non-empty list: use discovered tools + essential orchestrator tools
         - Otherwise (None or empty list): only essential orchestrator tools (NO MCP tools)
 
@@ -494,6 +792,17 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         ]
         essential_tools = [tool for tool in self.orchestrator_tools if tool.name in essential_tool_names]
 
+        # If inject_all_tools is set, use those directly (pre-discovered by orchestrator)
+        if self.inject_all_tools is not None:
+            # Deduplicate: injected tools override essential tools with same name
+            injected_names = {t.name for t in self.inject_all_tools}
+            unique_essential = [t for t in essential_tools if t.name not in injected_names]
+            logger.info(
+                f"Using {len(self.inject_all_tools)} injected tools + "
+                f"{len(unique_essential)} essential tools for '{self.name}'"
+            )
+            return list(self.inject_all_tools) + unique_essential
+
         # Check if config.mcp_tools is a non-empty list
         if self.config.mcp_tools and len(self.config.mcp_tools) > 0:
             # Non-empty list means use discovered tools + essential orchestrator tools
@@ -512,29 +821,65 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         )
         return [_validate_tool_schema(tool) for tool in essential_tools]
 
-    async def _ensure_agent(self) -> Any:
-        """Ensure the LangGraph agent is created (lazy initialization).
+    async def _ensure_agent(self) -> None:
+        """Resolve tools, skills, prompt, and build the default graph (lazy, once).
 
         On first call:
-        1. If mcp_tools is set, discover tools from Gatana gateway with whitelist filtering
-        2. Otherwise, use orchestrator tools (inheritance)
-        3. Create the LangGraph agent with structured output for task state
+        1. If inject_all_tools is set, use those directly (skip gateway discovery)
+        2. Else if mcp_tools is set, discover tools from Gatana gateway with whitelist filtering
+        3. Otherwise, use orchestrator tools (inheritance)
+        4. Resolve skills from store (default + group + personal)
+        5. Cache all intermediate state for _build_graph()
+        6. Build self._agent ONLY if sandbox is not active (sandbox agents build
+           a fresh graph per invocation in _astream_impl)
 
-        The agent uses SubAgentResponseSchema to explicitly determine task state,
-        following the same pattern as the orchestrator's FinalResponseSchema.
-
-        Returns:
-            The compiled LangGraph agent
+        After first call, this is a no-op (guarded by _cached_tools sentinel).
         """
-        if self._agent is not None:
-            return self._agent
+        # Already resolved — skip
+        if self._cached_tools is not None:
+            return
 
-        # Discover MCP tools if whitelist is configured (lazy, first invocation only)
-        # Note: Only discover if mcp_tools is a non-empty list
-        if self.config.mcp_tools and len(self.config.mcp_tools) > 0 and self._discovered_tools is None:
-            self._discovered_tools = await self._discover_mcp_tools()
+        # Discover MCP tools if whitelist is configured AND no injected tools
+        # (inject_all_tools bypasses gateway discovery entirely)
+        if self.inject_all_tools is None:
+            if self.config.mcp_tools and len(self.config.mcp_tools) > 0 and self._discovered_tools is None:
+                self._discovered_tools = await self._discover_mcp_tools()
 
         tools = self._get_effective_tools()
+
+        # Always discover console self-improvement MCP tools (independent of mcp_tools whitelist).
+        # These tools (console_create_skill, console_update_skill, console_remove_skill,
+        # console_update_playbook) are needed for all sub-agents to self-improve.
+        if self.store and self.console_backend_mcp_url:
+            console_tools = await self._discover_console_self_improvement_tools()
+            if console_tools:
+                # Avoid duplicates if tools were already discovered via mcp_tools whitelist
+                existing_names = {t.name for t in tools}
+                tools = tools + [t for t in console_tools if t.name not in existing_names]
+
+        # Pre-resolve skills (default + group + personal) for the virtual filesystem
+        if self.store and self.user_id:
+            from agent_common.core.skills_resolver import resolve_skills_for_agent
+            from agent_common.models.skill import SkillDefinition as AgentSkillDef
+
+            default_skills = []
+            if hasattr(self.config, "skills") and self.config.skills:
+                default_skills = [
+                    s
+                    if isinstance(s, AgentSkillDef)
+                    else AgentSkillDef(
+                        **(s if isinstance(s, dict) else {"name": s.name, "description": s.description, "body": s.body})
+                    )
+                    for s in self.config.skills
+                ]
+            self._resolved_skills = await resolve_skills_for_agent(
+                store=self.store,
+                user_id=self.user_id,
+                agent_name=self.name,
+                group_ids=self.group_ids or [],
+                default_skills=default_skills,
+            )
+
         logger.info(f"Creating LangGraph agent '{self.name}' with {len(tools)} tools")
 
         # Build system prompt with A2A protocol addendum and user preferences
@@ -543,6 +888,18 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if preferences_addendum:
             system_prompt += preferences_addendum
             logger.debug(f"Added user preferences addendum to {self.name} system prompt")
+
+        # Load playbooks from persistent store (AGENTS.md auto-loaded, skills indexed)
+        playbook_addendum = await self._build_playbook_addendum()
+        if playbook_addendum:
+            system_prompt += playbook_addendum
+            logger.debug(f"Added playbook addendum to {self.name} system prompt")
+
+        # Add self-improvement decision tree (guides agent on when/how to use skill tools)
+        self_improvement_addendum = self._build_self_improvement_addendum()
+        if self_improvement_addendum:
+            system_prompt += self_improvement_addendum
+            logger.debug(f"Added self-improvement addendum to {self.name} system prompt")
 
         # Get model-specific response_format strategy (may mutate tools list for Bedrock+thinking)
         response_format = get_response_format(
@@ -553,17 +910,96 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         # Build agent via the shared helper: handles backend factory selection
         # (injected vs. auto-created), middleware stack assembly, and graph creation.
-        self._agent = build_sub_agent_graph(
-            model=self.model,
-            tools=tools,
-            system_prompt=system_prompt,
-            checkpointer=self.checkpointer,  # Shared checkpointer for multi-turn conversations
-            store=self.store,  # Shared document store for persistent memory
-            response_format=response_format,
-            backend_factory=self.backend_factory or None,
-        )
+        # Include HITL for skill/playbook tools so changes require user approval.
+        from agent_common.core.hitl_config import SELF_IMPROVEMENT_HITL_GUARDS
 
-        return self._agent
+        hitl_guarded = dict(SELF_IMPROVEMENT_HITL_GUARDS)
+
+        # Build the backend factory with resolved skills mounted at /skills/
+        effective_backend_factory = self.backend_factory
+        if not effective_backend_factory and self._resolved_skills:
+            from agent_common.core.graph_utils import create_indexing_backend_factory
+
+            effective_backend_factory = create_indexing_backend_factory(
+                store=self.store,
+                resolved_skills=self._resolved_skills,
+            )
+        elif effective_backend_factory and self._resolved_skills:
+            # backend_factory already set (e.g., from orchestrator). Replace or add
+            # /skills/ route with the sub-agent's own SkillsStoreBackend.
+            from agent_common.backends.skills_store import SkillsStoreBackend as _SSB
+
+            if isinstance(effective_backend_factory, CompositeBackend):
+                routes = {**effective_backend_factory.routes, "/skills/": _SSB(self._resolved_skills)}
+                effective_backend_factory = CompositeBackend(
+                    default=effective_backend_factory.default,
+                    routes=routes,
+                )
+            else:
+                effective_backend_factory = CompositeBackend(
+                    default=effective_backend_factory,
+                    routes={"/skills/": _SSB(self._resolved_skills)},
+                )
+
+        # Cache intermediate state for _build_graph() (used by both paths)
+        self._cached_tools = tools
+        self._cached_system_prompt = system_prompt
+        self._cached_response_format = response_format
+        self._cached_hitl_guarded = hitl_guarded
+        self._cached_effective_backend_factory = effective_backend_factory
+
+        # Only build the default (non-sandbox) graph if sandbox is NOT active.
+        # Sandbox-enabled agents build a fresh graph per invocation in _astream_impl()
+        # with a sandboxed backend factory, so building one here would be wasteful.
+        sandbox_active = getattr(self.config, "sandbox_enabled", False) and self.sandbox_pool is not None
+        if not sandbox_active:
+            self._agent = self._build_graph(effective_backend_factory)
+
+    def _build_graph(
+        self,
+        backend_factory: Callable | None = None,
+        extra_middlewares: list | None = None,
+        extra_tools: list | None = None,
+        sandbox_enabled: bool = False,
+        sandbox_home: str | None = None,
+    ) -> CompiledStateGraph:
+        """Build a LangGraph agent from cached state with the given backend factory.
+
+        Single code path for both sandbox and non-sandbox graphs, ensuring
+        feature parity (same tools, prompt, middleware, response format).
+
+        Args:
+            backend_factory: Backend factory for FilesystemMiddleware.
+                For non-sandbox: the indexing backend factory.
+                For sandbox: a sandboxed factory wrapping the base factory.
+            extra_middlewares: Optional list of additional AgentMiddleware instances
+                to prepend to the standard middleware stack (e.g. SkillSandboxSyncMiddleware).
+                Combined with self.extra_middlewares (instance-level comes first).
+            extra_tools: Optional list of additional tools to include alongside
+                the cached tools (e.g. copy_to_sandbox for sandbox-enabled agents).
+            sandbox_enabled: When True, configures StoragePathsInstructionMiddleware
+                with sandbox-aware instructions.
+            sandbox_home: Sandbox home directory path (e.g. "/home/ubuntu").
+
+        Returns:
+            A compiled CompiledStateGraph
+        """
+        # Combine instance-level extra_middlewares with call-level ones
+        combined_middlewares = list(self.extra_middlewares or []) + list(extra_middlewares or []) or None
+        return build_sub_agent_graph(
+            model=self.model,
+            tools=self._cached_tools or [],
+            system_prompt=self._cached_system_prompt or self.config.system_prompt,
+            checkpointer=self.checkpointer,
+            store=self.store,
+            response_format=self._cached_response_format,
+            backend_factory=backend_factory or None,
+            hitl_guarded_tools=self._cached_hitl_guarded,
+            extra_middlewares=combined_middlewares,
+            extra_tools=extra_tools,
+            sandbox_enabled=sandbox_enabled,
+            sandbox_home=sandbox_home,
+        )
 
     async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
         """Stream dynamic agent execution with real-time status updates and content.
@@ -588,21 +1024,103 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             ValueError: If context_id missing from input
             GraphInterrupt: If user intervention needed
         """
-        # Prepare input with multi-modal support (handles content blocks)
-        human_message = await self._prepare_human_message_input(input_data)
-        context_id, task_id = self._extract_tracking_ids(input_data)
+        # For HITL resume: Command goes directly to the inner graph, skip message extraction
+        from langgraph.types import Command as LGCommand
+
+        _is_hitl_resume = isinstance(input_data, LGCommand)
+
+        if not _is_hitl_resume:
+            # Prepare input with multi-modal support (handles content blocks)
+            human_message = await self._prepare_human_message_input(input_data)
+        context_id, task_id = (None, None) if _is_hitl_resume else self._extract_tracking_ids(input_data)
+
+        # Sandbox lifecycle: acquire per-invocation, release in finally
+        pooled_sandbox = None
+        sandbox_active = getattr(self.config, "sandbox_enabled", False) and self.sandbox_pool is not None
 
         try:
-            # Ensure agent is created (lazy initialization)
-            agent = await self._ensure_agent()
+            # Clear per-invocation caches on extra_middlewares (e.g. ToolsetSelectorMiddleware)
+            for mw in self.extra_middlewares or []:
+                if hasattr(mw, "clear_cache"):
+                    mw.clear_cache()
 
-            agent_input = {"messages": [human_message]}
+            # Ensure tools/skills/prompt are resolved and default agent is built (lazy init)
+            await self._ensure_agent()
+
+            # If sandbox enabled, build a per-invocation graph with sandbox backend
+            if sandbox_active:
+                session_id = config.get("configurable", {}).get("thread_id", context_id or "unknown")
+                pooled_sandbox = await self.sandbox_pool.acquire(session_id, self.name)
+
+                # Build per-invocation sandboxed graph via shared _build_graph()
+                from agent_common.core.graph_utils import create_sandboxed_backend_factory
+                from agent_common.core.sandbox_tools import create_copy_to_sandbox_tool
+                from agent_common.middleware.sandbox_path_hint import SandboxPathHintMiddleware
+
+                sandbox_home = self.sandbox_pool.home or "/home/ubuntu"
+
+                sandboxed_backend_factory = create_sandboxed_backend_factory(
+                    sandbox_backend=pooled_sandbox.backend,
+                    base_backend=self._cached_effective_backend_factory or StateBackend(),
+                )
+
+                # Create copy_to_sandbox tool with access to virtual FS and sandbox
+                copy_tool = create_copy_to_sandbox_tool(
+                    composite_backend=self._cached_effective_backend_factory or StateBackend(),
+                    sandbox_backend=pooled_sandbox.backend,
+                    sandbox_home=sandbox_home,
+                )
+
+                # Assemble sandbox-specific middlewares
+                sandbox_middlewares: list = [
+                    SandboxPathHintMiddleware(sandbox_home=sandbox_home),
+                ]
+
+                # Wire SkillSandboxSyncMiddleware if skills are available
+                if self._cached_effective_backend_factory and isinstance(
+                    self._cached_effective_backend_factory, CompositeBackend
+                ):
+                    skills_backend = self._cached_effective_backend_factory.routes.get("/skills/")
+                    if skills_backend:
+                        from agent_common.middleware.skill_sandbox_sync import SkillSandboxSyncMiddleware
+
+                        sandbox_middlewares.append(
+                            SkillSandboxSyncMiddleware(
+                                sandbox_backend=pooled_sandbox.backend,
+                                skills_backend=skills_backend,
+                                skills_hash_ref={},
+                                sandbox_home=sandbox_home,
+                            )
+                        )
+
+                agent = self._build_graph(
+                    sandboxed_backend_factory,
+                    extra_middlewares=sandbox_middlewares,
+                    extra_tools=[copy_tool],
+                    sandbox_enabled=True,
+                    sandbox_home=sandbox_home,
+                )
+
+                logger.info(
+                    "Built sandboxed graph for '%s' (session=%s)",
+                    self.name,
+                    session_id[:8] if session_id else "?",
+                )
+            else:
+                agent = self._agent
+
+            agent_input = input_data if _is_hitl_resume else {"messages": [human_message]}
 
             # CRITICAL: Dynamic agent graphs are standalone, not subgraphs.
             # checkpoint_ns must be "" for standalone graphs (same pattern as GPAgentRunnable).
-            # Thread isolation is already provided by unique thread_id="{context_id}::dynamic-{name}".
+            # Thread isolation is provided by unique thread_id="{context_id}::dynamic-{name}"
+            # which the dispatch middleware sets correctly in the config it passes here.
             standalone_config = {
                 **config,
+                "metadata": {
+                    **config.get("metadata", {}),
+                    "agent_name": self.name,  # Ensure tools resolve to this agent's skills
+                },
                 "configurable": {
                     **config.get("configurable", {}),
                     "checkpoint_ns": "",  # Empty for standalone graph (not a subgraph)
@@ -617,7 +1135,6 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             # Shared streaming helpers
             response_streamer = StructuredResponseStreamer("SubAgentResponseSchema")
             stream_buffer = StreamBuffer()
-            emitted_tool_calls: set[str] = set()  # Track tool calls to avoid duplicates
 
             # Stream the agent with custom events and messages using v2 format
             # v2: every chunk is a StreamPart dict: {"type": ..., "ns": ..., "data": ...}
@@ -627,8 +1144,6 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 stream_mode=["custom", "messages"],
                 version="v2",
             ):
-                # Extract working-state messages from intermediate updates
-                status_text = None
                 part_type = part["type"]
 
                 # Capture tool calls and stream content from message chunks
@@ -637,22 +1152,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     if not isinstance(msg_chunk, AIMessageChunk):
                         continue
 
-                    # --- Tool call detection for activity log + structured response streaming ---
+                    # --- Structured response streaming ---
+                    # Tool-call status emission is handled by ToolStatusMiddleware
+                    # (emits via stream_writer with complete args).
                     if msg_chunk.tool_call_chunks:
                         for tc_chunk in msg_chunk.tool_call_chunks:
-                            tool_name = tc_chunk.get("name")
-                            # Emit status for tool calls (excluding response schemas)
-                            if (
-                                tool_name
-                                and tool_name not in ("FinalResponseSchema", "SubAgentResponseSchema")
-                                and tool_name not in emitted_tool_calls
-                            ):
-                                emitted_tool_calls.add(tool_name)
-                                yield TaskUpdate(
-                                    status_text=f"Using {tool_name}\u2026",
-                                    event_metadata=ActivityLogMeta(),
-                                )
-                            # Incremental structured response streaming
                             delta = response_streamer.feed(tc_chunk)
                             if delta:
                                 stream_buffer.append(delta)
@@ -674,32 +1178,63 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                                 yield ArtifactUpdate(content=chunk)
                     continue
 
+                # --- Custom events from middleware (via stream_writer) ---
                 if part_type == "custom":
                     event_data = part["data"]
                     if isinstance(event_data, tuple) and len(event_data) == 2:
                         event_type, payload = event_data
                         if isinstance(payload, dict):
-                            # Forward work plan updates from the sub-agent graph
                             if event_type == "todo_status" and "todos" in payload:
                                 yield TaskUpdate(
                                     event_metadata=WorkPlanMeta(todos=payload["todos"]),
                                 )
                                 continue
-                            status_text = payload.get("status")
+                            status = payload.get("status")
+                            if status:
+                                yield TaskUpdate(
+                                    status_text=status,
+                                    event_metadata=ActivityLogMeta(),
+                                )
                     elif isinstance(event_data, dict):
-                        status_text = event_data.get("status")
-
-                # Yield working-state status updates
-                if status_text:
-                    yield TaskUpdate(
-                        status_text=status_text,
-                        event_metadata=ActivityLogMeta(),
-                    )
+                        status = event_data.get("status")
+                        if status:
+                            yield TaskUpdate(
+                                status_text=status,
+                                event_metadata=ActivityLogMeta(),
+                            )
 
             # Flush remaining buffer
             remaining = stream_buffer.flush_all()
             if remaining:
                 yield ArtifactUpdate(content=remaining)
+
+            # Post-stream interrupt check: with is_nested=False (default for
+            # standalone graphs), GraphInterrupt is suppressed inside the Pregel
+            # loop and saved to the checkpoint.  We must inspect the post-stream
+            # state to detect suppressed interrupts and re-raise them so the
+            # orchestrator can surface them to the user.
+            logger.info(
+                "[DYNAMIC AGENT] Post-stream check: calling aget_state for '%s' (thread_id=%s, checkpoint_ns=%s)",
+                self.name,
+                standalone_config.get("configurable", {}).get("thread_id", "?"),
+                standalone_config.get("configurable", {}).get("checkpoint_ns", "?"),
+            )
+            post_state = await agent.aget_state(standalone_config)
+            logger.info(
+                "[DYNAMIC AGENT] Post-stream aget_state result for '%s': has_state=%s, num_tasks=%d, interrupts=%s",
+                self.name,
+                post_state is not None,
+                len(post_state.tasks) if post_state and post_state.tasks else 0,
+                [i.value for i in post_state.interrupts] if post_state and post_state.interrupts else "[]",
+            )
+            if post_state and post_state.interrupts:
+                logger.info(
+                    "[DYNAMIC AGENT] Post-stream check found %d suppressed interrupt(s) "
+                    "in '%s' — re-raising GraphInterrupt",
+                    len(post_state.interrupts),
+                    self.name,
+                )
+                raise GraphInterrupt(post_state.interrupts)
 
             # Retrieve final state (checkpointer saves it after each node)
             final_values = retrieve_final_state(agent, standalone_config)
@@ -738,6 +1273,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 data=error_result,
             )
 
+        finally:
+            # Release sandbox back to pool for warm reuse
+            if pooled_sandbox is not None and self.sandbox_pool is not None:
+                session_id = config.get("configurable", {}).get("thread_id", context_id or "unknown")
+                await self.sandbox_pool.release(session_id, self.name)
+
     # _translate_agent_result and _build_response_from_schema are provided by StructuredResponseMixin
 
 
@@ -757,6 +1298,11 @@ def create_dynamic_local_subagent(
     mcp_gateway_url: Optional[str] = None,
     mcp_gateway_client_id: Optional[str] = None,
     console_backend_client_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    group_ids: Optional[List[str]] = None,
+    sandbox_pool: SandboxPool | None = None,
+    extra_middlewares: Optional[List[Any]] = None,
+    inject_all_tools: Optional[List[BaseTool]] = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
@@ -779,6 +1325,10 @@ def create_dynamic_local_subagent(
         mcp_gateway_url: MCP gateway URL (defaults to MCP_GATEWAY_URL env var)
         mcp_gateway_client_id: MCP gateway client ID (defaults to MCP_GATEWAY_CLIENT_ID env var)
         console_backend_client_id: Console backend OIDC client ID for token exchange (defaults to CONSOLE_BACKEND_CLIENT_ID env var)
+        user_id: User's stable database ID (for playbook loading)
+        group_ids: User's group IDs for group playbook loading (all groups)
+        extra_middlewares: Optional middleware instances to prepend to the standard stack.
+        inject_all_tools: Optional pre-discovered tools (bypasses MCP discovery).
 
     Returns:
         CompiledSubAgent that can be registered with the orchestrator
@@ -810,6 +1360,11 @@ def create_dynamic_local_subagent(
         mcp_gateway_url=mcp_gateway_url,
         mcp_gateway_client_id=mcp_gateway_client_id,
         console_backend_client_id=console_backend_client_id,
+        user_id=user_id,
+        group_ids=group_ids,
+        sandbox_pool=sandbox_pool,
+        extra_middlewares=extra_middlewares,
+        inject_all_tools=inject_all_tools,
     )
 
     return CompiledSubAgent(

@@ -26,9 +26,11 @@ from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AG
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
+from agent_common.core.hitl_config import SELF_IMPROVEMENT_HITL_GUARDS
 from agent_common.core.model_factory import _has_aws_credentials, create_model
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
+from agent_common.middleware.tool_status import ToolStatusMiddleware
 from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
@@ -48,10 +50,10 @@ from ..middleware import (
     DynamicToolDispatchMiddleware,
     RepeatedToolCallMiddleware,
     TodoStatusMiddleware,
-    ToolsetSelectorMiddleware,
     UserPreferencesMiddleware,
 )
 from ..middleware.error_classification_middleware import ErrorClassificationMiddleware
+from ..middleware.playbook_middleware import PlaybookInjectionMiddleware
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
 from .file_tools import create_presigned_url_tool
@@ -61,7 +63,9 @@ from .time_tools import create_time_tool
 logger = logging.getLogger(__name__)
 
 # Tools that require user confirmation before execution (HITL interrupt)
+# Extends the shared self-improvement guards with orchestrator-specific tools.
 HITL_GUARDED_TOOLS = {
+    **SELF_IMPROVEMENT_HITL_GUARDS,
     "console_create_bug_report": {
         "allowed_decisions": ["approve", "edit", "reject"],
         "description": "Bug report requires your confirmation before submission.",
@@ -72,22 +76,6 @@ HITL_GUARDED_TOOLS = {
 def _create_hitl_middleware() -> HumanInTheLoopMiddleware:
     """Create a HumanInTheLoopMiddleware instance for guarded tools."""
     return HumanInTheLoopMiddleware(interrupt_on=HITL_GUARDED_TOOLS)
-
-
-# System prompt for the custom general-purpose agent graph.
-# This agent is invoked when the orchestrator delegates a "general-purpose" task.
-# It has access to MCP tools filtered by ToolsetSelectorMiddleware.
-GP_SYSTEM_PROMPT = (
-    "<role>\n"
-    "You are a helpful general-purpose assistant with access to a curated set of tools "
-    "that have been selected as relevant to the current task.\n"
-    "</role>\n"
-    "\n"
-    "<instructions>\n"
-    "Use the available tools to accomplish the user's request thoroughly and accurately. "
-    "When you're done, provide a clear and complete summary of what was accomplished.\n"
-    "</instructions>"
-)
 
 
 class GraphFactory:
@@ -130,7 +118,6 @@ class GraphFactory:
         # Model and graph caches
         self._models: dict[tuple[str, str | None], BaseChatModel] = {}
         self._graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
-        self._gp_graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
         self._task_scheduler_graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
 
         # Static tools cache (created once per model type, reused)
@@ -280,19 +267,21 @@ class GraphFactory:
 
     @property
     def backend_factory(self) -> Any:
-        """Get the backend factory for FilesystemMiddleware.
+        """Get the backend for FilesystemMiddleware.
 
-        Returns a factory function that creates a ``CompositeBackend`` with:
+        Returns a ``CompositeBackend`` with:
         - Default: ``StateBackend`` (ephemeral storage in agent state)
         - ``/memories/``: ``IndexingStoreBackend`` (persistent storage with semantic indexing)
 
         Delegates to ``create_indexing_backend_factory`` from ``agent_common``.
 
         Returns:
-            Callable ``(ToolRuntime) -> CompositeBackend``
+            A ``BackendProtocol`` instance (``CompositeBackend`` or ``StateBackend``)
         """
         bedrock_region = self.config.get_bedrock_region() if _has_aws_credentials() else None
-        return create_indexing_backend_factory(self.store, bedrock_region, cost_logger=self.cost_logger)
+        backend = create_indexing_backend_factory(self.store, bedrock_region, cost_logger=self.cost_logger)
+
+        return backend
 
     async def ensure_store_setup(self) -> None:
         """Ensure the database schema is set up for the document store.
@@ -451,6 +440,9 @@ class GraphFactory:
         # UserPreferencesMiddleware injects user preferences (language, etc.) into system prompt
         user_preferences_middleware = UserPreferencesMiddleware()
 
+        # PlaybookInjectionMiddleware injects AGENTS.md and skill index into system prompt
+        playbook_middleware = PlaybookInjectionMiddleware(store=self.store)
+
         # StoragePathsInstructionMiddleware adds filesystem storage paths documentation
         storage_paths_middleware = StoragePathsInstructionMiddleware()
 
@@ -525,6 +517,8 @@ class GraphFactory:
             BedrockPromptCachingMiddleware(),
             steering_middleware,
             user_preferences_middleware,
+            playbook_middleware,
+            ToolStatusMiddleware(),
             self._loop_detection_middleware,
             self._auth_middleware,
             ErrorClassificationMiddleware(),
@@ -590,16 +584,14 @@ class GraphFactory:
         # via GraphRuntimeContext.subagent_registry at request time, not at graph creation.
         # This enables per-user sub-agent discovery and unified handling.
         #
-        # The general-purpose agent is a GPAgentRunnable (LocalA2ARunnable) registered
-        # in subagent_registry as "general-purpose". It wraps a custom GP graph (created
-        # by _create_gp_graph) that has:
-        #   - context_schema=GraphRuntimeContext for accessing MCP tools at runtime
-        #   - ToolsetSelectorMiddleware for smart Phase 1+2 tool filtering
-        #   - DynamicToolDispatchMiddleware(skip_tool_injection=True) for tool execution
+        # The general-purpose agent is a DynamicLocalAgentRunnable registered in
+        # subagent_registry as "general-purpose". It uses inject_all_tools to receive
+        # ALL MCP tools from the orchestrator's tool_registry, and has
+        # ToolsetSelectorMiddleware as extra_middlewares for smart tool filtering.
         #
         # The default GP from create_deep_agent is still created internally but never
         # invoked because DynamicToolDispatchMiddleware dispatches "general-purpose"
-        # from subagent_registry (the GPAgentRunnable) before it can fall through.
+        # from subagent_registry (the DynamicLocalAgentRunnable) before it can fall through.
 
         backend = self.backend_factory
 
@@ -680,136 +672,6 @@ class GraphFactory:
             logger.info(f"Creating graph for model: {effective_model}, thinking_level={thinking_level}")
             self._graphs[cache_key] = self._create_graph(effective_model, thinking_level)
         return self._graphs[cache_key]
-
-    def _create_gp_graph(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> CompiledStateGraph:
-        """Create a custom general-purpose agent graph with tool selection middleware.
-
-        Unlike the built-in GP from deepagents (which can't be customized), this GP agent:
-        - Has context_schema=GraphRuntimeContext for accessing MCP tools at runtime
-        - Uses ToolsetSelectorMiddleware for smart tool filtering (Phase 1 + Phase 2)
-        - Uses DynamicToolDispatchMiddleware(skip_tool_injection=True) for tool execution
-        - Gets MCP tools from ToolsetSelectorMiddleware, not from static compilation
-        - Uses FilesystemMiddleware + IndexingStoreBackend for semantic indexing of files
-        - Uses SummarizationMiddleware to handle large context windows
-        - Uses AnthropicPromptCachingMiddleware for prompt caching on Anthropic models
-        - Uses BedrockPromptCachingMiddleware for prompt caching on Bedrock models
-        - Uses PatchToolCallsMiddleware to normalise tool call format
-
-        Middleware ordering (first = outermost wrapper):
-        1. ToolsetSelectorMiddleware: reads ALL MCP tools from tool_registry,
-           Phase 1 selects relevant MCP servers, Phase 2 selects individual tools.
-           Both phases are cached across model calls within a single GP invocation.
-        2. DynamicToolDispatchMiddleware(skip_tool_injection=True): converts BaseTool→dict
-           for Gemini compatibility, but does NOT inject from tool_registry. Resolves
-           dynamic (MCP) tools via request.override(tool=...) so the full inner chain
-           executes for every tool call — no middleware inside it is bypassed.
-        3-9. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
-           AnthropicPromptCachingMiddleware, BedrockPromptCachingMiddleware,
-           PatchToolCallsMiddleware,
-           ToolRetryMiddleware, RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware.
-
-        Args:
-            model_type: The type of model
-            thinking_level: Optional thinking level for the model
-
-        Returns:
-            CompiledStateGraph: The compiled GP agent graph
-        """
-        model = self._get_or_create_model(model_type, thinking_level)
-
-        backend = self.backend_factory
-
-        # ToolsetSelectorMiddleware: reads ALL MCP tools from tool_registry,
-        # Phase 1 selects relevant servers, Phase 2 selects individual tools.
-        # Both phases cached across model calls within a GP invocation.
-        # Docstore tools are always included so the GP agent can read/write persistent
-        # memory regardless of which MCP servers are active for the current task.
-        toolset_selector = ToolsetSelectorMiddleware(
-            always_include=[
-                "get_current_time",
-                "generate_presigned_url",
-                "docstore_search",
-                "read_personal_file",
-                "docstore_export",
-                "copy_file",
-            ],
-            cost_logger=self.cost_logger,
-        )
-
-        # DynamicToolDispatchMiddleware with skip_tool_injection=True:
-        # - Does NOT inject tools from tool_registry (ToolsetSelectorMiddleware handles that)
-        # - Does handle tool EXECUTION (awrap_tool_call) for MCP tools not in ToolNode
-        gp_dynamic_dispatch = DynamicToolDispatchMiddleware(
-            static_tools=[],
-            skip_tool_injection=True,
-            agent_settings=self.config,
-            cost_logger=self.cost_logger,
-        )
-
-        # DynamicToolDispatchMiddleware now resolves dynamic (MCP) tools via
-        # request.override(tool=...) and delegates to handler, so the full inner chain
-        # runs for every tool call.  No hoisting of FilesystemMiddleware is needed.
-        common_stack = build_common_middleware_stack(model, backend, add_docstore_hint=self.store is not None)
-
-        # HITL middleware must also guard MCP tools called by the GP agent
-        gp_hitl_middleware = _create_hitl_middleware()
-
-        middleware = [
-            toolset_selector,
-            gp_dynamic_dispatch,
-            *common_stack,  # FilesystemMiddleware, SummarizationMiddleware, caching, retry, etc.
-            gp_hitl_middleware,
-        ]
-
-        # Get response_format for structured output (SubAgentResponseSchema)
-        # This allows the GP agent to explicitly set task_state (completed/input_required/failed)
-        # rather than always returning "completed".
-        # Note: For Bedrock+thinking, this mutates static_tools_list by appending the response tool.
-        static_tools_list = self.get_static_tools(with_response_tool=False)
-        response_format = get_sub_agent_response_format(
-            model=model,
-            tools=static_tools_list,
-            thinking_enabled=bool(thinking_level),
-        )
-
-        gp_graph = create_agent(
-            model=model,
-            tools=static_tools_list,
-            system_prompt=GP_SYSTEM_PROMPT + SUB_AGENT_PROTOCOL_ADDENDUM,
-            middleware=middleware,  # type: ignore[arg-type]
-            context_schema=GraphRuntimeContext,
-            checkpointer=self._checkpointer,
-            store=self.store,
-            response_format=response_format,
-        )
-
-        gp_graph = gp_graph.with_config({"recursion_limit": self.config.MAX_RECURSION_LIMIT})
-        logger.info(f"GP graph created for model: {model_type}, thinking_level={thinking_level}")
-
-        return gp_graph
-
-    def get_gp_graph(
-        self, model_type: ModelType | None = None, thinking_level: ThinkingLevel | None = None
-    ) -> CompiledStateGraph:
-        """Get or create a custom GP graph for the given model type.
-
-        GP graphs are cached by (model_type, thinking_level) just like orchestrator graphs.
-        They are created lazily on first request.
-
-        Args:
-            model_type: The type of model (defaults to DEFAULT_MODEL)
-            thinking_level: Optional thinking level
-
-        Returns:
-            CompiledStateGraph: The GP graph instance (cached or newly created)
-        """
-        effective_model: ModelType = model_type or DEFAULT_MODEL
-        cache_key = (effective_model, thinking_level)
-
-        if cache_key not in self._gp_graphs:
-            logger.info(f"Creating GP graph for model: {effective_model}, thinking_level={thinking_level}")
-            self._gp_graphs[cache_key] = self._create_gp_graph(effective_model, thinking_level)
-        return self._gp_graphs[cache_key]
 
     def _create_task_scheduler_graph(self, model_type: ModelType) -> CompiledStateGraph:
         """Create a custom task scheduler agent graph with middleware.

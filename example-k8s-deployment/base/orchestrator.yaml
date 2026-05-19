@@ -72,6 +72,18 @@ spec:
           value: "docstore"
         - name: POSTGRES_SCHEMA
           value: "docstore"
+        # Sandbox (optional — omit SANDBOX_PROVIDER to disable)
+        # - name: SANDBOX_PROVIDER
+        #   value: "gatana"
+        # - name: SANDBOX_POOL_CAPACITY
+        #   value: "5"
+        # - name: SANDBOX_WARM_TTL
+        #   value: "60"
+        # - name: GATANA_ORG_ID
+        #   value: "alloych"
+        # - name: GATANA_ORG_CAPACITY
+        #   value: "10"
+        # GATANA_API_KEY should be in orchestrator-secrets
         envFrom:
         - secretRef:
             name: orchestrator-secrets

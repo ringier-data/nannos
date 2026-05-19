@@ -34,6 +34,7 @@ from console_backend.services.audit_service import AuditService
 from console_backend.services.notification_service import NotificationService
 from console_backend.services.oauth_service import OAuthService
 from console_backend.services.secrets_service import SecretsService
+from console_backend.services.skill_registry_service import SkillRegistryService
 from console_backend.services.sub_agent_service import SubAgentService
 from console_backend.services.user_group_service import UserGroupService
 from console_backend.services.user_service import UserService
@@ -225,8 +226,10 @@ def sub_agent_service():
     audit_service = AuditService()
     sub_agent_repo = SubAgentRepository()
     sub_agent_repo.set_audit_service(audit_service)
+    skill_registry_service = SkillRegistryService()
     service = SubAgentService()
     service.set_repository(sub_agent_repo)
+    service.set_skill_registry_service(skill_registry_service)
     return service
 
 

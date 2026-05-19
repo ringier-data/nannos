@@ -23,6 +23,7 @@ from .repositories.feedback_repository import FeedbackRepository
 from .repositories.rate_card_repository import RateCardRepository
 from .repositories.scheduled_job_repository import ScheduledJobRepository
 from .repositories.secrets_repository import SecretsRepository
+from .repositories.skill_registry_repository import SkillRegistryRepository
 from .repositories.sub_agent_repository import SubAgentRepository
 from .repositories.usage_repository import UsageRepository
 from .repositories.user_group_repository import UserGroupRepository
@@ -38,14 +39,16 @@ from .services.file_storage_service import FileStorageService
 from .services.keycloak_admin_service import KeycloakAdminService
 from .services.messages_service import MessagesService
 from .services.notification_service import NotificationService
+from .services.outbound_scim_endpoint_service import OutboundScimEndpointService
+from .services.outbound_scim_push_service import OutboundScimPushService
+from .services.playbook_service import PlaybookService
 from .services.rate_card_service import RateCardService
 from .services.scheduler_engine import SchedulerEngine
 from .services.scheduler_service import SchedulerService
 from .services.scheduler_token_service import SchedulerTokenService
 from .services.scim_service import ScimGroupService, ScimUserService
 from .services.scim_token_service import ScimTokenService
-from .services.outbound_scim_endpoint_service import OutboundScimEndpointService
-from .services.outbound_scim_push_service import OutboundScimPushService
+from .services.skill_registry_service import SkillRegistryService
 from .services.sub_agent_service import SubAgentService
 from .services.usage_service import UsageService
 from .services.user_group_service import UserGroupService
@@ -90,6 +93,12 @@ async def initialize_services(app: "FastAPI") -> None:
 
     app.state.usage_repository = UsageRepository()
 
+    app.state.skill_registry_repository = SkillRegistryRepository()
+    app.state.skill_registry_repository.set_audit_service(app.state.audit_service)
+
+    app.state.skill_registry_service = SkillRegistryService()
+    app.state.skill_registry_service.set_repository(app.state.skill_registry_repository)
+
     # Initialize services with repositories
     app.state.user_settings_service = UserSettingsService()
 
@@ -104,6 +113,7 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.sub_agent_service = SubAgentService()
     app.state.sub_agent_service.set_repository(app.state.sub_agent_repository)
     app.state.sub_agent_service.set_notification_service(app.state.notification_service)
+    app.state.sub_agent_service.set_skill_registry_service(app.state.skill_registry_service)
 
     app.state.catalog_repository = CatalogRepository()
     app.state.catalog_repository.set_audit_service(app.state.audit_service)
@@ -248,6 +258,14 @@ async def initialize_services(app: "FastAPI") -> None:
         oauth_service=app.state.oauth_service,
     )
 
+    # Configure skill security service (assessor agent via agent-runner)
+    from console_backend.services.skill_security_service import skill_security_service
+
+    skill_security_service.configure(
+        agent_runner_url=config.scheduler.agent_runner_url,
+        oauth_service=app.state.oauth_service,
+    )
+
     # Initialize feedback repository and service
     app.state.feedback_repository = FeedbackRepository()
 
@@ -282,6 +300,23 @@ async def initialize_services(app: "FastAPI") -> None:
         tick_interval_seconds=config.scheduler.tick_interval_seconds,
         claim_limit=config.scheduler.claim_limit,
     )
+
+    # Initialize playbook service (connects to docstore database)
+    from .db.docstore import get_docstore_session_factory
+
+    app.state.playbook_service = PlaybookService()
+    docstore_factory = get_docstore_session_factory()
+    if docstore_factory:
+        app.state.playbook_service.set_db_session_factory(docstore_factory)
+    else:
+        logger.warning("Docstore not configured — playbook management API will be unavailable")
+
+    # Initialize skill activation service
+    from .services.skill_activation_service import SkillActivationService
+
+    app.state.skill_activation_service = SkillActivationService()
+    app.state.skill_activation_service.set_playbook_service(app.state.playbook_service)
+    app.state.skill_activation_service.set_sub_agent_service(app.state.sub_agent_service)
 
     # Initialize orchestrator cookie cache
     app.state.orchestrator_cookie_cache = OrchestratorCookieCache(

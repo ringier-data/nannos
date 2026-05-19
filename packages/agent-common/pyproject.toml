@@ -14,7 +14,7 @@ dependencies = [
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
     # DeepAgents
-    "deepagents>=0.4.5,<0.5.0",
+    "deepagents>=0.5.7,<0.6.0",
     # MCP adapters
     "langchain-mcp-adapters>=0.1.11",
     # HTTP client
@@ -58,8 +58,11 @@ docstore = [
     # Semantic chunking (used by IndexingStoreBackend)
     "nltk>=3.9.0",
 ]
+sandbox-gatana = [
+    "gatana-langchain>=0.1.0",
+]
 all = [
-    "agent-common[openai,google,anthropic,foundry,docstore]",
+    "agent-common[openai,google,anthropic,foundry,docstore,sandbox-gatana]",
 ]
 
 [build-system]

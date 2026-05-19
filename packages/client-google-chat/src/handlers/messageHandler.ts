@@ -413,6 +413,7 @@ async function processHumanInTheLoopEvent(
   // Extract text description from TextPart and structured data from DataPart
   let interruptMessage = '';
   let actionRequests: any[] = [];
+  let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
   if (statusEvent.status.message?.parts) {
     for (const part of statusEvent.status.message.parts) {
       if (part.kind === 'text') {
@@ -422,45 +423,44 @@ async function processHumanInTheLoopEvent(
         if (data?.action_requests) {
           actionRequests = data.action_requests;
         }
+        if (data?.review_configs) {
+          reviewConfigs = data.review_configs;
+        }
       }
     }
   }
 
-  // Determine interrupt type from action_requests
+  // Generic HITL interrupt — show approval card for any tool
   const toolNames = actionRequests.map((ar: any) => ar?.name).filter(Boolean);
-  const isBugReport = toolNames.includes('console_create_bug_report');
+  const firstAction = actionRequests[0];
+  const toolName = firstAction?.name || 'unknown';
 
-  if (isBugReport) {
-    try {
-      const interruptReason =
-        actionRequests.find((ar: any) => ar.name === 'console_create_bug_report')?.args?.description ||
-        interruptMessage;
-      const bugReportCard = chatService.buildBugReportCard(config, interruptReason, {taskId: accumulatedTask.id});
+  // Determine if edit is allowed for this tool
+  const toolReviewConfig = reviewConfigs?.find(rc => rc.action_name === toolName);
+  const allowedDecisions = toolReviewConfig?.allowed_decisions ?? ['approve', 'reject'];
 
-      logger.info({ taskId: accumulatedTask?.id }, `Posting bug report card to Google Chat`);
+  try {
+    const interruptReason = (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || interruptMessage;
+    const hitlCard = chatService.buildHitlCard(config, toolName, interruptReason, { taskId: accumulatedTask.id, toolName }, allowedDecisions, actionRequests);
 
-      await chatService.sendPrivateCardMessage(
-        projectId,
-        spaceId,
-        userId,
-        [bugReportCard],
-        threadId,
-      );
+    logger.info({ taskId: accumulatedTask?.id, toolNames }, `Posting HITL interrupt card to Google Chat`);
 
-      // Store the interrupt context
-      await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
-        logger.error(err, `Failed to update in-flight task for interrupt: ${err}`);
-      });
+    await chatService.sendPrivateCardMessage(
+      projectId,
+      spaceId,
+      userId,
+      [hitlCard],
+      threadId,
+    );
 
-      return true;
-    } catch (widgetErr) {
-      logger.error(widgetErr, `Failed to post bug report card, falling back to text: ${widgetErr}`);
-      if (interruptMessage) {
-        await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
-      }
-    }
-  } else {
-    // For other HITL interrupt types, post text
+    // Store the interrupt context
+    await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
+      logger.error(err, `Failed to update in-flight task for interrupt: ${err}`);
+    });
+
+    return true;
+  } catch (widgetErr) {
+    logger.error(widgetErr, `Failed to post HITL interrupt card, falling back to text: ${widgetErr}`);
     if (interruptMessage) {
       await chatService.sendTextMessage(projectId, spaceId, interruptMessage, threadId);
     }

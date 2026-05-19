@@ -456,19 +456,91 @@ export class GoogleChatService {
     };
   }
 
-  buildBugReportCard(
+  /**
+   * Build a generic HITL (Human-in-the-Loop) approval card for any tool interrupt.
+   * Shows Approve + Reject buttons, and optionally a "Request Changes" button
+   * when "edit" is in the tool's allowed_decisions.
+   */
+  buildHitlCard(
     config: Config,
+    toolName: string,
     reason: string,
-    parameters: Record<string, string>
+    parameters: Record<string, string>,
+    allowedDecisions: string[] = ['approve', 'reject'],
+    actionRequests?: any[],
   ): chat_v1.Schema$CardWithId {
+    const toolLabel = toolName.replace(/_/g, ' ');
     const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
+    const editAllowed = allowedDecisions.includes('edit');
+
+    // Extract proposed args for display
+    const CONTENT_KEYS = ['content', 'body', 'description'];
+    const firstAction = actionRequests?.[0];
+    const toolArgs = firstAction?.args || {};
+    const contentKey = CONTENT_KEYS.find((k: string) => k in toolArgs);
+    const proposedContent = contentKey ? String(toolArgs[contentKey] || '') : '';
+    const metaEntries = Object.entries(toolArgs).filter(
+      ([k]) => !CONTENT_KEYS.includes(k) && k !== 'reason'
+    );
+
+    const buttons: any[] = [
+      {
+        text: '✅ Approve',
+        onClick: {
+          action: {
+            function: buttonClickHandlerUrl,
+            parameters: [
+              { key: 'cardId', value: 'hitl_card' },
+              { key: 'action', value: 'approve' },
+              { key: 'parameters', value: JSON.stringify(parameters) },
+            ],
+          },
+        },
+        color: {
+          red: 0.0,
+          green: 0.54,
+          blue: 0.86,
+          alpha: 1,
+        },
+      },
+    ];
+
+    if (editAllowed) {
+      buttons.push({
+        text: '✏️ Request Changes',
+        onClick: {
+          action: {
+            function: buttonClickHandlerUrl,
+            parameters: [
+              { key: 'cardId', value: 'hitl_card' },
+              { key: 'action', value: 'request_changes' },
+              { key: 'parameters', value: JSON.stringify(parameters) },
+            ],
+          },
+        },
+      });
+    }
+
+    buttons.push({
+      text: '❌ Reject',
+      onClick: {
+        action: {
+          function: buttonClickHandlerUrl,
+          parameters: [
+            { key: 'cardId', value: 'hitl_card' },
+            { key: 'action', value: 'reject' },
+            { key: 'parameters', value: JSON.stringify(parameters) },
+          ],
+        },
+      },
+    });
+
     return {
-      cardId: 'bug_report_card',
+      cardId: 'hitl_card',
       card: {
         header: {
-          title: '🐛 Bug Report',
-          subtitle: 'Please confirm this bug report',
-          imageUrl: 'https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/bug_report/default/48px.svg',
+          title: '⚠️ Approval Required',
+          subtitle: toolLabel,
           imageType: 'CIRCLE',
         },
         sections: [
@@ -479,25 +551,85 @@ export class GoogleChatService {
                   text: `<b>Reason:</b>\n${reason}`,
                 },
               } as any,
+              // Show metadata fields (name, skill_name, visibility, etc.)
+              ...(metaEntries.length > 0
+                ? [
+                    {
+                      textParagraph: {
+                        text: metaEntries
+                          .map(([k, v]) => `<b>${k}:</b> ${String(v).substring(0, 200)}`)
+                          .join('\n'),
+                      },
+                    } as any,
+                  ]
+                : []),
+              // Show proposed content preview (truncated)
+              ...(proposedContent
+                ? [
+                    {
+                      textParagraph: {
+                        text: `<b>Proposed content:</b>\n<code>${proposedContent.substring(0, 2000)}</code>`,
+                      },
+                    } as any,
+                  ]
+                : []),
               {
                 divider: {},
               },
               {
-                textParagraph: {
-                  text: '<b>Would you like to confirm this report?</b>',
+                buttonList: {
+                  buttons,
+                },
+              } as any,
+            ],
+          },
+        ],
+      },
+    };
+  }
+
+  /**
+   * Build a HITL feedback form card with a text input for the user to describe
+   * what should be changed. Replaces the approval card when "Request Changes" is clicked.
+   */
+  buildHitlFeedbackCard(
+    config: Config,
+    toolName: string,
+    parameters: Record<string, string>,
+  ): chat_v1.Schema$CardWithId {
+    const toolLabel = toolName.replace(/_/g, ' ');
+    const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
+
+    return {
+      cardId: 'hitl_feedback_card',
+      card: {
+        header: {
+          title: '✏️ Request Changes',
+          subtitle: toolLabel,
+          imageType: 'CIRCLE',
+        },
+        sections: [
+          {
+            widgets: [
+              {
+                textInput: {
+                  label: 'What should be changed?',
+                  type: 'MULTIPLE_LINE',
+                  name: 'feedback',
+                  hintText: 'e.g. "Make the description shorter" or "Change scope to group"',
                 },
               } as any,
               {
                 buttonList: {
                   buttons: [
                     {
-                      text: '✅ Confirm',
+                      text: 'Submit Feedback',
                       onClick: {
                         action: {
                           function: buttonClickHandlerUrl,
                           parameters: [
-                            { key: 'cardId', value: 'bug_report_card' },
-                            { key: 'action', value: 'approve' },
+                            { key: 'cardId', value: 'hitl_feedback_card' },
+                            { key: 'action', value: 'submit_feedback' },
                             { key: 'parameters', value: JSON.stringify(parameters) },
                           ],
                         },
@@ -510,13 +642,13 @@ export class GoogleChatService {
                       },
                     },
                     {
-                      text: '❌ Decline',
+                      text: 'Cancel',
                       onClick: {
                         action: {
                           function: buttonClickHandlerUrl,
                           parameters: [
-                            { key: 'cardId', value: 'bug_report_card' },
-                            { key: 'action', value: 'reject' },
+                            { key: 'cardId', value: 'hitl_feedback_card' },
+                            { key: 'action', value: 'cancel' },
                             { key: 'parameters', value: JSON.stringify(parameters) },
                           ],
                         },

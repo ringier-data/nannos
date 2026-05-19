@@ -1,8 +1,13 @@
 """Shared utility functions for the orchestrator agent."""
 
+from __future__ import annotations
+
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agent_common.core.sandbox_pool import SandboxPool
 
 from agent_common.utils import (  # noqa: F401
     LANGUAGE_NAMES,
@@ -12,6 +17,49 @@ from agent_common.utils import (  # noqa: F401
 from app.models.config import AgentSettings, UserConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _wrap_tool_with_agent_name(tool: Any, agent_name: str) -> Any:
+    """Wrap an MCP tool to auto-inject agent_name, hiding it from the LLM schema."""
+    from langchain_core.tools import BaseTool, StructuredTool
+    from pydantic import Field as PydanticField
+    from pydantic import create_model
+
+    if not isinstance(tool, BaseTool):
+        return tool
+
+    original_coroutine = getattr(tool, "coroutine", None)
+    if not original_coroutine:
+        return tool
+
+    async def wrapped_coroutine(**kwargs: Any) -> Any:
+        kwargs["agent_name"] = agent_name
+        return await original_coroutine(**kwargs)
+
+    # Rebuild schema without agent_name so the LLM doesn't see it
+    new_schema: Any = tool.args_schema
+    original_schema = tool.args_schema
+    if original_schema and isinstance(original_schema, type) and hasattr(original_schema, "model_fields"):
+        from pydantic_core import PydanticUndefined
+
+        new_fields = {}
+        for field_name, field_info in original_schema.model_fields.items():
+            if field_name == "agent_name":
+                continue
+            default = field_info.default if field_info.default is not PydanticUndefined else ...
+            new_fields[field_name] = (
+                field_info.annotation,
+                PydanticField(default=default, description=field_info.description),
+            )
+        new_schema = create_model(f"{original_schema.__name__}Wrapped", **new_fields)
+
+    return StructuredTool(
+        name=tool.name,
+        description=tool.description,
+        args_schema=new_schema,
+        coroutine=wrapped_coroutine,
+        metadata=tool.metadata,
+    )
 
 
 def build_runtime_context(
@@ -26,8 +74,8 @@ def build_runtime_context(
     backend_factory: Any = None,
     cost_logger: Any = None,
     backend_url: str | None = None,
-    gp_graph_provider: Any = None,
     task_scheduler_graph_provider: Any = None,
+    sandbox_pool: SandboxPool | None = None,
 ) -> Any:  # GraphRuntimeContext
     """Build GraphRuntimeContext from user config and orchestrator dependencies.
 
@@ -36,7 +84,7 @@ def build_runtime_context(
     - Built-in local sub-agents (like file-analyzer, task-scheduler)
     - Remote A2A agents from discovery
     - Dynamic local sub-agents from user configuration
-    - General-purpose (GP) agent (if gp_graph_provider is provided)
+    - General-purpose (GP) agent (loaded from DB as a DynamicLocalAgentRunnable)
     - Document store tools (if dependencies provided)
 
     Dynamic local sub-agents are instantiated with:
@@ -47,6 +95,11 @@ def build_runtime_context(
     - Shared document store for persistent memory (FilesystemMiddleware)
     - Shared backend factory for semantic indexing (IndexingStoreBackend)
     - Custom model selection via config.model_name (if specified)
+
+    The GP agent is special:
+    - Gets ALL tools from tool_registry (via inject_all_tools)
+    - Has ToolsetSelectorMiddleware for smart LLM-driven tool filtering
+    - Shares the same DynamicLocalAgentRunnable code path as other local agents
 
     Args:
         user_config: User configuration with tools, sub-agents, and preferences.
@@ -60,7 +113,6 @@ def build_runtime_context(
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
-        gp_graph_provider: Callable(model_type, thinking_level) -> CompiledStateGraph for GP agent.
         task_scheduler_graph_provider: Callable(model_type) -> CompiledStateGraph for task-scheduler agent.
 
     Returns:
@@ -73,11 +125,12 @@ def build_runtime_context(
     from agent_common.core.document_store_tools import create_document_store_tools
     from agent_common.core.model_factory import create_model, get_default_model, is_valid_model
     from deepagents import CompiledSubAgent
+    from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
     from .agents.file_analyzer import create_file_analyzer_subagent
-    from .agents.gp_agent import create_gp_local_subagent
     from .agents.task_scheduler import create_task_scheduler_subagent
+    from .middleware import ToolsetSelectorMiddleware
     from .models.config import GraphRuntimeContext
 
     # Convert tools list to tool_registry (name -> tool mapping)
@@ -202,6 +255,15 @@ def build_runtime_context(
         "console_list_mcp_servers",
         "console_grep_mcp_tools",
         "console_create_bug_report",
+        "console_create_skill",
+        "console_update_skill",
+        "console_remove_skill",
+        "console_update_playbook",
+        "console_write_skill_file",
+        "console_delete_skill_file",
+        "console_search_skills",
+        "console_import_skill",
+        "console_activate_skill",
     }
     orchestrator_auto_tools = {
         name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
@@ -213,6 +275,22 @@ def build_runtime_context(
     logger.debug(
         f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/console tools)"
     )
+
+    # Auto-inject agent_name="orchestrator" into skill management tools so the LLM
+    # doesn't need to guess the correct agent name.
+    _SKILL_TOOLS_NEEDING_AGENT_NAME = {
+        "console_create_skill",
+        "console_update_skill",
+        "console_remove_skill",
+        "console_update_playbook",
+        "console_write_skill_file",
+        "console_delete_skill_file",
+        "console_import_skill",
+        "console_activate_skill",
+    }
+    for tool_name in _SKILL_TOOLS_NEEDING_AGENT_NAME:
+        if tool_name in tool_registry:
+            tool_registry[tool_name] = _wrap_tool_with_agent_name(tool_registry[tool_name], "orchestrator")
 
     # Add dynamic local sub-agents from user configuration
     # Requires agent_settings for model creation
@@ -302,6 +380,33 @@ def build_runtime_context(
                     # Pass checkpointer for multi-turn conversation state
                     # Pass store and backend_factory for FilesystemMiddleware persistence
                     # Pass user preferences for personalized sub-agent behavior
+
+                    # GP agent gets special treatment: all MCP tools injected directly
+                    # + ToolsetSelectorMiddleware for smart LLM-driven filtering
+                    gp_extra_middlewares = None
+                    gp_inject_all_tools = None
+                    if config.name == "general-purpose":
+                        # Inject ALL MCP tools from tool_registry (already discovered by orchestrator)
+                        gp_inject_all_tools = [t for t in tool_registry.values() if isinstance(t, BaseTool)]
+                        # Add ToolsetSelectorMiddleware for smart tool filtering
+                        gp_extra_middlewares = [
+                            ToolsetSelectorMiddleware(
+                                always_include=[
+                                    "get_current_time",
+                                    "generate_presigned_url",
+                                    "docstore_search",
+                                    "read_personal_file",
+                                    "docstore_export",
+                                    "copy_file",
+                                ],
+                                cost_logger=cost_logger,
+                            ),
+                        ]
+                        logger.info(
+                            f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
+                            f"with ToolsetSelectorMiddleware"
+                        )
+
                     dynamic_subagent = create_dynamic_local_subagent(
                         config=config,
                         model=subagent_model,
@@ -317,7 +422,19 @@ def build_runtime_context(
                         backend_factory=backend_factory,
                         mcp_gateway_url=agent_settings.MCP_GATEWAY_URL if agent_settings else None,
                         mcp_gateway_client_id=agent_settings.MCP_GATEWAY_CLIENT_ID if agent_settings else None,
+                        user_id=user_config.user_id,
+                        group_ids=user_config.groups if user_config.groups else None,
+                        sandbox_pool=sandbox_pool if getattr(config, "sandbox_enabled", False) else None,
+                        extra_middlewares=gp_extra_middlewares,
+                        inject_all_tools=gp_inject_all_tools,
                     )
+                    # Log if sandbox_enabled but no pool configured
+                    if getattr(config, "sandbox_enabled", False) and not sandbox_pool:
+                        logger.warning(
+                            "Sub-agent '%s' has sandbox_enabled=true but no SANDBOX_PROVIDER configured; "
+                            "running without sandbox (scripts readable but not executable)",
+                            config.name,
+                        )
                     subagent_registry[config.name] = dynamic_subagent
                     if config.sub_agent_id is not None:
                         dynamic_subagent["sub_agent_id"] = config.sub_agent_id  # type: ignore[typeddict-unknown-key]
@@ -345,27 +462,10 @@ def build_runtime_context(
         message_formatting=user_config.message_formatting,
         slack_user_handle=user_config.slack_user_handle,
         custom_prompt=user_config.custom_prompt,
+        groups=user_config.groups,
         tool_registry=tool_registry,
         subagent_registry=subagent_registry,
         whitelisted_tool_names=whitelisted_tool_names,
     )
-
-    # Register general-purpose (GP) agent as a local sub-agent.
-    # This is done after GraphRuntimeContext creation because the GP agent needs
-    # the context reference for runtime tool injection (context_schema=GraphRuntimeContext).
-    # Since subagent_registry is a mutable dict, updating it here also updates the
-    # reference inside context.
-    if gp_graph_provider:
-        model_type = user_config.model or get_default_model()
-        thinking_level = user_config.thinking_level
-        subagent_registry["general-purpose"] = create_gp_local_subagent(
-            gp_graph_provider=gp_graph_provider,
-            user_context=context,
-            model_type=model_type,
-            user_sub=user_config.user_sub,
-            thinking_level=thinking_level,
-            cost_logger=cost_logger,
-        )
-        logger.info(f"Registered GP local sub-agent (model: {model_type}, thinking: {thinking_level})")
 
     return context

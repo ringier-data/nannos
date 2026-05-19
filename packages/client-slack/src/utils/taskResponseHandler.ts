@@ -367,62 +367,130 @@ export async function handleError(
     .catch((err) => logger.error(err, `Failed to send error message: ${err}`));
 }
 
+
+
 /**
- * Build a bug report widget with Confirm/Decline buttons
+ * Build a generic HITL interrupt widget with Approve/Decline buttons.
+ * Works for any tool that triggers a human-in-the-loop interrupt.
  */
-export interface BugReportWidgetData {
+export interface HitlInterruptWidgetData {
   taskId: string;
   contextId: string;
+  toolName: string;
   reason: string;
   channelId: string;
   threadTs: string;
   actionRequests?: any[];
+  reviewConfigs?: Array<{ action_name: string; allowed_decisions: string[] }>;
 }
 
-export function buildBugReportWidget(data: BugReportWidgetData): any[] {
-  // Encode only the IDs (not the full reason text) to stay within Slack's 2000-char value limit
-  const encodedData = Buffer.from(JSON.stringify({
+export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
+  // Determine allowed decisions from review_configs
+  const reviewConfig = data.reviewConfigs?.find(rc => rc.action_name === data.toolName);
+  const allowedDecisions = reviewConfig?.allowed_decisions ?? ['approve', 'reject'];
+
+  // Button payload only needs routing info — proposed content is shown in the message blocks
+  const payload = {
     taskId: data.taskId,
     contextId: data.contextId,
-    reason: data.reason.substring(0, 500),
+    toolName: data.toolName,
     channelId: data.channelId,
     threadTs: data.threadTs,
-    actionRequests: data.actionRequests,
-  })).toString('base64');
+    allowedDecisions,
+  };
+  const encodedData = Buffer.from(JSON.stringify(payload)).toString('base64');
 
-  return [
+  const toolLabel = data.toolName.replace(/_/g, ' ');
+
+  // Extract proposed args for display
+  const CONTENT_KEYS = ['content', 'body', 'description'];
+  const firstAction = data.actionRequests?.[0];
+  const toolArgs = firstAction?.args || {};
+  const contentKey = CONTENT_KEYS.find((k) => k in toolArgs);
+  const proposedContent = contentKey ? String(toolArgs[contentKey] || '') : '';
+  const metaEntries = Object.entries(toolArgs).filter(
+    ([k]) => !CONTENT_KEYS.includes(k) && k !== 'reason'
+  );
+
+  // Build action buttons: always Approve + Reject, optionally Request Changes
+  const editAllowed = allowedDecisions.includes('edit');
+  const actionElements: any[] = [
+    {
+      type: 'button',
+      text: {
+        type: 'plain_text',
+        text: '✅ Approve',
+        emoji: true,
+      },
+      action_id: 'hitl_approve',
+      value: encodedData,
+      style: 'primary',
+    },
+  ];
+
+  if (editAllowed) {
+    actionElements.push({
+      type: 'button',
+      text: {
+        type: 'plain_text',
+        text: '✏️ Request Changes',
+        emoji: true,
+      },
+      action_id: 'hitl_request_changes',
+      value: encodedData,
+    });
+  }
+
+  actionElements.push({
+    type: 'button',
+    text: {
+      type: 'plain_text',
+      text: '❌ Reject',
+      emoji: true,
+    },
+    action_id: 'hitl_reject',
+    value: encodedData,
+  });
+
+  const blocks: any[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `🐛 *Bug Report*\n\n${data.reason.substring(0, 2000)}\n\nWould you like to confirm this report?`,
+        text: `⚠️ *Approval Required — ${toolLabel}*\n\n${data.reason.substring(0, 2000)}`,
       },
     },
-    {
-      type: 'actions',
-      elements: [
-        {
-          type: 'button',
-          text: {
-            type: 'plain_text',
-            text: '✅ Confirm',
-            emoji: true,
-          },
-          action_id: 'bug_report_confirm',
-          value: encodedData,
-          style: 'primary',
-        },
-        {
-          type: 'button',
-          text: {
-            type: 'plain_text',
-            text: '❌ Decline',
-            emoji: true,
-          },
-          action_id: 'bug_report_decline',
-          value: encodedData,
-        },
-      ],
-    },
   ];
+
+  // Show metadata fields (name, skill_name, visibility, etc.)
+  if (metaEntries.length > 0) {
+    const metaText = metaEntries
+      .map(([k, v]) => `*${k}:* ${String(v).substring(0, 200)}`)
+      .join('\n');
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: metaText.substring(0, 3000),
+      },
+    });
+  }
+
+  // Show proposed content preview (truncated)
+  if (proposedContent) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Proposed content:*\n\`\`\`${proposedContent.substring(0, 2500)}\`\`\``,
+      },
+    });
+  }
+
+  blocks.push({
+    type: 'actions',
+    elements: actionElements,
+  });
+
+  return blocks;
 }

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from a2a.types import TaskState
 from langchain_core.messages import AIMessage, ContentBlock, HumanMessage
+from langgraph.errors import GraphInterrupt
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent.cost_tracking_mixin import CostTrackingMixin
 from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
@@ -917,7 +918,7 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         return extended_config
 
     async def astream(
-        self, input_data: Dict[str, Any], config: Optional[Dict[str, Any]] = None
+        self, input_data: Dict[str, Any] | Any, config: Optional[Dict[str, Any]] = None
     ) -> AsyncIterable[StreamEvent]:
         """Stream local sub-agent execution with real-time status updates.
 
@@ -935,7 +936,7 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         5. Response wrapping with A2A metadata
 
         Args:
-            input_data: Input data matching SubAgentInput schema
+            input_data: Input data matching SubAgentInput schema, or a Command for HITL resume
             config: Parent config from orchestrator (contains metadata, tags, callbacks)
 
         Yields:
@@ -947,6 +948,15 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
             NotImplementedError: If subclass doesn't implement _astream_impl()
         """
         try:
+            # For HITL resume: pass Command directly to _astream_impl, skip validation
+            from langgraph.types import Command as LGCommand
+
+            if isinstance(input_data, LGCommand):
+                logger.info(f"[{self.name}] Streaming with Command (HITL resume)")
+                async for item in self._astream_impl(input_data, config or {}):
+                    yield item
+                return
+
             # Validate input
             validated = SubAgentInput.model_validate(input_data)
 
@@ -971,6 +981,11 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
             result = await self._process(validated, extended_config)
             wrapped = self._wrap_message_with_metadata(result)
             yield TaskUpdate(data=wrapped)
+        except GraphInterrupt:
+            # GraphInterrupt is a LangGraph interrupt signal (e.g. from HumanInTheLoopMiddleware).
+            # It must NOT be swallowed — it needs to propagate so the caller can surface it
+            # to the user as an input_required pause. Re-raise without converting to ErrorEvent.
+            raise
         except ValueError as e:
             # Content extraction errors
             logger.error(f"[{self.name}] Stream validation error: {e}")

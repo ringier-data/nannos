@@ -115,6 +115,9 @@ class TestDynamicLocalAgentRunnable:
             yield
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         final_state = {
             "messages": [MagicMock(content="Task completed successfully.")],
@@ -156,6 +159,9 @@ class TestDynamicLocalAgentRunnable:
             yield
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         final_state = {
             "messages": [MagicMock(content="What is the project name?")],
@@ -226,6 +232,9 @@ class TestDynamicLocalAgentRunnable:
             yield
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         mock_message = MagicMock()
         mock_message.tool_calls = [
@@ -268,6 +277,9 @@ class TestDynamicLocalAgentRunnable:
             yield
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         final_state = {
             "messages": [MagicMock(content="Some response without structured output")],

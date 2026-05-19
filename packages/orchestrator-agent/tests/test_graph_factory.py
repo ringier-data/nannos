@@ -108,32 +108,42 @@ class TestMiddlewareStack:
     """Test middleware stack creation and composition."""
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
     @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_middleware_stack_order(self, mock_dynamodb, _mock_creds, mock_config):
+    def test_middleware_stack_order(self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config):
         """Test that middleware stack is assembled in the correct order."""
         factory = GraphFactory(config=mock_config)
 
         stack = factory._create_middleware_stack()
 
         # Verify correct order (DynamicTool first, static content before cache point,
-        # steering after cache, user prefs after steering)
-        assert len(stack) == 11
+        # steering after cache, user prefs after steering, playbook after prefs)
+        assert len(stack) == 14
         assert isinstance(stack[0], DynamicToolDispatchMiddleware)
         assert isinstance(stack[1], StoragePathsInstructionMiddleware)
         assert isinstance(stack[2], BedrockPromptCachingMiddleware)
         # stack[3] = SteeringMiddleware (from ringier_a2a_sdk)
         assert stack[3].__class__.__name__ == "SteeringMiddleware"
         assert isinstance(stack[4], UserPreferencesMiddleware)
-        assert isinstance(stack[5], RepeatedToolCallMiddleware)
-        assert isinstance(stack[6], AuthErrorDetectionMiddleware)
-        assert stack[7].__class__.__name__ == "ErrorClassificationMiddleware"
-        assert isinstance(stack[8], ToolRetryMiddleware)
-        assert isinstance(stack[9], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[10], TodoStatusMiddleware)
+        # stack[5] = PlaybookInjectionMiddleware
+        assert stack[5].__class__.__name__ == "PlaybookInjectionMiddleware"
+        # stack[6] = ToolStatusMiddleware (emits status for tool calls)
+        assert stack[6].__class__.__name__ == "ToolStatusMiddleware"
+        assert isinstance(stack[7], RepeatedToolCallMiddleware)
+        assert isinstance(stack[8], AuthErrorDetectionMiddleware)
+        assert stack[9].__class__.__name__ == "ErrorClassificationMiddleware"
+        # stack[10] = HumanInTheLoopMiddleware
+        assert stack[10].__class__.__name__ == "HumanInTheLoopMiddleware"
+        assert isinstance(stack[11], ToolRetryMiddleware)
+        assert isinstance(stack[12], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[13], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
     @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_middleware_stack_dynamic_tool_dispatch_config(self, mock_dynamodb, _mock_creds, mock_config):
+    def test_middleware_stack_dynamic_tool_dispatch_config(
+        self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config
+    ):
         """Test that DynamicToolDispatchMiddleware is configured correctly."""
         factory = GraphFactory(config=mock_config)
 
@@ -174,7 +184,7 @@ class TestStaticTools:
 
         # Verify it's a list of tools
         assert isinstance(tools, list)
-        assert len(tools) == 3  # FinalResponseSchema only added when with_response_tool=True
+        assert len(tools) == 3  # 3 core tools; playbook tools removed (replaced by console MCP)
 
         # Get tool names
         tool_names = [tool.name for tool in tools]

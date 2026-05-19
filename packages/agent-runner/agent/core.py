@@ -20,12 +20,14 @@ Execution flow per call:
    (the scheduler engine handles push-notification delivery on its side)
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 from collections.abc import AsyncIterable
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from a2a.types import AgentCard, Message, Task, TaskState
@@ -42,6 +44,9 @@ from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.model_factory import _has_aws_credentials, create_model, is_valid_model
 from object_storage import get_object_storage_service
 from agent_common.models.base import DEFAULT_MODEL
+
+if TYPE_CHECKING:
+    from agent_common.core.sandbox_pool import SandboxPool
 from jsonpath_ng.ext import parse as jsonpath_parse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -252,6 +257,7 @@ class AgentRunner(BaseAgent):
         super().__init__()
         self._checkpointer = _create_checkpointer()
         self._oauth2_client: OidcOAuth2Client | None = None
+        self._sandbox_pool: SandboxPool | None = None
         # Enable cost tracking so get_langchain_callbacks() works for LangGraph runs.
         # report_usage() is overridden as a no-op below to avoid a spurious "requests: 1"
         # entry being logged for the agent-runner dispatcher itself.
@@ -343,6 +349,64 @@ class AgentRunner(BaseAgent):
         if self._connection_pool is not None and self._connection_pool._opened:
             await self._connection_pool.close()
             logger.info("Closed document store connection pool")
+
+    async def init_sandbox_pool(self) -> None:
+        """Initialize sandbox pool if SANDBOX_PROVIDER is configured.
+
+        Same mechanics as the orchestrator: reads SANDBOX_PROVIDER, SANDBOX_WARM_TTL,
+        SANDBOX_POOL_CAPACITY, and provider-specific env vars (GATANA_*).
+        """
+        sandbox_provider_name = os.environ.get("SANDBOX_PROVIDER")
+        if not sandbox_provider_name:
+            return
+
+        try:
+            from agent_common.core.sandbox_pool import SandboxPool as _SandboxPool
+
+            warm_ttl = float(os.environ.get("SANDBOX_WARM_TTL", "300"))
+
+            if sandbox_provider_name == "gatana":
+                import asyncio as _aio
+
+                from gatana_client import GatanaClient
+                from gatana_langchain import GatanaSandbox
+
+                if not os.getenv("GATANA_API_KEY") or not os.getenv("GATANA_ORG_ID"):
+                    raise ValueError("GATANA_ORG_ID and GATANA_API_KEY are required")
+                org_capacity = int(os.environ.get("GATANA_ORG_CAPACITY", "10"))
+
+                async def _create_sandbox():
+                    client = GatanaClient()
+                    return await _aio.to_thread(
+                        GatanaSandbox,
+                        client=client,
+                    )
+
+                capacity = int(os.environ.get("SANDBOX_POOL_CAPACITY", "0")) or max(1, org_capacity - 2)
+            else:
+                raise ValueError(f"Unknown sandbox provider: {sandbox_provider_name!r}. Available: gatana")
+
+            self._sandbox_pool = _SandboxPool(
+                create_fn=_create_sandbox,
+                capacity=capacity,
+                warm_ttl=warm_ttl,
+                home="/home/ubuntu",
+            )
+            await self._sandbox_pool.start_reaper()
+            logger.info(
+                "Sandbox pool initialized (provider=%s, capacity=%d)",
+                sandbox_provider_name,
+                self._sandbox_pool.capacity,
+            )
+        except Exception as e:
+            logger.error("Failed to initialize sandbox pool: %s", e)
+            self._sandbox_pool = None
+
+    async def shutdown_sandbox_pool(self) -> None:
+        """Shut down sandbox pool if initialized."""
+        if self._sandbox_pool:
+            await self._sandbox_pool.shutdown()
+            logger.info("Sandbox pool shut down")
 
     async def report_usage(self, user_config: UserConfig, task: Task) -> None:
         """No-op: agent-runner is a dispatcher and has no LLM usage of its own to report.
@@ -740,6 +804,8 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             "foundry_query_api_name": cfg_version.get("foundry_query_api_name"),
             "foundry_scopes": cfg_version.get("foundry_scopes") or [],
             "foundry_version": cfg_version.get("foundry_version"),
+            # Sandbox
+            "sandbox_enabled": cfg_version.get("sandbox_enabled", False),
         }
 
     async def _execute_sub_agent(
@@ -866,8 +932,34 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
 
         result_summary: str | None = None
 
+        # Sandbox lifecycle
+        sandbox_active = sub_agent_cfg.get("sandbox_enabled", False) and self._sandbox_pool is not None
+        if sub_agent_cfg.get("sandbox_enabled", False) and not self._sandbox_pool:
+            logger.warning(
+                "Sub-agent '%s' has sandbox_enabled=true but no SANDBOX_PROVIDER configured; "
+                "running without sandbox for job %s",
+                sub_agent_cfg["name"],
+                scheduled_job_id,
+            )
+
+        pooled_sandbox = None
+
         async def _run_graph(tools: list) -> None:
-            nonlocal result_summary
+            nonlocal result_summary, pooled_sandbox
+
+            extra_middlewares = None
+            sandbox_backend_factory = None
+
+            if sandbox_active:
+                pooled_sandbox = await self._sandbox_pool.acquire(thread_id, sub_agent_cfg["name"])
+
+                from agent_common.core.graph_utils import create_sandboxed_backend_factory
+                from deepagents.backends import StateBackend
+
+                sandbox_backend_factory = create_sandboxed_backend_factory(
+                    sandbox_backend=pooled_sandbox.backend,
+                    base_backend=StateBackend(),
+                )
 
             # Determine structured output strategy (mutates tools in-place for Bedrock+thinking)
             response_format = get_response_format(llm, tools, thinking_enabled=bool(thinking_level))
@@ -881,6 +973,8 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 cost_logger=self._cost_logger,
                 response_format=response_format,
                 exclude_deep_agents_middlewares=False,
+                backend_factory=sandbox_backend_factory,
+                extra_middlewares=extra_middlewares,
             ).with_config({"recursion_limit": _MAX_RECURSION_LIMIT})
 
             config = self.create_runnable_config(
@@ -975,53 +1069,57 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 [t.name for t in docstore_tools],
             )
 
-        if mcp_tool_names:
-            # Keep the MCP session open for the entire graph execution so that
-            # tool closures can call back into the session when invoked.
-            allowed = set(mcp_tool_names)
-            has_console_tools = any(name.startswith("console_") for name in allowed)
-            has_gateway_tools = any(not name.startswith("console_") for name in allowed)
+        try:
+            if mcp_tool_names:
+                # Keep the MCP session open for the entire graph execution so that
+                # tool closures can call back into the session when invoked.
+                allowed = set(mcp_tool_names)
+                has_console_tools = any(name.startswith("console_") for name in allowed)
+                has_gateway_tools = any(not name.startswith("console_") for name in allowed)
 
-            connections: dict[str, StreamableHttpConnection] = {}
+                connections: dict[str, StreamableHttpConnection] = {}
 
-            # Add Gatana gateway connection for non-console tools
-            if has_gateway_tools:
-                gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
-                connections["gateway"] = StreamableHttpConnection(
-                    transport="streamable_http",
-                    url=_MCP_GATEWAY_URL,
-                    headers={"Authorization": f"Bearer {gatana_access_token}"},
-                    timeout=mcp_timeout,
-                    sse_read_timeout=mcp_timeout,
+                # Add Gatana gateway connection for non-console tools
+                if has_gateway_tools:
+                    gatana_access_token = await (self._get_oauth2_client()).exchange_token(user_access_token, "gatana")
+                    connections["gateway"] = StreamableHttpConnection(
+                        transport="streamable_http",
+                        url=_MCP_GATEWAY_URL,
+                        headers={"Authorization": f"Bearer {gatana_access_token}"},
+                        timeout=mcp_timeout,
+                        sse_read_timeout=mcp_timeout,
+                    )
+
+                # Add console backend MCP connection for console_ tools
+                if has_console_tools:
+                    console_mcp_url = f"{_CONSOLE_BACKEND_URL}/mcp"
+                    console_token = await (self._get_oauth2_client()).exchange_token(
+                        user_access_token, _CONSOLE_BACKEND_CLIENT_ID
+                    )
+                    connections["console"] = StreamableHttpConnection(
+                        transport="streamable_http",
+                        url=console_mcp_url,
+                        headers={"Authorization": f"Bearer {console_token}"},
+                        timeout=mcp_timeout,
+                        sse_read_timeout=mcp_timeout,
+                    )
+
+                mcp_client = MultiServerMCPClient(connections)
+                all_tools = await mcp_client.get_tools()
+                tools = [t for t in all_tools if t.name in allowed]
+                logger.info(
+                    "Loaded %d/%d MCP tools for job %s: %s",
+                    len(tools),
+                    len(all_tools),
+                    scheduled_job_id,
+                    [t.name for t in tools],
                 )
-
-            # Add console backend MCP connection for console_ tools
-            if has_console_tools:
-                console_mcp_url = f"{_CONSOLE_BACKEND_URL}/mcp"
-                console_token = await (self._get_oauth2_client()).exchange_token(
-                    user_access_token, _CONSOLE_BACKEND_CLIENT_ID
-                )
-                connections["console"] = StreamableHttpConnection(
-                    transport="streamable_http",
-                    url=console_mcp_url,
-                    headers={"Authorization": f"Bearer {console_token}"},
-                    timeout=mcp_timeout,
-                    sse_read_timeout=mcp_timeout,
-                )
-
-            mcp_client = MultiServerMCPClient(connections)
-            all_tools = await mcp_client.get_tools()
-            tools = [t for t in all_tools if t.name in allowed]
-            logger.info(
-                "Loaded %d/%d MCP tools for job %s: %s",
-                len(tools),
-                len(all_tools),
-                scheduled_job_id,
-                [t.name for t in tools],
-            )
-            await _run_graph(tools + docstore_tools)
-        else:
-            await _run_graph(docstore_tools)
+                await _run_graph(tools + docstore_tools)
+            else:
+                await _run_graph(docstore_tools)
+        finally:
+            if pooled_sandbox is not None and self._sandbox_pool is not None:
+                await self._sandbox_pool.release(thread_id, sub_agent_cfg["name"])
 
         logger.info(
             "LangGraph agent execution complete for job %s: %d chars",

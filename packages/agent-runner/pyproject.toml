@@ -10,7 +10,7 @@ dependencies = [
     # HTTP server
     "uvicorn>=0.38.0",
     # LangChain / DeepAgents
-    "deepagents>=0.4.10,<0.5.0",
+    "deepagents>=0.5.7,<0.6.0",
     "langchain>=1.0.0",
     "langchain-aws>=1.4.3",
     "langchain-mcp-adapters>=0.1.11",
@@ -32,6 +32,8 @@ dependencies = [
     "rcplus-alloy-common>=8.6.1",
     "ringier-a2a-sdk>=0.1.0",
     "agent-common[all]>=0.1.0",
+    # Sandbox (optional provider — only loaded when SANDBOX_PROVIDER is set)
+    "gatana-langchain>=0.1.0",
     # Utilities
     "python-dotenv>=1.1.0",
     "pyyaml>=6.0.2",

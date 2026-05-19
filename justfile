@@ -356,6 +356,18 @@ build-pkg pkg:
         -t "${IMAGE}:${TAG}" --push "${DIR}"
 
       printf "${GREEN} ✓${RESET}${DIM} (%ss)${RESET}\n" "$((SECONDS-T))"
+
+      # Check GHCR package visibility after first push
+      IMAGE_NAME="${IMAGE##*/}"
+      GHCR_ORG="{{ registry }}"; GHCR_ORG="${GHCR_ORG##*/}"
+      VISIBILITY=$(gh api "/orgs/${GHCR_ORG}/packages/container/${IMAGE_NAME}" --jq '.visibility' 2>/dev/null || echo "unknown")
+      if [[ "$VISIBILITY" != "public" ]]; then
+        SETTINGS_URL="https://github.com/orgs/${GHCR_ORG}/packages/container/${IMAGE_NAME}/settings"
+        printf "\n${YELLOW}⚠️  Package %s is not public. Configure it at:${RESET}\n" "$IMAGE_NAME"
+        printf "   ${DIM}%s${RESET}\n" "$SETTINGS_URL"
+        printf "   ${YELLOW}1.${RESET} Under Danger Zone, change visibility to ${GREEN}Public${RESET}\n"
+        printf "   ${YELLOW}2.${RESET} Under Manage access, add team ${GREEN}proj-nannos${RESET} with role ${GREEN}Write${RESET}\n"
+      fi
     fi
     printf "${GREEN}✅ ${IMAGE}:${TAG}${RESET}\n"
 

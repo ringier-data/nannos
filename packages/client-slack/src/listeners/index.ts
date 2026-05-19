@@ -15,8 +15,8 @@ import { registerMessageListeners } from './events/directMessage.js';
 import { registerNannosCommand } from './commands/nannos.js';
 import { registerAuthorizeButtonAction } from './actions/authorizeButton.js';
 import { registerFeedbackButtonActions } from './actions/feedbackButton.js';
-import { registerBugReportActions } from './actions/bugReportButton.js';
-import { registerBugReportModalHandler } from './views/bugReportModal.js';
+import { registerHitlActions } from './actions/hitlButton.js';
+import { registerHitlModalHandler } from './views/hitlModal.js';
 import { registerReactionListeners } from './events/reactionHandler.js';
 import { Logger } from '../utils/logger.js';
 
@@ -99,11 +99,11 @@ export async function registerListeners(
     registerFeedbackButtonActions(app, feedbackService);
   }
 
-  // Register bug report button and modal handlers
+  // Register generic HITL interrupt button and modal handlers
   // A factory is used because botToken/botName are normally resolved per-event,
-  // but bug report interactions (view submissions, button clicks) don't have
+  // but HITL interactions (view submissions, button clicks) don't have
   // the file-download context, so an empty botToken is fine.
-  const makeBugReportDeps = () => ({
+  const makeHitlDeps = () => ({
     userAuthService,
     a2aClientService,
     contextStore,
@@ -116,8 +116,8 @@ export async function registerListeners(
     isLocalMode,
     feedbackService,
   });
-  registerBugReportActions(app, makeBugReportDeps);
-  registerBugReportModalHandler(app, makeBugReportDeps);
+  registerHitlActions(app, makeHitlDeps);
+  registerHitlModalHandler(app, makeHitlDeps);
 
   // Register reaction listeners for message feedback (requires console-backend)
   if (feedbackService) {

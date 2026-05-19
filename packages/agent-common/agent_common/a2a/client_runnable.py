@@ -25,6 +25,8 @@ from a2a.client import Client, ClientConfig, ClientFactory
 from a2a.types import (
     AgentCard,
     DataPart,
+    FilePart,
+    FileWithUri,
     Message,
     Task,
     TaskArtifactUpdateEvent,
@@ -510,6 +512,23 @@ class A2AClientRunnable(BaseA2ARunnable):
             task_id=task_id,
             metadata=message_metadata,
         )
+
+    @staticmethod
+    def _content_block_to_file_part(block: dict) -> Optional[A2APart]:
+        """Convert a LangChain content block dict to an A2A FilePart.
+
+        Args:
+            block: Dict with keys like 'type', 'url', 'mime_type'
+
+        Returns:
+            A2A Part wrapping a FilePart, or None if URL is missing
+        """
+        url = block.get("url", "")
+        if not url:
+            return None
+        mime_type = block.get("mime_type")
+        file_data = FileWithUri(uri=url, mimeType=mime_type)
+        return A2APart(root=FilePart(file=file_data))
 
     # NOTE: _wrap_message_with_metadata is inherited from BaseA2ARunnable
 

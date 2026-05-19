@@ -57,6 +57,80 @@ _USER_FIXABLE_PATTERNS = re.compile(
 )
 
 
+def classify_error(content: str) -> str | None:
+    """Classify an error message into a category.
+
+    Standalone function so it can be used both by
+    ``ErrorClassificationMiddleware`` and by ``DynamicToolDispatchMiddleware``
+    (which short-circuits before the middleware chain).
+
+    Returns one of: ``"auth"``, ``"transient"``, ``"user_fixable"``,
+    ``"capability_gap"``, ``"system_error"``, or ``None``.
+    """
+    if not content:
+        return None
+
+    # Check for structured JSON errors first
+    classification = _classify_json(content)
+    if classification:
+        return classification
+
+    # Pattern-based classification
+    if _AUTH_PATTERNS.search(content):
+        return "auth"
+    if _TRANSIENT_PATTERNS.search(content):
+        return "transient"
+    if _USER_FIXABLE_PATTERNS.search(content):
+        return "user_fixable"
+    if _CAPABILITY_GAP_PATTERNS.search(content):
+        return "capability_gap"
+
+    # Default: if it looks like an error but doesn't match known patterns,
+    # classify as system_error (conservative)
+    if _looks_like_error(content):
+        return "system_error"
+
+    return None
+
+
+def _looks_like_error(content: str) -> bool:
+    """Heuristic: does this content look like an error response?"""
+    if not content:
+        return False
+    lower = content.lower()
+    return any(
+        kw in lower for kw in ("error", "exception", "failed", "failure", "traceback", "unauthorized", "forbidden")
+    )
+
+
+def _classify_json(content: str) -> str | None:
+    """Try to classify from structured JSON error responses."""
+    try:
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            return None
+
+        error_code = data.get("errorCode", data.get("error_code", ""))
+        status_code = data.get("statusCode", data.get("status_code", data.get("status", 0)))
+
+        if isinstance(status_code, int):
+            if status_code == 401 or status_code == 403:
+                return "auth"
+            if status_code == 429 or 500 <= status_code <= 599:
+                return "transient"
+            if status_code == 400:
+                return "user_fixable"
+
+        if error_code in ("need-credentials", "auth_required", "unauthorized"):
+            return "auth"
+        if error_code in ("rate_limit", "timeout", "service_unavailable"):
+            return "transient"
+
+        return None
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
 class ErrorClassificationMiddleware(AgentMiddleware[AgentState, ContextT]):
     """Middleware that classifies tool errors by pattern matching.
 
@@ -81,10 +155,10 @@ class ErrorClassificationMiddleware(AgentMiddleware[AgentState, ContextT]):
         status = getattr(result, "status", None)
         content = result.content if isinstance(result.content, str) else ""
 
-        if status != "error" and not self._looks_like_error(content):
+        if status != "error" and not _looks_like_error(content):
             return result
 
-        classification = self._classify(content)
+        classification = classify_error(content)
         if classification:
             # Tag the message metadata with the classification
             additional_kwargs = getattr(result, "additional_kwargs", {}) or {}
@@ -100,66 +174,3 @@ class ErrorClassificationMiddleware(AgentMiddleware[AgentState, ContextT]):
             logger.info(f"[ERROR_CLASSIFICATION] {tool_name}: {classification}")
 
         return result
-
-    def _looks_like_error(self, content: str) -> bool:
-        """Heuristic: does this content look like an error response?"""
-        if not content:
-            return False
-        lower = content.lower()
-        return any(
-            kw in lower for kw in ("error", "exception", "failed", "failure", "traceback", "unauthorized", "forbidden")
-        )
-
-    def _classify(self, content: str) -> str | None:
-        """Classify an error response into a category.
-
-        Order matters — check more specific patterns first.
-        """
-        if not content:
-            return None
-
-        # Check for structured JSON errors first
-        classification = self._classify_json(content)
-        if classification:
-            return classification
-
-        # Pattern-based classification
-        if _AUTH_PATTERNS.search(content):
-            return "auth"
-        if _TRANSIENT_PATTERNS.search(content):
-            return "transient"
-        if _USER_FIXABLE_PATTERNS.search(content):
-            return "user_fixable"
-        if _CAPABILITY_GAP_PATTERNS.search(content):
-            return "capability_gap"
-
-        # Default: if it looks like an error but doesn't match known patterns,
-        # classify as system_error (conservative)
-        return "system_error"
-
-    def _classify_json(self, content: str) -> str | None:
-        """Try to classify from structured JSON error responses."""
-        try:
-            data = json.loads(content)
-            if not isinstance(data, dict):
-                return None
-
-            error_code = data.get("errorCode", data.get("error_code", ""))
-            status_code = data.get("statusCode", data.get("status_code", data.get("status", 0)))
-
-            if isinstance(status_code, int):
-                if status_code == 401 or status_code == 403:
-                    return "auth"
-                if status_code == 429 or 500 <= status_code <= 599:
-                    return "transient"
-                if status_code == 400:
-                    return "user_fixable"
-
-            if error_code in ("need-credentials", "auth_required", "unauthorized"):
-                return "auth"
-            if error_code in ("rate_limit", "timeout", "service_unavailable"):
-                return "transient"
-
-            return None
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return None

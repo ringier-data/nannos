@@ -19,6 +19,8 @@ from ..models.sub_agent import (
     SubAgentConfigVersion,
     SubAgentCreate,
     SubAgentGroupPermissionResponse,
+    SubAgentListFullResponse,
+    SubAgentListItem,
     SubAgentListResponse,
     SubAgentPermissionsUpdate,
     SubAgentSetDefaultVersion,
@@ -40,7 +42,7 @@ def get_sub_agent_service(request: Request) -> SubAgentService:
     return request.app.state.sub_agent_service
 
 
-@router.get("", response_model=SubAgentListResponse, tags=["MCP"], operation_id="console_list_sub_agents")
+@router.get("", response_model=SubAgentListFullResponse, tags=["MCP"], operation_id="console_list_sub_agents")
 async def list_sub_agents(
     request: Request,
     db: DbSession,
@@ -48,7 +50,7 @@ async def list_sub_agents(
     status: SubAgentStatus | None = Query(None, description="Filter by status"),
     owned_only: bool = Query(False, description="Only show owned sub-agents"),
     activated_only: bool = Query(False, description="Only show activated sub-agents"),
-) -> SubAgentListResponse:
+) -> SubAgentListFullResponse:
     """List sub-agents accessible to the current user.
 
     Supports both user session authentication and Bearer token authentication.
@@ -81,7 +83,9 @@ async def list_sub_agents(
                 db, user.id, is_admin=effective_admin, status_filter=status, activated_only=activated_only
             )
 
-        return SubAgentListResponse(items=sub_agents, total=len(sub_agents))
+        # Convert to lightweight list items (skills without body/files content)
+
+        return SubAgentListFullResponse(items=sub_agents, total=len(sub_agents))
     except Exception as e:
         logger.error(f"Failed to list sub-agents: {e}")
         raise HTTPException(status_code=500, detail="Failed to list sub-agents")
@@ -97,7 +101,8 @@ async def list_pending_approvals(
     sub_agent_service = get_sub_agent_service(request)
     try:
         sub_agents = await sub_agent_service.get_pending_approvals(db)
-        return SubAgentListResponse(items=sub_agents, total=len(sub_agents))
+        items = [SubAgentListItem.from_sub_agent(sa) for sa in sub_agents]
+        return SubAgentListResponse(items=items, total=len(items))
     except Exception as e:
         logger.error(f"Failed to list pending approvals: {e}")
         raise HTTPException(status_code=500, detail="Failed to list pending approvals")
@@ -128,6 +133,7 @@ async def get_sub_agent_by_config_hash(
         if not any(sa.id == sub_agent.id for sa in accessible):
             raise HTTPException(status_code=403, detail="Access denied")
 
+        await sub_agent_service.resolve_imported_skills(db, sub_agent)
         return sub_agent
     except HTTPException:
         raise
@@ -161,6 +167,7 @@ async def get_sub_agent_by_config_version(
         if not any(sa.id == sub_agent.id for sa in accessible):
             raise HTTPException(status_code=403, detail="Access denied")
 
+        await sub_agent_service.resolve_imported_skills(db, sub_agent)
         return sub_agent
     except HTTPException:
         raise
@@ -223,6 +230,7 @@ async def get_sub_agent(
             if not any(sa.id == sub_agent_id for sa in accessible):
                 raise HTTPException(status_code=403, detail="Access denied")
 
+        await sub_agent_service.resolve_imported_skills(db, sub_agent)
         return sub_agent
     except HTTPException:
         raise
@@ -239,12 +247,19 @@ async def update_sub_agent(
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
 ) -> SubAgent:
-    """Update a sub-agent.
+    """Update a sub-agent's core configuration (name, system prompt, model, MCP tools).
 
-    Only the owner can update. For local sub-agents, configuration changes
-    automatically create a new version in the history.
+    **IMPORTANT**: Do NOT use this tool for skill operations (create/update/delete).
+    Use the dedicated skill tools instead — they handle ALL scopes:
+    - console_create_skill (scope='personal', 'group', or 'default')
+    - console_update_skill (scope='personal', 'group', or 'default')
+    - console_remove_skill (scope='personal', 'group', or 'default')
+    - console_update_playbook (scope='personal' or 'group')
 
-    Supports both session-based authentication and Bearer token authentication.
+    Use this tool ONLY for: system_prompt, model, name, mcp_tools, is_public.
+
+    Requires write or owner permission. Configuration changes create a new version
+    that may require approval.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
@@ -253,7 +268,14 @@ async def update_sub_agent(
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent
     except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"[ERROR_TYPE: auth] {e}. "
+                "If you want to customize this agent's behavior, try console_create_skill or "
+                "console_update_playbook with scope='personal' instead."
+            ),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:

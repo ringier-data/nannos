@@ -91,6 +91,55 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
         await agent_executor.agent._graph_factory.ensure_store_setup()
         logger.info("Document store ready")
 
+        # Initialize sandbox pool if provider is configured
+        sandbox_pool = None
+        sandbox_provider_name = os.environ.get("SANDBOX_PROVIDER")
+        if sandbox_provider_name:
+            try:
+                from agent_common.core.sandbox_pool import SandboxPool
+
+                warm_ttl = float(os.environ.get("SANDBOX_WARM_TTL", "300"))
+
+                if sandbox_provider_name == "gatana":
+                    import asyncio as _aio
+
+                    from gatana_client import GatanaClient
+                    from gatana_langchain import GatanaSandbox
+
+                    if not os.environ.get("GATANA_API_KEY") or not os.environ.get("GATANA_ORG_ID"):
+                        raise ValueError(
+                            "GATANA_API_KEY and GATANA_ORG_ID environment variables must be set for Gatana sandbox provider"
+                        )
+                    org_capacity = int(os.environ.get("GATANA_ORG_CAPACITY") or "10")
+
+                    async def _create_sandbox():
+                        client = GatanaClient()
+                        return await _aio.to_thread(GatanaSandbox, client=client)
+
+                    capacity = int(os.environ.get("SANDBOX_POOL_CAPACITY") or "0") or max(1, org_capacity - 2)
+                else:
+                    raise ValueError(f"Unknown sandbox provider: {sandbox_provider_name!r}. Available: gatana")
+
+                sandbox_pool = SandboxPool(
+                    create_fn=_create_sandbox,
+                    capacity=capacity,
+                    warm_ttl=warm_ttl,
+                    home="/home/ubuntu",
+                )
+                await sandbox_pool.start_reaper()
+                app.state.sandbox_pool = sandbox_pool
+                agent_executor.agent.sandbox_pool = sandbox_pool
+                logger.info(
+                    "Sandbox pool initialized (provider=%s, capacity=%d)",
+                    sandbox_provider_name,
+                    sandbox_pool.capacity,
+                )
+            except Exception as e:
+                logger.error("Failed to initialize sandbox pool: %s", e)
+                sandbox_pool = None
+        else:
+            app.state.sandbox_pool = None
+
         logger.info("Application startup complete")
 
         yield  # Application runs here
@@ -99,6 +148,10 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
         logger.info("Shutting down application...")
         await budget_guard.stop_polling()
         logger.info("Budget guard shutdown complete")
+
+        # Shutdown sandbox pool
+        if sandbox_pool:
+            await sandbox_pool.shutdown()
 
         # Close agent (includes cost logger and database connection pool cleanup)
         await agent_executor.agent.close()

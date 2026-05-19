@@ -15,6 +15,7 @@ from pydantic import BaseModel, Discriminator, Field
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
 from agent_common.models.base import ThinkingLevel
+from agent_common.models.skill import SkillDefinition
 
 
 class BaseLocalSubAgentConfig(BaseModel):
@@ -135,6 +136,18 @@ class LocalLangGraphSubAgentConfig(BaseLocalSubAgentConfig):
     thinking_level: ThinkingLevel | None = Field(
         default=None,
         description="Thinking depth level (minimal/low/medium/high) for extended thinking mode",
+    )
+    skills: list[SkillDefinition] = Field(
+        default_factory=list,
+        description="Standard (immutable) skills bundled with the sub-agent config version",
+    )
+    sandbox_enabled: bool = Field(
+        default=False,
+        description="Whether sandbox execution is enabled for this sub-agent",
+    )
+    effective_permission: Optional[Literal["owner", "write", "read"]] = Field(
+        default=None,
+        description="User's effective permission level on this sub-agent (owner/write/read)",
     )
 
 

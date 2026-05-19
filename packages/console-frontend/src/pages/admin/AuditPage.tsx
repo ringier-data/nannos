@@ -56,6 +56,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   bug_report: 'Bug Report',
   scim_token: 'SCIM Token',
   outbound_scim_endpoint: 'Outbound SCIM Endpoint',
+  skill: 'Skill',
 };
 
 export function AuditPage() {

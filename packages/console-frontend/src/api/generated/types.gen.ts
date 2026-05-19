@@ -5,11 +5,63 @@ export type ClientOptions = {
 };
 
 /**
+ * ActivateRequest
+ *
+ * Request to activate a registry skill for an agent.
+ */
+export type ActivateRequest = {
+    /**
+     * Agent
+     *
+     * Target sub-agent name
+     */
+    agent: string;
+    /**
+     * Scope
+     *
+     * 'personal' or 'group'
+     */
+    scope?: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Overwrite
+     *
+     * Overwrite if already activated
+     */
+    overwrite?: boolean;
+};
+
+/**
  * ActivationSource
  *
  * Activation source enum matching database enum.
  */
 export type ActivationSource = 'user' | 'group' | 'admin';
+
+/**
+ * ActivationUpdateResponse
+ *
+ * Response after updating an activation.
+ */
+export type ActivationUpdateResponse = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * New Hash
+     */
+    new_hash: string;
+    /**
+     * Message
+     */
+    message: string;
+};
 
 /**
  * AddSourceRequest
@@ -69,6 +121,20 @@ export type AdminModeToggleResponse = {
 };
 
 /**
+ * ApplyUpdateRequest
+ *
+ * Request to apply an upstream update to an imported skill.
+ */
+export type ApplyUpdateRequest = {
+    /**
+     * Latest Hash
+     *
+     * Expected latest hash (from check-update response)
+     */
+    latest_hash: string;
+};
+
+/**
  * AuditAction
  *
  * Audit action enum.
@@ -80,7 +146,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill';
 
 /**
  * AuditLog
@@ -426,6 +492,42 @@ export type BulkOperationResult = {
      * Error
      */
     error?: string | null;
+};
+
+/**
+ * BulkUpdateRequest
+ *
+ * Request to update multiple activations at once.
+ */
+export type BulkUpdateRequest = {
+    /**
+     * Activation Ids
+     *
+     * List of activation IDs to update
+     */
+    activation_ids: Array<number>;
+};
+
+/**
+ * BulkUpdateResponse
+ *
+ * Response for bulk update.
+ */
+export type BulkUpdateResponse = {
+    /**
+     * Updated
+     *
+     * IDs that were updated
+     */
+    updated?: Array<number>;
+    /**
+     * Failed
+     *
+     * IDs that failed with reason
+     */
+    failed?: Array<{
+        [key: string]: unknown;
+    }>;
 };
 
 /**
@@ -938,6 +1040,26 @@ export type CatalogUpdate = {
 };
 
 /**
+ * CopyRequest
+ *
+ * Request to copy a skill (creating an editable local version).
+ */
+export type CopyRequest = {
+    /**
+     * Name
+     *
+     * Name for the copy (defaults to original + ' (copy)')
+     */
+    name?: string | null;
+    /**
+     * Slug
+     *
+     * Slug for the copy. Auto-derived from name if omitted.
+     */
+    slug?: string | null;
+};
+
+/**
  * DeliveryChannelCreate
  *
  * Request body for registering a new delivery channel (A2A client → backend).
@@ -1332,6 +1454,581 @@ export type McpToolsResponse = {
 };
 
 /**
+ * McpActivateSkillInput
+ *
+ * Input for console_activate_skill MCP tool.
+ */
+export type McpActivateSkillInput = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    /**
+     * Registry Id
+     *
+     * Registry entry UUID to activate
+     */
+    registry_id?: string | null;
+    /**
+     * Skill Name
+     *
+     * Skill slug to search in registry (alternative to registry_id)
+     */
+    skill_name?: string | null;
+    /**
+     * Scope
+     *
+     * Activation scope: 'personal' (only you), 'group' (shared with group members), or 'default' (baked into sub-agent config, visible to all users — requires owner/write access)
+     */
+    scope?: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (resolved from agent_name if not provided)
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
+ * McpActivateSkillResponse
+ *
+ * Response for console_activate_skill.
+ */
+export type McpActivateSkillResponse = {
+    /**
+     * Skill Name
+     */
+    skill_name: string;
+    /**
+     * Agent Name
+     */
+    agent_name: string;
+    /**
+     * Scope
+     */
+    scope: string;
+    /**
+     * Registry Id
+     */
+    registry_id: string;
+    /**
+     * Message
+     */
+    message: string;
+};
+
+/**
+ * McpImportSkillInput
+ *
+ * Input for console_import_skill MCP tool.
+ */
+export type McpImportSkillInput = {
+    /**
+     * Repo
+     *
+     * Git repository in 'owner/repo' format (e.g. 'anthropics/skills')
+     */
+    repo: string;
+    /**
+     * Skill
+     *
+     * Skill name/directory within the repo (e.g. 'next-js-development'). If the repo IS the skill, use the repo name.
+     */
+    skill: string;
+    /**
+     * Agent Name
+     *
+     * Target sub-agent name to activate the skill for
+     */
+    agent_name: string;
+    /**
+     * Scope
+     *
+     * Scope: 'personal' (immediate, no approval) or 'group'
+     */
+    scope?: string;
+    /**
+     * Ref
+     *
+     * Git branch/tag/commit to fetch from
+     */
+    ref?: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Overwrite
+     *
+     * Overwrite if skill already exists
+     */
+    overwrite?: boolean;
+    /**
+     * Force
+     *
+     * Force import even if security assessment is 'unsafe'
+     */
+    force?: boolean;
+};
+
+/**
+ * McpImportSkillResponse
+ *
+ * Response for console_import_skill.
+ */
+export type McpImportSkillResponse = {
+    /**
+     * Skill Name
+     *
+     * Imported skill name
+     */
+    skill_name: string;
+    /**
+     * Agent
+     *
+     * Target sub-agent
+     */
+    agent: string;
+    /**
+     * Scope
+     *
+     * Activation scope
+     */
+    scope: string;
+    /**
+     * Security Verdict
+     *
+     * 'safe', 'caution', or 'unsafe'
+     */
+    security_verdict: string;
+    /**
+     * Files Count
+     *
+     * Number of files imported
+     */
+    files_count: number;
+    /**
+     * Message
+     *
+     * Human-readable summary
+     */
+    message: string;
+};
+
+/**
+ * McpPlaybookUpdate
+ *
+ * Request body for the console_update_playbook MCP tool.
+ *
+ * Updates the AGENTS.md playbook for an agent. For section-based updates,
+ * provide section_name and content. For full replacement, provide content only.
+ */
+export type McpPlaybookUpdate = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    scope: ScopeEnum;
+    /**
+     * Content
+     *
+     * Full Markdown content to write
+     */
+    content: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+};
+
+/**
+ * McpSearchSkillResult
+ *
+ * A single skill search result.
+ */
+export type McpSearchSkillResult = {
+    /**
+     * Id
+     *
+     * Skill identifier (use this for import)
+     */
+    id: string;
+    /**
+     * Name
+     *
+     * Human-readable skill name
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * Brief description of what the skill does
+     */
+    description?: string | null;
+    /**
+     * Source
+     *
+     * Source repository or provider
+     */
+    source: string;
+};
+
+/**
+ * McpSearchSkillsInput
+ *
+ * Input for console_search_skills MCP tool.
+ */
+export type McpSearchSkillsInput = {
+    /**
+     * Query
+     *
+     * Search query (keywords, skill name, or description fragment)
+     */
+    query: string;
+    /**
+     * Source
+     *
+     * Where to search: 'registry' (platform catalog, fast), 'external' (skills.sh community index), or 'repo:owner/name' (browse a specific GitHub repository for skills)
+     */
+    source?: string;
+    /**
+     * Limit
+     *
+     * Maximum number of results (1-50)
+     */
+    limit?: number;
+};
+
+/**
+ * McpSearchSkillsResponse
+ *
+ * Response for console_search_skills.
+ */
+export type McpSearchSkillsResponse = {
+    /**
+     * Results
+     */
+    results?: Array<McpSearchSkillResult>;
+    /**
+     * Count
+     */
+    count?: number;
+    /**
+     * Source
+     *
+     * Where results came from
+     */
+    source: string;
+};
+
+/**
+ * McpSkillCreate
+ *
+ * Request body for the console_create_skill MCP tool.
+ *
+ * Creates a skill in the registry and auto-activates it on the calling agent.
+ * The skill is immediately usable after creation.
+ */
+export type McpSkillCreate = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    scope: ScopeEnum2;
+    /**
+     * Skill Name
+     *
+     * Skill identifier (lowercase letters, numbers, hyphens only)
+     */
+    skill_name: string;
+    /**
+     * Description
+     *
+     * What the skill does and when to use it
+     */
+    description?: string;
+    /**
+     * Body
+     *
+     * Skill instructions body (Markdown)
+     */
+    body: string;
+    /**
+     * Files
+     *
+     * Optional files to bundle with the skill
+     */
+    files?: Array<McpSkillFile> | null;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (resolved from agent_name if not provided)
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Visibility
+     *
+     * Registry visibility: 'private' (only you), 'group' (your group), or 'public' (everyone)
+     */
+    visibility?: string;
+};
+
+/**
+ * McpSkillDeleteFile
+ *
+ * Request body for the console_delete_skill_file MCP tool.
+ */
+export type McpSkillDeleteFile = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    scope: ScopeEnum2;
+    /**
+     * Skill Name
+     *
+     * Skill identifier that the file belongs to
+     */
+    skill_name: string;
+    /**
+     * File Path
+     *
+     * Relative path of the file to delete (e.g., 'scripts/check.py')
+     */
+    file_path: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (resolved from agent_name if not provided)
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
+ * McpSkillFile
+ *
+ * A file to bundle with a skill.
+ */
+export type McpSkillFile = {
+    /**
+     * Path
+     *
+     * Relative path within the skill folder (e.g., 'scripts/check.py')
+     */
+    path: string;
+    /**
+     * Content
+     *
+     * File content (text)
+     */
+    content: string;
+};
+
+/**
+ * McpSkillRemove
+ *
+ * Request body for the console_remove_skill MCP tool.
+ *
+ * Deactivates a skill from the calling agent. The registry entry is preserved
+ * for other consumers.
+ */
+export type McpSkillRemove = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    scope: ScopeEnum2;
+    /**
+     * Skill Name
+     *
+     * Skill identifier to deactivate
+     */
+    skill_name: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (resolved from agent_name if not provided)
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
+ * McpSkillResponse
+ *
+ * Response from MCP skill operations.
+ */
+export type McpSkillResponse = {
+    /**
+     * Skill Name
+     */
+    skill_name: string;
+    scope: ScopeEnum2;
+    /**
+     * Agent Name
+     */
+    agent_name: string;
+    /**
+     * Message
+     */
+    message: string;
+    /**
+     * Registry Id
+     *
+     * Registry entry UUID (for create/update operations)
+     */
+    registry_id?: string | null;
+};
+
+/**
+ * McpSkillUpdate
+ *
+ * Request body for the console_update_skill MCP tool.
+ *
+ * Updates a skill in the registry and auto-refreshes the calling agent's
+ * own activation. Other consumers' activations remain pinned.
+ */
+export type McpSkillUpdate = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    scope: ScopeEnum2;
+    /**
+     * Skill Name
+     *
+     * Skill identifier to update
+     */
+    skill_name: string;
+    /**
+     * Description
+     *
+     * Updated description
+     */
+    description?: string | null;
+    /**
+     * Body
+     *
+     * Updated skill instructions body (Markdown)
+     */
+    body?: string | null;
+    /**
+     * Content
+     *
+     * Full SKILL.md content including frontmatter. Mutually exclusive with body.
+     */
+    content?: string | null;
+    /**
+     * Files
+     *
+     * If provided, replaces ALL bundled files. If omitted, existing files are untouched.
+     */
+    files?: Array<McpSkillFile> | null;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (resolved from agent_name if not provided)
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Registry Id
+     *
+     * Registry entry UUID (alternative to skill_name lookup)
+     */
+    registry_id?: string | null;
+};
+
+/**
+ * McpSkillWriteFile
+ *
+ * Request body for the console_write_skill_file MCP tool.
+ */
+export type McpSkillWriteFile = {
+    /**
+     * Agent Name
+     *
+     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     */
+    agent_name?: string | null;
+    scope: ScopeEnum2;
+    /**
+     * Skill Name
+     *
+     * Skill identifier that the file belongs to
+     */
+    skill_name: string;
+    /**
+     * File Path
+     *
+     * Relative path within the skill folder (e.g., 'scripts/check.py')
+     */
+    file_path: string;
+    /**
+     * Content
+     *
+     * File content (text)
+     */
+    content: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Sub Agent Id
+     *
+     * Sub-agent ID (resolved from agent_name if not provided)
+     */
+    sub_agent_id?: number | null;
+};
+
+/**
  * MemberInfo
  *
  * Member info for group detail response.
@@ -1716,6 +2413,66 @@ export type PhoneVerificationRequest = {
 };
 
 /**
+ * PlaybookContent
+ *
+ * AGENTS.md content for an agent.
+ */
+export type PlaybookContent = {
+    /**
+     * Agent Name
+     */
+    agent_name: string;
+    scope: ScopeEnum;
+    /**
+     * Content
+     *
+     * Markdown content of the AGENTS.md file
+     */
+    content?: string | null;
+    /**
+     * Group Id
+     *
+     * Group ID (present for group scope)
+     */
+    group_id?: string | null;
+    /**
+     * Group Name
+     *
+     * Group display name (present for group scope)
+     */
+    group_name?: string | null;
+};
+
+/**
+ * PlaybookListResponse
+ *
+ * Response for listing playbooks.
+ */
+export type PlaybookListResponse = {
+    personal?: PlaybookContent | null;
+    /**
+     * Groups
+     *
+     * Playbooks from all user groups
+     */
+    groups?: Array<PlaybookContent>;
+};
+
+/**
+ * PlaybookUpdate
+ *
+ * Request body for updating AGENTS.md.
+ */
+export type PlaybookUpdate = {
+    /**
+     * Content
+     *
+     * Full Markdown content to write
+     */
+    content: string;
+};
+
+/**
  * RateCardEntriesList
  *
  * List of rate card entries with pagination.
@@ -1918,6 +2675,96 @@ export type RegeneratedFileResponse = {
      * Files
      */
     files: Array<RegeneratedFileInfo>;
+};
+
+/**
+ * RegistryCreateRequest
+ *
+ * Request to create a new skill in the registry.
+ */
+export type RegistryCreateRequest = {
+    /**
+     * Name
+     *
+     * Display name for the skill
+     */
+    name: string;
+    /**
+     * Slug
+     *
+     * URL-safe identifier. Auto-derived from name if omitted.
+     */
+    slug?: string | null;
+    /**
+     * Description
+     *
+     * What the skill does
+     */
+    description?: string;
+    /**
+     * Files
+     *
+     * Skill files. Defaults to a stub SKILL.md if empty.
+     */
+    files?: Array<ConsoleBackendModelsSkillsRegistrySkillFile>;
+    /**
+     * Visibility
+     *
+     * 'private' or 'public'
+     */
+    visibility?: string;
+};
+
+/**
+ * RegistryFileWriteRequest
+ *
+ * Request to write a single file in a registry skill.
+ */
+export type RegistryFileWriteRequest = {
+    /**
+     * Content
+     *
+     * File content (text)
+     */
+    content: string;
+};
+
+/**
+ * RegistryUpdateRequest
+ *
+ * Request to update a skill in the registry.
+ */
+export type RegistryUpdateRequest = {
+    /**
+     * Name
+     *
+     * Updated name
+     */
+    name?: string | null;
+    /**
+     * Description
+     *
+     * Updated description
+     */
+    description?: string | null;
+    /**
+     * Files
+     *
+     * Full replacement file list
+     */
+    files?: Array<ConsoleBackendModelsSkillsRegistrySkillFile> | null;
+    /**
+     * Sandbox Required
+     *
+     * Whether skill requires sandbox execution
+     */
+    sandbox_required?: boolean | null;
+    /**
+     * Visibility
+     *
+     * Visibility: private or public
+     */
+    visibility?: string | null;
 };
 
 /**
@@ -2718,9 +3565,870 @@ export type SecretPermissionsUpdate = {
 export type SecretType = 'foundry_client_secret';
 
 /**
+ * SkillActivationListResponse
+ *
+ * Response for listing activations for an agent.
+ */
+export type SkillActivationListResponse = {
+    /**
+     * Items
+     */
+    items?: Array<SkillActivationWithStatus>;
+    /**
+     * Total
+     */
+    total?: number;
+};
+
+/**
+ * SkillActivationRequest
+ *
+ * Request to activate a registry skill on an agent.
+ */
+export type SkillActivationRequest = {
+    /**
+     * Registry Id
+     *
+     * UUID of the skill in the registry
+     */
+    registry_id: string;
+    /**
+     * Sub Agent Id
+     *
+     * Target sub-agent ID
+     */
+    sub_agent_id: number;
+    /**
+     * Scope
+     *
+     * 'personal' or 'group'
+     */
+    scope: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: number | null;
+};
+
+/**
+ * SkillActivationWithStatus
+ *
+ * Activation record enriched with update-available status and skill metadata.
+ */
+export type SkillActivationWithStatus = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id: number;
+    /**
+     * Registry Id
+     */
+    registry_id: string;
+    /**
+     * Scope
+     */
+    scope: string;
+    /**
+     * User Id
+     */
+    user_id?: string | null;
+    /**
+     * Group Id
+     */
+    group_id?: number | null;
+    /**
+     * Group Name
+     */
+    group_name?: string | null;
+    /**
+     * Content Hash
+     */
+    content_hash: string;
+    /**
+     * Locked
+     */
+    locked?: boolean;
+    /**
+     * Activated At
+     */
+    activated_at: string;
+    /**
+     * Activated By
+     */
+    activated_by: string;
+    /**
+     * Skill Slug
+     *
+     * Skill identifier (slug) for use in MCP tool calls
+     */
+    skill_slug: string;
+    /**
+     * Skill Name
+     */
+    skill_name: string;
+    /**
+     * Skill Description
+     */
+    skill_description?: string | null;
+    /**
+     * Update Available
+     *
+     * True when registry content_hash differs from activation content_hash
+     */
+    update_available?: boolean;
+    /**
+     * Latest Hash
+     *
+     * Current registry content_hash (if different)
+     */
+    latest_hash?: string | null;
+};
+
+/**
+ * SkillAuditEntry
+ *
+ * A single security audit from a registry partner.
+ */
+export type SkillAuditEntry = {
+    /**
+     * Provider
+     *
+     * Partner display name (e.g. 'Gen Agent Trust Hub', 'Socket')
+     */
+    provider: string;
+    /**
+     * Slug
+     *
+     * URL-safe partner slug
+     */
+    slug: string;
+    /**
+     * Status
+     *
+     * Normalized verdict: 'pass', 'warn', or 'fail'
+     */
+    status: string;
+    /**
+     * Summary
+     *
+     * One-line human-readable summary
+     */
+    summary: string;
+    /**
+     * Audited At
+     *
+     * ISO 8601 timestamp of audit
+     */
+    audited_at: string;
+    /**
+     * Risk Level
+     *
+     * 'NONE', 'LOW', 'MEDIUM', 'HIGH', or 'CRITICAL'
+     */
+    risk_level?: string | null;
+    /**
+     * Categories
+     *
+     * Detected categories
+     */
+    categories?: Array<string> | null;
+};
+
+/**
+ * SkillAuditResponse
+ *
+ * Security audit response from registry.
+ */
+export type SkillAuditResponse = {
+    /**
+     * Id
+     *
+     * Stable unique identifier
+     */
+    id: string;
+    /**
+     * Source
+     *
+     * Source repository or provider
+     */
+    source: string;
+    /**
+     * Slug
+     *
+     * URL-safe skill slug
+     */
+    slug: string;
+    /**
+     * Audits
+     *
+     * Security audit results
+     */
+    audits?: Array<SkillAuditEntry>;
+};
+
+/**
+ * SkillCreate
+ *
+ * Request body for creating a new skill.
+ */
+export type SkillCreate = {
+    /**
+     * Name
+     *
+     * Skill identifier (lowercase letters, numbers, hyphens only, per SKILL.md spec)
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * What the skill does and when to use it (shown in skill index)
+     */
+    description?: string;
+    /**
+     * Content
+     *
+     * Skill instructions body (Markdown). Frontmatter is generated automatically.
+     */
+    content: string;
+    /**
+     * Files
+     *
+     * Optional files to bundle with the skill
+     */
+    files?: Array<McpSkillFile> | null;
+};
+
+/**
+ * SkillDefinition
+ *
+ * A standard (immutable) skill bundled with a sub-agent config version.
+ *
+ * Two modes:
+ * - Custom skills (source=None): full content stored inline (body + files)
+ * - Imported skills (source set): only reference stored (name, description, source, source_hash).
+ * Body and files are empty/absent — resolve from skill registry at runtime.
+ */
+export type SkillDefinitionInput = {
+    /**
+     * Name
+     *
+     * Skill identifier (lowercase, alphanumeric + hyphens)
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * What the skill does
+     */
+    description: string;
+    /**
+     * Body
+     *
+     * SKILL.md body content (markdown). Empty for imported skills (resolve from registry).
+     */
+    body?: string;
+    /**
+     * Files
+     *
+     * Optional scripts/references/assets. Empty for imported skills.
+     */
+    files?: Array<ConsoleBackendModelsSubAgentSkillFile>;
+    /**
+     * Source
+     *
+     * Registry skill ID if imported (e.g., 'vercel-labs/agent-skills/next-js-dev'). Null for custom skills.
+     */
+    source?: string | null;
+    /**
+     * Source Hash
+     *
+     * Content hash of the registry skill at import time. Used to detect available updates.
+     */
+    source_hash?: string | null;
+    /**
+     * Update Available
+     *
+     * True when the registry has a newer version than the pinned source_hash.
+     */
+    update_available?: boolean;
+    /**
+     * Latest Hash
+     *
+     * Current content_hash in the registry. Present when update_available=True.
+     */
+    latest_hash?: string | null;
+    /**
+     * Sandbox Required
+     *
+     * Whether the skill contains executable files (.py, .sh, etc.) that require sandbox.
+     */
+    sandbox_required?: boolean;
+};
+
+/**
+ * SkillDefinition
+ *
+ * A standard (immutable) skill bundled with a sub-agent config version.
+ *
+ * Two modes:
+ * - Custom skills (source=None): full content stored inline (body + files)
+ * - Imported skills (source set): only reference stored (name, description, source, source_hash).
+ * Body and files are empty/absent — resolve from skill registry at runtime.
+ */
+export type SkillDefinitionOutput = {
+    /**
+     * Name
+     *
+     * Skill identifier (lowercase, alphanumeric + hyphens)
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * What the skill does
+     */
+    description: string;
+    /**
+     * Body
+     *
+     * SKILL.md body content (markdown). Empty for imported skills (resolve from registry).
+     */
+    body?: string;
+    /**
+     * Files
+     *
+     * Optional scripts/references/assets. Empty for imported skills.
+     */
+    files?: Array<SkillFileOutput>;
+    /**
+     * Source
+     *
+     * Registry skill ID if imported (e.g., 'vercel-labs/agent-skills/next-js-dev'). Null for custom skills.
+     */
+    source?: string | null;
+    /**
+     * Source Hash
+     *
+     * Content hash of the registry skill at import time. Used to detect available updates.
+     */
+    source_hash?: string | null;
+    /**
+     * Update Available
+     *
+     * True when the registry has a newer version than the pinned source_hash.
+     */
+    update_available?: boolean;
+    /**
+     * Latest Hash
+     *
+     * Current content_hash in the registry. Present when update_available=True.
+     */
+    latest_hash?: string | null;
+    /**
+     * Sandbox Required
+     *
+     * Whether the skill contains executable files (.py, .sh, etc.) that require sandbox.
+     */
+    sandbox_required?: boolean;
+};
+
+/**
+ * SkillDetail
+ *
+ * Full skill file content.
+ */
+export type SkillDetail = {
+    /**
+     * Name
+     */
+    name: string;
+    scope: ScopeEnum2;
+    /**
+     * Content
+     *
+     * Full SKILL.md content (frontmatter + body)
+     */
+    content: string;
+    /**
+     * Files
+     *
+     * Bundled file paths (excluding SKILL.md)
+     */
+    files?: Array<SkillFileSummary>;
+};
+
+/**
+ * SkillFile
+ *
+ * A file bundled with a standard skill (e.g., script, reference doc).
+ */
+export type SkillFileOutput = {
+    /**
+     * Path
+     *
+     * Relative path inside the skill directory (e.g., 'scripts/check.py')
+     */
+    path: string;
+    /**
+     * Content
+     *
+     * File content
+     */
+    content: string;
+};
+
+/**
+ * SkillFileContent
+ *
+ * Response for reading a skill file.
+ */
+export type SkillFileContent = {
+    /**
+     * Path
+     */
+    path: string;
+    /**
+     * Content
+     */
+    content: string;
+};
+
+/**
+ * SkillFileListResponse
+ *
+ * Response for listing files in a skill.
+ */
+export type SkillFileListResponse = {
+    /**
+     * Items
+     */
+    items?: Array<SkillFileSummary>;
+};
+
+/**
+ * SkillFileSummary
+ *
+ * Summary of a file within a skill folder.
+ */
+export type SkillFileSummary = {
+    /**
+     * Path
+     *
+     * Relative path within the skill folder (e.g., 'scripts/check.py')
+     */
+    path: string;
+};
+
+/**
+ * SkillFileWrite
+ *
+ * Request body for writing a skill file.
+ */
+export type SkillFileWrite = {
+    /**
+     * Content
+     *
+     * File content (text)
+     */
+    content: string;
+};
+
+/**
+ * SkillImportRequest
+ *
+ * Request body for importing a skill.
+ *
+ * Two resolution paths (Git-first architecture):
+ * 1. Direct Git: provide `repo` + `skill` (+ optional `ref`)
+ * 2. Via registry: provide `registry_id` which resolves to repo + skill
+ */
+export type SkillImportRequest = {
+    /**
+     * Repo
+     *
+     * Git repository (e.g. 'anthropics/skills', 'OthmanAdi/planning-with-files'). Primary source.
+     */
+    repo?: string | null;
+    /**
+     * Skill
+     *
+     * Skill name/directory within the repo. If omitted with repo, assumes repo IS the skill.
+     */
+    skill?: string | null;
+    /**
+     * Ref
+     *
+     * Git ref to fetch from (branch, tag, or commit SHA).
+     */
+    ref?: string;
+    /**
+     * Registry Id
+     *
+     * Registry skill ID in format '{source}/{slug}' (e.g. 'vercel-labs/agent-skills/next-js-development'). Resolves to repo + skill via the configured registry. Alternative to providing repo + skill directly.
+     */
+    registry_id?: string | null;
+    /**
+     * Agent
+     *
+     * Target sub-agent name. If omitted, skill is added to registry only (no activation).
+     */
+    agent?: string | null;
+    /**
+     * Scope
+     *
+     * Visibility/activation scope: 'personal', 'group', or 'default' (global)
+     */
+    scope?: string;
+    /**
+     * Group Id
+     *
+     * Group ID (required when scope='group')
+     */
+    group_id?: string | null;
+    /**
+     * Overwrite
+     *
+     * Overwrite existing skill with same name
+     */
+    overwrite?: boolean;
+    /**
+     * Force
+     *
+     * Force import even if security assessment is 'unsafe' (requires approver role)
+     */
+    force?: boolean;
+};
+
+/**
+ * SkillImportResponse
+ *
+ * Response after successful skill import.
+ */
+export type SkillImportResponse = {
+    /**
+     * Skill Name
+     *
+     * Imported skill name
+     */
+    skill_name: string;
+    /**
+     * Agent
+     *
+     * Target sub-agent name (None if registry-only)
+     */
+    agent?: string | null;
+    /**
+     * Scope
+     *
+     * Visibility/activation scope
+     */
+    scope: string;
+    /**
+     * Provenance metadata
+     */
+    source: SkillSourceInfo;
+    /**
+     * Files Count
+     *
+     * Total number of files imported (including SKILL.md)
+     */
+    files_count: number;
+    /**
+     * Overwritten
+     *
+     * Whether an existing skill was overwritten
+     */
+    overwritten?: boolean;
+    /**
+     * Security assessment result
+     */
+    security: SkillSecurityVerdict;
+};
+
+/**
+ * SkillListResponse
+ *
+ * Response for listing skills.
+ */
+export type SkillListResponse = {
+    /**
+     * Items
+     */
+    items?: Array<ConsoleBackendModelsPlaybookSkillSummary>;
+};
+
+/**
+ * SkillSearchResponse
+ *
+ * Response for skill search/browse.
+ */
+export type SkillSearchResponse = {
+    /**
+     * Data
+     */
+    data?: Array<SkillSearchResult>;
+    /**
+     * Query
+     */
+    query?: string;
+    /**
+     * Search Type
+     *
+     * 'fuzzy' or 'semantic' (registry search only)
+     */
+    search_type?: string | null;
+    /**
+     * Count
+     *
+     * Number of results returned
+     */
+    count?: number;
+    /**
+     * Total
+     *
+     * Total matching results (for pagination)
+     */
+    total?: number;
+    /**
+     * Offset
+     *
+     * Current offset
+     */
+    offset?: number;
+    /**
+     * Has More
+     *
+     * Whether more results are available
+     */
+    has_more?: boolean;
+};
+
+/**
+ * SkillSearchResult
+ *
+ * A skill found via search or browse.
+ */
+export type SkillSearchResult = {
+    /**
+     * Id
+     *
+     * Stable unique identifier. Format: '{source}/{slug}' (registry) or '{repo}/{skill}' (Git)
+     */
+    id: string;
+    /**
+     * Slug
+     *
+     * URL-safe skill slug (e.g. 'next-js-development')
+     */
+    slug: string;
+    /**
+     * Name
+     *
+     * Human-readable name (e.g. 'Next.js Development')
+     */
+    name: string;
+    /**
+     * Description
+     *
+     * Short description of what the skill does
+     */
+    description?: string | null;
+    /**
+     * Source
+     *
+     * Source repository (e.g. 'vercel-labs/agent-skills')
+     */
+    source: string;
+    /**
+     * Installs
+     *
+     * Total install count (registry only, 0 for Git sources)
+     */
+    installs?: number;
+    /**
+     * Source Type
+     *
+     * 'github' or 'well-known'
+     */
+    source_type?: string;
+    /**
+     * Author
+     *
+     * Display name of the skill author (registry only)
+     */
+    author?: string | null;
+    /**
+     * Visibility
+     *
+     * 'private' or 'public' (registry only)
+     */
+    visibility?: string | null;
+    /**
+     * Install Url
+     *
+     * Git clone URL or registry page URL
+     */
+    install_url?: string | null;
+    /**
+     * Url
+     *
+     * Direct link to skill (GitHub tree URL or registry page)
+     */
+    url?: string | null;
+};
+
+/**
+ * SkillSecurityIndicator
+ *
+ * A single security risk indicator detected in skill files.
+ */
+export type SkillSecurityIndicator = {
+    /**
+     * Category
+     *
+     * Risk category identifier
+     */
+    category: string;
+    /**
+     * Risk Level
+     *
+     * 'high' or 'medium'
+     */
+    risk_level: string;
+    /**
+     * Evidence
+     *
+     * Snippets/paths that triggered detection
+     */
+    evidence?: Array<string>;
+    /**
+     * Description
+     *
+     * Human-readable explanation
+     */
+    description: string;
+};
+
+/**
+ * SkillSecurityVerdict
+ *
+ * Combined security assessment for a skill.
+ */
+export type SkillSecurityVerdict = {
+    /**
+     * Verdict
+     *
+     * 'safe', 'caution', or 'unsafe'
+     */
+    verdict: string;
+    /**
+     * Indicators
+     */
+    indicators?: Array<SkillSecurityIndicator>;
+    /**
+     * Registry audit if available
+     */
+    registry_audit?: SkillAuditResponse | null;
+    /**
+     * Reasoning
+     *
+     * Summary explanation of the verdict
+     */
+    reasoning: string;
+    /**
+     * Assessed At
+     *
+     * ISO 8601 timestamp
+     */
+    assessed_at: string;
+    /**
+     * Content Hash
+     *
+     * SHA-256 hash of skill contents (cache key)
+     */
+    content_hash: string;
+};
+
+/**
+ * SkillSourceInfo
+ *
+ * Provenance metadata stored with imported skills.
+ */
+export type SkillSourceInfo = {
+    /**
+     * Type
+     *
+     * Source type: 'git' or 'registry'
+     */
+    type: string;
+    /**
+     * Repo
+     *
+     * Git repository (owner/repo)
+     */
+    repo: string;
+    /**
+     * Skill
+     *
+     * Skill name within the repo
+     */
+    skill: string;
+    /**
+     * Ref
+     *
+     * Git ref that was fetched
+     */
+    ref?: string;
+    /**
+     * Hash
+     *
+     * Git tree SHA at time of import
+     */
+    hash?: string | null;
+    /**
+     * Registry Id
+     *
+     * Registry ID if discovered via registry
+     */
+    registry_id?: string | null;
+    /**
+     * Imported At
+     *
+     * ISO 8601 timestamp of import
+     */
+    imported_at: string;
+};
+
+/**
+ * SkillUpdate
+ *
+ * Request body for updating a skill.
+ */
+export type SkillUpdate = {
+    /**
+     * Content
+     *
+     * Full Markdown content to write
+     */
+    content: string;
+    /**
+     * Files
+     *
+     * If provided, replaces ALL bundled files. If omitted, existing files are untouched.
+     */
+    files?: Array<McpSkillFile> | null;
+};
+
+/**
  * SubAgent
  *
- * Sub-agent model.
+ * Sub-agent model with full config version (including skill body/files).
  *
  * Metadata (name, owner, type) lives on sub_agents table.
  * Configuration data (description, model, config, status) lives on sub_agent_config_versions.
@@ -2754,7 +4462,6 @@ export type SubAgent = {
      * Default Version
      */
     default_version?: number | null;
-    config_version?: SubAgentConfigVersion | null;
     /**
      * Is Public
      */
@@ -2769,6 +4476,10 @@ export type SubAgent = {
      */
     activated_by_groups?: Array<number> | null;
     /**
+     * Effective Permission
+     */
+    effective_permission?: _0Enum | null;
+    /**
      * Deleted At
      */
     deleted_at?: string | null;
@@ -2780,6 +4491,7 @@ export type SubAgent = {
      * Updated At
      */
     updated_at?: string;
+    config_version?: SubAgentConfigVersion | null;
 };
 
 /**
@@ -2813,7 +4525,7 @@ export type SubAgentApproval = {
 /**
  * SubAgentConfigVersion
  *
- * Version history entry for sub-agent configurations.
+ * Full version with complete skill content (body + files).
  */
 export type SubAgentConfigVersion = {
     /**
@@ -2904,6 +4616,10 @@ export type SubAgentConfigVersion = {
     enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
     /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean;
+    /**
      * Change Summary
      */
     change_summary?: string | null;
@@ -2932,6 +4648,142 @@ export type SubAgentConfigVersion = {
      * Created At
      */
     created_at: string;
+    /**
+     * Skills
+     */
+    skills?: Array<SkillDefinitionOutput>;
+};
+
+/**
+ * SubAgentConfigVersionSummary
+ *
+ * Lightweight config version for list responses (skills without body/files).
+ */
+export type SubAgentConfigVersionSummary = {
+    /**
+     * Id
+     */
+    id?: number | null;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Version
+     */
+    version: number;
+    /**
+     * Version Hash
+     */
+    version_hash?: string | null;
+    /**
+     * Release Number
+     */
+    release_number?: number | null;
+    /**
+     * Description
+     */
+    description: string;
+    /**
+     * Model
+     */
+    model?: string | null;
+    /**
+     * System Prompt
+     */
+    system_prompt?: string | null;
+    /**
+     * Agent Url
+     */
+    agent_url?: string | null;
+    /**
+     * Mcp Tools
+     */
+    mcp_tools?: Array<string>;
+    /**
+     * Foundry Hostname
+     */
+    foundry_hostname?: string | null;
+    /**
+     * Foundry Client Id
+     */
+    foundry_client_id?: string | null;
+    /**
+     * Foundry Client Secret Ref
+     */
+    foundry_client_secret_ref?: number | null;
+    /**
+     * Foundry Client Secret Ssmkey
+     *
+     * SSM Parameter Store name for Foundry client secret. Is retrieved conditionally just when needed by the orchestrator.
+     */
+    foundry_client_secret_ssmkey?: string | null;
+    /**
+     * Foundry Ontology Rid
+     */
+    foundry_ontology_rid?: string | null;
+    /**
+     * Foundry Query Api Name
+     */
+    foundry_query_api_name?: string | null;
+    /**
+     * Foundry Scopes
+     */
+    foundry_scopes?: Array<string> | null;
+    /**
+     * Foundry Version
+     */
+    foundry_version?: string | null;
+    /**
+     * Pricing Config
+     *
+     * Agent-specific rate card configuration. Only applicable for remote and foundry agents. Format: {'rate_card_entries': [{'billing_unit': 'token_name', 'price_per_million': 1.5}]} or {'price_per_million_requests': 0.05}
+     */
+    pricing_config?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Enable Thinking
+     */
+    enable_thinking?: boolean | null;
+    thinking_level?: ThinkingLevel | null;
+    /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean;
+    /**
+     * Change Summary
+     */
+    change_summary?: string | null;
+    status?: SubAgentStatus;
+    /**
+     * Submitted By User Id
+     */
+    submitted_by_user_id?: string | null;
+    /**
+     * Approved By User Id
+     */
+    approved_by_user_id?: string | null;
+    /**
+     * Approved At
+     */
+    approved_at?: string | null;
+    /**
+     * Rejection Reason
+     */
+    rejection_reason?: string | null;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Skills
+     */
+    skills?: Array<ConsoleBackendModelsSubAgentSkillSummary>;
 };
 
 /**
@@ -3010,6 +4862,14 @@ export type SubAgentCreate = {
      */
     enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
+    /**
+     * Skills
+     */
+    skills?: Array<SkillDefinitionInput>;
+    /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean;
 };
 
 /**
@@ -3049,6 +4909,87 @@ export type SubAgentGroupPermissionResponse = {
 };
 
 /**
+ * SubAgentListFullResponse
+ *
+ * Response model for listing sub-agents with full details.
+ */
+export type SubAgentListFullResponse = {
+    /**
+     * Items
+     */
+    items: Array<SubAgent>;
+    /**
+     * Total
+     */
+    total: number;
+};
+
+/**
+ * SubAgentListItem
+ *
+ * Lightweight sub-agent for list responses (skills without body/files).
+ */
+export type SubAgentListItem = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    owner?: SubAgentOwner | null;
+    owner_status?: OwnerStatus;
+    type: SubAgentType;
+    /**
+     * System Role
+     */
+    system_role?: string | null;
+    /**
+     * Current Version
+     */
+    current_version?: number;
+    /**
+     * Default Version
+     */
+    default_version?: number | null;
+    /**
+     * Is Public
+     */
+    is_public?: boolean | null;
+    /**
+     * Is Activated
+     */
+    is_activated?: boolean | null;
+    activated_by?: ActivationSource | null;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
+    /**
+     * Effective Permission
+     */
+    effective_permission?: _0Enum | null;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+    config_version?: SubAgentConfigVersionSummary | null;
+};
+
+/**
  * SubAgentListResponse
  *
  * Response model for listing sub-agents.
@@ -3057,7 +4998,7 @@ export type SubAgentListResponse = {
     /**
      * Items
      */
-    items: Array<SubAgent>;
+    items: Array<SubAgentListItem>;
     /**
      * Total
      */
@@ -3178,7 +5119,7 @@ export type SubAgentUpdate = {
     /**
      * Description
      */
-    description: string;
+    description?: string | null;
     /**
      * Is Public
      */
@@ -3240,6 +5181,14 @@ export type SubAgentUpdate = {
      */
     enable_thinking?: boolean | null;
     thinking_level?: ThinkingLevel | null;
+    /**
+     * Skills
+     */
+    skills?: Array<SkillDefinitionInput> | null;
+    /**
+     * Sandbox Enabled
+     */
+    sandbox_enabled?: boolean | null;
     /**
      * Change Summary
      */
@@ -4092,6 +6041,147 @@ export type ValidationError = {
 };
 
 /**
+ * VisibilityUpdate
+ *
+ * Request to change a skill's visibility.
+ */
+export type VisibilityUpdate = {
+    /**
+     * Visibility
+     *
+     * 'private' or 'public'
+     */
+    visibility: string;
+};
+
+/**
+ * SkillSummary
+ *
+ * Summary of a skill file (for listing).
+ */
+export type ConsoleBackendModelsPlaybookSkillSummary = {
+    /**
+     * Name
+     *
+     * Skill identifier (lowercase, hyphens, per SKILL.md spec)
+     */
+    name: string;
+    /**
+     * Title
+     *
+     * Skill name from frontmatter (or first heading for legacy)
+     */
+    title: string;
+    /**
+     * Description
+     *
+     * Description from frontmatter (what the skill does and when to use it)
+     */
+    description?: string;
+    scope: ScopeEnum2;
+    /**
+     * File Count
+     *
+     * Number of bundled files (excluding SKILL.md)
+     */
+    file_count?: number;
+    /**
+     * Group Id
+     *
+     * Group ID (present for group scope)
+     */
+    group_id?: string | null;
+    /**
+     * Group Name
+     *
+     * Group display name (present for group scope)
+     */
+    group_name?: string | null;
+};
+
+/**
+ * SkillFile
+ *
+ * A single file within a skill (SKILL.md, examples, etc.).
+ */
+export type ConsoleBackendModelsSkillsRegistrySkillFile = {
+    /**
+     * Path
+     *
+     * Relative file path within the skill directory
+     */
+    path: string;
+    /**
+     * Contents
+     *
+     * Full text content of the file
+     */
+    contents: string;
+    /**
+     * Encoding
+     *
+     * Content encoding: None for UTF-8 text, 'base64' for binary files
+     */
+    encoding?: string | null;
+};
+
+/**
+ * SkillFile
+ *
+ * A file bundled with a standard skill (e.g., script, reference doc).
+ */
+export type ConsoleBackendModelsSubAgentSkillFile = {
+    /**
+     * Path
+     *
+     * Relative path inside the skill directory (e.g., 'scripts/check.py')
+     */
+    path: string;
+    /**
+     * Content
+     *
+     * File content
+     */
+    content: string;
+};
+
+/**
+ * SkillSummary
+ *
+ * Lightweight skill metadata for list responses (no body/files content).
+ */
+export type ConsoleBackendModelsSubAgentSkillSummary = {
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Description
+     */
+    description?: string;
+    /**
+     * Source
+     */
+    source?: string | null;
+    /**
+     * Source Hash
+     */
+    source_hash?: string | null;
+    /**
+     * Update Available
+     */
+    update_available?: boolean;
+    /**
+     * Latest Hash
+     */
+    latest_hash?: string | null;
+    /**
+     * Sandbox Required
+     */
+    sandbox_required?: boolean;
+};
+
+/**
  * Model
  */
 export type ModelEnum = 'gpt-4o' | 'gpt-4o-mini' | 'claude-sonnet-4.5' | 'claude-sonnet-4.6' | 'claude-haiku-4-5' | 'gemini-3.1-pro-preview' | 'gemini-3-flash-preview';
@@ -4107,6 +6197,20 @@ export type ActionEnum = 'suspend' | 'activate' | 'delete';
 export type RoleEnum = 'read' | 'write' | 'manager';
 
 /**
+ * Scope
+ *
+ * Scope: 'personal' or 'group'
+ */
+export type ScopeEnum = 'personal' | 'group';
+
+/**
+ * Scope
+ *
+ * Activation scope: 'personal' (user-only), 'group' (shared with group), or 'default' (baked into sub-agent config for all users)
+ */
+export type ScopeEnum2 = 'personal' | 'group' | 'default';
+
+/**
  * Flow Direction
  */
 export type FlowDirectionEnum = 'input' | 'output' | 'other';
@@ -4117,6 +6221,8 @@ export type FlowDirectionEnum = 'input' | 'output' | 'other';
 export type OpEnum = 'add' | 'remove' | 'replace';
 
 export type ItemsEnum = 'read' | 'write';
+
+export type _0Enum = 'owner' | 'write' | 'read';
 
 /**
  * Operation
@@ -4885,7 +6991,7 @@ export type ConsoleListSubAgentsResponses = {
     /**
      * Successful Response
      */
-    200: SubAgentListResponse;
+    200: SubAgentListFullResponse;
 };
 
 export type ConsoleListSubAgentsResponse = ConsoleListSubAgentsResponses[keyof ConsoleListSubAgentsResponses];
@@ -8695,6 +10801,1367 @@ export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPo
 };
 
 export type SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponse = SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponses[keyof SubmitConversationFeedbackApiV1ConversationsConversationIdFeedbackPostResponses];
+
+export type GetPlaybookApiV1PlaybooksAgentsAgentNameGetData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+    };
+    query?: never;
+    url: '/api/v1/playbooks/agents/{agent_name}';
+};
+
+export type GetPlaybookApiV1PlaybooksAgentsAgentNameGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetPlaybookApiV1PlaybooksAgentsAgentNameGetError = GetPlaybookApiV1PlaybooksAgentsAgentNameGetErrors[keyof GetPlaybookApiV1PlaybooksAgentsAgentNameGetErrors];
+
+export type GetPlaybookApiV1PlaybooksAgentsAgentNameGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: PlaybookListResponse;
+};
+
+export type GetPlaybookApiV1PlaybooksAgentsAgentNameGetResponse = GetPlaybookApiV1PlaybooksAgentsAgentNameGetResponses[keyof GetPlaybookApiV1PlaybooksAgentsAgentNameGetResponses];
+
+export type DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Scope
+         */
+        scope: string;
+    };
+    query?: {
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/{scope}';
+};
+
+export type DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteError = DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteErrors[keyof DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteErrors];
+
+export type DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteResponse = DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteResponses[keyof DeletePlaybookApiV1PlaybooksAgentsAgentNameScopeDeleteResponses];
+
+export type UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutData = {
+    body: PlaybookUpdate;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Scope
+         */
+        scope: string;
+    };
+    query?: {
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/{scope}';
+};
+
+export type UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutError = UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutErrors[keyof UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutErrors];
+
+export type UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutResponses = {
+    /**
+     * Successful Response
+     */
+    200: PlaybookContent;
+};
+
+export type UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutResponse = UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutResponses[keyof UpdatePlaybookApiV1PlaybooksAgentsAgentNameScopePutResponses];
+
+export type ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+    };
+    query?: never;
+    url: '/api/v1/playbooks/agents/{agent_name}/skills';
+};
+
+export type ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetError = ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetErrors[keyof ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetErrors];
+
+export type ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillListResponse;
+};
+
+export type ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetResponse = ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetResponses[keyof ListSkillsApiV1PlaybooksAgentsAgentNameSkillsGetResponses];
+
+export type GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+    };
+    query?: {
+        /**
+         * Scope
+         */
+        scope?: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required when scope='group')
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}';
+};
+
+export type GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetError = GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetErrors[keyof GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetErrors];
+
+export type GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillDetail;
+};
+
+export type GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetResponse = GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetResponses[keyof GetSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGetResponses];
+
+export type CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostData = {
+    body: SkillCreate;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Scope
+         */
+        scope: string;
+    };
+    query?: {
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{scope}';
+};
+
+export type CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostError = CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostErrors[keyof CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostErrors];
+
+export type CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostResponses = {
+    /**
+     * Successful Response
+     */
+    201: SkillDetail;
+};
+
+export type CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostResponse = CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostResponses[keyof CreateSkillApiV1PlaybooksAgentsAgentNameSkillsScopePostResponses];
+
+export type DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+    };
+    query?: {
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{scope}/{skill_name}';
+};
+
+export type DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteError = DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteErrors[keyof DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteErrors];
+
+export type DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteResponse = DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteResponses[keyof DeleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDeleteResponses];
+
+export type UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutData = {
+    body: SkillUpdate;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+    };
+    query?: {
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{scope}/{skill_name}';
+};
+
+export type UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutError = UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutErrors[keyof UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutErrors];
+
+export type UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillDetail;
+};
+
+export type UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutResponse = UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutResponses[keyof UpdateSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNamePutResponses];
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files';
+};
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetError = ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetErrors[keyof ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetErrors];
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillFileListResponse;
+};
+
+export type ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponse = ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponses[keyof ListSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGetResponses];
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files/{file_path}';
+};
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteError = DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteErrors[keyof DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteErrors];
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponse = DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponses[keyof DeleteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathDeleteResponses];
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetData = {
+    body?: never;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files/{file_path}';
+};
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetError = GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetErrors[keyof GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetErrors];
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillFileContent;
+};
+
+export type GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponse = GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponses[keyof GetSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGetResponses];
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutData = {
+    body: SkillFileWrite;
+    path: {
+        /**
+         * Agent Name
+         */
+        agent_name: string;
+        /**
+         * Skill Name
+         */
+        skill_name: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query: {
+        /**
+         * Scope
+         */
+        scope: string;
+        /**
+         * Group Id
+         *
+         * Group ID (required for group scope)
+         */
+        group_id?: string | null;
+    };
+    url: '/api/v1/playbooks/agents/{agent_name}/skills/{skill_name}/files/{file_path}';
+};
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutError = WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutErrors[keyof WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutErrors];
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillFileContent;
+};
+
+export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponse = WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses[keyof WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses];
+
+export type ConsoleCreateSkillData = {
+    body: McpSkillCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills';
+};
+
+export type ConsoleCreateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleCreateSkillError = ConsoleCreateSkillErrors[keyof ConsoleCreateSkillErrors];
+
+export type ConsoleCreateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    201: McpSkillResponse;
+};
+
+export type ConsoleCreateSkillResponse = ConsoleCreateSkillResponses[keyof ConsoleCreateSkillResponses];
+
+export type ConsoleUpdateSkillData = {
+    body: McpSkillUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills';
+};
+
+export type ConsoleUpdateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleUpdateSkillError = ConsoleUpdateSkillErrors[keyof ConsoleUpdateSkillErrors];
+
+export type ConsoleUpdateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleUpdateSkillResponse = ConsoleUpdateSkillResponses[keyof ConsoleUpdateSkillResponses];
+
+export type ConsoleRemoveSkillData = {
+    body: McpSkillRemove;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills/remove';
+};
+
+export type ConsoleRemoveSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleRemoveSkillError = ConsoleRemoveSkillErrors[keyof ConsoleRemoveSkillErrors];
+
+export type ConsoleRemoveSkillResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleRemoveSkillResponse = ConsoleRemoveSkillResponses[keyof ConsoleRemoveSkillResponses];
+
+export type ConsoleUpdatePlaybookData = {
+    body: McpPlaybookUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/playbook';
+};
+
+export type ConsoleUpdatePlaybookErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleUpdatePlaybookError = ConsoleUpdatePlaybookErrors[keyof ConsoleUpdatePlaybookErrors];
+
+export type ConsoleUpdatePlaybookResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleUpdatePlaybookResponse = ConsoleUpdatePlaybookResponses[keyof ConsoleUpdatePlaybookResponses];
+
+export type ConsoleWriteSkillFileData = {
+    body: McpSkillWriteFile;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills/files';
+};
+
+export type ConsoleWriteSkillFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleWriteSkillFileError = ConsoleWriteSkillFileErrors[keyof ConsoleWriteSkillFileErrors];
+
+export type ConsoleWriteSkillFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleWriteSkillFileResponse = ConsoleWriteSkillFileResponses[keyof ConsoleWriteSkillFileResponses];
+
+export type ConsoleDeleteSkillFileData = {
+    body: McpSkillDeleteFile;
+    path?: never;
+    query?: never;
+    url: '/api/v1/playbooks/mcp/skills/files/remove';
+};
+
+export type ConsoleDeleteSkillFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleDeleteSkillFileError = ConsoleDeleteSkillFileErrors[keyof ConsoleDeleteSkillFileErrors];
+
+export type ConsoleDeleteSkillFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleDeleteSkillFileResponse = ConsoleDeleteSkillFileResponses[keyof ConsoleDeleteSkillFileResponses];
+
+export type SearchSkillsApiV1SkillsRegistrySearchGetData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Q
+         *
+         * Search query
+         */
+        q: string;
+        /**
+         * Source
+         *
+         * 'registry' (internal) or 'external' (skills.sh)
+         */
+        source?: string;
+        /**
+         * Limit
+         *
+         * Max results to return
+         */
+        limit?: number;
+        /**
+         * Offset
+         *
+         * Offset for pagination
+         */
+        offset?: number;
+    };
+    url: '/api/v1/skills/registry/search';
+};
+
+export type SearchSkillsApiV1SkillsRegistrySearchGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type SearchSkillsApiV1SkillsRegistrySearchGetError = SearchSkillsApiV1SkillsRegistrySearchGetErrors[keyof SearchSkillsApiV1SkillsRegistrySearchGetErrors];
+
+export type SearchSkillsApiV1SkillsRegistrySearchGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillSearchResponse;
+};
+
+export type SearchSkillsApiV1SkillsRegistrySearchGetResponse = SearchSkillsApiV1SkillsRegistrySearchGetResponses[keyof SearchSkillsApiV1SkillsRegistrySearchGetResponses];
+
+export type BrowseRepoApiV1SkillsRegistryBrowseGetData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Repo
+         *
+         * Git repo (owner/repo)
+         */
+        repo: string;
+        /**
+         * Ref
+         *
+         * Git ref (branch/tag/SHA)
+         */
+        ref?: string;
+    };
+    url: '/api/v1/skills/registry/browse';
+};
+
+export type BrowseRepoApiV1SkillsRegistryBrowseGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type BrowseRepoApiV1SkillsRegistryBrowseGetError = BrowseRepoApiV1SkillsRegistryBrowseGetErrors[keyof BrowseRepoApiV1SkillsRegistryBrowseGetErrors];
+
+export type BrowseRepoApiV1SkillsRegistryBrowseGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillSearchResponse;
+};
+
+export type BrowseRepoApiV1SkillsRegistryBrowseGetResponse = BrowseRepoApiV1SkillsRegistryBrowseGetResponses[keyof BrowseRepoApiV1SkillsRegistryBrowseGetResponses];
+
+export type GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/detail/{skill_id}';
+};
+
+export type GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetError = GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetErrors[keyof GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetErrors];
+
+export type GetSkillDetailApiV1SkillsRegistryDetailSkillIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type GetSkillVersionsApiV1SkillsRegistryDetailSkillIdVersionsGetData = {
+    body?: never;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/detail/{skill_id}/versions';
+};
+
+export type GetSkillVersionsApiV1SkillsRegistryDetailSkillIdVersionsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSkillVersionsApiV1SkillsRegistryDetailSkillIdVersionsGetError = GetSkillVersionsApiV1SkillsRegistryDetailSkillIdVersionsGetErrors[keyof GetSkillVersionsApiV1SkillsRegistryDetailSkillIdVersionsGetErrors];
+
+export type GetSkillVersionsApiV1SkillsRegistryDetailSkillIdVersionsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type GetSkillVersionDetailApiV1SkillsRegistryDetailSkillIdVersionsContentHashGetData = {
+    body?: never;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+        /**
+         * Content Hash
+         */
+        content_hash: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/detail/{skill_id}/versions/{content_hash}';
+};
+
+export type GetSkillVersionDetailApiV1SkillsRegistryDetailSkillIdVersionsContentHashGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetSkillVersionDetailApiV1SkillsRegistryDetailSkillIdVersionsContentHashGetError = GetSkillVersionDetailApiV1SkillsRegistryDetailSkillIdVersionsContentHashGetErrors[keyof GetSkillVersionDetailApiV1SkillsRegistryDetailSkillIdVersionsContentHashGetErrors];
+
+export type GetSkillVersionDetailApiV1SkillsRegistryDetailSkillIdVersionsContentHashGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ImportSkillApiV1SkillsRegistryImportPostData = {
+    body: SkillImportRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/import';
+};
+
+export type ImportSkillApiV1SkillsRegistryImportPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ImportSkillApiV1SkillsRegistryImportPostError = ImportSkillApiV1SkillsRegistryImportPostErrors[keyof ImportSkillApiV1SkillsRegistryImportPostErrors];
+
+export type ImportSkillApiV1SkillsRegistryImportPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: SkillImportResponse;
+};
+
+export type ImportSkillApiV1SkillsRegistryImportPostResponse = ImportSkillApiV1SkillsRegistryImportPostResponses[keyof ImportSkillApiV1SkillsRegistryImportPostResponses];
+
+export type RemoveSkillApiV1SkillsRegistrySkillIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}';
+};
+
+export type RemoveSkillApiV1SkillsRegistrySkillIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RemoveSkillApiV1SkillsRegistrySkillIdDeleteError = RemoveSkillApiV1SkillsRegistrySkillIdDeleteErrors[keyof RemoveSkillApiV1SkillsRegistrySkillIdDeleteErrors];
+
+export type RemoveSkillApiV1SkillsRegistrySkillIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type RemoveSkillApiV1SkillsRegistrySkillIdDeleteResponse = RemoveSkillApiV1SkillsRegistrySkillIdDeleteResponses[keyof RemoveSkillApiV1SkillsRegistrySkillIdDeleteResponses];
+
+export type UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutData = {
+    body: RegistryUpdateRequest;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}';
+};
+
+export type UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutError = UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutErrors[keyof UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutErrors];
+
+export type UpdateRegistrySkillApiV1SkillsRegistrySkillIdPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type CreateRegistrySkillApiV1SkillsRegistryPostData = {
+    body: RegistryCreateRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry';
+};
+
+export type CreateRegistrySkillApiV1SkillsRegistryPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateRegistrySkillApiV1SkillsRegistryPostError = CreateRegistrySkillApiV1SkillsRegistryPostErrors[keyof CreateRegistrySkillApiV1SkillsRegistryPostErrors];
+
+export type CreateRegistrySkillApiV1SkillsRegistryPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}/files/{file_path}';
+};
+
+export type DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteError = DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteErrors[keyof DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteErrors];
+
+export type DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteResponse = DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteResponses[keyof DeleteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathDeleteResponses];
+
+export type WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutData = {
+    body: RegistryFileWriteRequest;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+        /**
+         * File Path
+         */
+        file_path: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}/files/{file_path}';
+};
+
+export type WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutError = WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutErrors[keyof WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutErrors];
+
+export type WriteRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type CopySkillApiV1SkillsRegistrySkillIdCopyPostData = {
+    body: CopyRequest;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}/copy';
+};
+
+export type CopySkillApiV1SkillsRegistrySkillIdCopyPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CopySkillApiV1SkillsRegistrySkillIdCopyPostError = CopySkillApiV1SkillsRegistrySkillIdCopyPostErrors[keyof CopySkillApiV1SkillsRegistrySkillIdCopyPostErrors];
+
+export type CopySkillApiV1SkillsRegistrySkillIdCopyPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type CheckSkillUpdateApiV1SkillsRegistrySkillIdCheckUpdatePostData = {
+    body?: never;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}/check-update';
+};
+
+export type CheckSkillUpdateApiV1SkillsRegistrySkillIdCheckUpdatePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CheckSkillUpdateApiV1SkillsRegistrySkillIdCheckUpdatePostError = CheckSkillUpdateApiV1SkillsRegistrySkillIdCheckUpdatePostErrors[keyof CheckSkillUpdateApiV1SkillsRegistrySkillIdCheckUpdatePostErrors];
+
+export type CheckSkillUpdateApiV1SkillsRegistrySkillIdCheckUpdatePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ApplySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostData = {
+    body: ApplyUpdateRequest;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}/apply-update';
+};
+
+export type ApplySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ApplySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostError = ApplySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostErrors[keyof ApplySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostErrors];
+
+export type ApplySkillUpdateApiV1SkillsRegistrySkillIdApplyUpdatePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ConsoleActivateSkillData = {
+    body: McpActivateSkillInput;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/activate';
+};
+
+export type ConsoleActivateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleActivateSkillError = ConsoleActivateSkillErrors[keyof ConsoleActivateSkillErrors];
+
+export type ConsoleActivateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    201: McpActivateSkillResponse;
+};
+
+export type ConsoleActivateSkillResponse = ConsoleActivateSkillResponses[keyof ConsoleActivateSkillResponses];
+
+export type ActivateSkillApiV1SkillsRegistrySkillIdActivatePostData = {
+    body: ActivateRequest;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}/activate';
+};
+
+export type ActivateSkillApiV1SkillsRegistrySkillIdActivatePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ActivateSkillApiV1SkillsRegistrySkillIdActivatePostError = ActivateSkillApiV1SkillsRegistrySkillIdActivatePostErrors[keyof ActivateSkillApiV1SkillsRegistrySkillIdActivatePostErrors];
+
+export type ActivateSkillApiV1SkillsRegistrySkillIdActivatePostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type UpdateVisibilityApiV1SkillsRegistrySkillIdVisibilityPatchData = {
+    body: VisibilityUpdate;
+    path: {
+        /**
+         * Skill Id
+         */
+        skill_id: string;
+    };
+    query?: never;
+    url: '/api/v1/skills/registry/{skill_id}/visibility';
+};
+
+export type UpdateVisibilityApiV1SkillsRegistrySkillIdVisibilityPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateVisibilityApiV1SkillsRegistrySkillIdVisibilityPatchError = UpdateVisibilityApiV1SkillsRegistrySkillIdVisibilityPatchErrors[keyof UpdateVisibilityApiV1SkillsRegistrySkillIdVisibilityPatchErrors];
+
+export type UpdateVisibilityApiV1SkillsRegistrySkillIdVisibilityPatchResponses = {
+    /**
+     * Successful Response
+     */
+    200: unknown;
+};
+
+export type ConsoleSearchSkillsData = {
+    body: McpSearchSkillsInput;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/search';
+};
+
+export type ConsoleSearchSkillsErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleSearchSkillsError = ConsoleSearchSkillsErrors[keyof ConsoleSearchSkillsErrors];
+
+export type ConsoleSearchSkillsResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSearchSkillsResponse;
+};
+
+export type ConsoleSearchSkillsResponse = ConsoleSearchSkillsResponses[keyof ConsoleSearchSkillsResponses];
+
+export type ConsoleImportSkillData = {
+    body: McpImportSkillInput;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/import';
+};
+
+export type ConsoleImportSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleImportSkillError = ConsoleImportSkillErrors[keyof ConsoleImportSkillErrors];
+
+export type ConsoleImportSkillResponses = {
+    /**
+     * Successful Response
+     */
+    201: McpImportSkillResponse;
+};
+
+export type ConsoleImportSkillResponse = ConsoleImportSkillResponses[keyof ConsoleImportSkillResponses];
+
+export type ListActivationsApiV1SkillsActivationsSubAgentIdGetData = {
+    body?: never;
+    path: {
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id: number;
+    };
+    query?: never;
+    url: '/api/v1/skills/activations/{sub_agent_id}';
+};
+
+export type ListActivationsApiV1SkillsActivationsSubAgentIdGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListActivationsApiV1SkillsActivationsSubAgentIdGetError = ListActivationsApiV1SkillsActivationsSubAgentIdGetErrors[keyof ListActivationsApiV1SkillsActivationsSubAgentIdGetErrors];
+
+export type ListActivationsApiV1SkillsActivationsSubAgentIdGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SkillActivationListResponse;
+};
+
+export type ListActivationsApiV1SkillsActivationsSubAgentIdGetResponse = ListActivationsApiV1SkillsActivationsSubAgentIdGetResponses[keyof ListActivationsApiV1SkillsActivationsSubAgentIdGetResponses];
+
+export type ActivateSkillApiV1SkillsActivationsPostData = {
+    body: SkillActivationRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/activations';
+};
+
+export type ActivateSkillApiV1SkillsActivationsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ActivateSkillApiV1SkillsActivationsPostError = ActivateSkillApiV1SkillsActivationsPostErrors[keyof ActivateSkillApiV1SkillsActivationsPostErrors];
+
+export type ActivateSkillApiV1SkillsActivationsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: unknown;
+};
+
+export type DeactivateSkillApiV1SkillsActivationsActivationIdDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Activation Id
+         */
+        activation_id: number;
+    };
+    query?: never;
+    url: '/api/v1/skills/activations/{activation_id}';
+};
+
+export type DeactivateSkillApiV1SkillsActivationsActivationIdDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type DeactivateSkillApiV1SkillsActivationsActivationIdDeleteError = DeactivateSkillApiV1SkillsActivationsActivationIdDeleteErrors[keyof DeactivateSkillApiV1SkillsActivationsActivationIdDeleteErrors];
+
+export type DeactivateSkillApiV1SkillsActivationsActivationIdDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type DeactivateSkillApiV1SkillsActivationsActivationIdDeleteResponse = DeactivateSkillApiV1SkillsActivationsActivationIdDeleteResponses[keyof DeactivateSkillApiV1SkillsActivationsActivationIdDeleteResponses];
+
+export type UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostData = {
+    body?: never;
+    path: {
+        /**
+         * Activation Id
+         */
+        activation_id: number;
+    };
+    query?: never;
+    url: '/api/v1/skills/activations/{activation_id}/update';
+};
+
+export type UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostError = UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostErrors[keyof UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostErrors];
+
+export type UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: ActivationUpdateResponse;
+};
+
+export type UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostResponse = UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostResponses[keyof UpdateActivationApiV1SkillsActivationsActivationIdUpdatePostResponses];
+
+export type BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostData = {
+    body: BulkUpdateRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/activations/bulk-update';
+};
+
+export type BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostError = BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostErrors[keyof BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostErrors];
+
+export type BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostResponses = {
+    /**
+     * Successful Response
+     */
+    200: BulkUpdateResponse;
+};
+
+export type BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostResponse = BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostResponses[keyof BulkUpdateActivationsApiV1SkillsActivationsBulkUpdatePostResponses];
 
 export type ListScimTokensApiV1AdminScimTokensGetData = {
     body?: never;

@@ -83,6 +83,13 @@ class GraphRuntimeContext:
     Allows users to customize agent behavior with personal preferences or guidelines.
     """
 
+    groups: list[str] = field(default_factory=list)
+    """User's group memberships (Keycloak group paths).
+    
+    Used for group-scoped playbook resolution. The first group is treated as
+    the primary group for filesystem namespace scoping.
+    """
+
     tool_registry: dict[str, Any] = field(default_factory=dict)
     """Registry of tool name -> BaseTool instance for this user.
 
@@ -122,15 +129,6 @@ class GraphRuntimeContext:
 
     This avoids the orchestrator LLM seeing (and hallucinating) raw pre-signed URLs.
     Sub-agents receive the exact original URIs without any LLM round-trip.
-    """
-
-    _cached_selected_tools: Optional[list[Any]] = field(default=None, repr=False)
-    """Cached tool selection results (internal).
-    
-    Set by ToolsetSelectorMiddleware after Phase 1 (server selection) and
-    Phase 2 (tool selection) to avoid re-running the LLM selections on every
-    model call within the same GP invocation. Reset to None between GP
-    invocations by GPAgentRunnable._process().
     """
 
     @property
@@ -295,8 +293,10 @@ class AgentSettings:
         "You are an orchestrator, NOT an executor. Your only job is to PLAN and DELEGATE.\n"
         "- Always use the 'task' tool to delegate work to sub-agents.\n"
         "- Do not attempt to solve tasks using your own knowledge or reasoning.\n"
-        "- The general-purpose sub-agent has access to ALL available tools through smart toolset selection. "
-        "When unsure which sub-agent to use, default to general-purpose.\n"
+        "- The general-purpose sub-agent has access to ALL available tools through smart toolset selection "
+        "and is the primary executor of skills. When unsure which sub-agent to use, default to general-purpose.\n"
+        "- Skills listed in each agent's description indicate specialized capabilities. "
+        "Delegate skill-related tasks to the agent that owns those skills.\n"
         "- Specialized sub-agents should be used for their specific domains.\n"
         "- Parallelize independent tasks whenever possible to save time.\n"
         "- Review your available sub-agents in the 'task' tool description before planning.\n"
@@ -439,6 +439,22 @@ class AgentSettings:
         "</route>\n"
         "</routing>\n"
         "\n"
+        "<self_improvement_awareness>\n"
+        "Sub-agents can learn from conversations and improve themselves using skill/playbook tools.\n"
+        "After a sub-agent successfully handles a complex or novel task, it may propose creating or updating skills.\n"
+        "When a sub-agent fails or the user corrects its approach:\n"
+        "- Re-delegate to the same sub-agent with the correction — it will evaluate whether to self-improve.\n"
+        "- If the user explicitly says 'remember this' or 'learn from this', include that instruction in the re-delegation.\n\n"
+        "Each sub-agent in the agent list may have a permission attribute (owner/write/read) indicating\n"
+        "what the current user can modify. Sub-agents with write/owner permission can update the agent's default\n"
+        "skills; read-only sub-agents can only create personal or group-scoped improvements.\n\n"
+        "When the user asks to manage skills or playbooks directly (create, update, delete):\n"
+        "- Use console_create_skill, console_update_skill, or console_remove_skill with the appropriate scope.\n"
+        "  Scopes: 'personal' (user-only), 'group' (shared with team), 'default' (agent's built-in skills, needs write access).\n"
+        "- Personal/group playbooks: use console_update_playbook with scope='personal' or 'group'.\n"
+        "- NEVER use console_update_sub_agent for skill operations \u2014 use console_*_skill tools for ALL scopes.\n"
+        "</self_improvement_awareness>\n"
+        "\n"
         "Remember: every task in your plan must be delegated to a sub-agent. You are the conductor, not the performer."
     )
 
@@ -454,7 +470,7 @@ class AgentSettings:
         "5. Return final response with task_state: completed|working|input_required|failed\n"
         "\n"
         "SUB-AGENT RULES:\n"
-        "- Use 'general-purpose' when unsure — it has access to ALL tools via smart selection\n"
+        "- Use 'general-purpose' when unsure — it has access to ALL tools via smart selection and to a cherry picked selection of skills\n"
         "- Use specialized sub-agents (file-analyzer, data-analyst, etc.) for their domains\n"
         "- Use 'task-scheduler' for ANY scheduling/monitoring/watch requests\n"
         "- When include_subagent_output=true, use message='' (sub-agents include their own intros)\n"

@@ -10,11 +10,11 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { SubAgentCard } from './SubAgentCard';
-import type { SubAgent, SubAgentStatus, SubAgentType } from './types';
+import type { SubAgentListItem, SubAgentStatus, SubAgentType } from './types';
 
 interface SubAgentListProps {
-  subAgents: SubAgent[];
-  onSelect: (subAgent: SubAgent) => void;
+  subAgents: SubAgentListItem[];
+  onSelect: (subAgent: SubAgentListItem) => void;
   emptyMessage?: string;
   showManageAccess?: boolean;
 }

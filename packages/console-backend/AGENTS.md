@@ -430,6 +430,47 @@ Effective permissions = System Role ∩ Group Role ∩ Resource Permissions. Sys
 
 Prefer actual PostgreSQL database writes for testing audit logging and data mutations, not mocks. This catches serialization issues, constraint violations, and race conditions that mocks would miss. Use `pg_session` fixture for real database operations.
 
+### Skills Registry as Source of Truth (services/skill_registry_service.py, routers/playbook_router.py)
+
+**Mental model**: Registry = PyPI (catalog), Docstore = .venv (runtime cache), Activation = pip install (pins a version), Self-update = author editing their own installed package.
+
+The `skill_registry` PostgreSQL table is the single source of truth for all skill content. The docstore is a runtime cache only. Key tables:
+- `skill_registry` — all skill content (authored or imported), with `owner_id`, `visibility` (private/group/public), `content_hash`, `group_ids[]`
+- `skill_activations` — tracks which skills are active where, pinned to a `content_hash`
+
+**Content-hash pinning**: Every registry edit produces a new SHA-256 hash. Activations pin to a specific hash. Consumers see "update available" when their pinned hash differs from the registry's latest.
+
+**Self-update rule**: When an agent edits a skill it owns via MCP tools, only that agent's own activation auto-updates. Other consumers' activations stay pinned.
+
+**Locked activations**: Created by config version approval only. Users cannot remove them. Stored in the same `skill_activations` table with `locked=true`.
+
+### MCP Tool Endpoints (routers/playbook_router.py)
+
+The playbook router exposes MCP-callable endpoints for agent self-improvement. These are called by agents via the console-backend MCP server:
+
+- `console_create_skill` — Creates in registry + auto-activates on calling agent
+- `console_update_skill` — Updates registry (new hash) + self-updates own activation
+- `console_remove_skill` — Deactivates from agent (registry entry preserved)
+- `console_activate_skill` — Activates existing registry skill on calling agent
+- `console_update_playbook` — Updates AGENTS.md content
+- `console_write_skill_file` / `console_delete_skill_file` — Manage bundled skill files
+- `console_search_skills` / `console_import_skill` — Search/import from external sources
+
+**CRITICAL**: MCP tools never create locked activations. Locked activations are managed exclusively through the config version approval workflow.
+
+**Skill name validation**: Lowercase alphanumeric + hyphens only, 1-64 chars, no leading/trailing hyphens, no consecutive hyphens. Follows agentskills.io specification.
+
+**File path validation**: Relative paths only, no traversal (`..`), max 6 segments deep, cannot be `SKILL.md` (managed via skill create/update).
+
+### Skill Activations (services/skill_activation_service.py)
+
+The activation service manages the lifecycle:
+- `activate()` — Pin skill to current hash, write snapshot to docstore
+- `deactivate()` — Remove activation + docstore entry
+- `update_activation()` — Pull latest hash from registry, refresh docstore
+- `self_update()` — Auto-called when author edits own skill
+- `upsert_locked()` — Called by config version approval workflow
+- `list_for_agent()` — All activations for a sub-agent (with update-available status)
 
 ## Important Notes
 

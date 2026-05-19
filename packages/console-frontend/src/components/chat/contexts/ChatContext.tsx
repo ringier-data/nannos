@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { useLocation, useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import type { AgentResponseData, Conversation, Message, PendingBugReport, Settings, Task, TaskHistoryEntry, TodoItem, TimelineEvent } from '../types';
+import type { AgentResponseData, Conversation, Message, PendingInterrupt, Settings, Task, TaskHistoryEntry, TodoItem, TimelineEvent } from '../types';
 import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT, FEEDBACK_REQUEST_EXT } from '../types';
 import { useSocket } from './SocketContext';
 import { useSessionId } from '../hooks/useLocalStorage';
@@ -38,7 +38,7 @@ interface ChatContextType {
   liveSubagentThoughts: Array<{agent_name: string; content: string; complete: boolean}>;
   liveStatusHistory: Array<{timestamp: Date; message: string}>;
   liveTimeline: TimelineEvent[];
-  pendingBugReport: PendingBugReport | null;
+  pendingInterrupt: PendingInterrupt | null;
   pendingFeedbackRequest: { conversationId: string; subAgents: string[] } | null;
 
   // Actions
@@ -47,7 +47,7 @@ interface ChatContextType {
   sendMessage: (content: string, files?: Array<Pick<UploadedFileInfo, 'uri' | 'mimeType' | 'name' | 's3Url'>>) => void;
   sendSilentMessage: (content: string, dataParts?: Record<string, unknown>[]) => void;
   interruptTask: () => void;
-  dismissBugReport: () => void;
+  dismissInterrupt: () => void;
   dismissFeedbackRequest: () => void;
   updateSettings: (settings: Settings) => Promise<boolean>;
   loadConversations: () => Promise<void>;
@@ -239,7 +239,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [workingStepsMap, setWorkingStepsMap] = useState<Map<string, TodoItem[]>>(new Map());
   const [subagentThoughtsMap, setSubagentThoughtsMap] = useState<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
   const [statusHistoryMap, setStatusHistoryMap] = useState<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
-  const [pendingBugReport, setPendingBugReport] = useState<PendingBugReport | null>(null);
+  const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
   const [pendingFeedbackRequest, setPendingFeedbackRequest] = useState<{ conversationId: string; subAgents: string[] } | null>(null);
   const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
   const streamingMapRef = useRef<Map<string, string>>(new Map());
@@ -624,8 +624,9 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             const isHitlInterrupt = extensions.includes('urn:nannos:a2a:human-in-the-loop:1.0');
 
             if (isHitlInterrupt) {
-              // Extract action_requests from DataPart
-              let actionRequests: Array<{ name: string; args: Record<string, unknown> }> | undefined;
+              // Extract action_requests + review_configs from DataPart
+              let actionRequests: Array<{ name: string; args: Record<string, unknown>; description?: string }> | undefined;
+              let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
               let reason = '';
               if (data.status.message?.parts) {
                 for (const part of data.status.message.parts) {
@@ -634,22 +635,26 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
                     if (partData?.action_requests) {
                       actionRequests = partData.action_requests as typeof actionRequests;
                     }
+                    if (partData?.review_configs) {
+                      reviewConfigs = partData.review_configs as typeof reviewConfigs;
+                    }
                   } else if (part.kind === 'text') {
                     reason = part.text || '';
                   }
                 }
               }
-              // Determine if this is a bug report interrupt
-              const isBugReport = actionRequests?.some((ar) => ar.name === 'console_create_bug_report');
-              if (isBugReport) {
-                const bugAction = actionRequests?.find((ar) => ar.name === 'console_create_bug_report');
-                setPendingBugReport({
-                  conversationId: resolvedConversationId,
-                  taskId: data.taskId as string | undefined,
-                  reason: (bugAction?.args?.description as string) || reason,
-                  actionRequests,
-                });
-              }
+
+              // Set a single generic interrupt — no tool-specific branching
+              const firstAction = actionRequests?.[0];
+              const toolName = firstAction?.name || '';
+              setPendingInterrupt({
+                conversationId: resolvedConversationId,
+                taskId: data.taskId as string | undefined,
+                toolName,
+                reason: (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || reason,
+                actionRequests,
+                reviewConfigs,
+              });
             }
           }
         }
@@ -1028,7 +1033,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       // above the final response.
       const aggregated: Message[] = [];
       let pendingTimeline: TimelineEvent[] = [];
-      for (const msg of mapped) {
+      for (const msg of mapped.filter((m): m is Message => m !== null)) {
         if (msg.showMessageCard === false) {
           // Collect timeline events from hidden messages
           if (msg.timeline) pendingTimeline.push(...msg.timeline);
@@ -1107,8 +1112,8 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
     });
   }, [activeConversationId, cancelTask]);
 
-  const dismissBugReport = useCallback(() => {
-    setPendingBugReport(null);
+  const dismissInterrupt = useCallback(() => {
+    setPendingInterrupt(null);
   }, []);
 
   const dismissFeedbackRequest = useCallback(() => {
@@ -1395,11 +1400,11 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         liveSubagentThoughts,
         liveStatusHistory,
         liveTimeline,
-        pendingBugReport,
+        pendingInterrupt,
         pendingFeedbackRequest,
         createConversation,
         interruptTask,
-        dismissBugReport,
+        dismissInterrupt,
         dismissFeedbackRequest,
         selectConversation,
         sendMessage: sendMessageAction,

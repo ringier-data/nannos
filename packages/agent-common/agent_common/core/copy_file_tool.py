@@ -6,7 +6,7 @@ particularly useful for large files that shouldn't be processed by the model.
 """
 
 import logging
-from typing import Any, Callable
+from typing import Any
 
 from deepagents.backends.protocol import BackendProtocol
 from langchain.tools import ToolRuntime
@@ -56,7 +56,7 @@ def _validate_path(path: str) -> str:
     return path
 
 
-def create_copy_file_tool(backend_factory: Callable[[Any], BackendProtocol]) -> BaseTool:
+def create_copy_file_tool(backend: Any) -> BaseTool:
     """Create tool for copying files to long-term memory without LLM context loading.
 
     The tool uses the CompositeBackend's routing to automatically:
@@ -69,7 +69,7 @@ def create_copy_file_tool(backend_factory: Callable[[Any], BackendProtocol]) -> 
     - Automatic semantic indexing on write to /memories/
 
     Args:
-        backend_factory: Callable that takes ToolRuntime and returns CompositeBackend
+        backend: A BackendProtocol instance (or legacy callable factory)
 
     Returns:
         BaseTool for copying files to memories
@@ -113,14 +113,14 @@ def create_copy_file_tool(backend_factory: Callable[[Any], BackendProtocol]) -> 
 
             destination_path = _validate_path(destination_path)
 
-            # Get backend from factory
-            backend: BackendProtocol = backend_factory(runtime)
+            # Get backend (supports both instances and legacy callable factories)
+            resolved_backend: BackendProtocol = backend(runtime) if callable(backend) else backend
 
             logger.info(f"Copying file from '{source_path}' to '{destination_path}'")
 
             # Read from source using backend (routes to correct backend via CompositeBackend)
             try:
-                source_content = await backend.aread(source_path)
+                source_content = await resolved_backend.aread(source_path)
             except Exception as e:
                 logger.error(f"Failed to read source file '{source_path}': {e}")
                 return f"Error: Could not read source file '{source_path}'. Make sure it exists and is accessible. Details: {str(e)}"
@@ -131,7 +131,7 @@ def create_copy_file_tool(backend_factory: Callable[[Any], BackendProtocol]) -> 
             # Write to destination (will route to IndexingStoreBackend for /memories/)
             # This triggers automatic semantic indexing
             try:
-                write_result = await backend.awrite(destination_path, source_content)
+                write_result = await resolved_backend.awrite(destination_path, source_content)
 
                 if write_result.error:
                     logger.error(f"Failed to write to '{destination_path}': {write_result.error}")

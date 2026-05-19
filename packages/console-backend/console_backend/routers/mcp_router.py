@@ -94,8 +94,29 @@ async def grep_mcp_tools(
         401 Unauthorized: If token exchange fails
         503 Service Unavailable: If MCP gateway is unreachable
     """
-    # Fetch all tools using the main list logic
-    all_tools = await _list_mcp_tools(request, user, server_slug)
+    try:
+        # Fetch all tools using the main list logic
+        all_tools = await _list_mcp_tools(request, user, server_slug)
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as e:
+        logger.error(f"MCP gateway returned HTTP error during grep: {e.response.status_code}: {e.response.text}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Gatana MCP gateway returned error: HTTP {e.response.status_code}",
+        )
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError) as e:
+        logger.error(f"Network error fetching MCP tools during grep: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot reach Gatana MCP gateway: {type(e).__name__}",
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error fetching MCP tools during grep: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to fetch MCP tools: {type(e).__name__}",
+        )
 
     # Tokenize query and filter stop words
     query_lower = query.lower().strip()
@@ -420,14 +441,36 @@ async def _get_gatana_token(request: Request, user: User) -> str:
     auth_header = request.headers.get("Authorization")
 
     if auth_header:
-        # Bearer token path: orchestrator/A2A already exchanged the token
+        # Bearer token path: orchestrator/A2A passes an agent-console audience token.
+        # We need to exchange it for a Gatana token to call the MCP gateway.
         if not auth_header.startswith("Bearer "):
             logger.error("Invalid Authorization header format")
             raise HTTPException(
                 status_code=401,
                 detail="Invalid Authorization header format. Expected 'Bearer <token>'.",
             )
-        return auth_header[len("Bearer ") :].strip()
+        access_token = auth_header[len("Bearer ") :].strip()
+
+        # Exchange for Gatana MCP gateway token
+        oauth2_client = OidcOAuth2Client(
+            client_id=config.oidc.client_id,
+            client_secret=config.oidc.client_secret.get_secret_value(),
+            issuer=config.oidc.issuer,
+        )
+        try:
+            mcp_gateway_token = await oauth2_client.exchange_token(
+                subject_token=access_token,
+                target_client_id=config.mcp_gateway.client_id,
+                requested_scopes=["openid", "profile", "offline_access"],
+            )
+            logger.debug(f"Exchanged bearer token for {config.mcp_gateway.client_id}")
+            return mcp_gateway_token
+        except Exception as e:
+            logger.error(f"Bearer token exchange for Gatana failed: {e}")
+            raise HTTPException(
+                status_code=401,
+                detail=f"Token exchange for MCP gateway failed: {str(e)}",
+            )
 
     # Session-based path: need to get user token and exchange it for Gatana token
     access_token = getattr(request.state, "access_token", None)

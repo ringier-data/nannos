@@ -3,10 +3,10 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from a2a.types import TaskState
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import Tool
 
-from a2a.types import TaskState
 from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.a2a.stream_events import ErrorEvent, TaskUpdate
@@ -117,6 +117,9 @@ class TestDynamicLocalAgentRunnable:
             yield  # make it an async generator
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         # Mock retrieve_final_state with structured response
         final_state = {
@@ -160,6 +163,9 @@ class TestDynamicLocalAgentRunnable:
             yield
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         final_state = {
             "messages": [MagicMock(content="What is the project name?")],
@@ -232,6 +238,9 @@ class TestDynamicLocalAgentRunnable:
             yield
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         # Bedrock-style: SubAgentResponseSchema in tool_calls, no structured_response key
         mock_message = MagicMock()
@@ -275,6 +284,9 @@ class TestDynamicLocalAgentRunnable:
             yield
 
         mock_graph.astream = empty_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         # No structured_response key → _translate_agent_result falls back to completed
         final_state = {

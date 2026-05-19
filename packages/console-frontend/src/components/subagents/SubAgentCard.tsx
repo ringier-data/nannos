@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SubAgentPermissionsDialog } from './SubAgentPermissionsDialog';
 import { useAuth } from '@/contexts/AuthContext';
-import type { SubAgent, SubAgentStatus } from './types';
+import type { SubAgentListItem, SubAgentStatus } from './types';
 
 const statusConfig: Record<SubAgentStatus, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
   draft: { label: 'Draft', variant: 'secondary' },
@@ -14,7 +14,7 @@ const statusConfig: Record<SubAgentStatus, { label: string; variant: 'default' |
 };
 
 interface SubAgentCardProps {
-  subAgent: SubAgent;
+  subAgent: SubAgentListItem;
   onClick?: () => void;
   showOwner?: boolean;
   showManageAccess?: boolean;

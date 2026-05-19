@@ -97,6 +97,14 @@ spec:
           value: "500"
         - name: AUTO_APPROVE_MAX_MCP_TOOLS_COUNT
           value: "3"
+        - name: DOCSTORE_HOST
+          value: "${POSTGRES_HOST}"
+        - name: DOCSTORE_PORT
+          value: "5432"
+        - name: DOCSTORE_DB
+          value: "nannos"
+        - name: DOCSTORE_USER
+          value: "docstore"
         envFrom:
         - secretRef:
             name: console-secrets

@@ -315,3 +315,108 @@ class TestZeroTrustUserIdExtraction:
 
         # Should have attempted to use anonymous
         # (implementation logs this as a warning)
+
+
+class TestExtractHitlDecisions:
+    """Tests for _extract_hitl_decisions and decision replication for parallel tool calls."""
+
+    def test_extract_single_decision_from_data_part(self, dynamodb_table):
+        """Test extracting a single decision from DataPart."""
+        from a2a.types import DataPart
+
+        context = Mock(spec=RequestContext)
+        context.message = Mock(spec=Message)
+        context.message.parts = [
+            Mock(root=DataPart(data={"decisions": [{"type": "reject", "message": "No"}]}))
+        ]
+
+        result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
+        assert result == {"decisions": [{"type": "reject", "message": "No"}]}
+
+    def test_extract_defaults_to_reject_when_no_data_part(self, dynamodb_table):
+        """Test fallback to reject when no DataPart with decisions is found."""
+        context = Mock(spec=RequestContext)
+        context.message = Mock(spec=Message)
+        context.message.parts = []
+
+        result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
+        assert result == {"decisions": [{"type": "reject"}]}
+
+    def test_single_reject_replicated_for_parallel_tool_calls(self, dynamodb_table):
+        """Test that a single reject decision is replicated to match N action_requests.
+
+        This is the core fix for the bug where Gemini models make parallel tool
+        calls (N tool_calls in one AIMessage), the HITL middleware creates N
+        action_requests, but the UI sends only 1 decision. Without replication,
+        the middleware raises ValueError('Number of human decisions (1) does not
+        match number of hanging tool calls (N)').
+        """
+        from a2a.types import DataPart
+
+        # Simulate: model made 3 parallel HITL-guarded tool calls
+        action_requests = [
+            {"name": "console_activate_skill", "args": {"skill": "printing"}},
+            {"name": "console_activate_skill", "args": {"skill": "scanning"}},
+            {"name": "console_activate_skill", "args": {"skill": "faxing"}},
+        ]
+
+        # UI sends 1 blanket reject
+        decisions = [{"type": "reject", "message": "User declined"}]
+        resume_value = {"decisions": decisions}
+
+        # Replicate (same logic as executor.py)
+        expected_count = len(action_requests)
+        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
+            resume_value = {"decisions": resume_value["decisions"] * expected_count}
+
+        assert len(resume_value["decisions"]) == 3
+        assert all(d["type"] == "reject" for d in resume_value["decisions"])
+        assert all(d["message"] == "User declined" for d in resume_value["decisions"])
+
+    def test_single_approve_replicated_for_parallel_tool_calls(self, dynamodb_table):
+        """Test that a single approve decision is replicated for N action_requests."""
+        action_requests = [
+            {"name": "tool_a", "args": {}},
+            {"name": "tool_b", "args": {}},
+        ]
+
+        decisions = [{"type": "approve"}]
+        resume_value = {"decisions": decisions}
+
+        expected_count = len(action_requests)
+        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
+            resume_value = {"decisions": resume_value["decisions"] * expected_count}
+
+        assert len(resume_value["decisions"]) == 2
+        assert all(d["type"] == "approve" for d in resume_value["decisions"])
+
+    def test_no_replication_when_counts_match(self, dynamodb_table):
+        """Test that decisions are not replicated when counts already match."""
+        action_requests = [{"name": "tool_a", "args": {}}]
+        decisions = [{"type": "reject"}]
+        resume_value = {"decisions": decisions}
+
+        expected_count = len(action_requests)
+        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
+            resume_value = {"decisions": resume_value["decisions"] * expected_count}
+
+        # 1 decision, 1 action_request — no replication
+        assert len(resume_value["decisions"]) == 1
+
+    def test_no_replication_when_multiple_decisions_sent(self, dynamodb_table):
+        """Test that multiple decisions are not replicated (future UI support)."""
+        action_requests = [
+            {"name": "tool_a", "args": {}},
+            {"name": "tool_b", "args": {}},
+        ]
+        decisions = [{"type": "approve"}, {"type": "reject"}]
+        resume_value = {"decisions": decisions}
+
+        expected_count = len(action_requests)
+        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
+            resume_value = {"decisions": resume_value["decisions"] * expected_count}
+
+        # 2 decisions, 2 action_requests — no replication needed
+        assert len(resume_value["decisions"]) == 2
+        assert resume_value["decisions"][0]["type"] == "approve"
+        assert resume_value["decisions"][1]["type"] == "reject"

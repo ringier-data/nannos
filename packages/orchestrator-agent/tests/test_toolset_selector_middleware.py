@@ -6,7 +6,7 @@ Tests cover:
 - Caching: _cached_selected_tools is used on subsequent calls within same invocation
 - always_include: specified tool names are always added regardless of filtering
 - Fallbacks: LLM failures fall back to full / truncated tool lists
-- Edge cases: no tools, wrong context type, single-server (skip Phase 1)
+- Edge cases: no tools, single-server (skip Phase 1)
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,8 +19,9 @@ from app.middleware.toolset_selector import (
     ServerSelection,
     ToolSelection,
     ToolsetSelectorMiddleware,
+    _selected_tools_var,
 )
-from app.models.config import AgentSettings, GraphRuntimeContext
+from app.models.config import AgentSettings
 
 
 def _make_tool(name: str, server: str | None = None) -> BaseTool:
@@ -32,26 +33,12 @@ def _make_tool(name: str, server: str | None = None) -> BaseTool:
     return tool
 
 
-def _make_context(**kwargs) -> GraphRuntimeContext:
-    """Return a minimal GraphRuntimeContext with sensible defaults."""
-    defaults = {
-        "user_id": "user-1",
-        "user_sub": "sub-1",
-        "name": "Test User",
-        "email": "test@example.com",
-    }
-    defaults.update(kwargs)
-    return GraphRuntimeContext(**defaults)
-
-
 def _make_request(
-    context: GraphRuntimeContext | None = None,
     tools: list | None = None,
     messages: list | None = None,
 ) -> MagicMock:
     """Return a mock ModelRequest."""
     request = MagicMock()
-    request.runtime.context = context if context is not None else _make_context()
     request.tools = tools or []
     request.messages = messages or [HumanMessage(content="Do something useful")]
     # override() should return a copy with the new tools
@@ -80,32 +67,18 @@ class TestAwrapModelCallNoFiltering:
     @pytest.mark.asyncio
     async def test_passthrough_when_no_tools(self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock):
         """No tools → handler is called with the original request."""
-        ctx = _make_context()
-        request = _make_request(context=ctx, tools=[])
+        request = _make_request(tools=[])
         result = await middleware.awrap_model_call(request, mock_handler)
 
         mock_handler.assert_called_once_with(request)
         assert result == mock_handler.return_value
 
     @pytest.mark.asyncio
-    async def test_passthrough_when_context_is_wrong_type(
-        self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock
-    ):
-        """Non-GraphRuntimeContext → handler is called unchanged with a warning."""
-        request = _make_request()
-        request.runtime.context = {"not": "a context"}  # wrong type
-
-        result = await middleware.awrap_model_call(request, mock_handler)
-
-        mock_handler.assert_called_once_with(request)
-
-    @pytest.mark.asyncio
     async def test_tools_below_threshold_skip_llm(self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock):
         """When total tools ≤ TOOLSET_SELECTION_THRESHOLD, no LLM is called."""
-        ctx = _make_context()
         # Add a handful of tools (well below threshold of 50)
         tools = [_make_tool(f"tool_{i}", server="server-a") for i in range(5)]
-        request = _make_request(context=ctx, tools=tools)
+        request = _make_request(tools=tools)
 
         with (
             patch.object(middleware, "_llm_select_servers", new_callable=AsyncMock) as mock_s,
@@ -118,16 +91,11 @@ class TestAwrapModelCallNoFiltering:
         mock_handler.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_tool_registry_tools_are_included(
-        self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock
-    ):
-        """Tools from tool_registry are merged with request.tools before filtering."""
-        ctx = _make_context()
-        registry_tool = _make_tool("registry_tool", server="server-a")
-        ctx.tool_registry = {"registry_tool": registry_tool}
-
-        request_tool = _make_tool("request_tool")
-        request = _make_request(context=ctx, tools=[request_tool])
+    async def test_all_request_tools_included(self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock):
+        """All tools from request.tools are included in filtering."""
+        tool_a = _make_tool("tool_a", server="server-a")
+        tool_b = _make_tool("tool_b")
+        request = _make_request(tools=[tool_a, tool_b])
 
         captured_tools: list = []
 
@@ -135,7 +103,6 @@ class TestAwrapModelCallNoFiltering:
             captured_tools.extend(req.tools or [])
             return AIMessage(content="ok")
 
-        # Patch override so it records the merged tool list
         def fake_override(**kwargs):
             req_copy = MagicMock()
             req_copy.tools = kwargs.get("tools", [])
@@ -146,8 +113,8 @@ class TestAwrapModelCallNoFiltering:
         await middleware.awrap_model_call(request, capture_handler)
 
         tool_names = {t.name for t in captured_tools if isinstance(t, MagicMock)}
-        assert "registry_tool" in tool_names
-        assert "request_tool" in tool_names
+        assert "tool_a" in tool_names
+        assert "tool_b" in tool_names
 
 
 class TestCaching:
@@ -155,31 +122,40 @@ class TestCaching:
     async def test_cached_tools_used_on_second_call(
         self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock
     ):
-        """When _cached_selected_tools is set, _select_tools is NOT called again."""
+        """When _selected_tools_var is set, _select_tools is NOT called again."""
         some_tool = _make_tool("cached_tool")
-        ctx = _make_context()
-        ctx._cached_selected_tools = [some_tool]  # pre-populated cache
+        _selected_tools_var.set([some_tool])  # pre-populated cache
 
         tools = [_make_tool(f"tool_{i}", server="server-a") for i in range(3)]
-        request = _make_request(context=ctx, tools=tools)
+        request = _make_request(tools=tools)
 
         with patch.object(middleware, "_select_tools", new_callable=AsyncMock) as mock_select:
             await middleware.awrap_model_call(request, mock_handler)
 
         mock_select.assert_not_called()
+        # Clean up
+        _selected_tools_var.set(None)
 
     @pytest.mark.asyncio
     async def test_cache_is_written_on_first_call(self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock):
-        """After first call, _cached_selected_tools is populated on the context."""
-        ctx = _make_context()
+        """After first call, _selected_tools_var is populated."""
         tools = [_make_tool(f"tool_{i}") for i in range(3)]
-        request = _make_request(context=ctx, tools=tools)
+        request = _make_request(tools=tools)
 
         selected = [tools[0]]
         with patch.object(middleware, "_select_tools", new_callable=AsyncMock, return_value=selected):
             await middleware.awrap_model_call(request, mock_handler)
 
-        assert ctx._cached_selected_tools == selected
+        assert _selected_tools_var.get() == selected
+        # Clean up
+        _selected_tools_var.set(None)
+
+    @pytest.mark.asyncio
+    async def test_clear_cache_resets_state(self, middleware: ToolsetSelectorMiddleware, mock_handler: AsyncMock):
+        """clear_cache() resets _selected_tools_var to None."""
+        _selected_tools_var.set([_make_tool("cached")])
+        middleware.clear_cache()
+        assert _selected_tools_var.get() is None
 
 
 class TestAlwaysInclude:
@@ -191,8 +167,7 @@ class TestAlwaysInclude:
 
         mw = ToolsetSelectorMiddleware(always_include=["essential_tool"])
 
-        ctx = _make_context()
-        request = _make_request(context=ctx, tools=[essential, other])
+        request = _make_request(tools=[essential, other])
 
         # Simulate _select_tools returning only `other` (essential was filtered out)
         with patch.object(mw, "_select_tools", new_callable=AsyncMock, return_value=[other]):
@@ -217,8 +192,7 @@ class TestAlwaysInclude:
         essential = _make_tool("essential_tool")
         mw = ToolsetSelectorMiddleware(always_include=["essential_tool"])
 
-        ctx = _make_context()
-        request = _make_request(context=ctx, tools=[essential])
+        request = _make_request(tools=[essential])
 
         with patch.object(mw, "_select_tools", new_callable=AsyncMock, return_value=[essential]):
             captured_tools: list = []
@@ -245,8 +219,7 @@ class TestProviderToolDicts:
         provider_dict = {"type": "function", "function": {"name": "special"}}
         base_tool = _make_tool("base_tool")
 
-        ctx = _make_context()
-        request = _make_request(context=ctx, tools=[base_tool, provider_dict])
+        request = _make_request(tools=[base_tool, provider_dict])
 
         with patch.object(middleware, "_select_tools", new_callable=AsyncMock, return_value=[base_tool]):
             captured_tools: list = []

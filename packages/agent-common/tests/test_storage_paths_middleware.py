@@ -7,13 +7,15 @@ Covers:
 - Async wrap_model_call mirrors sync behavior
 """
 
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock, call
 from langchain_core.messages import SystemMessage
 
 from agent_common.middleware.storage_paths_middleware import (
-    StoragePathsInstructionMiddleware,
     _FILESYSTEM_STORAGE_PATHS_PROMPT,
+    StoragePathsInstructionMiddleware,
+    _build_sandbox_prompt,
 )
 
 
@@ -85,9 +87,7 @@ class TestWrapModelCallSync:
 
     def test_existing_system_message_with_prompt_is_idempotent(self):
         """When system_message already contains the prompt, no modification is made."""
-        existing_sm = SystemMessage(
-            content=f"You are helpful.\n\n{_FILESYSTEM_STORAGE_PATHS_PROMPT}"
-        )
+        existing_sm = SystemMessage(content=f"You are helpful.\n\n{_FILESYSTEM_STORAGE_PATHS_PROMPT}")
         request = _make_request(system_message=existing_sm)
         received_requests = []
 
@@ -170,9 +170,7 @@ class TestWrapModelCallAsync:
     @pytest.mark.asyncio
     async def test_idempotent_async(self):
         """Async variant: prompt already present → no modification."""
-        existing_sm = SystemMessage(
-            content=f"Base prompt.\n\n{_FILESYSTEM_STORAGE_PATHS_PROMPT}"
-        )
+        existing_sm = SystemMessage(content=f"Base prompt.\n\n{_FILESYSTEM_STORAGE_PATHS_PROMPT}")
         request = _make_request(system_message=existing_sm)
 
         calls_to_handler = []
@@ -198,3 +196,59 @@ class TestWrapModelCallAsync:
         result = await self.middleware.awrap_model_call(request, handler)
 
         assert result is sentinel
+
+
+class TestSandboxMode:
+    """Tests for sandbox-enabled StoragePathsInstructionMiddleware."""
+
+    def test_sandbox_prompt_includes_copy_to_sandbox(self):
+        """Sandbox prompt should mention copy_to_sandbox tool."""
+        prompt = _build_sandbox_prompt("/home/ubuntu")
+        assert "copy_to_sandbox" in prompt
+        assert "/home/ubuntu" in prompt
+
+    def test_sandbox_prompt_mentions_skills_presync(self):
+        """Sandbox prompt should tell agent skills are pre-synced."""
+        prompt = _build_sandbox_prompt("/home/ubuntu")
+        assert "skills" in prompt.lower()
+        assert "pre-synced" in prompt or "automatically" in prompt
+
+    def test_sandbox_prompt_mentions_write_file_persist(self):
+        """Sandbox prompt should instruct agent to use write_file to persist."""
+        prompt = _build_sandbox_prompt("/home/ubuntu")
+        assert "write_file()" in prompt
+
+    def test_sandbox_mode_uses_sandbox_prompt(self):
+        """When sandbox_enabled=True, should use sandbox-specific prompt."""
+        mw = StoragePathsInstructionMiddleware(sandbox_enabled=True, sandbox_home="/home/ubuntu")
+        assert "copy_to_sandbox" in mw._prompt
+        assert _FILESYSTEM_STORAGE_PATHS_PROMPT not in mw._prompt
+
+    def test_non_sandbox_mode_uses_default_prompt(self):
+        """When sandbox_enabled=False (default), should use standard prompt."""
+        mw = StoragePathsInstructionMiddleware()
+        assert mw._prompt == _FILESYSTEM_STORAGE_PATHS_PROMPT
+
+    def test_sandbox_mode_injects_prompt(self):
+        """Sandbox mode should inject sandbox-aware prompt into system message."""
+        mw = StoragePathsInstructionMiddleware(sandbox_enabled=True, sandbox_home="/home/ubuntu")
+        existing_sm = SystemMessage(content="You are a helpful assistant.")
+        request = _make_request(system_message=existing_sm)
+        received_requests = []
+
+        def handler(req):
+            received_requests.append(req)
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+
+        request.override.assert_called_once()
+        _, kwargs = request.override.call_args
+        new_sm = kwargs["system_message"]
+        assert "copy_to_sandbox" in new_sm.text
+        assert "helpful assistant" in new_sm.text
+
+    def test_sandbox_prompt_custom_home(self):
+        """Should use provided sandbox_home in the prompt."""
+        prompt = _build_sandbox_prompt("/home/custom")
+        assert "/home/custom" in prompt

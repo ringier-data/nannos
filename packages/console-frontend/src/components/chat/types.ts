@@ -6,11 +6,13 @@ export const WORK_PLAN_EXT = 'urn:nannos:a2a:work-plan:1.0';
 export const INTERMEDIATE_OUTPUT_EXT = 'urn:nannos:a2a:intermediate-output:1.0';
 export const FEEDBACK_REQUEST_EXT = 'urn:nannos:a2a:feedback-request:1.0';
 
-export interface PendingBugReport {
+export interface PendingInterrupt {
   conversationId: string;
   taskId?: string;
+  toolName: string;
   reason: string;
-  actionRequests?: Array<{ name: string; args: Record<string, unknown> }>;
+  actionRequests?: Array<{ name: string; args: Record<string, unknown>; description?: string }>;
+  reviewConfigs?: Array<{ action_name: string; allowed_decisions: string[] }>;
 }
 
 export interface TodoItem {

@@ -29,7 +29,7 @@ from typing import Any, Optional
 
 from deepagents.backends.protocol import WriteResult
 from deepagents.backends.store import StoreBackend
-from langchain.tools import ToolRuntime
+from langgraph.config import get_config
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.cost_tracking.logger import (
@@ -75,7 +75,7 @@ class IndexingStoreBackend(StoreBackend):
 
     def __init__(
         self,
-        runtime: ToolRuntime,
+        store: AsyncPostgresStore,
         bedrock_region: str | None = None,
         cost_logger: Optional[CostLogger] = None,
         namespace_factory: Optional[Any] = None,
@@ -83,18 +83,18 @@ class IndexingStoreBackend(StoreBackend):
         """Initialize IndexingStoreBackend.
 
         Args:
-            runtime: ToolRuntime with store and config
+            store: AsyncPostgresStore for storage and indexing
             bedrock_region: AWS region for Bedrock model creation
             cost_logger: Optional CostLogger for reporting LLM usage costs
-            namespace_factory: Optional callable that takes BackendContext and returns
+            namespace_factory: Optional callable that takes a Runtime and returns
                 namespace tuple. Used to scope file storage (read/write operations).
                 If None, uses legacy assistant_id-based scoping.
         """
-        # Pass namespace factory to parent StoreBackend
+        # Pass store and namespace factory to parent StoreBackend
         # This ensures read operations (grep, read_file, etc.) are scoped correctly
-        super().__init__(runtime, namespace=namespace_factory)
+        super().__init__(store=store, namespace=namespace_factory)
         self._bedrock_region = bedrock_region
-        self.documents_store: AsyncPostgresStore = runtime.store  # type: ignore[assignment]
+        self.documents_store: AsyncPostgresStore = store
         self._cost_logger = cost_logger
 
     async def awrite(self, file_path: str, content: str) -> WriteResult:
@@ -138,14 +138,15 @@ class IndexingStoreBackend(StoreBackend):
             content: File content to index
         """
         # Get user_id and user_sub from runtime metadata or tags
-        metadata_dict = self.runtime.config.get("metadata", {})
+        config = get_config()
+        metadata_dict = config.get("metadata", {})
         user_id = metadata_dict.get("user_id")
         user_sub = metadata_dict.get("user_sub")
         conversation_id = metadata_dict.get("conversation_id")
 
         # Fallback: try to extract user_sub from tags if not in metadata
         if not user_sub:
-            tags = self.runtime.config.get("tags", [])
+            tags = config.get("tags", [])
             for tag in tags:
                 if isinstance(tag, str) and tag.startswith("user_sub:"):
                     user_sub = tag.split(":", 1)[1]
@@ -154,7 +155,7 @@ class IndexingStoreBackend(StoreBackend):
 
         # Fallback: try to extract conversation_id from tags if not in metadata
         if not conversation_id:
-            tags = self.runtime.config.get("tags", [])
+            tags = config.get("tags", [])
             for tag in tags:
                 if isinstance(tag, str) and tag.startswith("conversation:"):
                     conversation_id = tag.split(":", 1)[1]
@@ -173,7 +174,7 @@ class IndexingStoreBackend(StoreBackend):
         else:
             logger.warning(
                 f"[COST TRACKING] No user_sub in metadata or tags for {file_path}, "
-                f"embeddings won't be tracked. Config keys: {list(self.runtime.config.keys())}"
+                f"embeddings won't be tracked. Config keys: {list(config.keys())}"
             )
 
         if conversation_id:

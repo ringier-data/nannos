@@ -43,6 +43,32 @@ class PostgresConfig(BaseModel):
         return f"postgresql://{self.user}:{self.password.get_secret_value()}@{self.host}:{self.port}/{self.database}"
 
 
+class DocstoreConfig(BaseModel):
+    """Docstore (LangGraph store) database configuration.
+
+    Connects to the orchestrator's docstore database for reading/writing
+    playbook files directly from the store table.
+    """
+
+    host: str = Field(default_factory=lambda: os.getenv("DOCSTORE_HOST", os.getenv("POSTGRES_HOST", "localhost")))
+    port: int = Field(default_factory=lambda: int(os.getenv("DOCSTORE_PORT", os.getenv("POSTGRES_PORT", "5432"))))
+    database: str = Field(default_factory=lambda: os.getenv("DOCSTORE_DB", "docstore"))
+    user: str = Field(default_factory=lambda: os.getenv("DOCSTORE_USER", os.getenv("POSTGRES_USER", "postgres")))
+    password: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("DOCSTORE_PASSWORD", os.getenv("POSTGRES_PASSWORD", "password")))
+    )
+
+    @property
+    def connection_url(self) -> str:
+        """Build async PostgreSQL connection URL for SQLAlchemy."""
+        return f"postgresql+asyncpg://{self.user}:{self.password.get_secret_value()}@{self.host}:{self.port}/{self.database}"
+
+    @property
+    def is_configured(self) -> bool:
+        """Check if docstore connection is properly configured."""
+        return bool(self.host and self.password.get_secret_value())
+
+
 class OrchestratorConfig(BaseModel):
     """Orchestrator agent configuration for token exchange."""
 
@@ -131,7 +157,9 @@ class FrontendConfig(BaseModel):
     langsmith: LangsmithConfig = Field(default_factory=LangsmithConfig)
     auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
 
-    def build_response(self, *, oidc_issuer: str, orchestrator_base_domain: str) -> dict:
+    def build_response(
+        self, *, oidc_issuer: str, orchestrator_base_domain: str, external_skill_search: bool = False
+    ) -> dict:
         """Build the JSON response for GET /api/v1/config.
 
         Derives keycloak and orchestrator URLs from existing backend config
@@ -164,6 +192,9 @@ class FrontendConfig(BaseModel):
             "autoApprove": {
                 "maxSystemPromptLength": self.auto_approve.max_system_prompt_length,
                 "maxMcpToolsCount": self.auto_approve.max_mcp_tools_count,
+            },
+            "features": {
+                "externalSkillSearch": external_skill_search,
             },
         }
 
@@ -212,6 +243,26 @@ class CatalogConfig(BaseModel):
         return bool(self.google_oauth_client_id and self.google_oauth_client_secret.get_secret_value())
 
 
+class SkillsRegistryConfig(BaseModel):
+    """Configuration for skills sourcing (Git-first, registry-optional)."""
+
+    # Git provider (primary source — always available)
+    github_token: SecretStr | None = Field(
+        default_factory=lambda: SecretStr(t) if (t := os.getenv("GITHUB_TOKEN")) else None
+    )
+    github_app_id: str | None = Field(default_factory=lambda: os.getenv("GITHUB_APP_ID"))
+    github_app_private_key: SecretStr | None = Field(
+        default_factory=lambda: SecretStr(t) if (t := os.getenv("GITHUB_APP_PRIVATE_KEY")) else None
+    )
+    github_api_base_url: str = Field(default_factory=lambda: os.getenv("GITHUB_API_BASE_URL", "https://api.github.com"))
+
+    # Registry adapter (optional discovery/search layer)
+    registry_url: str = Field(default_factory=lambda: os.getenv("SKILL_REGISTRY_URL", "https://skills.sh"))
+    registry_api_key: SecretStr | None = Field(
+        default_factory=lambda: SecretStr(t) if (t := os.getenv("SKILL_REGISTRY_API_KEY")) else None
+    )
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -223,6 +274,7 @@ class Config(BaseModel):
 
     oidc: OidcConfig = Field(default_factory=OidcConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
+    docstore: DocstoreConfig = Field(default_factory=DocstoreConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)
     mcp_gateway: MCPGatewayConfig = Field(default_factory=MCPGatewayConfig)
@@ -232,6 +284,7 @@ class Config(BaseModel):
     twilio_verify: TwilioVerifyConfig = Field(default_factory=TwilioVerifyConfig)
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
     frontend: FrontendConfig = Field(default_factory=FrontendConfig)
+    skills_registry: SkillsRegistryConfig = Field(default_factory=SkillsRegistryConfig)
 
     def is_local(self) -> bool:
         return self.environment == "local"

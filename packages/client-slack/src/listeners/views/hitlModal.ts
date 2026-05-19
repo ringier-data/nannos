@@ -1,0 +1,83 @@
+import { App } from '@slack/bolt';
+import { Logger } from '../../utils/logger.js';
+import { handleIncomingMessage, HandlerDependencies, NormalizedMessage } from '../events/messageHandler.js';
+
+/**
+ * Register handler for HITL "Request Changes" modal submission.
+ * When user submits, we send a reject decision with their feedback so
+ * the LLM can re-propose the tool call incorporating the user's instructions.
+ */
+export function registerHitlModalHandler(app: App, makeDeps: () => HandlerDependencies): void {
+  const logger = Logger.getLogger('hitlModal');
+
+  app.view('hitl_submit', async ({ ack, body, view, client }) => {
+    await ack();
+
+    const userId = body.user.id;
+    logger.info(`HITL request-changes modal submitted by user ${userId}`);
+
+    let privateMetadata: any;
+    try {
+      privateMetadata = JSON.parse(view.private_metadata);
+      const { channelId, threadTs, messageTs, toolName, taskId } = privateMetadata;
+
+      // Extract user's feedback from the form
+      const feedbackBlock = view.state?.values?.feedback_block;
+      const feedback = feedbackBlock?.feedback_input?.value?.trim();
+
+      if (!feedback) {
+        // No feedback provided — treat as a no-op, inform user
+        logger.info(`HITL modal submitted with no feedback for task ${taskId}, ignoring`);
+        if (channelId && threadTs) {
+          await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: `ℹ️ No changes requested — use the Approve or Reject buttons on the original message.`,
+          });
+        }
+        return;
+      }
+
+      // Send reject decision with user's feedback as the message.
+      // The LLM will see this as a ToolMessage(status="error") and re-propose.
+      const rejectMessage = `The user requested changes to this tool call. Please revise and try again.\n\nUser feedback: ${feedback}`;
+      const decisions = { decisions: [{ type: 'reject', message: rejectMessage }] };
+
+      const syntheticMessage: NormalizedMessage = {
+        userId,
+        teamId: body.team?.id || '',
+        channelId,
+        messageTs: messageTs || Date.now().toString(),
+        threadTs,
+        rawText: '',
+        dataParts: [decisions],
+        source: 'direct_message',
+        client,
+      };
+
+      // Remove the interactive widget (orchestrator will post the outcome)
+      await client.chat.delete({
+        channel: channelId,
+        ts: messageTs,
+      });
+
+      // Fire the message to the orchestrator
+      handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {
+        logger.error(err, `Failed to send HITL feedback to orchestrator: ${err}`);
+      });
+
+      logger.info(`HITL feedback sent to orchestrator for tool ${toolName}`);
+    } catch (error) {
+      logger.error(error, `Failed to process HITL modal submission: ${error}`);
+      if (privateMetadata?.channelId && privateMetadata?.threadTs) {
+        await client.chat.postMessage({
+          channel: privateMetadata.channelId,
+          thread_ts: privateMetadata.threadTs,
+          text: `❌ Failed to process feedback: ${error instanceof Error ? error.message : 'unknown error'}`,
+        });
+      }
+    }
+  });
+
+  logger.info('Registered HITL modal handler');
+}

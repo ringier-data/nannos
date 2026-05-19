@@ -13,6 +13,7 @@ import {
   Bug,
   KeyRound,
   Globe,
+  BookOpen,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -57,6 +58,16 @@ export const mainNavItems: NavItem[] = [
     title: 'Delivery Channels',
     url: '/app/delivery-channels',
     icon: Webhook,
+  },
+  {
+    title: 'Playbooks',
+    url: '/app/playbooks',
+    icon: BookOpen,
+  },
+  {
+    title: 'Skill Registry',
+    url: '/app/skill-registry',
+    icon: BookOpen,
   },
 ];
 

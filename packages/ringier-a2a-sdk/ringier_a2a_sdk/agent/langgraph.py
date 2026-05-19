@@ -1157,10 +1157,13 @@ class LangGraphAgent(BaseAgent):
             logger.info("Final response sent successfully")
 
         except GraphRecursionError as e:
-            # Handle recursion limit gracefully with an informative message
+            # Recursion limit reached — the graph state is already checkpointed at
+            # the last completed step.  Surface as input_required so the caller can
+            # resume the conversation; the next astream() will start from the
+            # checkpoint with a fresh step counter.
             logger.error(f"Recursion limit reached during stream processing: {e}", exc_info=True)
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.input_required,
                 content="I've been working on this task for a while and need to take a break. "
                 "I've made some progress, but the task requires more steps than I can complete in one go. "
                 "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",

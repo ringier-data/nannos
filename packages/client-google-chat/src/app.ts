@@ -86,6 +86,7 @@ interface AppCommandGoogleChatEvent {
 interface ButtonClickedGoogleChatEvent {
   commonEventObject: {
     parameters: {cardId: string; action: string, parameters: string};
+    formInputs?: Record<string, { stringInputs?: { value: string[] } }>;
   }
   chat: {
     user: User;
@@ -307,6 +308,7 @@ function setupServerTimeouts(server: Server, config: Config) {
                 cardId: event.commonEventObject.parameters.cardId,
                 action: event.commonEventObject.parameters.action,
                 actionParameters: JSON.parse(event.commonEventObject.parameters.parameters),
+                formInputs: event.commonEventObject.formInputs,
                 userId,
                 userEmail,
                 projectId,

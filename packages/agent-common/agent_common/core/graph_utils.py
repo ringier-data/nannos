@@ -24,8 +24,13 @@ build_sub_agent_graph
     ``DynamicLocalAgentRunnable`` to avoid duplicating the build logic.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from deepagents.backends.protocol import SandboxBackendProtocol
 
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.protocol import BackendProtocol
@@ -34,20 +39,24 @@ from deepagents.middleware import FilesystemMiddleware, SummarizationMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.summarization import compute_summarization_defaults
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolRetryMiddleware
+from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware, ToolRetryMiddleware
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
 from agent_common.backends.indexing_store import IndexingStoreBackend
+from agent_common.backends.skills_store import SkillsStoreBackend
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
+from agent_common.middleware.tool_status import ToolStatusMiddleware
+from agent_common.models.skill import ResolvedSkill
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +131,9 @@ def build_common_middleware_stack(
     backend: Any,
     exclude_deep_agents_middlewares: bool = False,
     add_docstore_hint: bool = False,
+    hitl_guarded_tools: dict[str, dict] | None = None,
+    sandbox_enabled: bool = False,
+    sandbox_home: str | None = None,
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
@@ -166,9 +178,12 @@ def build_common_middleware_stack(
             whenever the backend includes ``IndexingStoreBackend`` so that
             eviction messages tell the agent it can run ``docstore_search``
             on the indexed content.
+        hitl_guarded_tools: Optional dict of tool names -> config for
+            HumanInTheLoopMiddleware. When provided, adds HITL middleware
+            that interrupts execution for approval before running these tools.
 
     Returns:
-        Ordered list of seven middleware instances ready to be included in a
+        Ordered list of middleware instances ready to be included in a
         ``create_agent`` / ``create_deep_agent`` call.
     """
     middleware = []
@@ -177,8 +192,12 @@ def build_common_middleware_stack(
         fs_cls = _FilesystemMiddlewareWithDocstoreHint if add_docstore_hint else FilesystemMiddleware
 
         middleware += [
-            StoragePathsInstructionMiddleware(),  # right before FilesytemMiddleware
+            StoragePathsInstructionMiddleware(
+                sandbox_enabled=sandbox_enabled,
+                sandbox_home=sandbox_home,
+            ),  # right before FilesytemMiddleware
             fs_cls(backend=backend),
+            ToolStatusMiddleware(),
             SummarizationMiddleware(
                 model=model,
                 backend=backend,
@@ -196,6 +215,10 @@ def build_common_middleware_stack(
             ),
         ]
 
+    # Add HITL middleware if guarded tools are specified
+    if hitl_guarded_tools:
+        middleware.append(HumanInTheLoopMiddleware(interrupt_on=hitl_guarded_tools))
+
     middleware += [
         RepeatedToolCallMiddleware(max_repeats=5, window_size=10),
         ToolSchemaCleaningMiddleware(),
@@ -207,14 +230,14 @@ def create_indexing_backend_factory(
     store: AsyncPostgresStore | None,
     bedrock_region: str | None = None,
     cost_logger: Optional[CostLogger] = None,
-) -> Callable[[Any], Any]:
-    """Return a backend factory for FilesystemMiddleware.
+    resolved_skills: dict[str, ResolvedSkill] | None = None,
+) -> BackendProtocol:
+    """Return a backend instance for FilesystemMiddleware.
 
-    When a document store is available the factory returns a
-    ``CompositeBackend`` that routes ``/memories/`` and
-    ``/large_tool_results/`` writes through ``IndexingStoreBackend`` for
-    automatic semantic indexing, with everything else falling back to
-    ephemeral ``StateBackend``.
+    When a document store is available, returns a ``CompositeBackend`` that
+    routes ``/memories/`` and ``/large_tool_results/`` writes through
+    ``IndexingStoreBackend`` for automatic semantic indexing, with everything
+    else falling back to ephemeral ``StateBackend``.
 
     ``/large_tool_results/`` is the path used by ``FilesystemMiddleware``
     when it evicts oversized tool results.  Routing it through
@@ -222,7 +245,7 @@ def create_indexing_backend_factory(
     semantic search and persisted across turns, not lost in ephemeral
     ``StateBackend``.
 
-    When no store is configured the factory simply wraps a ``StateBackend``
+    When no store is configured, returns a simple ``StateBackend``
     (ephemeral, in-agent-state storage).
 
     Args:
@@ -234,61 +257,119 @@ def create_indexing_backend_factory(
         cost_logger: Optional ``CostLogger`` for reporting LLM usage costs
             incurred by the indexing pipeline (contextualisation calls to
             Claude).
+        resolved_skills: Pre-resolved skills dict to mount at ``/skills/``
+            as a read-only backend.  When ``None``, no skills route is added.
 
     Returns:
-        A callable ``(ToolRuntime) -> Backend`` suitable for passing to
+        A ``BackendProtocol`` instance suitable for passing to
         ``FilesystemMiddleware``, ``SummarizationMiddleware``,
         ``build_common_middleware_stack``, or ``create_deep_agent``.
     """
     if store is not None:
+        # Create IndexingStoreBackend instances with explicit path-based routing:
+        # 1. /memories/ → user-scoped (user_id, "filesystem") - personal files
+        # 2. /large_tool_results/ → conversation-scoped (conversation_id, "filesystem") - tool results
+        # 3. /channel_memories/ → channel-scoped (assistant_id, "filesystem") - shared channel files
+        # 4. /group_memories/ → group-scoped (group_id, "filesystem") - shared group files
+        #
+        # Application logic decides which path to use:
+        # - write_file("/memories/foo") → personal, user-scoped
+        # - write_file("/channel_memories/foo") → shared, channel-scoped
+        # - write_file("/group_memories/foo") → shared, group-scoped
+        # - Tool results always go to /large_tool_results/ (conversation-scoped)
+        #
+        # Personal files: user-scoped namespace
+        user_documents_backend = IndexingStoreBackend(
+            store=store,
+            bedrock_region=bedrock_region,
+            cost_logger=cost_logger,
+            namespace_factory=lambda ctx: _user_scoped_namespace(ctx),
+        )
 
-        def _backend_with_indexing(rt: Any) -> CompositeBackend:
-            # Create three IndexingStoreBackend instances with explicit path-based routing:
-            # 1. /memories/ → user-scoped (user_id, "filesystem") - personal files
-            # 2. /large_tool_results/ → conversation-scoped (conversation_id, "filesystem") - tool results
-            # 3. /channel_memories/ → channel-scoped (assistant_id, "filesystem") - shared channel files
-            #
-            # Application logic decides which path to use:
-            # - write_file("/memories/foo") → personal, user-scoped
-            # - write_file("/channel_memories/foo") → shared, channel-scoped
-            # - Tool results always go to /large_tool_results/ (conversation-scoped)
+        # Tool results: conversation-scoped namespace for isolation
+        tool_results_backend = IndexingStoreBackend(
+            store=store,
+            bedrock_region=bedrock_region,
+            cost_logger=cost_logger,
+            namespace_factory=lambda ctx: _conversation_scoped_namespace(ctx),
+        )
 
-            # Personal files: user-scoped namespace
-            user_documents_backend = IndexingStoreBackend(
-                rt,
-                bedrock_region=bedrock_region,
-                cost_logger=cost_logger,
-                namespace_factory=lambda ctx: _user_scoped_namespace(ctx),
-            )
+        # Channel files: channel-scoped namespace for shared access
+        channel_documents_backend = IndexingStoreBackend(
+            store=store,
+            bedrock_region=bedrock_region,
+            cost_logger=cost_logger,
+            namespace_factory=lambda ctx: _channel_scoped_namespace(ctx),
+        )
 
-            # Tool results: conversation-scoped namespace for isolation
-            tool_results_backend = IndexingStoreBackend(
-                rt,
-                bedrock_region=bedrock_region,
-                cost_logger=cost_logger,
-                namespace_factory=lambda ctx: _conversation_scoped_namespace(ctx),
-            )
+        # Group files: group-scoped namespace for shared group files
+        group_documents_backend = IndexingStoreBackend(
+            store=store,
+            bedrock_region=bedrock_region,
+            cost_logger=cost_logger,
+            namespace_factory=lambda ctx: _group_scoped_namespace(ctx),
+        )
 
-            # Channel files: channel-scoped namespace for shared access
-            channel_documents_backend = IndexingStoreBackend(
-                rt,
-                bedrock_region=bedrock_region,
-                cost_logger=cost_logger,
-                namespace_factory=lambda ctx: _channel_scoped_namespace(ctx),
-            )
+        routes: dict[str, BackendProtocol] = {
+            "/memories/": user_documents_backend,
+            "/large_tool_results/": tool_results_backend,
+            "/channel_memories/": channel_documents_backend,
+            "/group_memories/": group_documents_backend,
+        }
+        if resolved_skills:
+            routes["/skills/"] = SkillsStoreBackend(resolved_skills)
 
-            return CompositeBackend(
-                default=StateBackend(rt),
-                routes={
-                    "/memories/": user_documents_backend,
-                    "/large_tool_results/": tool_results_backend,
-                    "/channel_memories/": channel_documents_backend,
-                },
-            )
-
-        return _backend_with_indexing
+        return CompositeBackend(
+            default=StateBackend(),
+            routes=routes,
+        )
     else:
-        return lambda rt: StateBackend(rt)
+        return StateBackend()
+
+
+def create_sandboxed_backend_factory(
+    sandbox_backend: "SandboxBackendProtocol",
+    base_backend: Any,
+) -> CompositeBackend:
+    """Wrap a base backend to use a sandbox as the default backend.
+
+    The sandbox_backend is a SandboxBackendProtocol instance (e.g., GatanaSandbox)
+    that already implements the full BackendProtocol (read, write, edit, execute,
+    grep, glob, ls). It's used directly as the default backend — no adapter needed.
+
+    The sandbox is wrapped with ReadySandboxWrapper which detects "not ready"
+    responses and raises SandboxNotReadyError — allowing ToolRetryMiddleware
+    to automatically retry with exponential backoff.
+
+    Preserves all existing routes (/skills/, /memories/, etc.) from the base backend.
+
+    Args:
+        sandbox_backend: A SandboxBackendProtocol instance (from SandboxPool.acquire)
+        base_backend: The non-sandboxed backend instance
+
+    Returns:
+        A CompositeBackend with sandbox as default
+    """
+    from agent_common.core.sandbox_ready_wrapper import ReadySandboxWrapper
+
+    wrapped = ReadySandboxWrapper(sandbox_backend)
+    if isinstance(base_backend, CompositeBackend):
+        return CompositeBackend(default=wrapped, routes=base_backend.routes)
+    # If base is a simple backend, use sandbox as default with no routes
+    return CompositeBackend(default=wrapped, routes={})
+
+
+def _get_metadata() -> dict:
+    """Get metadata from the current RunnableConfig.
+
+    Uses ``langgraph.config.get_config()`` which reads the config from
+    contextvars — works in both node and tool execution contexts.
+    """
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        return {}
+    return cfg.get("metadata", {})
 
 
 def _conversation_scoped_namespace(ctx: Any) -> tuple[str, ...]:
@@ -297,7 +378,7 @@ def _conversation_scoped_namespace(ctx: Any) -> tuple[str, ...]:
     Returns (conversation_id, "filesystem") to isolate files per conversation.
     Returns impossible-to-match sentinel if conversation_id missing (for graceful grep failure).
     """
-    metadata = ctx.runtime.config.get("metadata", {})
+    metadata = _get_metadata()
     conversation_id = metadata.get("conversation_id")
 
     if not conversation_id:
@@ -316,7 +397,7 @@ def _user_scoped_namespace(ctx: Any) -> tuple[str, ...]:
     Returns (user_id, "filesystem") to persist files across conversations.
     Returns impossible-to-match sentinel if user_id missing (for graceful grep failure).
     """
-    metadata = ctx.runtime.config.get("metadata", {})
+    metadata = _get_metadata()
     user_id = metadata.get("user_id")
 
     if not user_id:
@@ -336,7 +417,7 @@ def _channel_scoped_namespace(ctx: Any) -> tuple[str, ...]:
     All users in the same channel see the same files.
     Returns impossible-to-match sentinel if assistant_id missing (for graceful grep failure).
     """
-    metadata = ctx.runtime.config.get("metadata", {})
+    metadata = _get_metadata()
     assistant_id = metadata.get("assistant_id")
 
     if not assistant_id:
@@ -349,6 +430,30 @@ def _channel_scoped_namespace(ctx: Any) -> tuple[str, ...]:
     return (assistant_id, "filesystem")
 
 
+def _group_scoped_namespace(ctx: Any) -> tuple[str, ...]:
+    """Namespace factory for group-scoped files (shared group playbooks).
+
+    Returns (group_id, "filesystem") for files shared within a user group.
+    Validates that group_id is in the user's group_ids membership list.
+    Returns impossible-to-match sentinel if group_id missing or not authorized.
+    """
+    metadata = _get_metadata()
+    group_id = metadata.get("group_id")
+
+    if not group_id:
+        logger.warning("[NAMESPACE] group_id missing, using sentinel namespace")
+        return ("__missing_group_id__", "filesystem")
+
+    # Validate group_id against the user's verified memberships
+    group_ids = metadata.get("group_ids") or []
+    if group_ids and str(group_id) not in [str(g) for g in group_ids]:
+        logger.warning(f"[NAMESPACE] group_id {group_id} not in user's group_ids, denied")
+        return ("__unauthorized_group_id__", "filesystem")
+
+    logger.info(f"[NAMESPACE] group-scoped: ({group_id}, 'filesystem')")
+    return (str(group_id), "filesystem")
+
+
 def build_sub_agent_graph(
     model: BaseChatModel,
     tools: list,
@@ -359,18 +464,23 @@ def build_sub_agent_graph(
     cost_logger: Optional[CostLogger] = None,
     response_format: Any = None,
     exclude_deep_agents_middlewares: bool = False,
-    backend_factory: Optional[Callable[[Any], Any]] = None,
+    backend_factory: Optional[Any] = None,
+    hitl_guarded_tools: dict[str, dict] | None = None,
+    extra_middlewares: list[AgentMiddleware] | None = None,
+    extra_tools: list | None = None,
+    sandbox_enabled: bool = False,
+    sandbox_home: str | None = None,
     **kwargs: Any,
 ) -> CompiledStateGraph:
     """Build a standard deep-agent LangGraph graph.
 
     Combines three steps that every non-orchestrator agent repeats:
 
-    1. **Backend factory** — ``create_indexing_backend_factory(store,
-       agent_settings)`` selects the right backend (indexing vs. ephemeral),
-       unless *backend_factory* is provided directly (e.g. by
-       ``DynamicLocalAgentRunnable`` which may receive a pre-built factory
-       from the orchestrator).
+    1. **Backend** — ``create_indexing_backend_factory(store, ...)`` returns
+       the appropriate backend instance (``CompositeBackend`` with indexing
+       or plain ``StateBackend``), unless *backend_factory* is provided
+       directly (e.g. by ``DynamicLocalAgentRunnable`` which may receive a
+       pre-built backend from the orchestrator).
     2. **Middleware stack** — ``build_common_middleware_stack(model, backend,
        exclude_deep_agents_middlewares)`` assembles the standard middlewares.
     3. **Graph** — ``create_agent(...)`` wires everything together.
@@ -396,11 +506,11 @@ def build_sub_agent_graph(
             ``FilesystemMiddleware`` and ``SummarizationMiddleware`` from the
             middleware stack (intended for ``agent-runner`` which manages its
             own file-system lifecycle).
-        backend_factory: Optional pre-built backend factory
-            ``Callable[[Runtime], Backend]``.  When provided it is used
-            directly instead of calling ``create_indexing_backend_factory``.
+        backend_factory: Optional pre-built backend instance
+            (``BackendProtocol``).  When provided it is used directly
+            instead of calling ``create_indexing_backend_factory``.
             Useful when the caller (e.g. ``DynamicLocalAgentRunnable``) has
-            already received an injected factory from the orchestrator.
+            already received an injected backend from the orchestrator.
         **kwargs: Extra keyword arguments forwarded verbatim to
             ``create_agent`` (e.g. ``context_schema``,
             ``recursion_limit``).
@@ -418,11 +528,17 @@ def build_sub_agent_graph(
         backend,
         exclude_deep_agents_middlewares,
         add_docstore_hint=store is not None or backend_factory is not None,
+        hitl_guarded_tools=hitl_guarded_tools,
+        sandbox_enabled=sandbox_enabled,
+        sandbox_home=sandbox_home,
     )
+    if extra_middlewares:
+        middleware = list(extra_middlewares) + middleware
+    all_tools = list(tools) + list(extra_tools or [])
     return create_agent(
         model,
         system_prompt=system_prompt,
-        tools=tools,
+        tools=all_tools,
         checkpointer=checkpointer,
         store=store,
         middleware=middleware,
