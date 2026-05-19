@@ -911,37 +911,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         # Build agent via the shared helper: handles backend factory selection
         # (injected vs. auto-created), middleware stack assembly, and graph creation.
         # Include HITL for skill/playbook tools so changes require user approval.
-        hitl_guarded = {
-            # MCP console tools (preferred path for self-improvement)
-            "console_create_skill": {
-                "allowed_decisions": ["approve", "edit", "reject"],
-                "description": "Agent wants to create a new skill.",
-            },
-            "console_update_skill": {
-                "allowed_decisions": ["approve", "edit", "reject"],
-                "description": "Agent wants to update a skill.",
-            },
-            "console_remove_skill": {
-                "allowed_decisions": ["approve", "edit", "reject"],
-                "description": "Agent wants to deactivate a skill.",
-            },
-            "console_activate_skill": {
-                "allowed_decisions": ["approve", "reject"],
-                "description": "Agent wants to activate a skill from the registry.",
-            },
-            "console_update_playbook": {
-                "allowed_decisions": ["approve", "edit", "reject"],
-                "description": "Agent wants to update the playbook (AGENTS.md).",
-            },
-            "console_write_skill_file": {
-                "allowed_decisions": ["approve", "edit", "reject"],
-                "description": "Agent wants to write a file to a skill folder.",
-            },
-            "console_delete_skill_file": {
-                "allowed_decisions": ["approve", "edit", "reject"],
-                "description": "Agent wants to delete a file from a skill folder.",
-            },
-        }
+        from agent_common.core.hitl_config import SELF_IMPROVEMENT_HITL_GUARDS
+
+        hitl_guarded = dict(SELF_IMPROVEMENT_HITL_GUARDS)
 
         # Build the backend factory with resolved skills mounted at /skills/
         effective_backend_factory = self.backend_factory

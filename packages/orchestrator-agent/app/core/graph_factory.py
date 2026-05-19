@@ -26,6 +26,7 @@ from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AG
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
+from agent_common.core.hitl_config import SELF_IMPROVEMENT_HITL_GUARDS
 from agent_common.core.model_factory import _has_aws_credentials, create_model
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
@@ -62,34 +63,12 @@ from .time_tools import create_time_tool
 logger = logging.getLogger(__name__)
 
 # Tools that require user confirmation before execution (HITL interrupt)
+# Extends the shared self-improvement guards with orchestrator-specific tools.
 HITL_GUARDED_TOOLS = {
+    **SELF_IMPROVEMENT_HITL_GUARDS,
     "console_create_bug_report": {
         "allowed_decisions": ["approve", "edit", "reject"],
         "description": "Bug report requires your confirmation before submission.",
-    },
-    "console_create_skill": {
-        "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Agent wants to create a new skill.",
-    },
-    "console_update_skill": {
-        "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Agent wants to update a skill.",
-    },
-    "console_remove_skill": {
-        "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Agent wants to remove a skill.",
-    },
-    "console_update_playbook": {
-        "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Agent wants to update the playbook (AGENTS.md).",
-    },
-    "console_import_skill": {
-        "allowed_decisions": ["approve", "reject"],
-        "description": "Agent wants to import a skill from an external source.",
-    },
-    "console_activate_skill": {
-        "allowed_decisions": ["approve", "reject"],
-        "description": "Agent wants to activate a skill on a sub-agent.",
     },
 }
 

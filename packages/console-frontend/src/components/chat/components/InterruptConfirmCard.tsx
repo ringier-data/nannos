@@ -20,7 +20,8 @@ const HIDDEN_KEYS = new Set(['reason']);
 
 export function InterruptConfirmCard() {
   const { pendingInterrupt, dismissInterrupt, sendSilentMessage } = useChat();
-  const [editedContent, setEditedContent] = useState('');
+  const [feedback, setFeedback] = useState('');
+  const [showFeedback, setShowFeedback] = useState(false);
 
   if (!pendingInterrupt) return null;
 
@@ -46,32 +47,24 @@ export function InterruptConfirmCard() {
   const handleApprove = () => {
     sendSilentMessage('', [{ decisions: [{ type: 'approve' }] }]);
     dismissInterrupt();
-    setEditedContent('');
+    setFeedback('');
+    setShowFeedback(false);
   };
 
   const handleReject = () => {
     sendSilentMessage('', [{ decisions: [{ type: 'reject', message: 'The user explicitly rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.' }] }]);
     dismissInterrupt();
-    setEditedContent('');
+    setFeedback('');
+    setShowFeedback(false);
   };
 
-  const handleEdit = () => {
-    if (!editedContent.trim()) {
-      handleApprove();
-      return;
-    }
-    // Merge edited content into the original args.
-    // Use the first content key found, or fall back to 'content'.
-    const contentKey = [...CONTENT_KEYS.values()].find((k: string) => k in args) ?? 'content';
-    const editedArgs = { ...args, [contentKey]: editedContent };
-    sendSilentMessage('', [{
-      decisions: [{
-        type: 'edit',
-        edited_action: { name: action?.name || pendingInterrupt.toolName, args: editedArgs },
-      }],
-    }]);
+  const handleRequestChanges = () => {
+    if (!feedback.trim()) return;
+    const rejectMessage = `The user requested changes to this tool call. Please revise and try again.\n\nUser feedback: ${feedback.trim()}`;
+    sendSilentMessage('', [{ decisions: [{ type: 'reject', message: rejectMessage }] }]);
     dismissInterrupt();
-    setEditedContent('');
+    setFeedback('');
+    setShowFeedback(false);
   };
 
   return (
@@ -99,7 +92,7 @@ export function InterruptConfirmCard() {
         </div>
       </div>
 
-      {/* Show proposed content in a preview pane */}
+      {/* Show proposed content in a read-only preview pane */}
       {contentValue && (
         <div className="rounded border bg-white dark:bg-gray-900 p-2 max-h-48 overflow-y-auto">
           <pre className="text-xs whitespace-pre-wrap font-mono text-gray-700 dark:text-gray-300">
@@ -108,14 +101,15 @@ export function InterruptConfirmCard() {
         </div>
       )}
 
-      {/* Optional edit textarea — only shown when edit is an allowed decision */}
-      {allowed.has('edit') && (
+      {/* Feedback textarea — shown when user clicks "Request Changes" */}
+      {allowed.has('edit') && showFeedback && (
         <Textarea
-          placeholder="Edit the content before approving (optional)"
-          value={editedContent}
-          onChange={(e) => setEditedContent(e.target.value)}
+          placeholder="Describe what should be changed (e.g. 'Make the description shorter' or 'Change scope to group')"
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
           rows={2}
-          className="resize-none text-sm font-mono"
+          className="resize-none text-sm"
+          autoFocus
         />
       )}
 
@@ -125,16 +119,23 @@ export function InterruptConfirmCard() {
             Reject
           </Button>
         )}
-        {allowed.has('edit') && editedContent.trim() ? (
-          <Button size="sm" onClick={handleEdit}>
-            Approve with Edits
+        {allowed.has('edit') && showFeedback ? (
+          <Button size="sm" onClick={handleRequestChanges} disabled={!feedback.trim()}>
+            Submit Feedback
           </Button>
         ) : (
-          allowed.has('approve') && (
-            <Button size="sm" onClick={handleApprove}>
-              Approve
-            </Button>
-          )
+          <>
+            {allowed.has('edit') && (
+              <Button variant="outline" size="sm" onClick={() => setShowFeedback(true)}>
+                Request Changes
+              </Button>
+            )}
+            {allowed.has('approve') && (
+              <Button size="sm" onClick={handleApprove}>
+                Approve
+              </Button>
+            )}
+          </>
         )}
       </div>
     </div>

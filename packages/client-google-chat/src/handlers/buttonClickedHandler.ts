@@ -11,6 +11,7 @@ export interface ButtonClickedPayload {
   cardId: string,
   action: string,
   actionParameters: Record<string, string>;
+  formInputs?: Record<string, { stringInputs?: { value: string[] } }>;
   userId: string;
   userEmail: string;
   projectId: string;
@@ -26,6 +27,7 @@ interface ButtonFeedbackCardClickedParameters {
 
 interface ButtonHitlCardClickedParameters {
   taskId: string;
+  toolName?: string;
 }
 
 async function handleFeedbackCardClick(
@@ -83,6 +85,24 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
 
   logger.info(`HITL action: ${payload.action} for taskId=${actionParameters.taskId}`);
 
+  if (payload.action === 'request_changes') {
+    // Replace the card with a feedback form
+    const toolLabel = actionParameters.toolName || 'unknown';
+    const feedbackCard = deps.chatService.buildHitlFeedbackCard(
+      deps.config,
+      toolLabel,
+      { taskId: actionParameters.taskId },
+    );
+
+    await deps.chatService.updateMessage({
+      projectId: payload.projectId,
+      messageName: payload.messageId,
+      text: '✏️ Request Changes',
+      cardsV2: [feedbackCard],
+    });
+    return;
+  }
+
   await deps.chatService.updateMessage({
     projectId: payload.projectId,
     messageName: payload.messageId,
@@ -99,6 +119,67 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
   }
 
   // Send as a synthetic message via handleIncomingMessage (no visible chat message)
+  const syntheticMessage: NormalizedMessage = {
+    userId: payload.userId,
+    userEmail: payload.userEmail,
+    projectId: payload.projectId,
+    spaceId: payload.spaceId,
+    messageId: `synthetic-${randomUUID()}`,
+    threadId: payload.threadId,
+    rawText: '',
+    dataParts: [decisions],
+    source: 'direct_message',
+  };
+
+  await handleIncomingMessage(syntheticMessage, deps);
+}
+
+/**
+ * Handle HITL feedback form submission (from the feedback card).
+ */
+async function handleHitlFeedbackCardClick(payload: ButtonClickedPayload, deps: HandlerDependencies) {
+  const logger = Logger.getLogger('handleHitlFeedbackCardClick');
+
+  const actionParameters = payload.actionParameters as unknown as ButtonHitlCardClickedParameters;
+
+  if (payload.action === 'cancel') {
+    // User cancelled — just remove the feedback card
+    await deps.chatService.updateMessage({
+      projectId: payload.projectId,
+      messageName: payload.messageId,
+      text: 'ℹ️ Feedback cancelled',
+      cardsV2: [],
+    });
+    return;
+  }
+
+  // Extract feedback from form inputs
+  const feedback = payload.formInputs?.feedback?.stringInputs?.value?.[0]?.trim();
+
+  if (!feedback) {
+    logger.warn(`No feedback provided in HITL feedback form for task ${actionParameters.taskId}`);
+    await deps.chatService.updateMessage({
+      projectId: payload.projectId,
+      messageName: payload.messageId,
+      text: 'ℹ️ No feedback provided — please try again',
+      cardsV2: [],
+    });
+    return;
+  }
+
+  logger.info(`HITL feedback submitted for taskId=${actionParameters.taskId}: ${feedback.substring(0, 100)}`);
+
+  await deps.chatService.updateMessage({
+    projectId: payload.projectId,
+    messageName: payload.messageId,
+    text: `✏️ Changes requested: ${feedback.substring(0, 200)}`,
+    cardsV2: [],
+  });
+
+  // Send reject decision with user's feedback so the LLM re-proposes
+  const rejectMessage = `The user requested changes to this tool call. Please revise and try again.\n\nUser feedback: ${feedback}`;
+  const decisions = { decisions: [{ type: 'reject', message: rejectMessage }] };
+
   const syntheticMessage: NormalizedMessage = {
     userId: payload.userId,
     userEmail: payload.userEmail,
@@ -140,6 +221,15 @@ export async function handleButtonClicked(
 
     case 'hitl_card': {
       await handleHitlCardClick(
+        payload,
+        deps,
+      );
+
+      break;
+    }
+
+    case 'hitl_feedback_card': {
+      await handleHitlFeedbackCardClick(
         payload,
         deps,
       );

@@ -779,6 +779,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               // Extract text description from TextPart and structured data from DataPart
               let interruptMessage = '';
               let actionRequests: any[] = [];
+              let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
               if (statusEvent.status.message?.parts) {
                 for (const part of statusEvent.status.message.parts) {
                   if (part.kind === 'text') {
@@ -787,6 +788,9 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                     const data = (part as { kind: 'data'; data: any }).data;
                     if (data?.action_requests) {
                       actionRequests = data.action_requests;
+                    }
+                    if (data?.review_configs) {
+                      reviewConfigs = data.review_configs;
                     }
                   }
                 }
@@ -810,6 +814,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                     channelId,
                     threadTs,
                     actionRequests,
+                    reviewConfigs,
                   });
 
                   logger.info(

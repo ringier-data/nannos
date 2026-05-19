@@ -413,6 +413,7 @@ async function processHumanInTheLoopEvent(
   // Extract text description from TextPart and structured data from DataPart
   let interruptMessage = '';
   let actionRequests: any[] = [];
+  let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
   if (statusEvent.status.message?.parts) {
     for (const part of statusEvent.status.message.parts) {
       if (part.kind === 'text') {
@@ -421,6 +422,9 @@ async function processHumanInTheLoopEvent(
         const data = (part as { kind: 'data'; data: any }).data;
         if (data?.action_requests) {
           actionRequests = data.action_requests;
+        }
+        if (data?.review_configs) {
+          reviewConfigs = data.review_configs;
         }
       }
     }
@@ -431,9 +435,13 @@ async function processHumanInTheLoopEvent(
   const firstAction = actionRequests[0];
   const toolName = firstAction?.name || 'unknown';
 
+  // Determine if edit is allowed for this tool
+  const toolReviewConfig = reviewConfigs?.find(rc => rc.action_name === toolName);
+  const allowedDecisions = toolReviewConfig?.allowed_decisions ?? ['approve', 'reject'];
+
   try {
     const interruptReason = (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || interruptMessage;
-    const hitlCard = chatService.buildHitlCard(config, toolName, interruptReason, { taskId: accumulatedTask.id });
+    const hitlCard = chatService.buildHitlCard(config, toolName, interruptReason, { taskId: accumulatedTask.id, toolName }, allowedDecisions, actionRequests);
 
     logger.info({ taskId: accumulatedTask?.id, toolNames }, `Posting HITL interrupt card to Google Chat`);
 
