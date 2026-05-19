@@ -339,6 +339,7 @@ class SkillRegistryService:
         files: list[SkillFile],
         visibility: str = "private",
         slug: str | None = None,
+        group_ids: list[int] | None = None,
     ) -> SkillRegistryEntry:
         """Create a new skill in the registry (authoring flow).
 
@@ -350,6 +351,7 @@ class SkillRegistryService:
             files: Skill files (must include SKILL.md)
             visibility: 'private' or 'public'
             slug: Optional explicit slug override. Auto-derived from name if omitted.
+            group_ids: Group IDs for group-visible skills.
 
         Returns:
             The created registry entry
@@ -374,6 +376,8 @@ class SkillRegistryService:
             "owner_id": actor.id,
             "created_by": actor.id,
         }
+        if group_ids is not None:
+            fields["group_ids"] = group_ids
 
         skill_id = await self.repo.create(db=db, actor=actor, fields=fields, returning="id")
         entry = await self.get_by_id(db, str(skill_id))
