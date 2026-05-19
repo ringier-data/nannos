@@ -262,6 +262,28 @@ class TestScimUsers:
         response = await scim_client.delete("/api/scim/v2/Users/nonexistent-id")
         assert response.status_code == 404
 
+    async def test_recreate_user_after_delete(self, scim_client, seed_user):
+        """After deleting a user, creating a new user with the same email should succeed."""
+        # Delete the user
+        response = await scim_client.delete(f"/api/scim/v2/Users/{seed_user}")
+        assert response.status_code == 204
+
+        # Recreate with the same email
+        response = await scim_client.post(
+            "/api/scim/v2/Users",
+            json={
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+                "userName": "scimuser@example.com",
+                "name": {"givenName": "Scim", "familyName": "User"},
+                "externalId": "ext-001",
+                "active": True,
+            },
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["userName"] == "scimuser@example.com"
+        assert data["id"] != seed_user  # new user ID
+
     async def test_list_users_sort_by_username(self, scim_client, pg_session):
         """sortBy=userName should sort users by email."""
         # Create two users with distinct emails
@@ -335,26 +357,35 @@ class TestScimUsers:
         )
         assert response.status_code == 201
         data = response.json()
-        assert data["userName"] == "tobias.siegrist@ringier.ch"
-        assert data["name"]["givenName"] == "Tobias"
-        assert data["name"]["familyName"] == "Siegrist"
-        assert data["active"] is True
-        assert data["emails"][0]["value"] == "tobias.siegrist@ringier.ch"
-        assert data["externalId"] == "u00006943"
+        expected = {
+            "schemas": [
+                "urn:ietf:params:scim:schemas:core:2.0:User",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+            ],
+            "userName": "tobias.siegrist@ringier.ch",
+            "name": {"givenName": "Tobias", "familyName": "Siegrist", "formatted": "Tobias Siegrist"},
+            "displayName": "Tobias Siegrist",
+            "active": True,
+            "emails": [
+                {"value": "tobias.siegrist@ringier.ch", "type": "work", "primary": True}
+            ],
+            "externalId": "u00006943",
+            "phoneNumbers": [{"value": "+41442596669", "type": "work"}],
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                "department": "IT Governance & Portfolio",
+                "costCenter": "101550007",
+            },
+        }
+        dynamic_keys = {"id", "meta"}
+        actual = {k: v for k, v in data.items() if k not in dynamic_keys}
+        assert actual == expected
 
-        # Verify extra attributes returned in the SCIM response
-        assert data["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
-        enterprise_ext = data["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]
-        assert enterprise_ext["department"] == "IT Governance & Portfolio"
-        assert enterprise_ext["costCenter"] == "101550007"
-        assert "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User" in data["schemas"]
-
-        # Verify attributes are also returned on GET
+        # Verify GET returns the same shape
         get_response = await scim_client.get(f"/api/scim/v2/Users/{data['id']}")
         assert get_response.status_code == 200
         get_data = get_response.json()
-        assert get_data["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
-        assert get_data["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]["department"] == "IT Governance & Portfolio"
+        get_actual = {k: v for k, v in get_data.items() if k not in dynamic_keys}
+        assert get_actual == expected
 
         # Verify scim_attributes stored in DB
         row = await pg_session.execute(
@@ -366,6 +397,114 @@ class TestScimUsers:
         assert attrs["phoneNumbers"] == [{"value": "+41442596669", "type": "work"}]
         assert attrs["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]["department"] == "IT Governance & Portfolio"
         assert attrs["urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]["costCenter"] == "101550007"
+
+    async def test_create_user_omada_payload(self, scim_client, pg_session):
+        """POST User with Omada-style payload (formatted name, enterprise extension)."""
+        response = await scim_client.post(
+            "/api/scim/v2/Users",
+            json={
+                "userName": "changed_2passwordtest@ringier.ch",
+                "name": {
+                    "givenName": "OmadaRoleTest",
+                    "familyName": "Test",
+                    "formatted": "OmadaRoleTest Test",
+                },
+                "active": "true",
+                "emails": [
+                    {
+                        "value": "changed_2passwordtest@ringier.ch",
+                        "type": "work",
+                        "primary": "true",
+                    }
+                ],
+                "externalId": "u99991234",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                    "department": "IT Governance & Portfolio",
+                    "costCenter": "101550007",
+                },
+                "schemas": [
+                    "urn:ietf:params:scim:schemas:core:2.0:User",
+                    "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+                ],
+            },
+        )
+        assert response.status_code == 201
+        data = response.json()
+        expected = {
+            "schemas": [
+                "urn:ietf:params:scim:schemas:core:2.0:User",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+            ],
+            "userName": "changed_2passwordtest@ringier.ch",
+            "name": {"givenName": "OmadaRoleTest", "familyName": "Test", "formatted": "OmadaRoleTest Test"},
+            "displayName": "OmadaRoleTest Test",
+            "active": True,
+            "emails": [
+                {"value": "changed_2passwordtest@ringier.ch", "type": "work", "primary": True}
+            ],
+            "externalId": "u99991234",
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                "department": "IT Governance & Portfolio",
+                "costCenter": "101550007",
+            },
+        }
+        # Strip dynamic fields for exact comparison
+        dynamic_keys = {"id", "meta"}
+        actual = {k: v for k, v in data.items() if k not in dynamic_keys}
+        assert actual == expected
+
+        # Update the user via PUT
+        user_id = data["id"]
+        response = await scim_client.put(
+            f"/api/scim/v2/Users/{user_id}",
+            json={
+                "userName": "changed_2passwordtest@ringier.ch",
+                "name": {
+                    "givenName": "UpdatedFirst",
+                    "familyName": "UpdatedLast",
+                    "formatted": "UpdatedFirst UpdatedLast",
+                },
+                "active": "true",
+                "emails": [
+                    {
+                        "value": "changed_2passwordtest@ringier.ch",
+                        "type": "work",
+                        "primary": "true",
+                    }
+                ],
+                "externalId": "u99991234",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                    "department": "Engineering",
+                    "costCenter": "200000001",
+                },
+                "schemas": [
+                    "urn:ietf:params:scim:schemas:core:2.0:User",
+                    "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+                ],
+            },
+        )
+        assert response.status_code == 200
+        update_data = response.json()
+        update_expected = {
+            "schemas": [
+                "urn:ietf:params:scim:schemas:core:2.0:User",
+                "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+            ],
+            "userName": "changed_2passwordtest@ringier.ch",
+            "name": {"givenName": "UpdatedFirst", "familyName": "UpdatedLast", "formatted": "UpdatedFirst UpdatedLast"},
+            "displayName": "UpdatedFirst UpdatedLast",
+            "active": True,
+            "emails": [
+                {"value": "changed_2passwordtest@ringier.ch", "type": "work", "primary": True}
+            ],
+            "externalId": "u99991234",
+            "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User": {
+                "department": "Engineering",
+                "costCenter": "200000001",
+            },
+        }
+        update_actual = {k: v for k, v in update_data.items() if k not in dynamic_keys}
+        assert update_actual == update_expected
 
 
 # ─── Group CRUD Endpoints ───────────────────────────────────────────────────
