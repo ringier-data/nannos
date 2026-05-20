@@ -85,6 +85,8 @@ _AZURE_MODELS: dict[str, dict] = {
         "model_name": "gpt-5.4-mini",
         "input_modes": ["text", "image"],
         "backend": "azure_openai",
+        "display_name": "GPT-5.4 Mini",
+        "description": "Next-generation reasoning with improved instruction following and coding capabilities",
     },
     "gpt-5.4-nano": {
         "api_version": "2025-01-01-preview",
@@ -92,6 +94,8 @@ _AZURE_MODELS: dict[str, dict] = {
         "model_name": "gpt-5.4-nano",
         "input_modes": ["text", "image"],
         "backend": "azure_openai",
+        "display_name": "GPT-5.4 Nano",
+        "description": "Ultra-lightweight next-gen model for high-throughput, low-latency tasks",
     },
 }
 
@@ -140,6 +144,8 @@ _GEMINI_MODELS: dict[str, dict] = {
         "model_id": "gemini-3.1-flash-lite-preview",
         "input_modes": ["text", "image", "audio", "video", "file"],
         "backend": "google",
+        "display_name": "Gemini 3.1 Flash Lite (Preview)",
+        "description": "Google's lightweight and cost-efficient model, supports multimodal input, supports thinking mode",
     },
 }
 
