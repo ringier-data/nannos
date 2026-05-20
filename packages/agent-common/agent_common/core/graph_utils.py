@@ -1,8 +1,7 @@
 """Shared agent graph utilities.
 
-Provides helpers shared between the main GP graph (GraphFactory._create_gp_graph)
-and dynamic local sub-agents (DynamicLocalAgentRunnable._ensure_agent) to avoid
-duplicating the common middleware stack.
+Provides helpers shared between the orchestrator, agent-runner and dynamic local sub-agents
+to avoid duplicating the common middleware stack.
 
 Key exports
 -----------
@@ -28,6 +27,10 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any, Optional
+
+import httpx
+from langchain_core.tools import ToolException
+from langgraph.errors import GraphBubbleUp
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import SandboxBackendProtocol
@@ -59,6 +62,37 @@ from agent_common.middleware.tool_status import ToolStatusMiddleware
 from agent_common.models.skill import ResolvedSkill
 
 logger = logging.getLogger(__name__)
+
+
+def _should_retry_tool_error(exc: Exception) -> bool:
+    """Determine if a tool exception is transient and worth retrying.
+
+    Only retries errors that may succeed on a subsequent attempt:
+    - HTTP 5xx server errors (temporary server issues)
+    - Network errors: connection failures, timeouts
+
+    Does NOT retry (non-transient / deterministic):
+    - GraphBubbleUp (LangGraph interrupt mechanism — must propagate)
+    - ToolException (MCP errors like need-credentials, 400 validation, ResponseBodyError)
+    - HTTP 4xx client errors (bad request, forbidden, not found)
+    - Any other exception type
+    """
+    # GraphBubbleUp is raised by interrupt() — it MUST propagate to pause the graph.
+    if isinstance(exc, GraphBubbleUp):
+        raise exc
+
+    if isinstance(exc, ToolException):
+        return False
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        # Only retry 5xx server errors (transient)
+        return exc.response.status_code >= 500
+
+    if isinstance(exc, httpx.HTTPError):
+        # Network-level errors (ConnectError, TimeoutException, etc.) are transient
+        return True
+
+    return False
 
 
 _DOCSTORE_HINT = (
@@ -212,6 +246,7 @@ def build_common_middleware_stack(
             ToolRetryMiddleware(
                 max_retries=5,
                 backoff_factor=2.0,
+                retry_on=_should_retry_tool_error,
             ),
         ]
 
