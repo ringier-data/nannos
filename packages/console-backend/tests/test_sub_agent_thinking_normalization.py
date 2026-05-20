@@ -111,14 +111,18 @@ class TestModelsSupportingThinking:
     def test_supported_models_set_contains_expected_models(self):
         """Test that the supported models set contains the expected models."""
         assert "claude-sonnet-4.5" in MODELS_SUPPORTING_THINKING
+        assert "claude-sonnet-4.6" in MODELS_SUPPORTING_THINKING
         assert "claude-haiku-4-5" in MODELS_SUPPORTING_THINKING
         assert "gemini-3.1-pro-preview" in MODELS_SUPPORTING_THINKING
+        assert "gemini-3.1-flash-lite-preview" in MODELS_SUPPORTING_THINKING
         assert "gemini-3-flash-preview" in MODELS_SUPPORTING_THINKING
 
     def test_unsupported_models_not_in_set(self):
         """Test that unsupported models are not in the set."""
         assert "gpt-4o" not in MODELS_SUPPORTING_THINKING
         assert "gpt-4o-mini" not in MODELS_SUPPORTING_THINKING
+        assert "gpt-5.4-mini" not in MODELS_SUPPORTING_THINKING
+        assert "gpt-5.4-nano" not in MODELS_SUPPORTING_THINKING
 
 
 class TestThinkingConfigScenarios:
