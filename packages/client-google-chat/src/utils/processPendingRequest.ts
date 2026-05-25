@@ -26,7 +26,7 @@ export async function processPendingRequest(
 
   try {
     // Notify user that auth succeeded and we're picking up their request
-    await chatService.sendTextMessage(
+    await chatService.sendPrivateTextMessage(
       projectId,
       spaceId,
       '✅ Authorization successful! Now processing your request...',

@@ -197,7 +197,6 @@ async function sendThinkingStatusMessage(
   projectId: string,
   spaceId: string,
   threadId: string,
-  userId: string,
 ) {
   const statusMessage = {
     thinking: `🧠 ${getSpinnerVerb() || 'Working'}...`,
@@ -207,10 +206,9 @@ async function sendThinkingStatusMessage(
   };
 
   try {
-    const immediateStatus = await chatService.sendPrivateTextMessage(
+    const immediateStatus = await chatService.sendTextMessage(
       projectId,
       spaceId,
-      userId,
       statusMessage.thinking,
       threadId,
     );
@@ -565,7 +563,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     }
 
     // Post an immediate "Working..." message so the user sees responsiveness before the A2A server sends its first status-update event.
-    const statusMessage = await sendThinkingStatusMessage(logger, chatService, projectId, spaceId, threadId, userId);
+    const statusMessage = await sendThinkingStatusMessage(logger, chatService, projectId, spaceId, threadId);
 
     // Context management: get existing context ID for this thread if it exists, so we can include it in the A2A request and keep the conversation threaded on the server side. We will update the context store with the new context ID and last processed message ID as we receive updates from the A2A server.
     const contextKey = contextStore.buildKey(projectId, spaceId, threadId);
