@@ -85,7 +85,7 @@ export async function getConfigFromEnv(): Promise<Config> {
     if (!process.env[envVarName]) {
       throw new Error(`Please provide ${envVarName}`);
     }
-    const secretEnvVar = `GOOGLE_CHAT_A2A_NOTIFICATION_SECRET_${project.name.toUpperCase().replace(/-/g, '_')}`;
+    const secretEnvVar = `A2A_NOTIFICATION_SECRET_${project.name.toUpperCase().replace(/-/g, '_')}`;
     googleChatConfigs.push({
       projectName: project.name,
       projectNumber: project.google_chat_app_id,

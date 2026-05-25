@@ -11,7 +11,7 @@
 
 import { Logger } from '../utils/logger.js';
 import { HandlerDependencies } from './types.js';
-import { Task, TextPart } from '@a2a-js/sdk';
+import { Task } from '@a2a-js/sdk';
 
 const logger = Logger.getLogger('a2aNotificationHandler');
 

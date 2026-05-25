@@ -8,7 +8,7 @@ const logger = Logger.getLogger('A2ANotificationAuth');
  * Middleware to validate A2A push notification tokens.
  *
  * Matches the X-A2A-Notification-Token header against per-project secrets
- * configured via GOOGLE_CHAT_A2A_NOTIFICATION_SECRET_<PROJECT_NAME> env vars.
+ * configured via A2A_NOTIFICATION_SECRET_<PROJECT_NAME> env vars.
  * On success, sets res.locals.projectNumber
  */
 export function createA2ANotificationAuthMiddleware(googleChatConfigs: Config['googleChatConfigs']) {
