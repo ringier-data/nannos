@@ -7,6 +7,7 @@ export interface UserAuthToken {
   tokenType: string; // Usually "Bearer"
   scope?: string; // Granted scopes
   idToken?: string; // OIDC ID token
+  oidcSub?: string; // OIDC subject identifier (Keycloak user sub)
   createdAt: number; // Unix timestamp when token was created
   updatedAt: number; // Unix timestamp when token was last updated
 }
@@ -35,9 +36,11 @@ export interface IUserAuthStorage {
       refreshToken?: string;
       expiresAt?: number;
       idToken?: string;
+      oidcSub?: string;
     }
   ): Promise<void>;
   hasValidToken(userId: string, projectId: string): Promise<boolean>;
+  findByOidcSub(oidcSub: string, projectId: string): Promise<UserAuthToken | null>;
 }
 
 /**

@@ -18,6 +18,7 @@ export interface Config {
     projectName: string;
     projectNumber: string; // GCP project number for verifying Google-signed tokens
     googleApplicationCredentials: any;
+    a2aNotificationSecret?: string; // Secret for validating A2A push notifications
   }[];
   readonly storage: StorageConfig;
   readonly aws: {
@@ -84,10 +85,12 @@ export async function getConfigFromEnv(): Promise<Config> {
     if (!process.env[envVarName]) {
       throw new Error(`Please provide ${envVarName}`);
     }
+    const secretEnvVar = `GOOGLE_CHAT_A2A_NOTIFICATION_SECRET_${project.name.toUpperCase().replace(/-/g, '_')}`;
     googleChatConfigs.push({
       projectName: project.name,
       projectNumber: project.google_chat_app_id,
       googleApplicationCredentials: JSON.parse(process.env[envVarName]!),
+      a2aNotificationSecret: process.env[secretEnvVar],
     });
   }
 

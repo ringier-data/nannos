@@ -148,7 +148,9 @@ export class OIDCClient {
   /**
    * Map openid-client token set to UserAuthToken
    */
-  private mapTokenSet(tokens: client.TokenEndpointResponse): Omit<UserAuthToken, 'userId' | 'projectId'> {
+  private mapTokenSet(
+    tokens: client.TokenEndpointResponse & client.TokenEndpointResponseHelpers
+  ): Omit<UserAuthToken, 'userId' | 'projectId'> {
     const now = Date.now();
     const expiresIn = tokens.expires_in ?? 3600; // Default to 1 hour if not provided
     const expiresAt = now + expiresIn * 1000;
@@ -160,6 +162,7 @@ export class OIDCClient {
       tokenType: tokens.token_type ?? 'Bearer',
       scope: tokens.scope,
       idToken: tokens.id_token,
+      oidcSub: tokens.claims()?.sub,
       createdAt: now,
       updatedAt: now,
     };

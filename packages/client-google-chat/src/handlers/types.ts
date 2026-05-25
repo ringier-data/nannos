@@ -2,6 +2,7 @@ import type {
   IContextStore,
   IPendingRequestStore,
   IInFlightTaskStore,
+  IUserAuthStorage,
 } from '../storage/types.js';
 
 import { A2AClientService } from "../services/a2aClientService.js";
@@ -19,6 +20,7 @@ export interface HandlerDependencies {
   pendingRequestStore: IPendingRequestStore;
   inFlightTaskStore: IInFlightTaskStore;
   fileStorageService: FileStorageService;
+  userAuthStorage: IUserAuthStorage;
   feedbackService?: FeedbackService;
   config: Config;
 }

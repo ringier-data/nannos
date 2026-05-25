@@ -104,6 +104,7 @@ export class UserAuthService {
         refreshToken: refreshedToken.refreshToken,
         expiresAt: refreshedToken.expiresAt,
         idToken: refreshedToken.idToken,
+        oidcSub: refreshedToken.oidcSub,
       });
 
       return refreshedToken.accessToken;

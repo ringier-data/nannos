@@ -470,6 +470,7 @@ class AgentRunner(BaseAgent):
                 result_meta = {
                     "scheduler_status": "condition_not_met",
                     "last_check_result": last_check_result,
+                    "user_sub": user_config.user_sub,
                 }
                 yield AgentStreamResponse(
                     state=TaskState.completed,
@@ -511,6 +512,7 @@ class AgentRunner(BaseAgent):
                     "error_message": error_message,
                     "last_check_result": last_check_result,
                     "agent_message": agent_message,
+                    "user_sub": user_config.user_sub,
                 }
                 yield AgentStreamResponse(
                     state=TaskState.failed,
@@ -522,6 +524,7 @@ class AgentRunner(BaseAgent):
             "scheduler_status": "success",
             "agent_message": agent_message,
             "last_check_result": last_check_result,
+            "user_sub": user_config.user_sub,
         }
         yield AgentStreamResponse(
             state=TaskState.completed,

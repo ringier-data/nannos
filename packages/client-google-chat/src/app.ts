@@ -10,6 +10,7 @@ import { FileStorageService } from './services/fileStorageService.js';
 import { GoogleChatService } from './services/googleChatService.js';
 import { FeedbackService } from './services/feedbackService.js';
 import { createGoogleChatAuthMiddleware } from './middleware/googleChatAuth.js';
+import { createA2ANotificationAuthMiddleware } from './middleware/a2aNotificationAuth.js';
 import { handleOAuthCallback, generateCallbackHTML } from './utils/oauthCallback.js';
 import { processPendingRequest } from './utils/processPendingRequest.js';
 import { recoverOrphanedTasks } from './utils/taskRecovery.js';
@@ -18,6 +19,8 @@ import type { GoogleChatAttachment } from './utils/fileUtils.js';
 import { HandlerDependencies } from './handlers/types.js';
 import { AppCommand, handleAppCommand } from './handlers/commandHandler.js';
 import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClickedHandler.js';
+import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
+import { Task } from '@a2a-js/sdk';
 
 // Initialize logger early
 const logger = Logger.getLogger('app');
@@ -172,6 +175,7 @@ function setupServerTimeouts(server: Server, config: Config) {
       contextStore: storage.context,
       pendingRequestStore: storage.pendingRequest,
       inFlightTaskStore: storage.inFlightTask,
+      userAuthStorage: storage.userAuth,
       fileStorageService,
       feedbackService,
       config,
@@ -419,10 +423,35 @@ function setupServerTimeouts(server: Server, config: Config) {
       }
     });
 
-    // A2A webhook callback endpoint
-    app.post('/api/v1/a2a/callback', async (_req: Request, _res: Response) => {
-      logger.warn('Received request on /api/v1/a2a/callback — NOT IMPLEMENTED YET');
-    });
+    app.post(
+      '/api/v1/a2a/callback',
+      createA2ANotificationAuthMiddleware(config.googleChatConfigs),
+      async (req: Request, res: Response) => {
+        const task = req.body as Task;
+        const projectId = res.locals.projectNumber as string;
+        if (!task || task.kind !== 'task' || !task.status) {
+          logger.warn('[A2ACallback] Invalid task payload');
+          res.status(400).json({ error: 'Invalid task payload' });
+          return;
+        }
+
+        // Only process completed/failed notifications
+        const state = task.status.state;
+        if (state !== 'completed' && state !== 'failed') {
+          logger.debug(`[A2ACallback] Ignoring notification with state=${state}`);
+          return;
+        }
+
+        logger.info(
+          `[A2ACallback] Processing ${state} notification for project=${projectId} taskId=${task.id}`
+        );
+
+        // Respond immediately to acknowledge receipt
+        res.status(200).json({ acknowledged: true });
+
+        await handleA2ANotification(task, projectId, handlerDeps);
+      }
+    );
 
     // -----------------------------------------------------------------------
     // Start server
