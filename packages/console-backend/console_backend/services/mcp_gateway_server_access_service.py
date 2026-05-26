@@ -178,8 +178,7 @@ class McpGatewayServerAccessService:
         for item in response.permissions:
             permissions.append(
                 McpGatewayServerPermission(
-                    server_slug=item.server.slug,
-                    server_name=item.server.description or item.server.slug,
+                    server_slug=item.server_slug,
                     role=str(item.permission.role),
                 )
             )

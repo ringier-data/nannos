@@ -673,7 +673,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastapi-mcp", specifier = ">=0.4.0" },
-    { name = "gatana-client", specifier = "==1.1.3" },
+    { name = "gatana-client", specifier = "===1.1.4" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },
     { name = "google-auth", specifier = ">=2.25.0" },
     { name = "google-genai", specifier = ">=1.0.0" },
@@ -1070,16 +1070,16 @@ wheels = [
 
 [[package]]
 name = "gatana-client"
-version = "1.1.3"
+version = "1.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "httpx" },
     { name = "python-dateutil" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/18/b9/0105808684d6fd5e838ce9d09feae2ddf767666b9c45813c7adeac0031d5/gatana_client-1.1.3.tar.gz", hash = "sha256:39601ce4d3e808f63814ea4e4920aec92c4162d3d22c478299ea6d1604e2c3cd", size = 101433, upload-time = "2026-05-13T09:39:11.314Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/25/270853517471b76effe48c336e9433cc081d52bb0f8da5f43d1a51ff48f4/gatana_client-1.1.4.tar.gz", hash = "sha256:7b8234764607366f6b797e33402801d88340245e7fa12657039df7e96ff87e6b", size = 100234, upload-time = "2026-05-20T08:07:21.93Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/28/17832e3e8640204673c5613812ee8870499a2386a85e4fee2a2c12a694f8/gatana_client-1.1.3-py3-none-any.whl", hash = "sha256:fae2442339700209661197497dbeb5ac3770de684235a88147d90e46cc521c26", size = 379420, upload-time = "2026-05-13T09:39:09.653Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/5e/c000fef2ed3aaabb57b7ebdd7c78468191da2cceb7da1c427997330b5080/gatana_client-1.1.4-py3-none-any.whl", hash = "sha256:3bf512d85bda353be3f01a42aca1184ed51ba7b0ecc966ea6c7a7f6364f80f6c", size = 377077, upload-time = "2026-05-20T08:07:20.481Z" },
 ]
 
 [[package]]
