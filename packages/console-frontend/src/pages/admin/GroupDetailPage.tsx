@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2 } from 'lucide-react';
+import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2, Globe } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { config } from '@/config';
@@ -161,7 +161,7 @@ export function GroupDetailPage() {
 
   const { data: availableServersData } = useQuery({
     ...consoleListMcpServersOptions(),
-    enabled: grantServerDialogOpen,
+    enabled: !isNaN(groupId) && isAdminView && gatewayStatus?.managed === true,
   });
 
   const updateMutation = useMutation({
@@ -319,9 +319,15 @@ export function GroupDetailPage() {
 
   const gatewayPermissions = gatewayServers?.permissions ?? [];
   const grantedSlugs = new Set(gatewayPermissions.map((p) => p.server_slug));
-  // Available servers use "name" field which is actually the slug from Gatana
-  const availableServers = (availableServersData?.servers ?? [])
+  // All servers from gateway — "name" field is actually the slug
+  const allGatewayServers = (availableServersData?.servers ?? []) as Array<{ name: string; description?: string | null; visibility?: string | null }>;
+  // Organization-visibility servers are always shown (available to everyone)
+  const orgServers = allGatewayServers.filter((s) => s.visibility === 'organization' && s.name !== 'console');
+  const orgServerSlugs = new Set(orgServers.map((s) => s.name));
+  // Available for granting: private servers not already granted and not org-level
+  const availableServers = allGatewayServers
     .filter((s) => s.name !== 'console')
+    .filter((s) => s.visibility !== 'organization')
     .filter((s) => !grantedSlugs.has(s.name));
 
   const startEditing = () => {
@@ -606,31 +612,49 @@ export function GroupDetailPage() {
                         Loading...
                       </TableCell>
                     </TableRow>
-                  ) : gatewayPermissions.length === 0 ? (
+                  ) : gatewayPermissions.length === 0 && orgServers.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={3} className="text-center py-8 text-muted-foreground">
                         No server access configured.
                       </TableCell>
                     </TableRow>
                   ) : (
-                    gatewayPermissions.map((perm) => (
-                      <TableRow key={perm.server_slug}>
-                        <TableCell className="font-medium">{perm.server_slug}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline">{perm.role}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => revokeServerAccessMutation.mutate(perm.server_slug)}
-                            disabled={revokeServerAccessMutation.isPending}
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))
+                    <>
+                      {orgServers.map((server) => (
+                        <TableRow key={server.name} className="bg-muted/30">
+                          <TableCell className="font-medium">
+                            <span className="flex items-center gap-2">
+                              <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                              {server.name}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="secondary">organization</Badge>
+                          </TableCell>
+                          <TableCell />
+                        </TableRow>
+                      ))}
+                      {gatewayPermissions
+                        .filter((perm) => !orgServerSlugs.has(perm.server_slug))
+                        .map((perm) => (
+                        <TableRow key={perm.server_slug}>
+                          <TableCell className="font-medium">{perm.server_slug}</TableCell>
+                          <TableCell>
+                            <Badge variant="outline">{perm.role}</Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => revokeServerAccessMutation.mutate(perm.server_slug)}
+                              disabled={revokeServerAccessMutation.isPending}
+                            >
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </>
                   )}
                 </TableBody>
               </Table>

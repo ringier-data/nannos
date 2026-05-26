@@ -387,8 +387,18 @@ build-dev pkg:
 pkg-deploy pkg:
     #!/usr/bin/env bash
     case "{{ pkg }}" in
-      console-backend|console-frontend) echo "console" ;;
+      console|console-backend|console-frontend) echo "console" ;;
       client-slack|client-slack-frontend) echo "client-slack" ;;
+      *) echo "{{ pkg }}" ;;
+    esac
+
+# Expand a deploy group name to its constituent buildable packages
+[private]
+pkg-group pkg:
+    #!/usr/bin/env bash
+    case "{{ pkg }}" in
+      console) echo "console-backend console-frontend" ;;
+      client-slack) echo "client-slack client-slack-frontend" ;;
       *) echo "{{ pkg }}" ;;
     esac
 
@@ -499,31 +509,40 @@ deploy-dev pkg:
     CYAN='\033[1;36m' GREEN='\033[1;32m' DIM='\033[2m' RED='\033[1;31m' RESET='\033[0m'
 
     source scripts/release-helpers.sh
-    VERSION="$(get_package_version "{{ pkg }}")"
-    TAG="v${VERSION}-next.{{ build_ts }}"
-    IMAGE=$(just pkg-image "{{ pkg }}")
+    TS="{{ build_ts }}"
+    PACKAGES=$(just pkg-group "{{ pkg }}")
 
-    # Build & push with the computed tag
-    just tag="$TAG" push=true build-pkg "{{ pkg }}"
+    # Phase 1: Build & push all packages in the group
+    for p in $PACKAGES; do
+      VERSION="$(get_package_version "$p")"
+      TAG="v${VERSION}-next.${TS}"
+      IMAGE=$(just pkg-image "$p")
 
-    # Wait for the tag to be visible in the registry before triggering Flux
-    printf "${CYAN}⏳ Waiting for %s:%s to be available in registry...${RESET}" "$IMAGE" "$TAG"
-    for i in $(seq 1 30); do
-      if docker manifest inspect "${IMAGE}:${TAG}" > /dev/null 2>&1; then
-        printf "${GREEN} ✓${RESET}\n"
-        break
-      fi
-      if [[ $i -eq 30 ]]; then
-        printf "\n${RED}❌ Tag %s not visible in registry after 30s. Proceeding anyway...${RESET}\n" "$TAG"
-      fi
-      sleep 1
+      just tag="$TAG" push=true build-pkg "$p"
+
+      # Wait for the tag to be visible in the registry before triggering Flux
+      printf "${CYAN}⏳ Waiting for %s:%s to be available in registry...${RESET}" "$IMAGE" "$TAG"
+      for i in $(seq 1 30); do
+        if docker manifest inspect "${IMAGE}:${TAG}" > /dev/null 2>&1; then
+          printf "${GREEN} ✓${RESET}\n"
+          break
+        fi
+        if [[ $i -eq 30 ]]; then
+          printf "\n${RED}❌ Tag %s not visible in registry after 30s. Proceeding anyway...${RESET}\n" "$TAG"
+        fi
+        sleep 1
+      done
     done
 
-    FLUX_NAME="nannos-{{ pkg }}"
-    flux reconcile image repository "$FLUX_NAME"
-    flux reconcile image policy "$FLUX_NAME"
+    # Phase 2: Reconcile Flux for all packages in the group
+    for p in $PACKAGES; do
+      FLUX_NAME="nannos-${p}"
+      flux reconcile image repository "$FLUX_NAME"
+      flux reconcile image policy "$FLUX_NAME"
+    done
     flux reconcile kustomization nannos-app --with-source
 
+    # Phase 3: Wait for rollout (deduplicated — group members share a deployment)
     DEPLOY=$(just pkg-deploy "{{ pkg }}")
     printf "${CYAN}⏳ Waiting for deployment/%s rollout...${RESET}\n" "$DEPLOY"
     kubectl -n nannos rollout status "deployment/$DEPLOY" --timeout=300s

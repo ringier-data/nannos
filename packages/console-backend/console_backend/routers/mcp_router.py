@@ -38,6 +38,7 @@ class MCPServer(BaseModel):
 
     name: str
     description: str | None = None
+    visibility: str | None = None
 
 
 class MCPServersResponse(BaseModel):
@@ -478,13 +479,13 @@ async def list_mcp_servers(
             # Note: Gateway returns 'slug' and doesn't include tool counts
             # We'll set tool_count to 0 for now (could fetch tools per server if needed)
             servers = [
-                MCPServer(name=server.get("slug", "unknown"), description=server.get("description"))
+                MCPServer(name=server.get("slug", "unknown"), description=server.get("description"), visibility=server.get("visibility"))
                 for server in servers_data
                 if server.get("slug") and server.get("isEnabled", False)
             ]
 
             # Append console backend as a virtual MCP server
-            servers.append(MCPServer(name="console", description="Console backend tools (bug reports, sub-agents)"))
+            servers.append(MCPServer(name="console", description="Console backend tools (bug reports, sub-agents)", visibility="organization"))
 
             logger.info(f"Discovered {len(servers)} MCP servers from gateway")
 

@@ -1597,6 +1597,10 @@ export type McpServer = {
      * Description
      */
     description?: string | null;
+    /**
+     * Visibility
+     */
+    visibility?: string | null;
 };
 
 /**
@@ -1735,10 +1739,6 @@ export type McpGatewayServerPermission = {
      * Server Slug
      */
     server_slug: string;
-    /**
-     * Server Name
-     */
-    server_name: string;
     /**
      * Role
      */

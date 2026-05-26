@@ -16,7 +16,6 @@ class McpGatewayServerPermission(BaseModel):
     """A single server permission entry."""
 
     server_slug: str
-    server_name: str
     role: str
 
 
