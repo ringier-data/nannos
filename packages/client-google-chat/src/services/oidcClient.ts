@@ -155,16 +155,21 @@ export class OIDCClient {
     const expiresIn = tokens.expires_in ?? 3600; // Default to 1 hour if not provided
     const expiresAt = now + expiresIn * 1000;
 
-    return {
+    const result: Omit<UserAuthToken, 'userId' | 'projectId'> = {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresAt,
       tokenType: tokens.token_type ?? 'Bearer',
       scope: tokens.scope,
       idToken: tokens.id_token,
-      oidcSub: tokens.claims()?.sub,
       createdAt: now,
       updatedAt: now,
     };
+
+    if (tokens.id_token) {
+      result.oidcSub = tokens.claims()?.sub
+    }
+
+    return result;
   }
 }

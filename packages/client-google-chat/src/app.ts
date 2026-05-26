@@ -439,6 +439,7 @@ function setupServerTimeouts(server: Server, config: Config) {
         const state = task.status.state;
         if (state !== 'completed' && state !== 'failed') {
           logger.debug(`[A2ACallback] Ignoring notification with state=${state}`);
+          res.status(200).json({ acknowledged: true });
           return;
         }
 
