@@ -6,18 +6,42 @@ registry adapters (skills.sh, self-hosted) for search/discovery.
 """
 
 from datetime import datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Registry visibility: who can discover and activate the skill.
+RegistryVisibility = Literal["private", "public"]
+
+# Registry scope: what the registry entry represents.
+#   - standalone: agent-agnostic skill (can be activated on any agent)
+#   - sub-agent: skill tied to a specific sub-agent's config
+RegistryScope = Literal["standalone", "sub-agent"]
 
 
 class SkillFile(BaseModel):
     """A single file within a skill (SKILL.md, examples, etc.)."""
 
     path: str = Field(description="Relative file path within the skill directory")
-    contents: str = Field(description="Full text content of the file")
+    content: str = Field(description="Full text content of the file")
     encoding: str | None = Field(
         default=None, description="Content encoding: None for UTF-8 text, 'base64' for binary files"
     )
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        """Reject path traversal, absolute paths, and excessive depth."""
+        if v.startswith("/") or v.startswith("~"):
+            raise ValueError(f"Skill file path must be relative: {v}")
+        segments = v.split("/")
+        if ".." in segments:
+            raise ValueError(f"Path traversal not allowed: {v}")
+        if len(segments) > 6:
+            raise ValueError(f"Skill file path exceeds max depth (6): {v}")
+        if not v or not all(segments):
+            raise ValueError(f"Invalid skill file path: {v}")
+        return v
 
 
 class SkillSearchResult(BaseModel):
@@ -33,7 +57,7 @@ class SkillSearchResult(BaseModel):
     installs: int = Field(default=0, description="Total install count (registry only, 0 for Git sources)")
     source_type: str = Field(default="github", description="'github' or 'well-known'")
     author: str | None = Field(default=None, description="Display name of the skill author (registry only)")
-    visibility: str | None = Field(default=None, description="'private' or 'public' (registry only)")
+    visibility: RegistryVisibility | None = Field(default=None, description="'private' or 'public' (registry only)")
     install_url: str | None = Field(default=None, description="Git clone URL or registry page URL")
     url: str | None = Field(default=None, description="Direct link to skill (GitHub tree URL or registry page)")
 
@@ -89,6 +113,15 @@ class SkillAuditResponse(BaseModel):
     audits: list[SkillAuditEntry] = Field(default_factory=list, description="Security audit results")
 
 
+# --- Activation scope ---
+
+# Activation scope: who "owns" this skill activation.
+#   personal  — activated by/for a specific user
+#   group     — activated by/for a user group (shared)
+#   sub-agent — part of the sub-agent's own config (visible to all users)
+ActivationScope = Literal["personal", "group", "sub-agent"]
+
+
 # --- Import models ---
 
 
@@ -124,8 +157,8 @@ class SkillImportRequest(BaseModel):
     agent: str | None = Field(
         default=None, description="Target sub-agent name. If omitted, skill is added to registry only (no activation)."
     )
-    scope: str = Field(
-        default="default", description="Visibility/activation scope: 'personal', 'group', or 'default' (global)"
+    scope: ActivationScope = Field(
+        default="sub-agent", description="Activation scope: 'personal', 'group', or 'sub-agent' (baked into config)"
     )
     group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
     overwrite: bool = Field(default=False, description="Overwrite existing skill with same name")
@@ -174,7 +207,7 @@ class SkillImportResponse(BaseModel):
 
     skill_name: str = Field(description="Imported skill name")
     agent: str | None = Field(default=None, description="Target sub-agent name (None if registry-only)")
-    scope: str = Field(description="Visibility/activation scope")
+    scope: ActivationScope = Field(description="Activation scope")
     source: SkillSourceInfo = Field(description="Provenance metadata")
     files_count: int = Field(description="Total number of files imported (including SKILL.md)")
     overwritten: bool = Field(default=False, description="Whether an existing skill was overwritten")
@@ -190,14 +223,18 @@ class SkillActivation(BaseModel):
     id: int
     sub_agent_id: int
     registry_id: str = Field(description="UUID of the registry entry")
-    scope: str = Field(description="'personal' or 'group'")
+    scope: ActivationScope
     user_id: str | None = None
     group_id: int | None = None
     content_hash: str = Field(description="Pinned content hash at activation time")
-    locked: bool = Field(default=False, description="True if managed by config version")
     config_version_id: int | None = None
     activated_at: datetime
     activated_by: str
+
+    @field_validator("registry_id", mode="before")
+    @classmethod
+    def _coerce_registry_id(cls, v: Any) -> str:
+        return str(v) if v is not None else v
 
 
 class SkillActivationWithStatus(BaseModel):
@@ -206,12 +243,11 @@ class SkillActivationWithStatus(BaseModel):
     id: int
     sub_agent_id: int
     registry_id: str
-    scope: str
+    scope: ActivationScope
     user_id: str | None = None
     group_id: int | None = None
     group_name: str | None = None
     content_hash: str
-    locked: bool = False
     activated_at: datetime
     activated_by: str
     # Joined from skill_registry
@@ -230,7 +266,7 @@ class SkillActivationRequest(BaseModel):
 
     registry_id: str = Field(description="UUID of the skill in the registry")
     sub_agent_id: int = Field(description="Target sub-agent ID")
-    scope: str = Field(description="'personal' or 'group'")
+    scope: ActivationScope
     group_id: int | None = Field(default=None, description="Group ID (required when scope='group')")
 
 
@@ -241,10 +277,32 @@ class SkillActivationListResponse(BaseModel):
     total: int = 0
 
 
-class SkillRegistryEntry(BaseModel):
-    """A full registry entry for authoring/editing views."""
+class SkillRegistryCreateRequest(BaseModel):
+    """Request to create a new skill in the registry."""
 
-    id: str = Field(description="UUID")
+    name: str = Field(description="Skill name (will be slugified)")
+    description: str = Field(default="", description="What the skill does")
+    files: list[SkillFile] = Field(description="Skill files (must include SKILL.md content)")
+    visibility: RegistryVisibility = Field(default="private", description="'private' or 'public'")
+
+
+class SkillRegistryUpdateRequest(BaseModel):
+    """Request to update a skill in the registry."""
+
+    description: str | None = Field(default=None, description="Updated description")
+    files: list[SkillFile] | None = Field(default=None, description="Updated files (replaces all)")
+
+
+# --- Internal DB row models ---
+
+
+class SkillRegistryEntry(BaseModel):
+    """Skill registry entry as returned by service queries.
+
+    Includes table columns plus joined/computed fields (e.g. author_name).
+    """
+
+    id: str
     name: str
     slug: str
     description: str | None = None
@@ -254,29 +312,282 @@ class SkillRegistryEntry(BaseModel):
     source_path: str | None = None
     files: list[SkillFile] = Field(default_factory=list)
     content_hash: str
-    visibility: str = Field(description="'private', 'group', or 'public'")
-    owner_id: str | None = None
-    group_ids: list[int] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     security_verdict: str | None = None
+    visibility: RegistryVisibility
+    scope: RegistryScope | None = None
+    sub_agent_id: int | None = None
+    sandbox_required: bool = False
+    owner_id: str | None = None
     created_by: str
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    author_name: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _coerce_id(cls, v: Any) -> str:
+        return str(v) if v is not None else v
+
+    @field_validator("files", mode="before")
+    @classmethod
+    def _coerce_files(cls, v: Any) -> list:
+        return v if v is not None else []
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _coerce_metadata(cls, v: Any) -> dict:
+        return v if v is not None else {}
 
 
-class SkillRegistryCreateRequest(BaseModel):
-    """Request to create a new skill in the registry."""
+class RegistryRef(BaseModel):
+    """Reference to a registry skill in a config version's skills list."""
 
-    name: str = Field(description="Skill name (will be slugified)")
-    description: str = Field(default="", description="What the skill does")
-    files: list[SkillFile] = Field(description="Skill files (must include SKILL.md content)")
-    visibility: str = Field(default="private", description="'private', 'group', or 'public'")
-    group_ids: list[int] = Field(
-        default_factory=list, description="Groups that can see this skill (when visibility='group')"
+    registry_id: str
+    name: str
+
+
+class SkillVersionSummary(BaseModel):
+    """Summary of a skill version (for version history listing)."""
+
+    content_hash: str
+    description: str | None = None
+    created_by: str
+    created_at: datetime
+
+
+class SkillVersionDetail(BaseModel):
+    """Full detail of a skill version snapshot."""
+
+    files: list[SkillFile] = Field(default_factory=list)
+    content_hash: str
+    description: str | None = None
+    created_by: str
+    created_at: datetime
+
+    @field_validator("files", mode="before")
+    @classmethod
+    def _coerce_files(cls, v: Any) -> list:
+        return v if v is not None else []
+
+
+# --- Skill UI/MCP models ---
+
+
+class SkillFileSummary(BaseModel):
+    """Summary of a file within a skill folder."""
+
+    path: str = Field(description="Relative path within the skill folder (e.g., 'scripts/check.py')")
+
+
+class SkillSummary(BaseModel):
+    """Summary of a skill file (for listing)."""
+
+    name: str = Field(description="Skill identifier (lowercase, hyphens, per SKILL.md spec)")
+    title: str = Field(description="Skill name from frontmatter (or first heading for legacy)")
+    description: str = Field(
+        default="", description="Description from frontmatter (what the skill does and when to use it)"
+    )
+    scope: ActivationScope = Field(description="'personal', 'group', or 'sub-agent'")
+    file_count: int = Field(default=0, description="Number of bundled files (excluding SKILL.md)")
+    group_id: str | None = Field(default=None, description="Group ID (present for group scope)")
+    group_name: str | None = Field(default=None, description="Group display name (present for group scope)")
+
+
+class SkillDetail(BaseModel):
+    """Full skill file content."""
+
+    name: str
+    scope: ActivationScope
+    content: str = Field(description="Full SKILL.md content (frontmatter + body)")
+    files: list[SkillFileSummary] = Field(default_factory=list, description="Bundled file paths (excluding SKILL.md)")
+
+
+class McpSkillFile(BaseModel):
+    """A file to bundle with a skill."""
+
+    path: str = Field(description="Relative path within the skill folder (e.g., 'scripts/check.py')")
+    content: str = Field(description="File content (text)")
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        """Reject path traversal, absolute paths, excessive depth, and SKILL.md."""
+        if v.startswith("/") or v.startswith("~"):
+            raise ValueError(f"Skill file path must be relative: {v}")
+        segments = v.split("/")
+        if ".." in segments:
+            raise ValueError(f"Path traversal not allowed: {v}")
+        if len(segments) > 6:
+            raise ValueError(f"Skill file path exceeds max depth (6): {v}")
+        if not v or not all(segments):
+            raise ValueError(f"Invalid skill file path: {v}")
+        if v == "SKILL.md":
+            raise ValueError(
+                "Cannot use 'SKILL.md' as a file path — it is the skill entry point managed via create/update skill."
+            )
+        return v
+
+
+# Constraints for skill file operations
+MAX_SKILL_FILES = 20
+MAX_SKILL_FILE_SIZE_BYTES = 256 * 1024  # 256KB
+
+
+class SkillCreate(BaseModel):
+    """Request body for creating a new skill."""
+
+    name: str = Field(description="Skill identifier (lowercase letters, numbers, hyphens only, per SKILL.md spec)")
+    description: str = Field(default="", description="What the skill does and when to use it (shown in skill index)")
+    content: str = Field(description="Skill instructions body (Markdown). Frontmatter is generated automatically.")
+    files: list[McpSkillFile] | None = Field(default=None, description="Optional files to bundle with the skill")
+
+
+class SkillUpdate(BaseModel):
+    """Request body for updating a skill."""
+
+    content: str = Field(description="Full Markdown content to write")
+    files: list[McpSkillFile] | None = Field(
+        default=None,
+        description="If provided, replaces ALL bundled files. If omitted, existing files are untouched.",
     )
 
 
-class SkillRegistryUpdateRequest(BaseModel):
-    """Request to update a skill in the registry."""
+class SkillListResponse(BaseModel):
+    """Response for listing skills."""
 
+    items: list[SkillSummary] = Field(default_factory=list)
+
+
+# --- MCP Tool Request/Response Models ---
+
+
+class McpSkillCreate(BaseModel):
+    """Request body for the console_create_skill MCP tool.
+
+    Creates a skill in the registry and auto-activates it on the calling agent.
+    The skill is immediately usable after creation.
+    """
+
+    agent_name: str = Field(
+        default="self",
+        description="Target sub-agent name. Defaults to 'self' (the calling agent).",
+    )
+    scope: ActivationScope = Field(
+        description="Activation scope: 'personal' (user-only), 'group' (shared with group), or 'sub-agent' (baked into sub-agent config for all users)",
+    )
+    skill_name: str = Field(description="Skill identifier (lowercase letters, numbers, hyphens only)")
+    description: str = Field(default="", description="What the skill does and when to use it")
+    body: str = Field(description="Skill instructions body (Markdown)")
+    files: list[McpSkillFile] | None = Field(default=None, description="Optional files to bundle with the skill")
+    group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
+    visibility: RegistryVisibility = Field(
+        default="private",
+        description="Registry visibility: 'private' (only you) or 'public' (everyone)",
+    )
+
+
+class McpSkillUpdate(BaseModel):
+    """Request body for the console_update_skill MCP tool.
+
+    Updates a skill in the registry and auto-refreshes the calling agent's
+    own activation. Other consumers' activations remain pinned.
+    """
+
+    agent_name: str = Field(
+        default="self",
+        description="Target sub-agent name. Defaults to 'self' (the calling agent).",
+    )
+    scope: ActivationScope = Field(
+        description="Scope of the skill to update: 'personal', 'group', or 'sub-agent'",
+    )
+    skill_name: str = Field(description="Skill identifier to update")
     description: str | None = Field(default=None, description="Updated description")
-    files: list[SkillFile] | None = Field(default=None, description="Updated files (replaces all)")
+    body: str | None = Field(default=None, description="Updated skill instructions body (Markdown)")
+    content: str | None = Field(
+        default=None,
+        description="Full SKILL.md content including frontmatter. Mutually exclusive with body.",
+    )
+    files: list[McpSkillFile] | None = Field(
+        default=None,
+        description="If provided, replaces ALL bundled files. If omitted, existing files are untouched.",
+    )
+    group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
+    registry_id: str | None = Field(default=None, description="Registry entry UUID (alternative to skill_name lookup)")
+
+
+class McpSkillRemove(BaseModel):
+    """Request body for the console_remove_skill MCP tool.
+
+    Deactivates a skill from the calling agent. The registry entry is preserved
+    for other consumers.
+    """
+
+    agent_name: str = Field(
+        default="self",
+        description="Target sub-agent name. Defaults to 'self' (the calling agent).",
+    )
+    scope: ActivationScope = Field(description="Scope of the skill to remove: 'personal', 'group', or 'sub-agent'")
+    skill_name: str = Field(description="Skill identifier to deactivate")
+    group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
+    registry_id: str | None = Field(default=None, description="Registry entry UUID (alternative to skill_name lookup)")
+
+
+class McpSkillWriteFile(BaseModel):
+    """Request body for the console_write_skill_file MCP tool."""
+
+    agent_name: str = Field(
+        default="self",
+        description="Target sub-agent name. Defaults to 'self' (the calling agent).",
+    )
+    scope: ActivationScope = Field(description="Scope of the skill: 'personal', 'group', or 'sub-agent'")
+    skill_name: str = Field(description="Skill identifier that the file belongs to")
+    file_path: str = Field(description="Relative path within the skill folder (e.g., 'scripts/check.py')")
+    content: str = Field(description="File content (text)")
+    group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
+    registry_id: str | None = Field(default=None, description="Registry entry UUID (alternative to skill_name lookup)")
+
+
+class McpSkillDeleteFile(BaseModel):
+    """Request body for the console_delete_skill_file MCP tool."""
+
+    agent_name: str = Field(
+        default="self",
+        description="Target sub-agent name. Defaults to 'self' (the calling agent).",
+    )
+    scope: ActivationScope = Field(description="Scope of the skill: 'personal', 'group', or 'sub-agent'")
+    skill_name: str = Field(description="Skill identifier that the file belongs to")
+    file_path: str = Field(description="Relative path of the file to delete (e.g., 'scripts/check.py')")
+    group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
+    registry_id: str | None = Field(default=None, description="Registry entry UUID (alternative to skill_name lookup)")
+
+
+class McpSkillResponse(BaseModel):
+    """Response from MCP skill operations."""
+
+    skill_name: str
+    scope: ActivationScope
+    agent_name: str
+    message: str
+    registry_id: str | None = Field(default=None, description="Registry entry UUID (for create/update operations)")
+
+
+class McpSkillActivate(BaseModel):
+    """Request body for the console_activate_skill MCP tool.
+
+    Activates an existing registry skill on the calling agent.
+    Use this to adopt a skill created by someone else.
+    """
+
+    agent_name: str = Field(
+        default="self",
+        description="Target sub-agent name. Defaults to 'self' (the calling agent).",
+    )
+    registry_id: str | None = Field(default=None, description="Registry entry UUID to activate")
+    skill_name: str | None = Field(
+        default=None, description="Skill name to search in registry (alternative to registry_id)"
+    )
+    scope: ActivationScope = Field(
+        default="personal", description="Activation scope: 'personal', 'group', or 'sub-agent'"
+    )
+    group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")

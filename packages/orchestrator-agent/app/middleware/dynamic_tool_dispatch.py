@@ -235,8 +235,15 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             if isinstance(runnable, DynamicLocalAgentRunnable):
                 perm = runnable.config.effective_permission
                 if runnable.config.skills:
-                    skill_lines = [f"  - {s.name}: {s.description}" for s in runnable.config.skills]
-                    skills_section = "\n<skills>\n" + "\n".join(skill_lines) + "\n</skills>"
+                    skill_lines = []
+                    for s in runnable.config.skills:
+                        if s.name:
+                            line = f"  - {s.name}: {s.description}"
+                            skill_lines.append(line)
+                        else:
+                            logger.warning(f"Sub-agent '{name}' has a skill with no name; skipping in description")
+                    if skill_lines:
+                        skills_section = "\n<skills>\n" + "\n".join(skill_lines) + "\n</skills>"
             perm_attr = f' permission="{perm}"' if perm else ""
             descriptions.append(f'<agent name="{name}"{perm_attr}>\n{desc}{skills_section}\n</agent>')
             names.append(name)

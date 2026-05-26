@@ -5,11 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from console_backend.models.playbook import PlaybookUpdate, SkillCreate, SkillUpdate
+from console_backend.models.playbook import PlaybookUpdate
+from console_backend.models.skills_registry import SkillCreate, SkillUpdate
 from console_backend.models.user import User, UserRole
 from console_backend.routers.playbook_router import (
-    _resolve_group,
-    _validate_skill_name,
     create_skill,
     delete_playbook,
     delete_skill,
@@ -19,6 +18,10 @@ from console_backend.routers.playbook_router import (
     list_skills,
     update_playbook,
     update_skill,
+)
+from console_backend.routers.skills_registry_router import (
+    _resolve_group,
+    _validate_skill_name,
 )
 
 # --- Fixtures ---

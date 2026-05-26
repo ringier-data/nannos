@@ -343,7 +343,7 @@ class PlaybookService:
             ValueError: If constraints are violated.
             RuntimeError: If service is not configured.
         """
-        from console_backend.models.playbook import MAX_SKILL_FILE_SIZE_BYTES, MAX_SKILL_FILES
+        from console_backend.models.skills_registry import MAX_SKILL_FILE_SIZE_BYTES, MAX_SKILL_FILES
 
         if not self._db_session_factory:
             raise RuntimeError("Playbook service not configured")
@@ -460,7 +460,7 @@ class PlaybookService:
             replace_files: If True and files is provided, delete all existing
                            non-SKILL.md files first (for bulk replacement).
         """
-        from console_backend.models.playbook import MAX_SKILL_FILE_SIZE_BYTES, MAX_SKILL_FILES
+        from console_backend.models.skills_registry import MAX_SKILL_FILE_SIZE_BYTES, MAX_SKILL_FILES
 
         if not self._db_session_factory:
             raise RuntimeError("Playbook service not configured")

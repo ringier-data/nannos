@@ -217,7 +217,7 @@ class GitHubSource(SkillSource):
         description = ""
         for f in files:
             if f.path == "SKILL.md":
-                description = _extract_description(f.contents)
+                description = _extract_description(f.content)
                 break
 
         return SkillSourceDetail(
@@ -332,12 +332,12 @@ class GitHubSource(SkillSource):
                         result = await self._fetch_blob(owner, repo_name, entry["sha"])
                         if result is not None:
                             blob_content, encoding = result
-                            files.append(SkillFile(path=relative_path, contents=blob_content, encoding=encoding))
+                            files.append(SkillFile(path=relative_path, content=blob_content, encoding=encoding))
                 else:
                     result = await self._fetch_blob(owner, repo_name, entry["sha"])
                     if result is not None:
                         blob_content, encoding = result
-                        files.append(SkillFile(path=entry_path, contents=blob_content, encoding=encoding))
+                        files.append(SkillFile(path=entry_path, content=blob_content, encoding=encoding))
             elif entry.get("type") == "tree" and entry.get("path") == skill_dir_prefix:
                 tree_sha = entry.get("sha")
 
@@ -420,13 +420,11 @@ class GitHubSource(SkillSource):
                         if entry["path"].startswith(dir_path + "/")
                         else entry["name"]
                     )
-                    files.append(SkillFile(path=relative, contents=file_content, encoding=encoding))
+                    files.append(SkillFile(path=relative, content=file_content, encoding=encoding))
             elif entry.get("type") == "dir":
                 sub_files = await self._fetch_directory_files(owner, repo_name, entry["path"], ref)
                 for sf in sub_files:
-                    files.append(
-                        SkillFile(path=f"{entry['name']}/{sf.path}", contents=sf.contents, encoding=sf.encoding)
-                    )
+                    files.append(SkillFile(path=f"{entry['name']}/{sf.path}", content=sf.content, encoding=sf.encoding))
         return files
 
     async def _get_tree_sha(self, owner: str, repo_name: str, dir_path: str, ref: str) -> str | None:

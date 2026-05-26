@@ -26,7 +26,7 @@ import {
   listMyGroupsApiV1GroupsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { getSkillApiV1PlaybooksAgentsAgentNameSkillsSkillNameGet, deleteSkillApiV1PlaybooksAgentsAgentNameSkillsScopeSkillNameDelete, createSkillApiV1PlaybooksAgentsAgentNameSkillsScopePost, listSkillFilesApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesGet, getSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathGet, writeSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPut } from '@/api/generated/sdk.gen';
-import type { ConsoleBackendModelsPlaybookSkillSummary as SkillSummary, SkillDefinitionInput as SkillDefinition } from '@/api/generated/types.gen';
+import type { ConsoleBackendModelsSkillsRegistrySkillSummary as SkillSummary, SkillDefinition } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -138,7 +138,7 @@ export function SkillsPage() {
 
   // Derive standard skills from the sub-agent config
   const selectedSubAgent = subAgentsData?.items?.find((a) => a.name === selectedAgent);
-  const standardSkills: Array<SkillDefinition & { scope: 'standard' }> = (
+  const standardSkills: Array<Omit<SkillDefinition, 'scope'> & { scope: 'standard' }> = (
     selectedSubAgent?.config_version?.skills ?? []
   ).map((s) => ({ ...s, description: s.description ?? '', scope: 'standard' as const }));
 
@@ -146,7 +146,7 @@ export function SkillsPage() {
   const isOverride = (skill: SkillSummary) => standardSkillNames.has(skill.name);
 
   // Filter skills based on unified view
-  const filteredSkills: Array<(SkillSummary & { scope: string }) | (SkillDefinition & { scope: 'standard' })> = (() => {
+  const filteredSkills: Array<(SkillSummary & { scope: string }) | (Omit<SkillDefinition, 'scope'> & { scope: 'standard' })> = (() => {
     switch (true) {
       case view === 'personal':
         return allSkills.filter((s) => s.scope === 'personal');
@@ -466,7 +466,7 @@ export function SkillsPage() {
                   }`}
                   onClick={() => {
                     if (isStandard) return;
-                    setActiveSkill({ name: skill.name, scope: (skill as SkillSummary).scope });
+                    setActiveSkill({ name: skill.name!, scope: (skill as SkillSummary).scope });
                   }}
                 >
                   <Blocks className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -520,7 +520,7 @@ export function SkillsPage() {
                         onClick={(e) => {
                           e.stopPropagation();
                           setRenamingSkill(skill as SkillSummary);
-                          setRenameValue(skill.name);
+                          setRenameValue(skill.name ?? '');
                         }}
                         disabled={isRenaming}
                       >

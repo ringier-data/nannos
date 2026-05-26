@@ -24,7 +24,7 @@ def _compute_content_hash(files: list[dict]) -> str:
     hasher = hashlib.sha256()
     for f in sorted(files, key=lambda x: x["path"]):
         hasher.update(f["path"].encode())
-        hasher.update(f["contents"].encode())
+        hasher.update(f["content"].encode())
     return hasher.hexdigest()
 
 
@@ -48,7 +48,7 @@ async def _setup_test_data(db: AsyncSession, user_id: str = "test-user-id") -> d
     agent_id = result.scalar_one()
 
     # Create registry entry
-    files = [{"path": "SKILL.md", "contents": "# Test Skill\nHello world"}]
+    files = [{"path": "SKILL.md", "content": "# Test Skill\nHello world"}]
     content_hash = _compute_content_hash(files)
     result = await db.execute(
         text("""
@@ -99,9 +99,9 @@ class TestListActivations:
         await pg_session.execute(
             text("""
                 INSERT INTO skill_activations
-                    (sub_agent_id, registry_id, scope, user_id, content_hash, locked, activated_by)
+                    (sub_agent_id, registry_id, scope, user_id, content_hash, activated_by)
                 VALUES
-                    (:agent_id, :reg_id, 'personal', 'test-user-id', :hash, FALSE, 'test-user-id')
+                    (:agent_id, :reg_id, 'personal', 'test-user-id', :hash, 'test-user-id')
             """),
             {"agent_id": data["agent_id"], "reg_id": data["registry_id"], "hash": data["content_hash"]},
         )

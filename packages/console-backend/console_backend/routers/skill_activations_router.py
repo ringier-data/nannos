@@ -21,17 +21,19 @@ from console_backend.models.skills_registry import (
     SkillActivationRequest,
 )
 from console_backend.models.user import User
+from console_backend.services.skill_activation_service import SkillActivationService
+from console_backend.services.skill_registry_service import SkillRegistryService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/skills/activations", tags=["skill-activations"])
 
 
-def _get_activation_service(request: Request):
+def _get_activation_service(request: Request) -> "SkillActivationService":
     return request.app.state.skill_activation_service
 
 
-def _get_registry_service(request: Request):
+def _get_registry_service(request: Request) -> "SkillRegistryService":
     return request.app.state.skill_registry_service
 
 
@@ -83,7 +85,7 @@ async def list_activations(
     """List all skill activations for an agent.
 
     Returns personal activations for the current user, group activations
-    for user's groups, and all locked activations. Each item includes
+    for user's groups, and sub-agent-scoped activations. Each item includes
     an `update_available` flag when the registry has newer content.
     """
     group_ids = await _get_user_group_ids(request, db, user)
@@ -164,9 +166,10 @@ async def deactivate_skill(
 ):
     """Deactivate a skill from an agent.
 
-    Removes the activation record and cleans up the docstore snapshot.
+    Removes the activation record and cleans up appropriately based on scope:
+    - Personal/group: removes docstore snapshot
+    - Sub-agent: removes skill from config version
     The registry entry is preserved for other consumers.
-    Cannot deactivate locked activations (managed by config versions).
     """
     activation_service = _get_activation_service(request)
 
@@ -192,6 +195,8 @@ async def deactivate_skill(
             activation_id=activation_id,
             agent_name=row["agent_name"],
             user_id=user.id,
+            sub_agent_id=row["sub_agent_id"],
+            actor=user,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -212,7 +217,7 @@ async def update_activation(
     """Pull latest content from registry for this activation.
 
     Updates the activation's content hash and refreshes the docstore snapshot.
-    Cannot update locked activations (managed by config versions).
+    Cannot update sub-agent-scoped activations (managed by config versions).
     """
     activation_service = _get_activation_service(request)
 
@@ -263,7 +268,7 @@ async def bulk_update_activations(
 ) -> BulkUpdateResponse:
     """Update multiple activations to their latest registry content.
 
-    Skips locked activations and reports failures individually.
+    Skips sub-agent-scoped activations and reports failures individually.
     """
     activation_service = _get_activation_service(request)
     updated: list[int] = []

@@ -5,8 +5,8 @@ Tests cover:
 - Deactivate a skill (remove activation + docstore snapshot)
 - Self-update after registry edit
 - List activations with update-available detection
-- Upsert locked activations during config set-default
-- Error cases (duplicate activation, locked deactivation, missing registry)
+- Upsert sub-agent activations during config set-default
+- Error cases (duplicate activation, sub-agent scope guard, missing registry)
 """
 
 import hashlib
@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from console_backend.models.skills_registry import RegistryRef
 from console_backend.services.skill_activation_service import SkillActivationService
 
 # --- Helpers ---
@@ -31,7 +32,7 @@ def _compute_content_hash(files: list[dict]) -> str:
     hasher = hashlib.sha256()
     for f in sorted(files, key=lambda x: x["path"]):
         hasher.update(f["path"].encode())
-        hasher.update(f["contents"].encode())
+        hasher.update(f["content"].encode())
     return hasher.hexdigest()
 
 
@@ -79,7 +80,7 @@ async def _create_registry_entry(
 ) -> str:
     """Insert a test skill registry entry and return its UUID."""
     if files is None:
-        files = [{"path": "SKILL.md", "contents": "# Test Skill\nTest body"}]
+        files = [{"path": "SKILL.md", "content": "# Test Skill\nTest body"}]
     content_hash = _compute_content_hash(files)
     result = await db.execute(
         text("""
@@ -147,7 +148,6 @@ class TestActivate:
         assert row["sub_agent_id"] == agent_id
         assert row["scope"] == "personal"
         assert row["user_id"] == user_id
-        assert row["locked"] is False
 
         # Verify docstore write was called
         activation_service.playbook_service.put_skill_with_files.assert_called_once()
@@ -268,20 +268,20 @@ class TestDeactivate:
         assert check.first() is None
 
     @pytest.mark.asyncio
-    async def test_deactivate_locked_raises(self, pg_session: AsyncSession, activation_service):
-        """Deactivating a locked activation raises ValueError."""
+    async def test_deactivate_sub_agent_scope_requires_actor(self, pg_session: AsyncSession, activation_service):
+        """Deactivating a sub-agent-scoped activation without actor raises ValueError."""
         user_id = await _create_test_user(pg_session)
         agent_id = await _create_test_agent(pg_session, user_id=user_id)
         registry_id = await _create_registry_entry(pg_session, user_id=user_id)
         await pg_session.commit()
 
-        # Create a locked activation directly
+        # Create a sub-agent-scoped activation directly
         result = await pg_session.execute(
             text("""
                 INSERT INTO skill_activations
-                    (sub_agent_id, registry_id, scope, user_id, content_hash, locked, activated_by)
+                    (sub_agent_id, registry_id, scope, user_id, content_hash, activated_by)
                 VALUES
-                    (:agent_id, :reg_id, 'personal', :user_id, 'abc123', TRUE, :user_id)
+                    (:agent_id, :reg_id, 'sub-agent', NULL, 'abc123', :user_id)
                 RETURNING id
             """),
             {"agent_id": agent_id, "reg_id": registry_id, "user_id": user_id},
@@ -289,7 +289,7 @@ class TestDeactivate:
         activation_id = result.scalar_one()
         await pg_session.commit()
 
-        with pytest.raises(ValueError, match="locked"):
+        with pytest.raises(ValueError, match="sub_agent_id and actor are required"):
             await activation_service.deactivate(
                 db=pg_session,
                 activation_id=activation_id,
@@ -317,7 +317,7 @@ class TestSelfUpdate:
         """Self-update updates the activation content_hash to match registry."""
         user_id = await _create_test_user(pg_session)
         agent_id = await _create_test_agent(pg_session, user_id=user_id)
-        files_v1 = [{"path": "SKILL.md", "contents": "# Version 1"}]
+        files_v1 = [{"path": "SKILL.md", "content": "# Version 1"}]
         registry_id = await _create_registry_entry(pg_session, files=files_v1, user_id=user_id)
         await pg_session.commit()
 
@@ -332,7 +332,7 @@ class TestSelfUpdate:
         await pg_session.commit()
 
         # Simulate registry update (change content_hash in registry)
-        files_v2 = [{"path": "SKILL.md", "contents": "# Version 2 - Updated"}]
+        files_v2 = [{"path": "SKILL.md", "content": "# Version 2 - Updated"}]
         new_hash = _compute_content_hash(files_v2)
         await pg_session.execute(
             text("UPDATE skill_registry SET files = :files, content_hash = :hash WHERE id = CAST(:id AS uuid)"),
@@ -426,7 +426,7 @@ class TestListForAgent:
         await pg_session.commit()
 
         # Update registry (simulate new version)
-        new_files = [{"path": "SKILL.md", "contents": "# Updated content"}]
+        new_files = [{"path": "SKILL.md", "content": "# Updated content"}]
         new_hash = _compute_content_hash(new_files)
         await pg_session.execute(
             text("UPDATE skill_registry SET files = :files, content_hash = :hash WHERE id = CAST(:id AS uuid)"),
@@ -466,7 +466,7 @@ class TestUpdateActivation:
         await pg_session.commit()
 
         # Update registry
-        new_files = [{"path": "SKILL.md", "contents": "# New version"}]
+        new_files = [{"path": "SKILL.md", "content": "# New version"}]
         new_hash = _compute_content_hash(new_files)
         await pg_session.execute(
             text("UPDATE skill_registry SET files = :files, content_hash = :hash WHERE id = CAST(:id AS uuid)"),
@@ -512,18 +512,19 @@ class TestUpsertLocked:
             db=pg_session,
             sub_agent_id=agent_id,
             agent_name="test-agent",
-            registry_refs=[{"registry_id": registry_id, "name": "locked-skill"}],
+            registry_refs=[RegistryRef(registry_id=registry_id, name="locked-skill")],
             config_version_id=config_version_id,
             activated_by=user_id,
         )
         await pg_session.commit()
 
-        # Verify locked activation exists
+        # Verify sub-agent-scoped activation exists
         check = await pg_session.execute(
-            text("SELECT * FROM skill_activations WHERE sub_agent_id = :id AND locked = TRUE"),
+            text("SELECT * FROM skill_activations WHERE sub_agent_id = :id AND scope = 'sub-agent'"),
             {"id": agent_id},
         )
         rows = check.mappings().all()
         assert len(rows) == 1
-        assert rows[0]["locked"] is True
+        assert rows[0]["scope"] == "sub-agent"
+        assert rows[0]["config_version_id"] == config_version_id
         assert str(rows[0]["registry_id"]) == registry_id

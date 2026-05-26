@@ -136,6 +136,7 @@ class TestDynamicAgentEnsureAgentSkipsGraphForSandbox:
         )
 
         mock_graph = MagicMock()
+        mock_graph.with_config = MagicMock(return_value=mock_graph)
         with patch(
             "agent_common.agents.dynamic_agent.build_sub_agent_graph",
             return_value=mock_graph,

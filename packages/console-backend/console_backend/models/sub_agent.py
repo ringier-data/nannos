@@ -1,11 +1,14 @@
 """Pydantic models for sub-agents."""
 
 import re
+import uuid as _uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .skills_registry import RegistryScope, SkillFile
 
 
 class ActivationSource(str, Enum):
@@ -101,58 +104,34 @@ class FoundryAgentConfiguration(BaseModel):
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 
 
-class SkillFile(BaseModel):
-    """A file bundled with a standard skill (e.g., script, reference doc)."""
-
-    path: str = Field(..., description="Relative path inside the skill directory (e.g., 'scripts/check.py')")
-    content: str = Field(..., description="File content")
-
-    @field_validator("path")
-    @classmethod
-    def _validate_path(cls, v: str) -> str:
-        """Reject path traversal, absolute paths, and excessive depth."""
-        if v.startswith("/") or v.startswith("~"):
-            raise ValueError(f"Skill file path must be relative: {v}")
-        segments = v.split("/")
-        if ".." in segments:
-            raise ValueError(f"Path traversal not allowed: {v}")
-        if len(segments) > 6:
-            raise ValueError(f"Skill file path exceeds max depth (6): {v}")
-        if not v or not all(segments):
-            raise ValueError(f"Invalid skill file path: {v}")
-        return v
-
-
 class SkillDefinition(BaseModel):
-    """A standard (immutable) skill bundled with a sub-agent config version.
+    """A skill bundled with a sub-agent config version.
 
-    Two modes:
-    - Custom skills (registry_id=None): full content stored inline (body + files)
-    - Registry-backed skills (registry_id set): only reference stored.
-      Body and files are empty/absent — resolved from skill_registry table at runtime.
+    On read from DB, only registry_id and content_hash are present (from SkillRef JSONB).
+    All other fields are populated by resolve_imported_skills() from the registry.
     """
 
-    name: str = Field(..., description="Skill identifier (lowercase, alphanumeric + hyphens)")
-    description: str = Field(..., max_length=1024, description="What the skill does")
+    name: str = Field(default="", description="Skill identifier (lowercase, alphanumeric + hyphens)")
+    description: str = Field(default="", max_length=1024, description="What the skill does")
     body: str = Field(default="", description="SKILL.md body content (markdown). Empty for registry-backed skills.")
     files: list[SkillFile] = Field(
         default_factory=list, description="Optional scripts/references/assets. Empty for registry-backed skills."
     )
     registry_id: str | None = Field(
         default=None,
-        description="UUID of the skill in skill_registry table. Used for DB lookups. Null for inline custom skills.",
+        description="UUID of the skill in skill_registry table.",
     )
     source: str | None = Field(
         default=None,
         description="External provenance path where the skill was imported from (e.g., 'vercel-labs/agent-skills/xlsx'). Informational only.",
     )
-    source_hash: str | None = Field(
+    content_hash: str | None = Field(
         default=None,
-        description="Content hash of the registry skill at import time. Used to detect available updates.",
+        description="Content hash pinning this skill to a specific version in the registry.",
     )
     update_available: bool = Field(
         default=False,
-        description="True when the registry has a newer version than the pinned source_hash.",
+        description="True when the registry has a newer version than the pinned content_hash.",
     )
     latest_hash: str | None = Field(
         default=None,
@@ -162,16 +141,52 @@ class SkillDefinition(BaseModel):
         default=False,
         description="Whether the skill contains executable files (.py, .sh, etc.) that require sandbox.",
     )
+    scope: RegistryScope | None = Field(
+        default=None,
+        description="Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_source_hash(cls, data: dict) -> dict:
+        """Backward compat: map old 'source_hash' key to 'content_hash'."""
+        if isinstance(data, dict) and "source_hash" in data and "content_hash" not in data:
+            data["content_hash"] = data.pop("source_hash")
+        return data
+
+    @field_validator("registry_id")
+    @classmethod
+    def _validate_registry_id(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                _uuid.UUID(v)
+            except (ValueError, AttributeError):
+                raise ValueError(f"registry_id must be a valid UUID, got: {v!r}")
+        return v
 
     @field_validator("name")
     @classmethod
     def _validate_name(cls, v: str) -> str:
-        if not v or len(v) > 64 or not _SKILL_NAME_RE.match(v):
+        # Allow empty — populated after resolve_imported_skills
+        if not v:
+            return v
+        if len(v) > 64 or not _SKILL_NAME_RE.match(v):
             raise ValueError(
                 "Skill name must be 1-64 chars, lowercase alphanumeric + hyphens, "
                 "no leading/trailing/consecutive hyphens"
             )
         return v
+
+
+class SkillRef(BaseModel):
+    """Minimal reference to a versioned skill in the registry.
+
+    This is what gets persisted in config version JSONB.
+    registry_id identifies the skill, content_hash pins the version.
+    """
+
+    registry_id: str = Field(..., description="UUID of the skill in skill_registry")
+    content_hash: str = Field(..., description="SHA-256 content hash pinning to a specific version")
 
 
 class SkillSummary(BaseModel):
@@ -180,7 +195,7 @@ class SkillSummary(BaseModel):
     name: str
     description: str = ""
     source: str | None = None
-    source_hash: str | None = None
+    content_hash: str | None = None
     update_available: bool = False
     latest_hash: str | None = None
     sandbox_required: bool = False
@@ -232,6 +247,22 @@ class SubAgentConfigVersionBase(BaseModel):
     rejection_reason: str | None = None
     deleted_at: datetime | None = None
     created_at: datetime
+
+
+class SubAgentConfigVersionRaw(SubAgentConfigVersionBase):
+    """Version as stored in the database — skills are unresolved references.
+
+    Use this when reading config version rows before batch-resolving skills.
+    Convert to SubAgentConfigVersion after resolution.
+    """
+
+    skill_refs: list[SkillRef] = Field(default_factory=list)
+
+    def to_resolved(self, skills: list[SkillDefinition]) -> "SubAgentConfigVersion":
+        """Produce a fully resolved config version with complete skill content."""
+        data = self.model_dump(exclude={"skill_refs"})
+        data["skills"] = skills
+        return SubAgentConfigVersion(**data)
 
 
 class SubAgentConfigVersion(SubAgentConfigVersionBase):
@@ -439,7 +470,7 @@ class SubAgentConfigVersionSummary(SubAgentConfigVersionBase):
                 name=s.name,
                 description=s.description,
                 source=s.source,
-                source_hash=s.source_hash,
+                content_hash=s.content_hash,
                 update_available=s.update_available,
                 latest_hash=s.latest_hash,
                 sandbox_required=s.sandbox_required,

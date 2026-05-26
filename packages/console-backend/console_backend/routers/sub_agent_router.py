@@ -42,7 +42,7 @@ def get_sub_agent_service(request: Request) -> SubAgentService:
     return request.app.state.sub_agent_service
 
 
-@router.get("", response_model=SubAgentListFullResponse, tags=["MCP"], operation_id="console_list_sub_agents")
+@router.get("", response_model=SubAgentListResponse, tags=["MCP"], operation_id="console_list_sub_agents")
 async def list_sub_agents(
     request: Request,
     db: DbSession,
@@ -50,7 +50,7 @@ async def list_sub_agents(
     status: SubAgentStatus | None = Query(None, description="Filter by status"),
     owned_only: bool = Query(False, description="Only show owned sub-agents"),
     activated_only: bool = Query(False, description="Only show activated sub-agents"),
-) -> SubAgentListFullResponse:
+) -> SubAgentListResponse:
     """List sub-agents accessible to the current user.
 
     Supports both user session authentication and Bearer token authentication.
@@ -83,12 +83,40 @@ async def list_sub_agents(
                 db, user.id, is_admin=effective_admin, status_filter=status, activated_only=activated_only
             )
 
-        # Convert to lightweight list items (skills without body/files content)
+        # Resolve skill references so names/descriptions are populated (needed by orchestrator)
+        await sub_agent_service.resolve_imported_skills_bulk(db, sub_agents)
 
-        return SubAgentListFullResponse(items=sub_agents, total=len(sub_agents))
+        items = [SubAgentListItem.from_sub_agent(sa) for sa in sub_agents]
+        return SubAgentListResponse(items=items, total=len(items))
     except Exception as e:
         logger.error(f"Failed to list sub-agents: {e}")
         raise HTTPException(status_code=500, detail="Failed to list sub-agents")
+
+
+@router.get("/activated", response_model=SubAgentListFullResponse, operation_id="list_activated_sub_agents")
+async def list_activated_sub_agents(
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> SubAgentListFullResponse:
+    """List activated sub-agents with full skill content (body + files).
+
+    Internal endpoint used by the orchestrator to build sub-agent configs
+    with complete skill data for execution. Not exposed as an MCP tool.
+    """
+    sub_agent_service = get_sub_agent_service(request)
+    try:
+        sub_agents = await sub_agent_service.get_accessible_sub_agents(
+            db, user.id, is_admin=False, status_filter=SubAgentStatus.APPROVED, activated_only=True
+        )
+
+        # Resolve skill references with full body content
+        await sub_agent_service.resolve_imported_skills_bulk(db, sub_agents)
+
+        return SubAgentListFullResponse(items=sub_agents, total=len(sub_agents))
+    except Exception as e:
+        logger.error(f"Failed to list activated sub-agents: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list activated sub-agents")
 
 
 @router.get("/pending", response_model=SubAgentListResponse)
@@ -250,10 +278,11 @@ async def update_sub_agent(
     """Update a sub-agent's core configuration (name, system prompt, model, MCP tools).
 
     **IMPORTANT**: Do NOT use this tool for skill operations (create/update/delete).
-    Use the dedicated skill tools instead — they handle ALL scopes:
+    Use the dedicated skill tools instead:
     - console_create_skill (scope='personal', 'group', or 'default')
     - console_update_skill (scope='personal', 'group', or 'default')
     - console_remove_skill (scope='personal', 'group', or 'default')
+    - console_activate_skill (scope='personal', 'group', or 'default')
     - console_update_playbook (scope='personal' or 'group')
 
     Use this tool ONLY for: system_prompt, model, name, mcp_tools, is_public.

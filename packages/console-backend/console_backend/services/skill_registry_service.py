@@ -17,49 +17,24 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from console_backend.models.audit import AuditAction
-from console_backend.models.skills_registry import SkillFile
+from console_backend.models.skills_registry import (
+    RegistryVisibility,
+    SkillFile,
+    SkillRegistryEntry,
+    SkillVersionDetail,
+    SkillVersionSummary,
+)
 from console_backend.models.user import User
 from console_backend.repositories.skill_registry_repository import SkillRegistryRepository
 from console_backend.services.skill_sources.base import SkillSourceDetail
 
 logger = logging.getLogger(__name__)
-
-# Registry scope: what the registry entry represents.
-#   - standalone: agent-agnostic skill (can be activated on any agent)
-#   - sub-agent: skill tied to a specific sub-agent's config
-RegistryScope = Literal["standalone", "sub-agent"]
-
-
-class SkillRegistryEntry:
-    """A skill in the registry (read model)."""
-
-    def __init__(self, row: dict[str, Any]) -> None:
-        self.id: str = str(row["id"])
-        self.name: str = row["name"]
-        self.slug: str = row["slug"]
-        self.description: str | None = row.get("description")
-        self.source_type: str = row["source_type"]
-        self.source_repo: str | None = row.get("source_repo")
-        self.source_ref: str | None = row.get("source_ref")
-        self.source_path: str | None = row.get("source_path")
-        self.files: list[SkillFile] = [SkillFile(**f) for f in (row.get("files") or [])]
-        self.content_hash: str = row["content_hash"]
-        self.metadata: dict[str, Any] = row.get("metadata") or {}
-        self.security_verdict: str | None = row.get("security_verdict")
-        self.visibility: str = row["visibility"]
-        self.scope: RegistryScope = row.get("scope") or "standalone"
-        self.sub_agent_id: int | None = row.get("sub_agent_id")
-        self.sandbox_required: bool = row.get("sandbox_required", False)
-        self.created_by: str = row["created_by"]
-        self.author_name: str | None = row.get("author_name")
-        self.created_at: datetime = row["created_at"]
-        self.updated_at: datetime = row["updated_at"]
 
 
 class SkillRegistryService:
@@ -70,6 +45,46 @@ class SkillRegistryService:
 
     def set_repository(self, repo: SkillRegistryRepository) -> None:
         self.repo = repo
+
+    async def check_write_access(
+        self,
+        db: AsyncSession,
+        entry: "SkillRegistryEntry",
+        user_id: str,
+    ) -> bool:
+        """Check if a user has write access to a registry entry.
+
+        Authorization model:
+        - Owner (owner_id == user_id) always has write access.
+        - Sub-agent scoped entries inherit from the sub-agent's permissions:
+          if the user has write access on the sub-agent, they can write its skills.
+          Uses SubAgentService.check_user_permission internally.
+        - Standalone/public entries not owned by the user: no write access.
+
+        Args:
+            db: Database session
+            entry: The registry entry to check access for
+            user_id: The user requesting access
+
+        Returns:
+            True if the user has write access to this registry entry.
+        """
+        # Owner always has full access
+        if entry.owner_id == user_id:
+            return True
+
+        # Sub-agent scoped skills inherit permissions from the sub-agent
+        if entry.scope == "sub-agent" and entry.sub_agent_id:
+            # TODO: this pattern is sub-optimal but we lazy-import SubAgentService here to avoid circular dependencies
+            # since SubAgentService also depends on SkillRegistryService
+            from console_backend.services.sub_agent_service import SubAgentService
+
+            sub_agent_service = SubAgentService()
+            return await sub_agent_service.check_user_permission(
+                db, sub_agent_id=entry.sub_agent_id, user_id=user_id, required_permission="write"
+            )
+
+        return False
 
     async def _save_version_snapshot(
         self,
@@ -100,7 +115,7 @@ class SkillRegistryService:
         self,
         db: AsyncSession,
         skill_id: str,
-    ) -> list[dict[str, Any]]:
+    ) -> list[SkillVersionSummary]:
         """Get all version snapshots for a skill, newest first."""
         result = await db.execute(
             text("""
@@ -111,14 +126,14 @@ class SkillRegistryService:
             """),
             {"skill_id": skill_id},
         )
-        return [dict(row) for row in result.mappings().all()]
+        return [SkillVersionSummary.model_validate(dict(row)) for row in result.mappings().all()]
 
     async def get_version(
         self,
         db: AsyncSession,
         skill_id: str,
         content_hash: str,
-    ) -> dict[str, Any] | None:
+    ) -> SkillVersionDetail | None:
         """Get a specific version snapshot by content_hash."""
         result = await db.execute(
             text("""
@@ -129,13 +144,12 @@ class SkillRegistryService:
             {"skill_id": skill_id, "content_hash": content_hash},
         )
         row = result.mappings().first()
-        return dict(row) if row else None
+        return SkillVersionDetail.model_validate(dict(row)) if row else None
 
     async def search(
         self,
         db: AsyncSession,
         query: str,
-        visibility: str | None = None,
         limit: int = 50,
         offset: int = 0,
         owner_id: str | None = None,
@@ -169,6 +183,9 @@ class SkillRegistryService:
         if visibility_clauses:
             conditions.append(f"({' OR '.join(visibility_clauses)})")
 
+        # Exclude sub-agent scoped skills — they are internal to their owning sub-agent
+        conditions.append("COALESCE(sr.scope, 'standalone') != 'sub-agent'")
+
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         # Get total count
@@ -188,18 +205,23 @@ class SkillRegistryService:
 
         result = await db.execute(sql, params)
         rows = result.mappings().all()
-        return [SkillRegistryEntry(dict(row)) for row in rows], total
+        return [SkillRegistryEntry.model_validate(dict(row)) for row in rows], total
 
     async def get_by_id(self, db: AsyncSession, skill_id: str) -> SkillRegistryEntry | None:
         """Get a single registry entry by ID."""
         result = await db.execute(
-            text("SELECT * FROM skill_registry WHERE id = :id"),
+            text("""
+                SELECT sr.*, CONCAT(u.first_name, ' ', u.last_name) AS author_name
+                FROM skill_registry sr
+                LEFT JOIN users u ON sr.owner_id = u.id
+                WHERE sr.id = :id
+            """),
             {"id": skill_id},
         )
         row = result.mappings().first()
         if not row:
             return None
-        return SkillRegistryEntry(dict(row))
+        return SkillRegistryEntry.model_validate(dict(row))
 
     async def get_by_id_or_slug(self, db: AsyncSession, identifier: str) -> SkillRegistryEntry | None:
         """Get a registry entry by ID (UUID) or slug.
@@ -220,24 +242,35 @@ class SkillRegistryService:
 
         # Fallback to slug lookup (any visibility)
         result = await db.execute(
-            text("SELECT * FROM skill_registry WHERE slug = :slug ORDER BY updated_at DESC LIMIT 1"),
+            text("""
+                SELECT sr.*, CONCAT(u.first_name, ' ', u.last_name) AS author_name
+                FROM skill_registry sr
+                LEFT JOIN users u ON sr.owner_id = u.id
+                WHERE sr.slug = :slug
+                ORDER BY sr.updated_at DESC LIMIT 1
+            """),
             {"slug": identifier},
         )
         row = result.mappings().first()
         if not row:
             return None
-        return SkillRegistryEntry(dict(row))
+        return SkillRegistryEntry.model_validate(dict(row))
 
     async def get_by_slug(self, db: AsyncSession, slug: str) -> SkillRegistryEntry | None:
         """Get a registry entry by slug."""
         result = await db.execute(
-            text("SELECT * FROM skill_registry WHERE slug = :slug AND visibility = 'public'"),
+            text("""
+                SELECT sr.*, CONCAT(u.first_name, ' ', u.last_name) AS author_name
+                FROM skill_registry sr
+                LEFT JOIN users u ON sr.owner_id = u.id
+                WHERE sr.slug = :slug AND sr.visibility = 'public'
+            """),
             {"slug": slug},
         )
         row = result.mappings().first()
         if not row:
             return None
-        return SkillRegistryEntry(dict(row))
+        return SkillRegistryEntry.model_validate(dict(row))
 
     async def import_from_source(
         self,
@@ -245,7 +278,7 @@ class SkillRegistryService:
         actor: User,
         detail: SkillSourceDetail,
         source_type: str,
-        visibility: str = "public",
+        visibility: RegistryVisibility = "public",
     ) -> SkillRegistryEntry:
         """Import a skill from a SkillSourceDetail into the registry.
 
@@ -257,10 +290,10 @@ class SkillRegistryService:
             visibility: 'private' or 'public'
 
         Returns:
-            The created SkillRegistryEntry
+            The created SkillRegistryRow
         """
         content_hash = _compute_content_hash(detail.files)
-        files_json = [{"path": f.path, "contents": f.contents} for f in detail.files]
+        files_json = [{"path": f.path, "content": f.content} for f in detail.files]
 
         resolved_slug = await _ensure_unique_slug(
             db,
@@ -294,7 +327,7 @@ class SkillRegistryService:
         db: AsyncSession,
         actor: User,
         skill_id: str,
-        visibility: str,
+        visibility: RegistryVisibility,
     ) -> None:
         """Change a skill's visibility."""
         fields: dict[str, Any] = {
@@ -325,10 +358,15 @@ class SkillRegistryService:
     async def find_by_content_hash(self, db: AsyncSession, content_hash: str) -> list[SkillRegistryEntry]:
         """Find registry entries with the same content hash (duplicate detection)."""
         result = await db.execute(
-            text("SELECT * FROM skill_registry WHERE content_hash = :hash"),
+            text("""
+                SELECT sr.*, CONCAT(u.first_name, ' ', u.last_name) AS author_name
+                FROM skill_registry sr
+                LEFT JOIN users u ON sr.owner_id = u.id
+                WHERE sr.content_hash = :hash
+            """),
             {"hash": content_hash},
         )
-        return [SkillRegistryEntry(dict(row)) for row in result.mappings().all()]
+        return [SkillRegistryEntry.model_validate(dict(row)) for row in result.mappings().all()]
 
     async def create_skill(
         self,
@@ -337,9 +375,8 @@ class SkillRegistryService:
         name: str,
         description: str,
         files: list[SkillFile],
-        visibility: str = "private",
+        visibility: RegistryVisibility = "private",
         slug: str | None = None,
-        group_ids: list[int] | None = None,
     ) -> SkillRegistryEntry:
         """Create a new skill in the registry (authoring flow).
 
@@ -351,13 +388,18 @@ class SkillRegistryService:
             files: Skill files (must include SKILL.md)
             visibility: 'private' or 'public'
             slug: Optional explicit slug override. Auto-derived from name if omitted.
-            group_ids: Group IDs for group-visible skills.
 
         Returns:
             The created registry entry
         """
+        # If description is empty, try to extract from SKILL.md frontmatter
+        if not description:
+            skill_md = next((f for f in files if f.path == "SKILL.md"), None)
+            if skill_md:
+                description = _extract_description_from_frontmatter(skill_md.content)
+
         content_hash = _compute_content_hash(files)
-        files_json = [{"path": f.path, "contents": f.contents} for f in files]
+        files_json = [{"path": f.path, "content": f.content} for f in files]
 
         resolved_slug = await _ensure_unique_slug(
             db,
@@ -376,10 +418,17 @@ class SkillRegistryService:
             "owner_id": actor.id,
             "created_by": actor.id,
         }
-        if group_ids is not None:
-            fields["group_ids"] = group_ids
 
         skill_id = await self.repo.create(db=db, actor=actor, fields=fields, returning="id")
+        # Save initial version snapshot so version history includes the first creation
+        await self._save_version_snapshot(
+            db=db,
+            skill_id=str(skill_id),
+            files_json=files_json,
+            content_hash=content_hash,
+            description=description,
+            created_by=actor.id,
+        )
         entry = await self.get_by_id(db, str(skill_id))
         if not entry:
             raise RuntimeError("Failed to read back created registry entry")
@@ -394,7 +443,7 @@ class SkillRegistryService:
         description: str | None = None,
         name: str | None = None,
         sandbox_required: bool | None = None,
-        visibility: str | None = None,
+        visibility: RegistryVisibility | None = None,
     ) -> SkillRegistryEntry:
         """Update a skill in the registry. Returns entry with new content_hash.
 
@@ -426,10 +475,18 @@ class SkillRegistryService:
 
         if files is not None:
             content_hash = _compute_content_hash(files)
-            files_json = [{"path": f.path, "contents": f.contents} for f in files]
+            files_json = [{"path": f.path, "content": f.content} for f in files]
             fields["files"] = json.dumps(files_json)
             fields["content_hash"] = content_hash
             fields["sandbox_required"] = _detect_sandbox_required(files)
+
+            # Sync description from SKILL.md frontmatter if not explicitly provided
+            if description is None:
+                skill_md = next((f for f in files if f.path == "SKILL.md"), None)
+                if skill_md:
+                    extracted = _extract_description_from_frontmatter(skill_md.content)
+                    if extracted:
+                        fields["description"] = extracted
 
         await self.repo.update(db=db, actor=actor, entity_id=skill_id, fields=fields)
 
@@ -457,39 +514,53 @@ class SkillRegistryService:
         name: str,
         description: str,
         files: list[SkillFile],
+        registry_id: str | None = None,
     ) -> tuple[str, str]:
         """Upsert a custom skill into the registry scoped to a sub-agent.
 
-        If a matching skill (same sub_agent_id + slug) already exists, it is
-        updated in-place. Otherwise a new entry is created.
+        If registry_id is provided, updates that entry directly (idempotent).
+        Otherwise falls back to slug-based lookup for backward compatibility.
+        If no existing entry is found, creates a new one.
 
         Returns:
             Tuple of (registry_id, content_hash).
         """
-        slug = _slugify(name)
         content_hash = _compute_content_hash(files)
-        files_json = [{"path": f.path, "contents": f.contents} for f in files]
+        files_json = [{"path": f.path, "content": f.content} for f in files]
         now = datetime.now(timezone.utc)
 
-        # Check for existing entry (same agent + slug)
-        result = await db.execute(
-            text(
-                "SELECT id FROM skill_registry "
-                "WHERE scope = 'sub-agent' AND sub_agent_id = :sub_agent_id AND slug = :slug"
-            ),
-            {"sub_agent_id": sub_agent_id, "slug": slug},
-        )
-        existing = result.scalars().first()
+        skill_id = None
+        # Prefer direct ID lookup when available (idempotent)
+        if registry_id:
+            result = await db.execute(
+                text("SELECT id, slug, name FROM skill_registry WHERE id = CAST(:id AS uuid)"),
+                {"id": registry_id},
+            )
+            row = result.mappings().first()
+            if row:
+                skill_id = str(row["id"])
+                slug = row["slug"]
+                db_name = row["name"]
+                if db_name != name:
+                    # update the slug if the name has changed
+                    slug = await _ensure_unique_slug(db, _slugify(name), exclude_id=skill_id)
+            else:
+                skill_id = None
+                slug = await _ensure_unique_slug(db, base_slug=_slugify(name))
+        else:
+            skill_id = None
+            slug = await _ensure_unique_slug(db, base_slug=_slugify(name))
 
         sandbox_required = _detect_sandbox_required(files)
 
-        if existing:
-            skill_id = str(existing)
+        if skill_id:
             await self.repo.update(
                 db=db,
                 actor=actor,
                 entity_id=skill_id,
                 fields={
+                    "name": name,
+                    "slug": slug,
                     "description": description,
                     "files": json.dumps(files_json),
                     "content_hash": content_hash,
@@ -525,6 +596,15 @@ class SkillRegistryService:
         }
 
         skill_id = await self.repo.create(db=db, actor=actor, fields=fields, returning="id")
+        # Save initial version snapshot
+        await self._save_version_snapshot(
+            db=db,
+            skill_id=str(skill_id),
+            files_json=files_json,
+            content_hash=content_hash,
+            description=description,
+            created_by=actor.id,
+        )
         return str(skill_id), content_hash
 
 
@@ -546,6 +626,24 @@ _SANDBOX_EXTENSIONS = frozenset(
         ".cjs",
     }
 )
+
+
+def _extract_description_from_frontmatter(content: str) -> str:
+    """Extract description from SKILL.md YAML frontmatter."""
+    if not content.startswith("---"):
+        return ""
+    end_idx = content.find("---", 3)
+    if end_idx == -1:
+        return ""
+    frontmatter = content[3:end_idx]
+    for line in frontmatter.split("\n"):
+        line = line.strip()
+        if line.startswith("description:"):
+            desc = line[len("description:") :].strip()
+            if (desc.startswith('"') and desc.endswith('"')) or (desc.startswith("'") and desc.endswith("'")):
+                desc = desc[1:-1]
+            return desc
+    return ""
 
 
 def _slugify(name: str) -> str:
@@ -605,5 +703,5 @@ def _compute_content_hash(files: list[SkillFile]) -> str:
     hasher = hashlib.sha256()
     for f in sorted(files, key=lambda x: x.path):
         hasher.update(f.path.encode())
-        hasher.update(f.contents.encode())
+        hasher.update(f.content.encode())
     return hasher.hexdigest()

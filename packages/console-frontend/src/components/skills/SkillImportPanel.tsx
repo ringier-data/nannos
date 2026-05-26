@@ -22,7 +22,7 @@ import {
   browseRepoApiV1SkillsRegistryBrowseGetOptions,
   importSkillApiV1SkillsRegistryImportPostMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SkillSearchResult, SkillSecurityVerdict, SkillSecurityIndicator } from '@/api/generated/types.gen';
+import type { SkillSearchResult, SkillSecurityVerdict, SkillSecurityIndicator, SkillImportRequest } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -159,7 +159,7 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
   // Selection + import state
   const [selectedResult, setSelectedResult] = useState<SkillSearchResult | null>(null);
   const [selectedResults, setSelectedResults] = useState<Set<string>>(new Set());
-  const [importScope, setImportScope] = useState<string>('public');
+  const [importScope, setImportScope] = useState('public');
   const [overwrite, setOverwrite] = useState(false);
   const [showUnsafeDialog, setShowUnsafeDialog] = useState(false);
   const [unsafeMessage, setUnsafeMessage] = useState('');
@@ -235,14 +235,14 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
     return isRegistryResult
       ? {
           registry_id: result.id,
-          scope: importScope,
+          scope: importScope as SkillImportRequest['scope'],
           overwrite,
           force,
         }
       : {
           repo: result.source,
           skill: result.slug,
-          scope: importScope,
+          scope: importScope as SkillImportRequest['scope'],
           overwrite,
           force,
         };

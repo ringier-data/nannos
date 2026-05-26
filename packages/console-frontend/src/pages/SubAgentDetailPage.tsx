@@ -87,13 +87,14 @@ import {
   updateActivationApiV1SkillsActivationsActivationIdUpdatePostMutation,
   listMyGroupsApiV1GroupsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinitionInput, SkillDefinitionOutput, McpSkillFile, SkillSearchResult, SkillActivationWithStatus } from '@/api/generated/types.gen';
+import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinition, McpSkillFile, SkillSearchResult, SkillActivationWithStatus } from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
 import { usePlaygroundChat } from '@/hooks/usePlaygroundChat';
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { SkillRegistryBrowseDialog } from '@/components/skills/SkillRegistryBrowseDialog';
+import { SkillDiffDialog } from '@/components/skills/SkillDiffDialog';
 
 const statusConfig: Record<
   SubAgentStatus,
@@ -179,7 +180,7 @@ export function SubAgentDetailPage() {
   const [pricingExpanded, setPricingExpanded] = useState(false);
 
   // Skills and sandbox state (local agents only)
-  const [editSkills, setEditSkills] = useState<SkillDefinitionOutput[]>([]);
+  const [editSkills, setEditSkills] = useState<SkillDefinition[]>([]);
   const [editSandboxEnabled, setEditSandboxEnabled] = useState(false);
   const [editSandboxAutoEnabled, setEditSandboxAutoEnabled] = useState(false);
   const [isSkillModalOpen, setIsSkillModalOpen] = useState(false);
@@ -187,6 +188,9 @@ export function SubAgentDetailPage() {
   const [importingSkillId, setImportingSkillId] = useState<string | null>(null);
   const [updatingSkillName, setUpdatingSkillName] = useState<string | null>(null);
   const [skillsWithUpdates, setSkillsWithUpdates] = useState<Set<string>>(new Set());
+
+  // Skill diff dialog state
+  const [skillDiffInfo, setSkillDiffInfo] = useState<{ registryId: string; contentHash: string; name: string } | null>(null);
 
   // Personal/group skill activations state
   const [showActivateSkillDialog, setShowActivateSkillDialog] = useState(false);
@@ -260,7 +264,7 @@ export function SubAgentDetailPage() {
     }),
     enabled: !!id,
   });
-  const myActivations = (activationsData?.items ?? []).filter((a) => !a.locked);
+  const myActivations = activationsData?.items ?? [];
 
   // Fetch user's groups (for group scope activation)
   const { data: myGroupsData } = useQuery(listMyGroupsApiV1GroupsGetOptions());
@@ -567,15 +571,15 @@ export function SubAgentDetailPage() {
     const updatable = new Set<string>();
     for (const skill of editSkills) {
       if (skill.registry_id && skill.update_available) {
-        updatable.add(skill.name);
+        updatable.add(skill.name!);
       }
     }
     if (updatable.size > 0) {
       setSkillsWithUpdates(updatable);
       return;
     }
-    // Fallback: check registry for skills without update_available flag
-    const importedSkills = editSkills.filter((s) => s.registry_id && s.source_hash && !s.update_available);
+    // Fallback: check registry for imported skills without update_available flag
+    const importedSkills = editSkills.filter((s) => s.registry_id && s.content_hash && !s.update_available && s.scope !== 'sub-agent');
     if (importedSkills.length === 0) return;
 
     let cancelled = false;
@@ -588,8 +592,8 @@ export function SubAgentDetailPage() {
           });
           if (cancelled) return;
           const detail = data as { content_hash?: string } | undefined;
-          if (detail?.content_hash && detail.content_hash !== skill.source_hash) {
-            updatable.add(skill.name);
+          if (detail?.content_hash && detail.content_hash !== skill.content_hash) {
+            updatable.add(skill.name!);
           }
         } catch {
           // Skip check if registry is unreachable
@@ -693,7 +697,8 @@ export function SubAgentDetailPage() {
               files: s.files?.map((f: McpSkillFile) => ({ path: f.path, content: f.content })),
               registry_id: s.registry_id ?? null,
               source: s.source ?? null,
-              source_hash: s.source_hash ?? null,
+              content_hash: s.content_hash ?? null,
+              scope: s.scope ?? null,
             }))
           : []
       );
@@ -764,7 +769,7 @@ export function SubAgentDetailPage() {
         mcp_tools: editMcpTools.length > 0 ? editMcpTools : undefined,
         enable_thinking: editEnableThinking,
         thinking_level: editThinkingLevel ?? undefined, // Convert null to undefined for API
-        skills: editSkills.length > 0 ? editSkills : undefined,
+        skills: editSkills,
         sandbox_enabled: editSandboxEnabled,
       };
     }
@@ -809,20 +814,15 @@ export function SubAgentDetailPage() {
         toast.error('Failed to fetch skill details');
         return;
       }
-      const detail = data as { name?: string; description?: string; content_hash?: string; files?: Array<{ path: string; contents: string }> };
-      // Extract SKILL.md body from files
-      const skillMdFile = detail.files?.find((f) => f.path === 'SKILL.md');
-      const body = skillMdFile?.contents ?? '';
-      const otherFiles = (detail.files ?? [])
-        .filter((f) => f.path !== 'SKILL.md')
-        .map((f) => ({ path: f.path, content: f.contents }));
+      const detail = data as { name?: string; slug?: string; description?: string; content_hash?: string; scope?: string };
       const newSkill = {
-        name: detail.name ?? skill.name,
+        name: detail.slug ?? skill.slug ?? skill.name,
         description: detail.description ?? '',
-        body,
-        files: otherFiles.length > 0 ? otherFiles : undefined,
-        source: skill.id,
-        source_hash: detail.content_hash ?? null,
+        body: '',
+        files: undefined,
+        registry_id: skill.id,
+        content_hash: detail.content_hash ?? null,
+        scope: 'standalone' as const,
       };
       // Don't add duplicates
       if (editSkills.some((s) => s.name === newSkill.name)) {
@@ -849,16 +849,11 @@ export function SubAgentDetailPage() {
         toast.error('Failed to fetch latest version from registry');
         return;
       }
-      const detail = data as { name?: string; description?: string; content_hash?: string; files?: Array<{ path: string; contents: string }> };
-      const skillMdFile = detail.files?.find((f) => f.path === 'SKILL.md');
-      const body = skillMdFile?.contents ?? '';
-      const otherFiles = (detail.files ?? [])
-        .filter((f) => f.path !== 'SKILL.md')
-        .map((f) => ({ path: f.path, content: f.contents }));
+      const detail = data as { name?: string; slug?: string; description?: string; content_hash?: string };
       setEditSkills((prev) =>
         prev.map((s) =>
           s.name === skillName
-            ? { ...s, description: detail.description ?? s.description, body, files: otherFiles.length > 0 ? otherFiles : undefined, source_hash: detail.content_hash ?? s.source_hash }
+            ? { ...s, description: detail.description ?? s.description, content_hash: detail.content_hash ?? s.content_hash }
             : s
         )
       );
@@ -1771,7 +1766,7 @@ export function SubAgentDetailPage() {
                                 <Plus className="h-2.5 w-2.5 mr-1" />
                                 Import
                               </Button>
-                              {editSkills.some((s) => !s.registry_id) ? (
+                              {editSkills.some((s) => s.scope === 'sub-agent' || !s.registry_id) ? (
                                 <Button
                                   type="button"
                                   variant="outline"
@@ -1801,12 +1796,12 @@ export function SubAgentDetailPage() {
                           const skillsList = isEditing ? editSkills : displayedSkills;
                           return Array.isArray(skillsList) && skillsList.length > 0 ? (
                             <div className="space-y-1">
-                              {skillsList.map((skill: SkillDefinitionOutput, idx: number) => (
+                              {skillsList.map((skill: SkillDefinition, idx: number) => (
                                 <div
                                   key={skill.name}
                                   className="flex items-center gap-2 py-1 px-2 rounded bg-muted/40 text-[11px] group/skill"
                                 >
-                                  {skill.registry_id ? (
+                                  {skill.scope && skill.scope !== 'sub-agent' ? (
                                     <a
                                       href={`/app/skill-registry?skill=${skill.registry_id}`}
                                       className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline inline-flex items-center gap-0.5"
@@ -1818,11 +1813,17 @@ export function SubAgentDetailPage() {
                                   ) : (
                                     <code className="font-mono font-medium shrink-0 whitespace-nowrap">{skill.name || '(unnamed)'}</code>
                                   )}
-                                  {skill.registry_id && (
+                                  {skill.scope && skill.scope !== 'sub-agent' && (
                                     <span className="text-[10px] text-muted-foreground bg-muted px-1 rounded shrink-0">imported</span>
                                   )}
-                                  {!isEditing && skill.registry_id && skill.update_available && (
-                                    <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0">update available</span>
+                                  {!isEditing && skill.scope && skill.scope !== 'sub-agent' && skill.update_available && skill.registry_id && skill.content_hash && (
+                                    <button
+                                      type="button"
+                                      className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer"
+                                      onClick={() => setSkillDiffInfo({ registryId: skill.registry_id!, contentHash: skill.content_hash!, name: skill.name || 'Skill' })}
+                                    >
+                                      update available
+                                    </button>
                                   )}
                                   {(skill.files?.length ?? 0) > 0 && (
                                     <span className="text-[10px] text-muted-foreground shrink-0">
@@ -1834,14 +1835,14 @@ export function SubAgentDetailPage() {
                                       — {skill.description.length > 50 ? skill.description.slice(0, 50) + '…' : skill.description}
                                     </span>
                                   )}
-                                  {isEditing && skill.registry_id && (
+                                  {isEditing && skill.scope && skill.scope !== 'sub-agent' && (
                                     <div className="flex items-center gap-1 opacity-0 group-hover/skill:opacity-100 transition-opacity ml-auto shrink-0">
-                                      {skillsWithUpdates.has(skill.name) && (
+                                      {skill.name && skillsWithUpdates.has(skill.name) && (
                                         <button
                                           type="button"
                                           className="text-primary hover:text-primary/80 text-[10px] font-medium"
                                           disabled={updatingSkillName === skill.name}
-                                          onClick={() => handleUpdateImportedSkill(skill.name, skill.registry_id!)}
+                                          onClick={() => handleUpdateImportedSkill(skill.name!, skill.registry_id!)}
                                         >
                                           {updatingSkillName === skill.name ? (
                                             <Loader2 className="h-3 w-3 animate-spin" />
@@ -1862,7 +1863,7 @@ export function SubAgentDetailPage() {
                                       </button>
                                     </div>
                                   )}
-                                  {isEditing && !skill.registry_id && (
+                                  {isEditing && (!skill.scope || skill.scope === 'sub-agent') && (
                                     <button
                                       type="button"
                                       className="opacity-0 group-hover/skill:opacity-100 text-destructive hover:text-destructive/80 transition-opacity ml-auto shrink-0"
@@ -1901,15 +1902,26 @@ export function SubAgentDetailPage() {
                         <SkillEditorModal
                           open={isSkillModalOpen}
                           onOpenChange={setIsSkillModalOpen}
-                          skills={editSkills.filter((s) => !s.registry_id) as SkillDefinitionInput[]}
+                          skills={editSkills.filter((s) => s.scope === 'sub-agent' || !s.registry_id) as SkillDefinition[]}
                           onChange={(updated) => {
-                            const importedSkills = editSkills.filter((s) => s.registry_id);
-                            const customSkills = updated.map(s => ({
-                              name: s.name,
-                              description: s.description,
-                              body: s.body ?? '',
-                              files: s.files?.map((f: { path: string; content: string }) => ({ path: f.path, content: f.content })),
-                            }));
+                            const importedSkills = editSkills.filter((s) => s.scope && s.scope !== 'sub-agent');
+                            // Build a lookup of existing sub-agent skills to preserve registry_id/scope
+                            const existingByName = new Map(
+                              editSkills
+                                .filter((s) => s.scope === 'sub-agent' || !s.registry_id)
+                                .map((s) => [s.name, s])
+                            );
+                            const customSkills = updated.map(s => {
+                              const existing = existingByName.get(s.name);
+                              return {
+                                name: s.name,
+                                description: s.description,
+                                body: s.body ?? '',
+                                files: s.files?.map((f: { path: string; content: string }) => ({ path: f.path, content: f.content })),
+                                registry_id: existing?.registry_id ?? null,
+                                scope: existing?.scope ?? null,
+                              };
+                            });
                             setEditSkills([...importedSkills, ...customSkills]);
                             handleFieldChange();
                           }}
@@ -2056,10 +2068,15 @@ export function SubAgentDetailPage() {
                       {activation.scope === 'group' ? (activation.group_name ?? 'Group') : 'Personal'}
                     </Badge>
                     {activation.update_available && (
-                      <Badge variant="default" className="text-[9px] px-1 py-0 bg-amber-500 hover:bg-amber-600 shrink-0">
-                        <ArrowUpCircle className="h-2 w-2 mr-0.5" />
-                        update
-                      </Badge>
+                      <button
+                        type="button"
+                        onClick={() => setSkillDiffInfo({ registryId: activation.registry_id, contentHash: activation.content_hash, name: activation.skill_name })}
+                      >
+                        <Badge variant="default" className="text-[9px] px-1 py-0 bg-amber-500 hover:bg-amber-600 shrink-0 cursor-pointer">
+                          <ArrowUpCircle className="h-2 w-2 mr-0.5" />
+                          update
+                        </Badge>
+                      </button>
                     )}
                     {activation.skill_description && (
                       <span className="text-muted-foreground truncate flex-1">
@@ -2623,6 +2640,15 @@ export function SubAgentDetailPage() {
           </DialogContent>
         </Dialog>
       )}
+
+      {/* Skill Diff Dialog */}
+      <SkillDiffDialog
+        open={!!skillDiffInfo}
+        onOpenChange={(open) => { if (!open) setSkillDiffInfo(null); }}
+        registryId={skillDiffInfo?.registryId ?? ''}
+        pinnedContentHash={skillDiffInfo?.contentHash ?? ''}
+        skillName={skillDiffInfo?.name ?? ''}
+      />
     </div>
   );
 }

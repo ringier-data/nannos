@@ -96,12 +96,12 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
   // Skills configuration (local agents only)
   const [skills, setSkills] = useState<Array<{ name: string; description: string; body: string; files?: Array<{ path: string; content: string }>; source?: string | null; source_hash?: string | null }>>(
     (config?.skills as SkillDefinition[] | undefined)?.map((s) => ({
-      name: s.name,
-      description: s.description,
+      name: s.name ?? '',
+      description: s.description ?? '',
       body: s.body ?? '',
       files: s.files?.map((f: { path: string; content: string }) => ({ path: f.path, content: f.content })),
-      source: (s as any).source ?? null,
-      source_hash: (s as any).source_hash ?? null,
+      source: s.source ?? null,
+      source_hash: s.content_hash ?? null,
     })) ?? []
   );
   const [isSkillModalOpen, setIsSkillModalOpen] = useState(false);
@@ -152,12 +152,12 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
         toast.error('Failed to fetch skill details');
         return;
       }
-      const detail = data as { name?: string; description?: string; content_hash?: string; files?: Array<{ path: string; contents: string }> };
+      const detail = data as { name?: string; description?: string; content_hash?: string; files?: Array<{ path: string; content: string }> };
       const skillMdFile = detail.files?.find((f) => f.path === 'SKILL.md');
-      const body = skillMdFile?.contents ?? '';
+      const body = skillMdFile?.content ?? '';
       const otherFiles = (detail.files ?? [])
         .filter((f) => f.path !== 'SKILL.md')
-        .map((f) => ({ path: f.path, content: f.contents }));
+        .map((f) => ({ path: f.path, content: f.content }));
       const newSkill = {
         name: detail.name ?? skill.name,
         description: detail.description ?? '',
@@ -957,7 +957,7 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
             skills={skills.filter((s) => !(s as any).source)}
             onChange={(updated) => {
               const importedSkills = skills.filter((s) => (s as any).source);
-              setSkills([...importedSkills, ...updated.map(s => ({ ...s, body: s.body ?? '' }))]);
+              setSkills([...importedSkills, ...updated.map(s => ({ ...s, name: s.name ?? '', description: s.description ?? '', body: s.body ?? '' }))]);
             }}
             disabled={isSubmitting}
           />

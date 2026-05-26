@@ -5,27 +5,42 @@ Provides endpoints for:
 - External source search (skills.sh, GitHub browse)
 - Import from source into registry
 - Activate from registry to agent filesystem
+- MCP tools for skill CRUD (create, update, remove, write/delete files)
 """
 
 import logging
+import re
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from console_backend.db.session import get_db_session
+from console_backend.db.session import DbSession, get_db_session
 from console_backend.dependencies import require_auth, require_auth_or_bearer_token
 from console_backend.models.skills_registry import (
+    ActivationScope,
+    McpSkillCreate,
+    McpSkillDeleteFile,
+    McpSkillRemove,
+    McpSkillResponse,
+    McpSkillUpdate,
+    McpSkillWriteFile,
     SkillFile,
     SkillImportRequest,
     SkillImportResponse,
+    SkillRegistryEntry,
     SkillSearchResponse,
     SkillSourceInfo,
 )
 from console_backend.models.user import User
-from console_backend.services.skill_registry_service import SkillRegistryEntry, SkillRegistryService
+from console_backend.services.skill_registry_service import SkillRegistryService
 from console_backend.services.skills_registry_service import skills_registry_service
+
+if TYPE_CHECKING:
+    from console_backend.services.skill_activation_service import SkillActivationService
+    from console_backend.services.sub_agent_service import SubAgentService
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +206,7 @@ async def get_skill_detail(
         "sandbox_required": entry.sandbox_required,
         "content_hash": entry.content_hash,
         "security_verdict": entry.security_verdict,
-        "files": [{"path": f.path, "contents": f.contents} for f in entry.files],
+        "files": [{"path": f.path, "content": f.content} for f in entry.files],
         "created_at": entry.created_at.isoformat(),
         "updated_at": entry.updated_at.isoformat(),
     }
@@ -217,10 +232,10 @@ async def get_skill_versions(
         "current_hash": entry.content_hash,
         "versions": [
             {
-                "content_hash": v["content_hash"],
-                "description": v["description"],
-                "created_by": v["created_by"],
-                "created_at": v["created_at"].isoformat() if v["created_at"] else None,
+                "content_hash": v.content_hash,
+                "description": v.description,
+                "created_by": v.created_by,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
             }
             for v in versions
         ],
@@ -248,11 +263,11 @@ async def get_skill_version_detail(
 
     return {
         "skill_id": skill_id,
-        "files": version["files"],
-        "content_hash": version["content_hash"],
-        "description": version["description"],
-        "created_by": version["created_by"],
-        "created_at": version["created_at"].isoformat() if version["created_at"] else None,
+        "files": version.files,
+        "content_hash": version.content_hash,
+        "description": version.description,
+        "created_by": version.created_by,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
     }
 
 
@@ -315,7 +330,7 @@ async def import_skill(
     bundled_files: list[SkillFile] = []
     for f in git_detail.files:
         if f.path == "SKILL.md":
-            skill_content = f.contents
+            skill_content = f.content
         else:
             bundled_files.append(f)
 
@@ -390,7 +405,7 @@ async def import_skill(
 
         # Step 6: Activate to agent filesystem (docstore)
         files_data = (
-            [{"path": f.path, "content": f.contents, "encoding": f.encoding} for f in bundled_files]
+            [{"path": f.path, "content": f.content, "encoding": f.encoding} for f in bundled_files]
             if bundled_files
             else None
         )
@@ -511,7 +526,7 @@ async def create_registry_skill(
             actor=user,
             name=body.name,
             description=body.description,
-            files=body.files or [SkillFile(path="SKILL.md", contents=f"# {body.name}\n\n{body.description}")],
+            files=body.files or [SkillFile(path="SKILL.md", content=f"# {body.name}\n\n{body.description}")],
             visibility=body.visibility,
             slug=body.slug if body.slug else None,
         )
@@ -617,11 +632,11 @@ async def write_registry_file(
     file_found = False
     for i, f in enumerate(current_files):
         if f.path == file_path:
-            current_files[i] = SkillFile(path=file_path, contents=body.content)
+            current_files[i] = SkillFile(path=file_path, content=body.content)
             file_found = True
             break
     if not file_found:
-        current_files.append(SkillFile(path=file_path, contents=body.content))
+        current_files.append(SkillFile(path=file_path, content=body.content))
 
     try:
         updated = await skill_registry_service.update_skill(
@@ -811,8 +826,8 @@ async def check_skill_update(
         return {"update_available": False}
 
     # Build file-level diff
-    current_files_map = {f.path: f.contents for f in entry.files}
-    latest_files_map = {f.path: f.contents for f in latest.files}
+    current_files_map = {f.path: f.content for f in entry.files}
+    latest_files_map = {f.path: f.content for f in latest.files}
     all_paths = sorted(set(list(current_files_map.keys()) + list(latest_files_map.keys())))
 
     file_diffs = []
@@ -924,32 +939,244 @@ async def apply_skill_update(
     }
 
 
+# ─── Shared MCP Helpers ──────────────────────────────────────────────────────
+# These helpers are used by MCP skill tool endpoints across routers.
+
+
+def _get_sub_agent_service(request: Request) -> "SubAgentService":
+    """Get the sub-agent service from app state."""
+    return request.app.state.sub_agent_service
+
+
+# Agents that do not support the skills feature.
+_SKILLS_EXCLUDED_AGENTS = frozenset({"voice-agent"})
+
+# Orchestrator delegates skill ownership to general-purpose.
+# When the orchestrator calls skill tools, resolve to GP's sub_agent_id.
+_AGENT_NAME_ALIASES: dict[str, str] = {"orchestrator": "general-purpose"}
+
+
+def _require_agent_name(agent_name: str | None) -> str:
+    """Validate that agent_name was provided (either by caller or auto-injected).
+
+    agent_name is always required — even when registry_id is provided — because
+    it identifies which sub-agent to operate on (for activation refresh, etc.).
+    """
+    if not agent_name or agent_name == "self":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "agent_name is required (even when registry_id is provided). "
+                "Sub-agents auto-inject this; if calling directly, provide it explicitly."
+            ),
+        )
+    if agent_name in _SKILLS_EXCLUDED_AGENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Skills are not supported for '{agent_name}'.",
+        )
+    return agent_name
+
+
+def _get_skill_activation_service(request: Request) -> "SkillActivationService":
+    """Get the skill activation service from app state."""
+    return request.app.state.skill_activation_service
+
+
+async def _resolve_sub_agent_id(request: Request, db: AsyncSession, agent_name: str) -> tuple[int, str]:
+    """Resolve sub_agent_id from agent_name.
+
+    Applies agent name aliases (e.g., orchestrator → general-purpose) before lookup.
+    Returns (sub_agent_id, resolved_agent_name).
+    """
+    resolved_name = _AGENT_NAME_ALIASES.get(agent_name, agent_name)
+
+    from sqlalchemy import text as sa_text
+
+    result = await db.execute(
+        sa_text("SELECT id FROM sub_agents WHERE name = :name AND deleted_at IS NULL"),
+        {"name": resolved_name},
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sub-agent '{resolved_name}' not found. Cannot resolve sub_agent_id.",
+        )
+    return row, resolved_name
+
+
+async def _check_sub_agent_write_permission(
+    request: Request, db: AsyncSession, sub_agent_id: int, user_id: str
+) -> None:
+    """Verify the user has write permission on the target sub-agent.
+
+    Uses SubAgentService.check_user_permission (owner check + group RBAC intersection).
+    Raises 403 if denied.
+    """
+    sub_agent_service = _get_sub_agent_service(request)
+    has_write = await sub_agent_service.check_user_permission(
+        db, sub_agent_id=sub_agent_id, user_id=user_id, required_permission="write"
+    )
+    if not has_write:
+        raise HTTPException(
+            status_code=403,
+            detail="[ERROR_TYPE: auth] You do not have write permission on this sub-agent.",
+        )
+
+
+async def _check_registry_write_access(
+    request: Request,
+    db: AsyncSession,
+    entry: SkillRegistryEntry,
+    user_id: str,
+    sub_agent_id: int,
+) -> None:
+    """Verify the user has write access to a registry entry.
+
+    Authorization model:
+    - Owner always has write access.
+    - Sub-agent scoped entries: inherit from sub-agent permissions
+      (uses SubAgentService.check_user_permission on entry.sub_agent_id).
+    - Standalone entries not owned by user: denied.
+
+    Raises 403 if denied.
+    """
+    registry_service = get_skill_registry_service(request)
+    if not await registry_service.check_write_access(db, entry, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="[ERROR_TYPE: auth] You do not have write access to this skill registry entry.",
+        )
+
+
+def _validate_skill_name(name: str) -> None:
+    """Validate skill name per the SKILL.md spec (agentskills.io/specification).
+
+    Rules:
+    - 1-64 characters
+    - Lowercase alphanumeric + hyphens only
+    - Must not start or end with a hyphen
+    - Must not contain consecutive hyphens (--)
+    """
+    if not name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Skill name is required",
+        )
+    if len(name) > 64:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Skill name must be at most 64 characters",
+        )
+    if "--" in name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Skill name must not contain consecutive hyphens (--)",
+        )
+    if not re.match(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Skill name must contain only lowercase letters, numbers, and hyphens, and must not start or end with a hyphen",
+        )
+
+
+def _validate_file_path(file_path: str) -> None:
+    """Validate a skill file path.
+
+    Rules:
+    - Must be relative (no leading / or ~)
+    - No path traversal (..)
+    - Max 3 segments deep
+    - Cannot be SKILL.md (managed via skill create/update)
+    """
+    if not file_path:
+        raise HTTPException(status_code=400, detail="file_path is required")
+    if file_path.startswith("/") or file_path.startswith("~"):
+        raise HTTPException(status_code=400, detail="File path must be relative")
+    segments = file_path.split("/")
+    if ".." in segments:
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
+    if len(segments) > 6:
+        raise HTTPException(status_code=400, detail="File path exceeds max depth (6 segments)")
+    if not all(segments):
+        raise HTTPException(status_code=400, detail="Invalid file path (empty segments)")
+    if file_path == "SKILL.md":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot manage SKILL.md as a file — use the skill create/update endpoints instead.",
+        )
+
+
+def _build_skill_content(name: str, description: str, body: str) -> str:
+    """Build SKILL.md content with YAML frontmatter.
+
+    Follows the Agent Skills spec (agentskills.io/specification).
+    """
+    lines = ["---", f"name: {name}"]
+    if description:
+        lines.append(f"description: {description}")
+    lines.append("---")
+    lines.append("")
+    if body:
+        lines.append(body)
+    content = "\n".join(lines)
+    if not content.endswith("\n"):
+        content += "\n"
+    return content
+
+
+async def _get_user_group_context(
+    request: Request, db: AsyncSession, user: User, group_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Get the user's group memberships.
+
+    Returns list of dicts with 'id', 'name', 'group_role'.
+    """
+    user_group_service = request.app.state.user_group_service
+    return await user_group_service.get_user_group_memberships(db, user.id)
+
+
+def _resolve_group(memberships: list[dict[str, Any]], group_id: str | None) -> tuple[str | None, str | None]:
+    """Resolve which group to use and the user's role in it.
+
+    If group_id is provided, validates the user is a member.
+    If not provided, uses the first group (primary).
+    Returns (group_id, group_role).
+    """
+    if not memberships:
+        return None, None
+
+    if group_id:
+        for m in memberships:
+            if str(m["id"]) == group_id:
+                return str(m["id"]), m["group_role"]
+        return None, None  # User is not a member of requested group
+
+    # Default to first group
+    primary = memberships[0]
+    return str(primary["id"]), primary["group_role"]
+
+
 class McpActivateSkillInput(BaseModel):
     """Input for console_activate_skill MCP tool."""
 
     agent_name: str = Field(
         default="self",
-        description=(
-            "Target sub-agent name. Defaults to 'self' (the calling agent). "
-            "When targeting a different agent, prefer sub_agent_id for precision since agent names "
-            "may be imprecise (missing hyphens, underscores, spelling variations)."
-        ),
+        description="Target sub-agent name. Defaults to 'self' (the calling agent).",
     )
     registry_id: str | None = Field(default=None, description="Registry entry UUID to activate")
     skill_name: str | None = Field(
         default=None, description="Skill slug to search in registry (alternative to registry_id)"
     )
-    scope: str = Field(
+    scope: ActivationScope = Field(
         default="personal",
         description=(
             "Activation scope: 'personal' (only you), 'group' (shared with group members), "
-            "or 'default' (baked into sub-agent config, visible to all users — requires owner/write access)"
+            "or 'sub-agent' (baked into sub-agent config, visible to all users — requires owner/write access)"
         ),
     )
     group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
-    sub_agent_id: int | None = Field(
-        default=None, description="Sub-agent ID (resolved from agent_name if not provided)"
-    )
 
 
 class McpActivateSkillResponse(BaseModel):
@@ -982,23 +1209,14 @@ async def mcp_activate_skill(
 
     Provide either registry_id (exact) or skill_name (searches by slug).
     """
-    from console_backend.routers.playbook_router import (
-        _get_skill_activation_service,
-        _get_sub_agent_service,
-        _get_user_group_context,
-        _require_agent_name,
-        _resolve_group,
-        _resolve_sub_agent_id,
-    )
-
     agent_name = _require_agent_name(body.agent_name)
 
-    if body.scope not in ("personal", "group", "default"):
+    if body.scope not in ("personal", "group", "sub-agent"):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Invalid scope '{body.scope}'. Must be 'personal', 'group', "
-                "or 'default' (bakes skill into sub-agent config for all users)."
+                "or 'sub-agent' (bakes skill into sub-agent config for all users)."
             ),
         )
 
@@ -1006,11 +1224,11 @@ async def mcp_activate_skill(
         raise HTTPException(status_code=400, detail="Either registry_id or skill_name must be provided")
 
     # Resolve sub_agent_id
-    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name, body.sub_agent_id)
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name)
 
     # Scope-specific authorization
-    if body.scope == "default":
-        # Default scope bakes the skill into the sub-agent config — requires write access
+    if body.scope == "sub-agent":
+        # Sub-agent scope bakes the skill into the sub-agent config — requires write access
         sub_agent_service = _get_sub_agent_service(request)
         has_write = await sub_agent_service.check_user_permission(
             db=db, sub_agent_id=sub_agent_id, user_id=user.id, required_permission="write"
@@ -1019,7 +1237,7 @@ async def mcp_activate_skill(
             raise HTTPException(
                 status_code=403,
                 detail=(
-                    "[ERROR_TYPE: auth] You need owner or write access on the sub-agent to activate default-scope skills. "
+                    "[ERROR_TYPE: auth] You need owner or write access on the sub-agent to activate sub-agent-scope skills. "
                     "You can still activate the skill with 'personal' scope for your own use."
                 ),
             )
@@ -1056,13 +1274,13 @@ async def mcp_activate_skill(
     # Activate
     activation_service = _get_skill_activation_service(request)
 
-    # Sub-agent-scoped skills can only be activated with 'default' scope
+    # Sub-agent-scoped registry skills can only be activated with 'sub-agent' scope
     # (they're embedded in a sub-agent's config and need owner access).
-    if entry.scope == "sub-agent" and body.scope != "default":
+    if entry.scope == "sub-agent" and body.scope != "sub-agent":
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Skill '{entry.slug}' is scoped to a sub-agent. Use scope='default' "
+                f"Skill '{entry.slug}' is scoped to a sub-agent. Use scope='sub-agent' "
                 "to activate it on your agent, or use 'console_create_skill' to create a new copy."
             ),
         )
@@ -1078,25 +1296,17 @@ async def mcp_activate_skill(
         )
 
     try:
-        if body.scope == "default":
-            await activation_service.activate_as_default(
-                db=db,
-                registry_id=entry.id,
-                sub_agent_id=sub_agent_id,
-                agent_name=resolved_name,
-                actor=user,
-            )
-        else:
-            await activation_service.activate(
-                db=db,
-                registry_id=entry.id,
-                sub_agent_id=sub_agent_id,
-                agent_name=resolved_name,
-                scope=body.scope,
-                user_id=user.id,
-                group_id=int(resolved_group_id) if resolved_group_id and body.scope == "group" else None,
-                activated_by=user.id,
-            )
+        await activation_service.activate(
+            db=db,
+            registry_id=entry.id,
+            sub_agent_id=sub_agent_id,
+            agent_name=resolved_name,
+            scope=body.scope,
+            user_id=user.id,
+            group_id=int(resolved_group_id) if resolved_group_id and body.scope == "group" else None,
+            activated_by=user.id,
+            actor=user,
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -1113,7 +1323,7 @@ class ActivateRequest(BaseModel):
     """Request to activate a registry skill for an agent."""
 
     agent: str = Field(description="Target sub-agent name")
-    scope: str = Field(default="personal", description="'personal' or 'group'")
+    scope: ActivationScope = Field(default="personal", description="'personal' or 'group'")
     group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
     overwrite: bool = Field(default=False, description="Overwrite if already activated")
 
@@ -1160,9 +1370,9 @@ async def activate_skill(
     bundled_files: list[dict[str, str | None]] = []
     for f in entry.files:
         if f.path == "SKILL.md":
-            skill_content = f.contents
+            skill_content = f.content
         else:
-            bundled_files.append({"path": f.path, "content": f.contents, "encoding": f.encoding})
+            bundled_files.append({"path": f.path, "content": f.content, "encoding": f.encoding})
 
     if not skill_content:
         raise HTTPException(
@@ -1352,7 +1562,7 @@ class McpImportSkillInput(BaseModel):
             "Prefer using the exact name — agent names may have hyphens, underscores, or unexpected spelling."
         ),
     )
-    scope: str = Field(default="personal", description="Scope: 'personal' (immediate, no approval) or 'group'")
+    scope: ActivationScope = Field(default="personal", description="Scope: 'personal', 'group', or 'sub-agent'")
     ref: str = Field(default="main", description="Git branch/tag/commit to fetch from")
     group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
     overwrite: bool = Field(default=False, description="Overwrite if skill already exists")
@@ -1430,9 +1640,9 @@ async def mcp_import_skill(
     bundled_files: list[dict[str, str | None]] = []
     for f in files:
         if f.path == "SKILL.md":
-            skill_md_content = f.contents
+            skill_md_content = f.content
         else:
-            bundled_files.append({"path": f.path, "content": f.contents, "encoding": f.encoding})
+            bundled_files.append({"path": f.path, "content": f.content, "encoding": f.encoding})
 
     if not skill_md_content:
         raise HTTPException(
@@ -1487,4 +1697,626 @@ async def mcp_import_skill(
         security_verdict=security_verdict.verdict,
         files_count=1 + len(bundled_files),
         message=f"Skill '{skill_name}' imported and activated for agent '{body.agent_name}' ({body.scope} scope). Security: {security_verdict.verdict}.",
+    )
+
+
+# ─── MCP Skill CRUD Endpoints ────────────────────────────────────────────────
+
+
+@router.post(
+    "/mcp/skills",
+    response_model=McpSkillResponse,
+    tags=["MCP"],
+    operation_id="console_create_skill",
+    status_code=status.HTTP_201_CREATED,
+)
+async def mcp_create_skill(
+    body: McpSkillCreate,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> McpSkillResponse:
+    """Create a new skill and activate it on the calling agent.
+
+    Creates a skill in the registry and auto-activates it on the calling agent.
+    The skill is immediately usable after creation.
+
+    Scope determines the activation target:
+    - **personal**: Only your conversations with this agent see the skill.
+    - **group**: All group members' conversations see it. Requires 'write' group role.
+    - **sub-agent**: Baked into the sub-agent config, visible to all users. Requires owner/write access.
+
+    Visibility determines who can discover and activate the skill from the registry:
+    - **private**: Only you (default).
+    - **group**: Members of your groups.
+    - **public**: Everyone on the platform.
+    """
+    agent_name = _require_agent_name(body.agent_name)
+
+    _validate_skill_name(body.skill_name)
+
+    # Resolve sub_agent_id
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name)
+
+    # Scope-specific authorization
+    if body.scope == "sub-agent":
+        # Sub-agent scope bakes the skill into the sub-agent config — requires write access
+        sub_agent_service = _get_sub_agent_service(request)
+        has_write = await sub_agent_service.check_user_permission(
+            db=db, sub_agent_id=sub_agent_id, user_id=user.id, required_permission="write"
+        )
+        if not has_write:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "[ERROR_TYPE: auth] You need owner or write access on the sub-agent to create sub-agent-scope skills. "
+                    "Try scope='personal' instead."
+                ),
+            )
+        resolved_group_id = None
+        group_role = None
+    else:
+        # Resolve group context for personal/group scopes
+        memberships = await _get_user_group_context(request, db, user)
+        resolved_group_id, group_role = _resolve_group(memberships, body.group_id)
+
+        if body.scope == "group":
+            if not resolved_group_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No group context available or not a member of the specified group",
+                )
+            if group_role not in ("write", "manager"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "[ERROR_TYPE: auth] You need at least 'write' group role to create group skills. "
+                        "Try scope='personal' instead."
+                    ),
+                )
+
+    # Build skill files for registry
+    skill_content = _build_skill_content(body.skill_name, body.description, body.body)
+    registry_files = [SkillFile(path="SKILL.md", content=skill_content)]
+    if body.files:
+        for f in body.files:
+            registry_files.append(SkillFile(path=f.path, content=f.content))
+
+    # Create in registry
+    registry_service = get_skill_registry_service(request)
+    try:
+        entry = await registry_service.create_skill(
+            db=db,
+            actor=user,
+            name=body.skill_name.replace("-", " ").title(),
+            slug=body.skill_name,
+            description=body.description,
+            files=registry_files,
+            visibility=body.visibility,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Auto-activate on calling agent
+    activation_service = _get_skill_activation_service(request)
+    try:
+        await activation_service.activate(
+            db=db,
+            registry_id=entry.id,
+            sub_agent_id=sub_agent_id,
+            agent_name=resolved_name,
+            scope=body.scope,
+            user_id=user.id,
+            group_id=int(resolved_group_id) if resolved_group_id and body.scope == "group" else None,
+            activated_by=user.id,
+            actor=user if body.scope == "sub-agent" else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return McpSkillResponse(
+        skill_name=body.skill_name,
+        scope=body.scope,
+        agent_name=agent_name,
+        registry_id=entry.id,
+        message=f"Skill '{body.skill_name}' created and activated ({body.scope} scope).",
+    )
+
+
+@router.put(
+    "/mcp/skills",
+    response_model=McpSkillResponse,
+    tags=["MCP"],
+    operation_id="console_update_skill",
+)
+async def mcp_update_skill(
+    body: McpSkillUpdate,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> McpSkillResponse:
+    """Update a skill in the registry and refresh the calling agent's activation.
+
+    Finds the registry entry via the calling agent's activation, updates it,
+    and refreshes the docstore snapshot for this agent. Other agents' activations
+    remain pinned at their current content_hash until they explicitly self-update.
+    """
+    agent_name = _require_agent_name(body.agent_name)
+
+    if body.scope not in ("personal", "group", "sub-agent"):
+        raise HTTPException(status_code=400, detail="scope must be 'personal', 'group', or 'sub-agent'")
+
+    _validate_skill_name(body.skill_name)
+
+    # Resolve sub_agent_id
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name)
+
+    # Scope-specific authorization
+    if body.scope == "sub-agent":
+        # Sub-agent scope requires write access on the sub-agent
+        sub_agent_service = _get_sub_agent_service(request)
+        has_write = await sub_agent_service.check_user_permission(
+            db=db, sub_agent_id=sub_agent_id, user_id=user.id, required_permission="write"
+        )
+        if not has_write:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "[ERROR_TYPE: auth] You need owner or write access on the sub-agent to update sub-agent-scope skills. "
+                    "Try scope='personal' instead."
+                ),
+            )
+        resolved_group_id = None
+        group_role = None
+    else:
+        # Resolve group context for personal/group scopes
+        memberships = await _get_user_group_context(request, db, user)
+        resolved_group_id, group_role = _resolve_group(memberships, body.group_id)
+
+        if body.scope == "group":
+            if not resolved_group_id:
+                raise HTTPException(
+                    status_code=400, detail="No group context available or not a member of the specified group"
+                )
+            if group_role not in ("write", "manager"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="[ERROR_TYPE: auth] You need at least 'write' group role to modify group skills.",
+                )
+
+    # Find registry entry: by registry_id or by activation on calling agent
+    registry_service = get_skill_registry_service(request)
+    activation_service = _get_skill_activation_service(request)
+
+    if body.registry_id:
+        entry = await registry_service.get_by_id(db, body.registry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Registry entry '{body.registry_id}' not found")
+    else:
+        # Look up via activation
+        activation = await activation_service.find_activation_by_skill_name(
+            db,
+            sub_agent_id=sub_agent_id,
+            skill_name=body.skill_name,
+            scope=body.scope,
+            user_id=user.id if body.scope == "personal" else None,
+            group_id=int(resolved_group_id) if resolved_group_id else None,
+        )
+        if not activation:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Skill '{body.skill_name}' not found in {body.scope} scope on this agent.",
+            )
+        entry = await registry_service.get_by_id(db, activation.registry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Registry entry for this activation no longer exists")
+
+    # Authorization: verify user can write to this registry entry
+    await _check_registry_write_access(request, db, entry, user.id, sub_agent_id)
+
+    # Build updated files
+    current_files = entry.files or []
+    if body.files is not None:
+        # Replace all files (except SKILL.md which we handle separately)
+        new_files = []
+        for f in body.files:
+            new_files.append(SkillFile(path=f.path, content=f.content))
+        registry_files = new_files
+    else:
+        # Keep existing non-SKILL.md files
+        registry_files = [f for f in current_files if f.path != "SKILL.md"]
+
+    # Build updated SKILL.md
+    if body.content is not None:
+        skill_content = body.content
+    elif body.body is not None:
+        skill_content = _build_skill_content(body.skill_name, body.description or "", body.body)
+    else:
+        raise HTTPException(status_code=400, detail="Either 'body' or 'content' must be provided")
+
+    registry_files.insert(0, SkillFile(path="SKILL.md", content=skill_content))
+
+    # Update registry
+    try:
+        updated_entry = await registry_service.update_skill(
+            db=db,
+            actor=user,
+            skill_id=entry.id,
+            files=registry_files,
+            description=body.description,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Self-update: refresh this agent's activation / docstore snapshot
+    await activation_service.self_update(
+        db=db,
+        registry_id=entry.id,
+        sub_agent_id=sub_agent_id,
+        agent_name=resolved_name,
+        actor=user,
+    )
+
+    return McpSkillResponse(
+        skill_name=body.skill_name,
+        scope=body.scope,
+        agent_name=agent_name,
+        registry_id=entry.id,
+        message=f"Skill '{body.skill_name}' updated in registry and refreshed on this agent.",
+    )
+
+
+@router.post(
+    "/mcp/skills/remove",
+    response_model=McpSkillResponse,
+    tags=["MCP"],
+    operation_id="console_remove_skill",
+)
+async def mcp_remove_skill(
+    body: McpSkillRemove,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> McpSkillResponse:
+    """Deactivate a skill from the calling agent.
+
+    Removes the skill's activation and cleans up the docstore snapshot.
+    The registry entry is preserved so other consumers are unaffected.
+
+    For sub-agent-scope skills, also removes the skill from the sub-agent's config version.
+    """
+    agent_name = _require_agent_name(body.agent_name)
+
+    if body.scope not in ("personal", "group", "sub-agent"):
+        raise HTTPException(status_code=400, detail="scope must be 'personal', 'group', or 'sub-agent'")
+
+    _validate_skill_name(body.skill_name)
+
+    # Resolve sub_agent_id
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name)
+
+    # Scope-specific authorization
+    if body.scope == "sub-agent":
+        # Sub-agent scope requires write access on the sub-agent
+        sub_agent_service = _get_sub_agent_service(request)
+        has_write = await sub_agent_service.check_user_permission(
+            db=db, sub_agent_id=sub_agent_id, user_id=user.id, required_permission="write"
+        )
+        if not has_write:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "[ERROR_TYPE: auth] You need owner or write access on the sub-agent to remove sub-agent-scope skills. "
+                    "Try scope='personal' instead."
+                ),
+            )
+        resolved_group_id = None
+        group_role = None
+    else:
+        # Resolve group context for personal/group scopes
+        memberships = await _get_user_group_context(request, db, user)
+        resolved_group_id, group_role = _resolve_group(memberships, body.group_id)
+
+        if body.scope == "group":
+            if not resolved_group_id:
+                raise HTTPException(
+                    status_code=400, detail="No group context available or not a member of the specified group"
+                )
+            if group_role not in ("write", "manager"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="[ERROR_TYPE: auth] You need at least 'write' group role to deactivate group skills.",
+                )
+
+    # Authorization: verify user can write on this sub-agent
+    await _check_sub_agent_write_permission(request, db, sub_agent_id, user.id)
+
+    # Find and deactivate
+    activation_service = _get_skill_activation_service(request)
+
+    if body.registry_id:
+        # Direct lookup by registry_id
+        activation = await activation_service.find_activation_by_registry_id(
+            db,
+            registry_id=body.registry_id,
+            sub_agent_id=sub_agent_id,
+            scope=body.scope,
+            user_id=user.id if body.scope == "personal" else None,
+        )
+        if not activation:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No activation found for registry '{body.registry_id}' in {body.scope} scope on this agent.",
+            )
+    else:
+        activation = await activation_service.find_activation_by_skill_name(
+            db,
+            sub_agent_id=sub_agent_id,
+            skill_name=body.skill_name,
+            scope=body.scope,
+            user_id=user.id if body.scope == "personal" else None,
+            group_id=int(resolved_group_id) if resolved_group_id else None,
+        )
+        if not activation:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Skill '{body.skill_name}' not found in {body.scope} scope on this agent.",
+            )
+
+    try:
+        deactivated = await activation_service.deactivate(
+            db=db,
+            activation_id=activation.id,
+            agent_name=resolved_name,
+            user_id=user.id,
+            sub_agent_id=sub_agent_id if body.scope == "sub-agent" else None,
+            actor=user if body.scope == "sub-agent" else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not deactivated:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Skill '{body.skill_name}' not found in {body.scope} scope on this agent.",
+        )
+
+    return McpSkillResponse(
+        skill_name=body.skill_name,
+        scope=body.scope,
+        agent_name=agent_name,
+        message=f"Skill '{body.skill_name}' deactivated from this agent ({body.scope} scope).",
+    )
+
+
+@router.post(
+    "/mcp/skills/files",
+    response_model=McpSkillResponse,
+    tags=["MCP"],
+    operation_id="console_write_skill_file",
+)
+async def mcp_write_skill_file(
+    body: McpSkillWriteFile,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> McpSkillResponse:
+    """Write a file to a skill in the registry.
+
+    Creates or updates a single file within an existing skill. Updates the registry
+    entry and refreshes the calling agent's docstore snapshot.
+    Cannot be used to write SKILL.md (use console_update_skill instead).
+
+    - **personal** scope: immediate effect, no approval needed.
+    - **group** scope: requires 'write' or 'manager' group role.
+    """
+    agent_name = _require_agent_name(body.agent_name)
+
+    if body.scope not in ("personal", "group"):
+        raise HTTPException(status_code=400, detail="scope must be 'personal' or 'group'")
+
+    _validate_skill_name(body.skill_name)
+    _validate_file_path(body.file_path)
+
+    # Resolve sub_agent_id
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name)
+
+    # Resolve group context
+    memberships = await _get_user_group_context(request, db, user)
+    resolved_group_id, group_role = _resolve_group(memberships, body.group_id)
+
+    if body.scope == "group":
+        if not resolved_group_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No group context available or not a member of the specified group",
+            )
+        if group_role not in ("write", "manager"):
+            raise HTTPException(
+                status_code=403,
+                detail="[ERROR_TYPE: auth] You need at least 'write' group role to write group skill files.",
+            )
+
+    # Find registry entry via activation or registry_id
+    activation_service = _get_skill_activation_service(request)
+    registry_service = get_skill_registry_service(request)
+
+    if body.registry_id:
+        entry = await registry_service.get_by_id(db, body.registry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Registry entry '{body.registry_id}' not found")
+    else:
+        activation = await activation_service.find_activation_by_skill_name(
+            db,
+            sub_agent_id=sub_agent_id,
+            skill_name=body.skill_name,
+            scope=body.scope,
+            user_id=user.id if body.scope == "personal" else None,
+            group_id=int(resolved_group_id) if resolved_group_id else None,
+        )
+        if not activation:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Skill '{body.skill_name}' not found in {body.scope} scope on this agent.",
+            )
+        entry = await registry_service.get_by_id(db, activation.registry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Registry entry for this activation no longer exists")
+
+    # Authorization: verify user can write to this registry entry
+    await _check_registry_write_access(request, db, entry, user.id, sub_agent_id)
+
+    # Update the file in the registry files list
+    current_files = list(entry.files or [])
+    # Replace existing file or add new one
+    file_found = False
+    for i, f in enumerate(current_files):
+        if f.path == body.file_path:
+            current_files[i] = SkillFile(path=body.file_path, content=body.content)
+            file_found = True
+            break
+    if not file_found:
+        current_files.append(SkillFile(path=body.file_path, content=body.content))
+
+    # Update registry
+    try:
+        await registry_service.update_skill(
+            db=db,
+            actor=user,
+            skill_id=entry.id,
+            files=current_files,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Self-update: refresh this agent's activation / docstore snapshot
+    await activation_service.self_update(
+        db=db,
+        registry_id=entry.id,
+        sub_agent_id=sub_agent_id,
+        agent_name=resolved_name,
+        actor=user,
+    )
+
+    return McpSkillResponse(
+        skill_name=body.skill_name,
+        scope=body.scope,
+        agent_name=agent_name,
+        registry_id=entry.id,
+        message=f"File '{body.file_path}' written to skill '{body.skill_name}' in registry.",
+    )
+
+
+@router.post(
+    "/mcp/skills/files/remove",
+    response_model=McpSkillResponse,
+    tags=["MCP"],
+    operation_id="console_delete_skill_file",
+)
+async def mcp_delete_skill_file(
+    body: McpSkillDeleteFile,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_auth_or_bearer_token),
+) -> McpSkillResponse:
+    """Delete a file from a skill in the registry.
+
+    Removes a single file from an existing skill. Updates the registry entry
+    and refreshes the calling agent's docstore snapshot.
+    Cannot delete SKILL.md (use console_remove_skill to deactivate the skill instead).
+
+    - **personal** scope: immediate effect.
+    - **group** scope: requires 'write' or 'manager' group role.
+    """
+    agent_name = _require_agent_name(body.agent_name)
+
+    if body.scope not in ("personal", "group"):
+        raise HTTPException(status_code=400, detail="scope must be 'personal' or 'group'")
+
+    _validate_skill_name(body.skill_name)
+    _validate_file_path(body.file_path)
+
+    # Resolve sub_agent_id
+    sub_agent_id, resolved_name = await _resolve_sub_agent_id(request, db, agent_name)
+
+    # Resolve group context
+    memberships = await _get_user_group_context(request, db, user)
+    resolved_group_id, group_role = _resolve_group(memberships, body.group_id)
+
+    if body.scope == "group":
+        if not resolved_group_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No group context available or not a member of the specified group",
+            )
+        if group_role not in ("write", "manager"):
+            raise HTTPException(
+                status_code=403,
+                detail="[ERROR_TYPE: auth] You need at least 'write' group role to delete group skill files.",
+            )
+
+    # Find registry entry via activation or registry_id
+    activation_service = _get_skill_activation_service(request)
+    registry_service = get_skill_registry_service(request)
+
+    if body.registry_id:
+        entry = await registry_service.get_by_id(db, body.registry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Registry entry '{body.registry_id}' not found")
+    else:
+        activation = await activation_service.find_activation_by_skill_name(
+            db,
+            sub_agent_id=sub_agent_id,
+            skill_name=body.skill_name,
+            scope=body.scope,
+            user_id=user.id if body.scope == "personal" else None,
+            group_id=int(resolved_group_id) if resolved_group_id else None,
+        )
+        if not activation:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Skill '{body.skill_name}' not found in {body.scope} scope on this agent.",
+            )
+        entry = await registry_service.get_by_id(db, activation.registry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Registry entry for this activation no longer exists")
+
+    # Authorization: verify user can write to this registry entry
+    await _check_registry_write_access(request, db, entry, user.id, sub_agent_id)
+
+    # Remove the file from the registry files list
+    current_files = list(entry.files or [])
+    new_files = [f for f in current_files if f.path != body.file_path]
+    if len(new_files) == len(current_files):
+        raise HTTPException(
+            status_code=404,
+            detail=f"File '{body.file_path}' not found in skill '{body.skill_name}'",
+        )
+
+    # Update registry
+    try:
+        await registry_service.update_skill(
+            db=db,
+            actor=user,
+            skill_id=entry.id,
+            files=new_files,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Self-update: refresh this agent's activation / docstore snapshot
+    await activation_service.self_update(
+        db=db,
+        registry_id=entry.id,
+        sub_agent_id=sub_agent_id,
+        agent_name=resolved_name,
+        actor=user,
+    )
+
+    return McpSkillResponse(
+        skill_name=body.skill_name,
+        scope=body.scope,
+        agent_name=agent_name,
+        registry_id=entry.id,
+        message=f"File '{body.file_path}' removed from skill '{body.skill_name}' in registry.",
     )

@@ -7,9 +7,10 @@ Covers:
 - Skills persisted in config_version
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from pydantic import ValidationError
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from console_backend.models.sub_agent import (
     SkillDefinition,
@@ -19,12 +20,13 @@ from console_backend.models.sub_agent import (
 )
 
 
-class TestSkillFilePathValidation:
-    """SkillFile.path must be relative, no traversal, max 3 segments."""
+class TestSkillFileModel:
+    """SkillFile path validation and field tests."""
 
     def test_valid_simple_path(self):
         f = SkillFile(path="scripts/check.py", content="print('ok')")
         assert f.path == "scripts/check.py"
+        assert f.content == "print('ok')"
 
     def test_valid_nested_path(self):
         f = SkillFile(path="a/b/c.md", content="hello")
@@ -33,6 +35,18 @@ class TestSkillFilePathValidation:
     def test_valid_single_segment(self):
         f = SkillFile(path="README.md", content="# readme")
         assert f.path == "README.md"
+
+    def test_valid_max_depth(self):
+        f = SkillFile(path="scripts/office/helpers/__init__.py", content="ok")
+        assert f.path == "scripts/office/helpers/__init__.py"
+
+    def test_encoding_optional(self):
+        f = SkillFile(path="data.bin", content="base64data", encoding="base64")
+        assert f.encoding == "base64"
+
+    def test_encoding_defaults_none(self):
+        f = SkillFile(path="readme.md", content="hello")
+        assert f.encoding is None
 
     def test_rejects_absolute_path(self):
         with pytest.raises(ValidationError, match="must be relative"):
@@ -53,11 +67,6 @@ class TestSkillFilePathValidation:
     def test_rejects_too_deep(self):
         with pytest.raises(ValidationError, match="max depth"):
             SkillFile(path="a/b/c/d/e/f/g.py", content="too deep")
-
-    def test_accepts_deeper_paths(self):
-        """Paths up to 6 segments are valid (e.g. scripts/office/schemas/vendor/file.xsd)."""
-        f = SkillFile(path="scripts/office/helpers/__init__.py", content="ok")
-        assert f.path == "scripts/office/helpers/__init__.py"
 
     def test_rejects_empty_path(self):
         with pytest.raises(ValidationError, match="Invalid"):
@@ -83,9 +92,10 @@ class TestSkillDefinitionNameValidation:
         with pytest.raises(ValidationError):
             SkillDefinition(name="skill_with_underscores", description="x", body="x")
 
-    def test_rejects_empty(self):
-        with pytest.raises(ValidationError):
-            SkillDefinition(name="", description="x", body="x")
+    def test_allows_empty_name(self):
+        """Empty name is allowed (used for minimal refs resolved later)."""
+        sd = SkillDefinition(name="", description="x", body="x")
+        assert sd.name == ""
 
     def test_rejects_too_long(self):
         with pytest.raises(ValidationError):
@@ -181,7 +191,7 @@ class TestSkillDefinitionReferenceMode:
             description="From registry",
             body="",
             source="vercel-labs/agent-skills/next-js-dev",
-            source_hash="abc123",
+            content_hash="abc123",
         )
         assert skill.source == "vercel-labs/agent-skills/next-js-dev"
         assert skill.body == ""
@@ -195,7 +205,7 @@ class TestSkillDefinitionReferenceMode:
             body="# Do something\nStep 1...",
         )
         assert skill.source is None
-        assert skill.source_hash is None
+        assert skill.content_hash is None
         assert skill.body == "# Do something\nStep 1..."
 
     def test_body_defaults_to_empty(self):
@@ -223,16 +233,18 @@ class TestStripImportedSkillContent:
                 description="From registry",
                 body="# Full content here\nLong markdown...",
                 files=[SkillFile(path="script.py", content="print('hello')")],
+                registry_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                 source="org/repo/skill",
-                source_hash="hash123",
+                content_hash="hash123",
             ),
         ]
         result = self.strip(skills)
         assert len(result) == 1
         assert result[0]["name"] == "imported"
         assert result[0]["description"] == "From registry"
+        assert result[0]["registry_id"] == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
         assert result[0]["source"] == "org/repo/skill"
-        assert result[0]["source_hash"] == "hash123"
+        assert result[0]["content_hash"] == "hash123"
         assert result[0]["body"] == ""
         assert result[0]["files"] == []
 
@@ -257,8 +269,9 @@ class TestStripImportedSkillContent:
                 name="imported-one",
                 description="Registry",
                 body="Big content...",
+                registry_id="11111111-1111-1111-1111-111111111111",
                 source="org/repo/one",
-                source_hash="h1",
+                content_hash="h1",
             ),
             SkillDefinition(
                 name="custom-one",
@@ -270,8 +283,9 @@ class TestStripImportedSkillContent:
                 description="Another imported",
                 body="More content...",
                 files=[SkillFile(path="large.xsd", content="<xml>...</xml>")],
+                registry_id="22222222-2222-2222-2222-222222222222",
                 source="org/repo/two",
-                source_hash="h2",
+                content_hash="h2",
             ),
         ]
         result = self.strip(skills)
@@ -289,12 +303,14 @@ class TestStripImportedSkillContent:
                 "description": "Imported",
                 "body": "content",
                 "files": [],
+                "registry_id": "33333333-3333-3333-3333-333333333333",
                 "source": "x/y/z",
-                "source_hash": "h",
+                "content_hash": "h",
             },
         ]
         result = self.strip(skills)
         assert result[0]["body"] == ""
+        assert result[0]["registry_id"] == "33333333-3333-3333-3333-333333333333"
         assert result[0]["source"] == "x/y/z"
 
 
@@ -303,7 +319,7 @@ class TestPersistAndStripSkills:
 
     @pytest.fixture
     def mock_db(self):
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
 
         db = AsyncMock()
         # Mock execute for the SELECT query in upsert_agent_skill
@@ -327,8 +343,7 @@ class TestPersistAndStripSkills:
 
     @pytest.mark.asyncio
     async def test_custom_skill_gets_registry_source(self, mock_db, mock_actor):
-        """Custom skills (no source) should be upserted to registry and get a source ID."""
-        from unittest.mock import AsyncMock, patch
+        """Custom skills (no registry_id) should be upserted to registry and get a registry_id."""
 
         from console_backend.services.sub_agent_service import SubAgentService
 
@@ -336,7 +351,7 @@ class TestPersistAndStripSkills:
 
         mock_registry_service = MagicMock()
         mock_registry_service.upsert_agent_skill = AsyncMock(
-            return_value=("generated-uuid-123", "content-hash-abc")
+            return_value=("a1b2c3d4-e5f6-7890-abcd-ef1234567890", "content-hash-abc")
         )
         service._skill_registry_service = mock_registry_service
 
@@ -352,11 +367,8 @@ class TestPersistAndStripSkills:
         result = await service._persist_and_strip_skills(mock_db, mock_actor, 42, skills)
 
         assert len(result) == 1
-        assert result[0]["name"] == "my-custom-skill"
-        assert result[0]["source"] == "generated-uuid-123"
-        assert result[0]["source_hash"] == "content-hash-abc"
-        assert result[0]["body"] == ""
-        assert result[0]["files"] == []
+        assert result[0].registry_id == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert result[0].content_hash == "content-hash-abc"
 
         # Verify upsert was called with correct args
         mock_registry_service.upsert_agent_skill.assert_called_once()
@@ -371,8 +383,7 @@ class TestPersistAndStripSkills:
 
     @pytest.mark.asyncio
     async def test_imported_skill_stripped_without_registry_call(self, mock_db, mock_actor):
-        """Imported skills (with source) should be stripped without calling the registry."""
-        from unittest.mock import AsyncMock, patch
+        """Imported skills (with registry_id) should be stripped without calling the registry."""
 
         from console_backend.services.sub_agent_service import SubAgentService
 
@@ -387,18 +398,17 @@ class TestPersistAndStripSkills:
                 name="imported-skill",
                 description="From external registry",
                 body="# Full body (will be stripped)",
-                source="existing-registry-id",
-                source_hash="existing-hash",
+                registry_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                source="org/repo/skill",
+                content_hash="existing-hash",
             ),
         ]
 
         result = await service._persist_and_strip_skills(mock_db, mock_actor, 42, skills)
 
         assert len(result) == 1
-        assert result[0]["source"] == "existing-registry-id"
-        assert result[0]["source_hash"] == "existing-hash"
-        assert result[0]["body"] == ""
-        assert result[0]["files"] == []
+        assert result[0].registry_id == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert result[0].content_hash == "existing-hash"
 
         # Should NOT call upsert for imported skills
         mock_registry_service.upsert_agent_skill.assert_not_called()
@@ -406,14 +416,15 @@ class TestPersistAndStripSkills:
     @pytest.mark.asyncio
     async def test_mixed_skills_both_handled(self, mock_db, mock_actor):
         """Mix of custom and imported skills are handled correctly."""
-        from unittest.mock import AsyncMock, patch
 
         from console_backend.services.sub_agent_service import SubAgentService
 
         service = SubAgentService.__new__(SubAgentService)
 
         mock_registry_service = MagicMock()
-        mock_registry_service.upsert_agent_skill = AsyncMock(return_value=("new-id", "new-hash"))
+        mock_registry_service.upsert_agent_skill = AsyncMock(
+            return_value=("55555555-5555-5555-5555-555555555555", "new-hash")
+        )
         service._skill_registry_service = mock_registry_service
 
         skills = [
@@ -421,8 +432,9 @@ class TestPersistAndStripSkills:
                 name="imported",
                 description="External",
                 body="body",
-                source="ext-id",
-                source_hash="ext-hash",
+                registry_id="44444444-4444-4444-4444-444444444444",
+                source="ext/path",
+                content_hash="ext-hash",
             ),
             SkillDefinition(
                 name="custom",
@@ -434,13 +446,12 @@ class TestPersistAndStripSkills:
         result = await service._persist_and_strip_skills(mock_db, mock_actor, 7, skills)
 
         assert len(result) == 2
-        # Imported: keep original source
-        assert result[0]["source"] == "ext-id"
-        assert result[0]["body"] == ""
-        # Custom: gets new registry source
-        assert result[1]["source"] == "new-id"
-        assert result[1]["source_hash"] == "new-hash"
-        assert result[1]["body"] == ""
+        # Imported: keep original registry_id and hash
+        assert result[0].registry_id == "44444444-4444-4444-4444-444444444444"
+        assert result[0].content_hash == "ext-hash"
+        # Custom: gets new registry_id
+        assert result[1].registry_id == "55555555-5555-5555-5555-555555555555"
+        assert result[1].content_hash == "new-hash"
 
         # Only one upsert call (for the custom skill)
         mock_registry_service.upsert_agent_skill.assert_called_once()

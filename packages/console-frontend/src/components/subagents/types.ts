@@ -12,8 +12,8 @@ export type {
   SubAgentPermissionsUpdate,
   SubAgentListResponse,
   FoundryScope,
-  SkillDefinitionInput as SkillDefinition,
-  ConsoleBackendModelsSubAgentSkillFile as SkillFile,
+  SkillDefinition,
+  SkillFile,
 } from '@/api/generated/types.gen';
 
 // Local type aliases for backward compatibility

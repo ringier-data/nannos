@@ -148,9 +148,9 @@ export function SkillRegistryPage() {
   const [draftSkill, setDraftSkillRaw] = useState<{
     name: string;
     slug: string;
-    files: Array<{ path: string; contents: string }>;
+    files: Array<{ path: string; content: string }>;
     existingId?: string;  // set when editing an existing skill
-    originalFiles?: Array<{ path: string; contents: string }>;  // server state for diffing
+    originalFiles?: Array<{ path: string; content: string }>;  // server state for diffing
     sandboxRequired?: boolean;
     originalName?: string;  // server name for diffing
     visibility?: string;  // 'private' | 'public'
@@ -199,7 +199,7 @@ export function SkillRegistryPage() {
   const [showHistory, setShowHistory] = useState(false);
   const [versionHistory, setVersionHistory] = useState<Array<{ content_hash: string; description: string; created_by: string; created_at: string }>>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [selectedVersion, setSelectedVersion] = useState<{ content_hash: string; files: Array<{ path: string; contents: string }>; description: string; created_at: string } | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<{ content_hash: string; files: Array<{ path: string; content: string }>; description: string; created_at: string; prevFiles: Array<{ path: string; content: string }> | null } | null>(null);
   const [restoringVersion, setRestoringVersion] = useState(false);
 
   const updateSearch = useCallback(
@@ -259,7 +259,7 @@ export function SkillRegistryPage() {
     enabled: !!selectedSkillId,
   });
   const detail = skillDetail as any;
-  const files: Array<{ path: string; contents: string }> = detail?.files ?? [];
+  const files: Array<{ path: string; content: string }> = detail?.files ?? [];
 
   // Reset editor state when switching skills
   useEffect(() => {
@@ -308,7 +308,7 @@ export function SkillRegistryPage() {
     setDraftSkill({
       name: 'new-skill',
       slug: 'new-skill',
-      files: [{ path: 'SKILL.md', contents: '# New Skill\n\n' }],
+      files: [{ path: 'SKILL.md', content: '# New Skill\n\n' }],
       visibility: 'public',
     });
     setEditingDraftName(true);
@@ -331,13 +331,13 @@ export function SkillRegistryPage() {
     }
     // Enter draft mode with the new name (ensureEditDraft needs detail loaded)
     if ((selectedSkillId === skillId || detail?.id === skillId) && detail && !isImported) {
-      const detailFiles: Array<{ path: string; contents: string }> = detail.files ?? [];
+      const detailFiles: Array<{ path: string; content: string }> = detail.files ?? [];
       const draft = {
         name: trimmed,
         slug: trimmed.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
-        files: detailFiles.map((f: { path: string; contents: string }) => ({ ...f })),
+        files: detailFiles.map((f: { path: string; content: string }) => ({ ...f })),
         existingId: detail.id,
-        originalFiles: detailFiles.map((f: { path: string; contents: string }) => ({ ...f })),
+        originalFiles: detailFiles.map((f: { path: string; content: string }) => ({ ...f })),
         sandboxRequired: detail.sandbox_required ?? false,
         originalName: detail.name,
         visibility: detail.visibility ?? 'public',
@@ -357,13 +357,13 @@ export function SkillRegistryPage() {
   const ensureEditDraft = () => {
     if (isDraft) return draftSkill;
     if (!selectedSkillId || !detail || isImported) return null;
-    const detailFiles: Array<{ path: string; contents: string }> = detail.files ?? [];
+    const detailFiles: Array<{ path: string; content: string }> = detail.files ?? [];
     const draft = {
       name: detail.name,
       slug: detail.slug ?? detail.name,
-      files: detailFiles.map((f: { path: string; contents: string }) => ({ ...f })),
+      files: detailFiles.map((f: { path: string; content: string }) => ({ ...f })),
       existingId: detail.id,
-      originalFiles: detailFiles.map((f: { path: string; contents: string }) => ({ ...f })),
+      originalFiles: detailFiles.map((f: { path: string; content: string }) => ({ ...f })),
       sandboxRequired: detail.sandbox_required ?? false,
       originalName: detail.name,
       visibility: detail.visibility ?? 'public',
@@ -371,7 +371,7 @@ export function SkillRegistryPage() {
     setDraftSkill(draft);
     return draft;
   };
-  const currentFileContent = effectiveFiles.find((f) => f.path === activeFile)?.contents ?? '';
+  const currentFileContent = effectiveFiles.find((f) => f.path === activeFile)?.content ?? '';
   const isSkillMd = activeFile === 'SKILL.md';
 
   const parsedSkillMd = isSkillMd ? parseSkillMd(currentFileContent) : null;
@@ -404,9 +404,9 @@ export function SkillRegistryPage() {
     let updatedFiles = [...draftSkill.files];
     if (activeFile === 'SKILL.md' && (editedDescription !== null || editedBody !== null)) {
       const content = composeSkillMd(draftSkill.name, displayDescription, displayBody);
-      updatedFiles = updatedFiles.map((f) => f.path === 'SKILL.md' ? { ...f, contents: content } : f);
+      updatedFiles = updatedFiles.map((f) => f.path === 'SKILL.md' ? { ...f, content: content } : f);
     } else if (activeFile !== 'SKILL.md' && editedContent !== null) {
-      updatedFiles = updatedFiles.map((f) => f.path === activeFile ? { ...f, contents: editedContent } : f);
+      updatedFiles = updatedFiles.map((f) => f.path === activeFile ? { ...f, content: editedContent } : f);
     }
     return { ...draftSkill, files: updatedFiles };
   };
@@ -419,11 +419,12 @@ export function SkillRegistryPage() {
     try {
       if (flushed.existingId) {
         // Update existing skill via bulk update
+        const filesChanged = JSON.stringify(flushed.files) !== JSON.stringify(flushed.originalFiles);
         await updateRegistrySkillApiV1SkillsRegistrySkillIdPut({
           path: { skill_id: flushed.existingId },
           body: {
             name: flushed.name !== flushed.originalName ? flushed.name : undefined,
-            files: JSON.stringify(flushed.files) !== JSON.stringify(flushed.originalFiles) ? flushed.files : undefined,
+            files: filesChanged ? flushed.files : undefined,
             sandbox_required: flushed.sandboxRequired !== (detail?.sandbox_required ?? false) ? flushed.sandboxRequired : undefined,
             visibility: (flushed.visibility ?? 'public') !== (detail?.visibility ?? 'public') ? flushed.visibility : undefined,
           } as any,
@@ -479,7 +480,7 @@ export function SkillRegistryPage() {
       }
       setDraftSkill({
         ...d,
-        files: [...d.files, { path, contents: '' }],
+        files: [...d.files, { path, content: '' }],
       });
       setAddingFile(false);
       setNewFilePath('');
@@ -565,7 +566,7 @@ export function SkillRegistryPage() {
     if (!detail?.id) { setRenamingFile(null); return; }
     setSaving(true);
     try {
-      const oldContent = files.find((f) => f.path === oldPath)?.contents ?? '';
+      const oldContent = files.find((f) => f.path === oldPath)?.content ?? '';
       await writeRegistryFileApiV1SkillsRegistrySkillIdFilesFilePathPut({
         path: { skill_id: detail.id, file_path: newPath },
         body: { content: oldContent },
@@ -685,11 +686,30 @@ export function SkillRegistryPage() {
       });
       if (error) throw error;
       const v = data as any;
+
+      // Find the previous version in history to show what this version changed
+      const idx = versionHistory.findIndex((h) => h.content_hash === contentHash);
+      let prevFiles: Array<{ path: string; content: string }> | null = null;
+      if (idx >= 0 && idx < versionHistory.length - 1) {
+        const prevHash = versionHistory[idx + 1].content_hash;
+        try {
+          const { data: prevData } = await client.get({
+            url: `/api/v1/skills/registry/detail/${detail.id}/versions/${prevHash}`,
+          });
+          if (prevData) {
+            prevFiles = (prevData as any)?.files ?? [];
+          }
+        } catch {
+          // If we can't fetch the previous version, show files without diff
+        }
+      }
+
       setSelectedVersion({
         content_hash: contentHash,
         files: v?.files ?? [],
         description: v?.description ?? '',
         created_at: v?.created_at ?? '',
+        prevFiles,
       });
     } catch {
       toast.error('Failed to load version');
@@ -1340,7 +1360,7 @@ export function SkillRegistryPage() {
                           const d = draftSkill ?? ensureEditDraft();
                           if (d) {
                             const content = composeSkillMd(d.name, e.target.value, displayBody);
-                            setDraftSkill({ ...d, files: d.files.map((f) => f.path === 'SKILL.md' ? { ...f, contents: content } : f) });
+                            setDraftSkill({ ...d, files: d.files.map((f) => f.path === 'SKILL.md' ? { ...f, content: content } : f) });
                           }
                         }}
                         className="text-sm"
@@ -1357,7 +1377,7 @@ export function SkillRegistryPage() {
                           const d = draftSkill ?? ensureEditDraft();
                           if (d) {
                             const content = composeSkillMd(d.name, displayDescription, e.target.value);
-                            setDraftSkill({ ...d, files: d.files.map((f) => f.path === 'SKILL.md' ? { ...f, contents: content } : f) });
+                            setDraftSkill({ ...d, files: d.files.map((f) => f.path === 'SKILL.md' ? { ...f, content: content } : f) });
                           }
                         }}
                         className="font-mono text-xs min-h-[400px] resize-y"
@@ -1373,7 +1393,7 @@ export function SkillRegistryPage() {
                       setEditedContent(e.target.value);
                       const d = draftSkill ?? ensureEditDraft();
                       if (d) {
-                        setDraftSkill({ ...d, files: d.files.map((f) => f.path === activeFile ? { ...f, contents: e.target.value } : f) });
+                        setDraftSkill({ ...d, files: d.files.map((f) => f.path === activeFile ? { ...f, content: e.target.value } : f) });
                       }
                     }}
                     placeholder="File content..."
@@ -1504,34 +1524,48 @@ export function SkillRegistryPage() {
                 </div>
               </div>
               <div className="flex-1 overflow-y-auto border rounded-md">
-                {selectedVersion.files.map((f) => {
-                  const currentFile = files.find((cf) => cf.path === f.path);
-                  const isSame = currentFile?.contents === f.contents;
-                  return (
-                    <div key={f.path} className="border-b last:border-b-0">
-                      <div className="px-3 py-1.5 bg-muted/50 border-b flex items-center gap-2 text-xs font-medium sticky top-0">
-                        <FileText className="h-3 w-3" />
-                        <span>{f.path}</span>
-                        {!currentFile && <Badge variant="default" className="text-[9px] px-1 py-0">added since</Badge>}
-                        {currentFile && !isSame && <Badge variant="secondary" className="text-[9px] px-1 py-0">changed</Badge>}
-                        {isSame && <Badge variant="outline" className="text-[9px] px-1 py-0">unchanged</Badge>}
+                {(() => {
+                  const prevFiles = selectedVersion.prevFiles;
+                  // Collect all unique file paths from both this version and previous
+                  const allPaths = new Set([
+                    ...selectedVersion.files.map((f) => f.path),
+                    ...(prevFiles ?? []).map((f) => f.path),
+                  ]);
+                  return Array.from(allPaths).map((path) => {
+                    const thisFile = selectedVersion.files.find((f) => f.path === path);
+                    const prevFile = prevFiles?.find((f) => f.path === path);
+                    const thisContent = thisFile?.content ?? '';
+                    const prevContent = prevFile?.content ?? '';
+                    const isSame = thisContent === prevContent;
+                    const isNew = !prevFile && !!thisFile;
+                    const isDeleted = !!prevFile && !thisFile;
+                    return (
+                      <div key={path} className="border-b last:border-b-0">
+                        <div className="px-3 py-1.5 bg-muted/50 border-b flex items-center gap-2 text-xs font-medium sticky top-0">
+                          <FileText className="h-3 w-3" />
+                          <span>{path}</span>
+                          {isNew && <Badge variant="default" className="text-[9px] px-1 py-0">added</Badge>}
+                          {isDeleted && <Badge variant="destructive" className="text-[9px] px-1 py-0">removed</Badge>}
+                          {!isNew && !isDeleted && !isSame && <Badge variant="secondary" className="text-[9px] px-1 py-0">changed</Badge>}
+                          {isSame && <Badge variant="outline" className="text-[9px] px-1 py-0">unchanged</Badge>}
+                        </div>
+                        {!isSame && (
+                          <ReactDiffViewer
+                            oldValue={prevContent}
+                            newValue={thisContent}
+                            splitView={false}
+                            compareMethod={DiffMethod.LINES}
+                            useDarkTheme={document.documentElement.classList.contains('dark')}
+                            hideLineNumbers={false}
+                            leftTitle={prevFiles ? 'Previous version' : '(empty)'}
+                            rightTitle="This version"
+                            styles={{ contentText: { fontSize: '11px', lineHeight: '1.4' } }}
+                          />
+                        )}
                       </div>
-                      {!isSame && (
-                        <ReactDiffViewer
-                          oldValue={f.contents ?? ''}
-                          newValue={currentFile?.contents ?? ''}
-                          splitView={false}
-                          compareMethod={DiffMethod.LINES}
-                          useDarkTheme={document.documentElement.classList.contains('dark')}
-                          hideLineNumbers={false}
-                          leftTitle="This version"
-                          rightTitle="Current"
-                          styles={{ contentText: { fontSize: '11px', lineHeight: '1.4' } }}
-                        />
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  });
+                })()}
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setSelectedVersion(null)}>Back</Button>

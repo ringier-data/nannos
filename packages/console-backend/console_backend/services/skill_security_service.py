@@ -172,7 +172,7 @@ class SkillSecurityService:
         data_part: dict[str, Any] = {
             "kind": "data",
             "data": {
-                "files": [{"path": f.path, "contents": f.contents} for f in files],
+                "files": [{"path": f.path, "content": f.content} for f in files],
             },
             "metadata": {"mimeType": "application/json"},
         }
@@ -232,7 +232,7 @@ class SkillSecurityService:
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
-                    raw = line[len("data:"):].strip()
+                    raw = line[len("data:") :].strip()
                     if not raw:
                         continue
                     try:
@@ -332,7 +332,7 @@ class SkillSecurityService:
         hasher = sha256()
         for f in sorted(files, key=lambda x: x.path):
             hasher.update(f.path.encode())
-            hasher.update(f.contents.encode())
+            hasher.update(f.content.encode())
         return hasher.hexdigest()
 
 

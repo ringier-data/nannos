@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
-from ..models.sub_agent import ActivationSource, ThinkingLevel
+from ..models.sub_agent import ActivationSource, SkillRef, ThinkingLevel
 from ..models.user import User
 from .base import AuditedRepository
 
@@ -819,7 +819,7 @@ class SubAgentRepository(AuditedRepository):
         pricing_config: dict | None = None,
         enable_thinking: bool | None = None,
         thinking_level: ThinkingLevel | None = None,
-        skills: list | None = None,
+        skills: list[SkillRef] | None = None,
         sandbox_enabled: bool = False,
     ) -> int:
         """
@@ -892,7 +892,7 @@ class SubAgentRepository(AuditedRepository):
                 "pricing_config": json.dumps(pricing_config) if pricing_config else None,
                 "enable_thinking": enable_thinking,
                 "thinking_level": thinking_level,
-                "skills": json.dumps([s.model_dump() if hasattr(s, "model_dump") else s for s in skills_list]),
+                "skills": json.dumps([s.model_dump() for s in skills_list]),
                 "sandbox_enabled": sandbox_enabled,
                 "change_summary": change_summary,
                 "status": status,
@@ -921,7 +921,7 @@ class SubAgentRepository(AuditedRepository):
             "pricing_config": pricing_config,
             "enable_thinking": enable_thinking,
             "thinking_level": thinking_level,
-            "skills": [s.model_dump() if hasattr(s, "model_dump") else s for s in skills_list],
+            "skills": [s.model_dump() for s in skills_list],
             "sandbox_enabled": sandbox_enabled,
             "change_summary": change_summary,
             "status": status,

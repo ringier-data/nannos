@@ -8,7 +8,7 @@ import {
   Pencil,
   FolderOpen,
 } from 'lucide-react';
-import type { SkillDefinitionInput as SkillDefinition } from '@/api/generated/types.gen';
+import type { SkillDefinition } from '@/api/generated/types.gen';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -252,7 +252,7 @@ export function SkillEditorModal({
                           onClick={(e) => {
                             e.stopPropagation();
                             setRenamingIdx(idx);
-                            setRenameValue(skill.name);
+                            setRenameValue(skill.name ?? '');
                           }}
                         >
                           <Pencil className="h-3 w-3" />

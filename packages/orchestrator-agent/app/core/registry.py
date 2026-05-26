@@ -204,10 +204,9 @@ class RegistryService:
             return [SubAgent.model_validate(data)] if data else []
         else:
             # Normal mode: fetch all approved sub-agents (those with default_version set)
-            # Only fetch activated sub-agents for this user
+            # Use the /activated endpoint which returns full skill content (body + files)
             response = await client.get(
-                "/api/v1/sub-agents",
-                params={"status": "approved", "activated_only": True},
+                "/api/v1/sub-agents/activated",
                 headers=headers,
             )
 

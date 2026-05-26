@@ -16,12 +16,7 @@ export type ActivateRequest = {
      * Target sub-agent name
      */
     agent: string;
-    /**
-     * Scope
-     *
-     * 'personal' or 'group'
-     */
-    scope?: string;
+    scope?: ScopeEnum;
     /**
      * Group Id
      *
@@ -1462,9 +1457,9 @@ export type McpActivateSkillInput = {
     /**
      * Agent Name
      *
-     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     * Target sub-agent name. Defaults to 'self' (the calling agent).
      */
-    agent_name?: string | null;
+    agent_name?: string;
     /**
      * Registry Id
      *
@@ -1477,24 +1472,13 @@ export type McpActivateSkillInput = {
      * Skill slug to search in registry (alternative to registry_id)
      */
     skill_name?: string | null;
-    /**
-     * Scope
-     *
-     * Activation scope: 'personal' (only you), 'group' (shared with group members), or 'default' (baked into sub-agent config, visible to all users — requires owner/write access)
-     */
-    scope?: string;
+    scope?: ScopeEnum;
     /**
      * Group Id
      *
      * Group ID (required when scope='group')
      */
     group_id?: string | null;
-    /**
-     * Sub Agent Id
-     *
-     * Sub-agent ID (resolved from agent_name if not provided)
-     */
-    sub_agent_id?: number | null;
 };
 
 /**
@@ -1546,15 +1530,10 @@ export type McpImportSkillInput = {
     /**
      * Agent Name
      *
-     * Target sub-agent name to activate the skill for
+     * Target sub-agent name. Defaults to 'self' (the calling agent). Prefer using the exact name — agent names may have hyphens, underscores, or unexpected spelling.
      */
-    agent_name: string;
-    /**
-     * Scope
-     *
-     * Scope: 'personal' (immediate, no approval) or 'group'
-     */
-    scope?: string;
+    agent_name?: string;
+    scope?: ScopeEnum;
     /**
      * Ref
      *
@@ -1637,10 +1616,10 @@ export type McpPlaybookUpdate = {
     /**
      * Agent Name
      *
-     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     * Target sub-agent name. Defaults to 'self' (the calling agent).
      */
-    agent_name?: string | null;
-    scope: ScopeEnum;
+    agent_name?: string;
+    scope: ScopeEnum2;
     /**
      * Content
      *
@@ -1747,10 +1726,10 @@ export type McpSkillCreate = {
     /**
      * Agent Name
      *
-     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     * Target sub-agent name. Defaults to 'self' (the calling agent).
      */
-    agent_name?: string | null;
-    scope: ScopeEnum2;
+    agent_name?: string;
+    scope: ScopeEnum;
     /**
      * Skill Name
      *
@@ -1781,18 +1760,7 @@ export type McpSkillCreate = {
      * Group ID (required when scope='group')
      */
     group_id?: string | null;
-    /**
-     * Sub Agent Id
-     *
-     * Sub-agent ID (resolved from agent_name if not provided)
-     */
-    sub_agent_id?: number | null;
-    /**
-     * Visibility
-     *
-     * Registry visibility: 'private' (only you), 'group' (your group), or 'public' (everyone)
-     */
-    visibility?: string;
+    visibility?: VisibilityEnum;
 };
 
 /**
@@ -1804,10 +1772,10 @@ export type McpSkillDeleteFile = {
     /**
      * Agent Name
      *
-     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     * Target sub-agent name. Defaults to 'self' (the calling agent).
      */
-    agent_name?: string | null;
-    scope: ScopeEnum2;
+    agent_name?: string;
+    scope: ScopeEnum;
     /**
      * Skill Name
      *
@@ -1827,11 +1795,11 @@ export type McpSkillDeleteFile = {
      */
     group_id?: string | null;
     /**
-     * Sub Agent Id
+     * Registry Id
      *
-     * Sub-agent ID (resolved from agent_name if not provided)
+     * Registry entry UUID (alternative to skill_name lookup)
      */
-    sub_agent_id?: number | null;
+    registry_id?: string | null;
 };
 
 /**
@@ -1866,10 +1834,10 @@ export type McpSkillRemove = {
     /**
      * Agent Name
      *
-     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     * Target sub-agent name. Defaults to 'self' (the calling agent).
      */
-    agent_name?: string | null;
-    scope: ScopeEnum2;
+    agent_name?: string;
+    scope: ScopeEnum;
     /**
      * Skill Name
      *
@@ -1883,11 +1851,11 @@ export type McpSkillRemove = {
      */
     group_id?: string | null;
     /**
-     * Sub Agent Id
+     * Registry Id
      *
-     * Sub-agent ID (resolved from agent_name if not provided)
+     * Registry entry UUID (alternative to skill_name lookup)
      */
-    sub_agent_id?: number | null;
+    registry_id?: string | null;
 };
 
 /**
@@ -1900,7 +1868,7 @@ export type McpSkillResponse = {
      * Skill Name
      */
     skill_name: string;
-    scope: ScopeEnum2;
+    scope: ScopeEnum;
     /**
      * Agent Name
      */
@@ -1929,10 +1897,10 @@ export type McpSkillUpdate = {
     /**
      * Agent Name
      *
-     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     * Target sub-agent name. Defaults to 'self' (the calling agent).
      */
-    agent_name?: string | null;
-    scope: ScopeEnum2;
+    agent_name?: string;
+    scope: ScopeEnum;
     /**
      * Skill Name
      *
@@ -1970,12 +1938,6 @@ export type McpSkillUpdate = {
      */
     group_id?: string | null;
     /**
-     * Sub Agent Id
-     *
-     * Sub-agent ID (resolved from agent_name if not provided)
-     */
-    sub_agent_id?: number | null;
-    /**
      * Registry Id
      *
      * Registry entry UUID (alternative to skill_name lookup)
@@ -1992,10 +1954,10 @@ export type McpSkillWriteFile = {
     /**
      * Agent Name
      *
-     * Name of the sub-agent. Auto-injected when called by a sub-agent — omit unless targeting a different agent.
+     * Target sub-agent name. Defaults to 'self' (the calling agent).
      */
-    agent_name?: string | null;
-    scope: ScopeEnum2;
+    agent_name?: string;
+    scope: ScopeEnum;
     /**
      * Skill Name
      *
@@ -2021,11 +1983,11 @@ export type McpSkillWriteFile = {
      */
     group_id?: string | null;
     /**
-     * Sub Agent Id
+     * Registry Id
      *
-     * Sub-agent ID (resolved from agent_name if not provided)
+     * Registry entry UUID (alternative to skill_name lookup)
      */
-    sub_agent_id?: number | null;
+    registry_id?: string | null;
 };
 
 /**
@@ -2422,7 +2384,7 @@ export type PlaybookContent = {
      * Agent Name
      */
     agent_name: string;
-    scope: ScopeEnum;
+    scope: ScopeEnum2;
     /**
      * Content
      *
@@ -2706,7 +2668,7 @@ export type RegistryCreateRequest = {
      *
      * Skill files. Defaults to a stub SKILL.md if empty.
      */
-    files?: Array<ConsoleBackendModelsSkillsRegistrySkillFile>;
+    files?: Array<SkillFile>;
     /**
      * Visibility
      *
@@ -2752,7 +2714,7 @@ export type RegistryUpdateRequest = {
      *
      * Full replacement file list
      */
-    files?: Array<ConsoleBackendModelsSkillsRegistrySkillFile> | null;
+    files?: Array<SkillFile> | null;
     /**
      * Sandbox Required
      *
@@ -3598,12 +3560,7 @@ export type SkillActivationRequest = {
      * Target sub-agent ID
      */
     sub_agent_id: number;
-    /**
-     * Scope
-     *
-     * 'personal' or 'group'
-     */
-    scope: string;
+    scope: ScopeEnum;
     /**
      * Group Id
      *
@@ -3630,10 +3587,7 @@ export type SkillActivationWithStatus = {
      * Registry Id
      */
     registry_id: string;
-    /**
-     * Scope
-     */
-    scope: string;
+    scope: ScopeEnum;
     /**
      * User Id
      */
@@ -3650,10 +3604,6 @@ export type SkillActivationWithStatus = {
      * Content Hash
      */
     content_hash: string;
-    /**
-     * Locked
-     */
-    locked?: boolean;
     /**
      * Activated At
      */
@@ -3807,26 +3757,24 @@ export type SkillCreate = {
 /**
  * SkillDefinition
  *
- * A standard (immutable) skill bundled with a sub-agent config version.
+ * A skill bundled with a sub-agent config version.
  *
- * Two modes:
- * - Custom skills (registry_id=None): full content stored inline (body + files)
- * - Registry-backed skills (registry_id set): only reference stored.
- * Body and files are empty/absent — resolved from skill_registry table at runtime.
+ * On read from DB, only registry_id and content_hash are present (from SkillRef JSONB).
+ * All other fields are populated by resolve_imported_skills() from the registry.
  */
-export type SkillDefinitionInput = {
+export type SkillDefinition = {
     /**
      * Name
      *
      * Skill identifier (lowercase, alphanumeric + hyphens)
      */
-    name: string;
+    name?: string;
     /**
      * Description
      *
      * What the skill does
      */
-    description: string;
+    description?: string;
     /**
      * Body
      *
@@ -3838,11 +3786,11 @@ export type SkillDefinitionInput = {
      *
      * Optional scripts/references/assets. Empty for registry-backed skills.
      */
-    files?: Array<ConsoleBackendModelsSubAgentSkillFile>;
+    files?: Array<SkillFile>;
     /**
      * Registry Id
      *
-     * UUID of the skill in skill_registry table. Used for DB lookups. Null for inline custom skills.
+     * UUID of the skill in skill_registry table.
      */
     registry_id?: string | null;
     /**
@@ -3852,15 +3800,15 @@ export type SkillDefinitionInput = {
      */
     source?: string | null;
     /**
-     * Source Hash
+     * Content Hash
      *
-     * Content hash of the registry skill at import time. Used to detect available updates.
+     * Content hash pinning this skill to a specific version in the registry.
      */
-    source_hash?: string | null;
+    content_hash?: string | null;
     /**
      * Update Available
      *
-     * True when the registry has a newer version than the pinned source_hash.
+     * True when the registry has a newer version than the pinned content_hash.
      */
     update_available?: boolean;
     /**
@@ -3875,79 +3823,12 @@ export type SkillDefinitionInput = {
      * Whether the skill contains executable files (.py, .sh, etc.) that require sandbox.
      */
     sandbox_required?: boolean;
-};
-
-/**
- * SkillDefinition
- *
- * A standard (immutable) skill bundled with a sub-agent config version.
- *
- * Two modes:
- * - Custom skills (registry_id=None): full content stored inline (body + files)
- * - Registry-backed skills (registry_id set): only reference stored.
- * Body and files are empty/absent — resolved from skill_registry table at runtime.
- */
-export type SkillDefinitionOutput = {
     /**
-     * Name
+     * Scope
      *
-     * Skill identifier (lowercase, alphanumeric + hyphens)
+     * Registry scope: 'sub-agent' for inline-editable skills, 'standalone' for imported read-only. Set on read.
      */
-    name: string;
-    /**
-     * Description
-     *
-     * What the skill does
-     */
-    description: string;
-    /**
-     * Body
-     *
-     * SKILL.md body content (markdown). Empty for registry-backed skills.
-     */
-    body?: string;
-    /**
-     * Files
-     *
-     * Optional scripts/references/assets. Empty for registry-backed skills.
-     */
-    files?: Array<SkillFileOutput>;
-    /**
-     * Registry Id
-     *
-     * UUID of the skill in skill_registry table. Used for DB lookups. Null for inline custom skills.
-     */
-    registry_id?: string | null;
-    /**
-     * Source
-     *
-     * External provenance path where the skill was imported from (e.g., 'vercel-labs/agent-skills/xlsx'). Informational only.
-     */
-    source?: string | null;
-    /**
-     * Source Hash
-     *
-     * Content hash of the registry skill at import time. Used to detect available updates.
-     */
-    source_hash?: string | null;
-    /**
-     * Update Available
-     *
-     * True when the registry has a newer version than the pinned source_hash.
-     */
-    update_available?: boolean;
-    /**
-     * Latest Hash
-     *
-     * Current content_hash in the registry. Present when update_available=True.
-     */
-    latest_hash?: string | null;
-    /**
-     * Sandbox Required
-     *
-     * Whether the skill contains executable files (.py, .sh, etc.) that require sandbox.
-     */
-    sandbox_required?: boolean;
+    scope?: _0Enum | null;
 };
 
 /**
@@ -3960,7 +3841,7 @@ export type SkillDetail = {
      * Name
      */
     name: string;
-    scope: ScopeEnum2;
+    scope: ScopeEnum;
     /**
      * Content
      *
@@ -3978,21 +3859,27 @@ export type SkillDetail = {
 /**
  * SkillFile
  *
- * A file bundled with a standard skill (e.g., script, reference doc).
+ * A single file within a skill (SKILL.md, examples, etc.).
  */
-export type SkillFileOutput = {
+export type SkillFile = {
     /**
      * Path
      *
-     * Relative path inside the skill directory (e.g., 'scripts/check.py')
+     * Relative file path within the skill directory
      */
     path: string;
     /**
      * Content
      *
-     * File content
+     * Full text content of the file
      */
     content: string;
+    /**
+     * Encoding
+     *
+     * Content encoding: None for UTF-8 text, 'base64' for binary files
+     */
+    encoding?: string | null;
 };
 
 /**
@@ -4091,12 +3978,7 @@ export type SkillImportRequest = {
      * Target sub-agent name. If omitted, skill is added to registry only (no activation).
      */
     agent?: string | null;
-    /**
-     * Scope
-     *
-     * Visibility/activation scope: 'personal', 'group', or 'default' (global)
-     */
-    scope?: string;
+    scope?: ScopeEnum;
     /**
      * Group Id
      *
@@ -4135,12 +4017,7 @@ export type SkillImportResponse = {
      * Target sub-agent name (None if registry-only)
      */
     agent?: string | null;
-    /**
-     * Scope
-     *
-     * Visibility/activation scope
-     */
-    scope: string;
+    scope: ScopeEnum;
     /**
      * Provenance metadata
      */
@@ -4172,7 +4049,7 @@ export type SkillListResponse = {
     /**
      * Items
      */
-    items?: Array<ConsoleBackendModelsPlaybookSkillSummary>;
+    items?: Array<ConsoleBackendModelsSkillsRegistrySkillSummary>;
 };
 
 /**
@@ -4280,7 +4157,7 @@ export type SkillSearchResult = {
      *
      * 'private' or 'public' (registry only)
      */
-    visibility?: string | null;
+    visibility?: VisibilityEnum | null;
     /**
      * Install Url
      *
@@ -4490,7 +4367,7 @@ export type SubAgent = {
     /**
      * Effective Permission
      */
-    effective_permission?: _0Enum | null;
+    effective_permission?: _0Enum2 | null;
     /**
      * Deleted At
      */
@@ -4663,7 +4540,7 @@ export type SubAgentConfigVersion = {
     /**
      * Skills
      */
-    skills?: Array<SkillDefinitionOutput>;
+    skills?: Array<SkillDefinition>;
 };
 
 /**
@@ -4877,7 +4754,7 @@ export type SubAgentCreate = {
     /**
      * Skills
      */
-    skills?: Array<SkillDefinitionInput>;
+    skills?: Array<SkillDefinition>;
     /**
      * Sandbox Enabled
      */
@@ -4985,7 +4862,7 @@ export type SubAgentListItem = {
     /**
      * Effective Permission
      */
-    effective_permission?: _0Enum | null;
+    effective_permission?: _0Enum2 | null;
     /**
      * Deleted At
      */
@@ -5196,7 +5073,7 @@ export type SubAgentUpdate = {
     /**
      * Skills
      */
-    skills?: Array<SkillDefinitionInput> | null;
+    skills?: Array<SkillDefinition> | null;
     /**
      * Sandbox Enabled
      */
@@ -6071,7 +5948,7 @@ export type VisibilityUpdate = {
  *
  * Summary of a skill file (for listing).
  */
-export type ConsoleBackendModelsPlaybookSkillSummary = {
+export type ConsoleBackendModelsSkillsRegistrySkillSummary = {
     /**
      * Name
      *
@@ -6090,7 +5967,7 @@ export type ConsoleBackendModelsPlaybookSkillSummary = {
      * Description from frontmatter (what the skill does and when to use it)
      */
     description?: string;
-    scope: ScopeEnum2;
+    scope: ScopeEnum;
     /**
      * File Count
      *
@@ -6112,52 +5989,6 @@ export type ConsoleBackendModelsPlaybookSkillSummary = {
 };
 
 /**
- * SkillFile
- *
- * A single file within a skill (SKILL.md, examples, etc.).
- */
-export type ConsoleBackendModelsSkillsRegistrySkillFile = {
-    /**
-     * Path
-     *
-     * Relative file path within the skill directory
-     */
-    path: string;
-    /**
-     * Contents
-     *
-     * Full text content of the file
-     */
-    contents: string;
-    /**
-     * Encoding
-     *
-     * Content encoding: None for UTF-8 text, 'base64' for binary files
-     */
-    encoding?: string | null;
-};
-
-/**
- * SkillFile
- *
- * A file bundled with a standard skill (e.g., script, reference doc).
- */
-export type ConsoleBackendModelsSubAgentSkillFile = {
-    /**
-     * Path
-     *
-     * Relative path inside the skill directory (e.g., 'scripts/check.py')
-     */
-    path: string;
-    /**
-     * Content
-     *
-     * File content
-     */
-    content: string;
-};
-
-/**
  * SkillSummary
  *
  * Lightweight skill metadata for list responses (no body/files content).
@@ -6176,9 +6007,9 @@ export type ConsoleBackendModelsSubAgentSkillSummary = {
      */
     source?: string | null;
     /**
-     * Source Hash
+     * Content Hash
      */
-    source_hash?: string | null;
+    content_hash?: string | null;
     /**
      * Update Available
      */
@@ -6192,6 +6023,13 @@ export type ConsoleBackendModelsSubAgentSkillSummary = {
      */
     sandbox_required?: boolean;
 };
+
+/**
+ * Scope
+ *
+ * 'personal' or 'group'
+ */
+export type ScopeEnum = 'personal' | 'group' | 'sub-agent';
 
 /**
  * Model
@@ -6213,14 +6051,14 @@ export type RoleEnum = 'read' | 'write' | 'manager';
  *
  * Scope: 'personal' or 'group'
  */
-export type ScopeEnum = 'personal' | 'group';
+export type ScopeEnum2 = 'personal' | 'group';
 
 /**
- * Scope
+ * Visibility
  *
- * Activation scope: 'personal' (user-only), 'group' (shared with group), or 'default' (baked into sub-agent config for all users)
+ * Registry visibility: 'private' (only you) or 'public' (everyone)
  */
-export type ScopeEnum2 = 'personal' | 'group' | 'default';
+export type VisibilityEnum = 'private' | 'public';
 
 /**
  * Flow Direction
@@ -6234,7 +6072,9 @@ export type OpEnum = 'add' | 'remove' | 'replace';
 
 export type ItemsEnum = 'read' | 'write';
 
-export type _0Enum = 'owner' | 'write' | 'read';
+export type _0Enum = 'standalone' | 'sub-agent';
+
+export type _0Enum2 = 'owner' | 'write' | 'read';
 
 /**
  * Operation
@@ -7003,7 +6843,7 @@ export type ConsoleListSubAgentsResponses = {
     /**
      * Successful Response
      */
-    200: SubAgentListFullResponse;
+    200: SubAgentListResponse;
 };
 
 export type ConsoleListSubAgentsResponse = ConsoleListSubAgentsResponses[keyof ConsoleListSubAgentsResponses];
@@ -7032,6 +6872,22 @@ export type ConsoleCreateSubAgentResponses = {
 };
 
 export type ConsoleCreateSubAgentResponse = ConsoleCreateSubAgentResponses[keyof ConsoleCreateSubAgentResponses];
+
+export type ListActivatedSubAgentsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/sub-agents/activated';
+};
+
+export type ListActivatedSubAgentsResponses = {
+    /**
+     * Successful Response
+     */
+    200: SubAgentListFullResponse;
+};
+
+export type ListActivatedSubAgentsResponse = ListActivatedSubAgentsResponses[keyof ListActivatedSubAgentsResponses];
 
 export type ListPendingApprovalsApiV1SubAgentsPendingGetData = {
     body?: never;
@@ -11324,81 +11180,6 @@ export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFileP
 
 export type WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponse = WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses[keyof WriteSkillFileApiV1PlaybooksAgentsAgentNameSkillsSkillNameFilesFilePathPutResponses];
 
-export type ConsoleCreateSkillData = {
-    body: McpSkillCreate;
-    path?: never;
-    query?: never;
-    url: '/api/v1/playbooks/mcp/skills';
-};
-
-export type ConsoleCreateSkillErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleCreateSkillError = ConsoleCreateSkillErrors[keyof ConsoleCreateSkillErrors];
-
-export type ConsoleCreateSkillResponses = {
-    /**
-     * Successful Response
-     */
-    201: McpSkillResponse;
-};
-
-export type ConsoleCreateSkillResponse = ConsoleCreateSkillResponses[keyof ConsoleCreateSkillResponses];
-
-export type ConsoleUpdateSkillData = {
-    body: McpSkillUpdate;
-    path?: never;
-    query?: never;
-    url: '/api/v1/playbooks/mcp/skills';
-};
-
-export type ConsoleUpdateSkillErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleUpdateSkillError = ConsoleUpdateSkillErrors[keyof ConsoleUpdateSkillErrors];
-
-export type ConsoleUpdateSkillResponses = {
-    /**
-     * Successful Response
-     */
-    200: McpSkillResponse;
-};
-
-export type ConsoleUpdateSkillResponse = ConsoleUpdateSkillResponses[keyof ConsoleUpdateSkillResponses];
-
-export type ConsoleRemoveSkillData = {
-    body: McpSkillRemove;
-    path?: never;
-    query?: never;
-    url: '/api/v1/playbooks/mcp/skills/remove';
-};
-
-export type ConsoleRemoveSkillErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleRemoveSkillError = ConsoleRemoveSkillErrors[keyof ConsoleRemoveSkillErrors];
-
-export type ConsoleRemoveSkillResponses = {
-    /**
-     * Successful Response
-     */
-    200: McpSkillResponse;
-};
-
-export type ConsoleRemoveSkillResponse = ConsoleRemoveSkillResponses[keyof ConsoleRemoveSkillResponses];
-
 export type ConsoleUpdatePlaybookData = {
     body: McpPlaybookUpdate;
     path?: never;
@@ -11423,56 +11204,6 @@ export type ConsoleUpdatePlaybookResponses = {
 };
 
 export type ConsoleUpdatePlaybookResponse = ConsoleUpdatePlaybookResponses[keyof ConsoleUpdatePlaybookResponses];
-
-export type ConsoleWriteSkillFileData = {
-    body: McpSkillWriteFile;
-    path?: never;
-    query?: never;
-    url: '/api/v1/playbooks/mcp/skills/files';
-};
-
-export type ConsoleWriteSkillFileErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleWriteSkillFileError = ConsoleWriteSkillFileErrors[keyof ConsoleWriteSkillFileErrors];
-
-export type ConsoleWriteSkillFileResponses = {
-    /**
-     * Successful Response
-     */
-    200: McpSkillResponse;
-};
-
-export type ConsoleWriteSkillFileResponse = ConsoleWriteSkillFileResponses[keyof ConsoleWriteSkillFileResponses];
-
-export type ConsoleDeleteSkillFileData = {
-    body: McpSkillDeleteFile;
-    path?: never;
-    query?: never;
-    url: '/api/v1/playbooks/mcp/skills/files/remove';
-};
-
-export type ConsoleDeleteSkillFileErrors = {
-    /**
-     * Validation Error
-     */
-    422: HttpValidationError;
-};
-
-export type ConsoleDeleteSkillFileError = ConsoleDeleteSkillFileErrors[keyof ConsoleDeleteSkillFileErrors];
-
-export type ConsoleDeleteSkillFileResponses = {
-    /**
-     * Successful Response
-     */
-    200: McpSkillResponse;
-};
-
-export type ConsoleDeleteSkillFileResponse = ConsoleDeleteSkillFileResponses[keyof ConsoleDeleteSkillFileResponses];
 
 export type SearchSkillsApiV1SkillsRegistrySearchGetData = {
     body?: never;
@@ -12036,6 +11767,131 @@ export type ConsoleImportSkillResponses = {
 };
 
 export type ConsoleImportSkillResponse = ConsoleImportSkillResponses[keyof ConsoleImportSkillResponses];
+
+export type ConsoleCreateSkillData = {
+    body: McpSkillCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/skills';
+};
+
+export type ConsoleCreateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleCreateSkillError = ConsoleCreateSkillErrors[keyof ConsoleCreateSkillErrors];
+
+export type ConsoleCreateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    201: McpSkillResponse;
+};
+
+export type ConsoleCreateSkillResponse = ConsoleCreateSkillResponses[keyof ConsoleCreateSkillResponses];
+
+export type ConsoleUpdateSkillData = {
+    body: McpSkillUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/skills';
+};
+
+export type ConsoleUpdateSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleUpdateSkillError = ConsoleUpdateSkillErrors[keyof ConsoleUpdateSkillErrors];
+
+export type ConsoleUpdateSkillResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleUpdateSkillResponse = ConsoleUpdateSkillResponses[keyof ConsoleUpdateSkillResponses];
+
+export type ConsoleRemoveSkillData = {
+    body: McpSkillRemove;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/skills/remove';
+};
+
+export type ConsoleRemoveSkillErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleRemoveSkillError = ConsoleRemoveSkillErrors[keyof ConsoleRemoveSkillErrors];
+
+export type ConsoleRemoveSkillResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleRemoveSkillResponse = ConsoleRemoveSkillResponses[keyof ConsoleRemoveSkillResponses];
+
+export type ConsoleWriteSkillFileData = {
+    body: McpSkillWriteFile;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/skills/files';
+};
+
+export type ConsoleWriteSkillFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleWriteSkillFileError = ConsoleWriteSkillFileErrors[keyof ConsoleWriteSkillFileErrors];
+
+export type ConsoleWriteSkillFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleWriteSkillFileResponse = ConsoleWriteSkillFileResponses[keyof ConsoleWriteSkillFileResponses];
+
+export type ConsoleDeleteSkillFileData = {
+    body: McpSkillDeleteFile;
+    path?: never;
+    query?: never;
+    url: '/api/v1/skills/registry/mcp/skills/files/remove';
+};
+
+export type ConsoleDeleteSkillFileErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleDeleteSkillFileError = ConsoleDeleteSkillFileErrors[keyof ConsoleDeleteSkillFileErrors];
+
+export type ConsoleDeleteSkillFileResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpSkillResponse;
+};
+
+export type ConsoleDeleteSkillFileResponse = ConsoleDeleteSkillFileResponses[keyof ConsoleDeleteSkillFileResponses];
 
 export type ListActivationsApiV1SkillsActivationsSubAgentIdGetData = {
     body?: never;

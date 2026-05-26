@@ -868,17 +868,28 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if self.store and self.user_id:
             from agent_common.core.skills_resolver import resolve_skills_for_agent
             from agent_common.models.skill import SkillDefinition as AgentSkillDef
+            from agent_common.models.skill import SkillFile as AgentSkillFile
+
+            def _to_skill_def(s) -> AgentSkillDef:
+                if isinstance(s, AgentSkillDef):
+                    return s
+                if isinstance(s, dict):
+                    files = [
+                        AgentSkillFile(path=f["path"], content=f.get("content", ""), encoding=f.get("encoding"))
+                        if isinstance(f, dict) else f
+                        for f in s.get("files", [])
+                    ]
+                    return AgentSkillDef(
+                        name=s.get("name", ""),
+                        description=s.get("description", ""),
+                        body=s.get("body", ""),
+                        files=files,
+                    )
+                return AgentSkillDef(name=s.name, description=s.description, body=s.body, files=s.files)
 
             default_skills = []
             if hasattr(self.config, "skills") and self.config.skills:
-                default_skills = [
-                    s
-                    if isinstance(s, AgentSkillDef)
-                    else AgentSkillDef(
-                        **(s if isinstance(s, dict) else {"name": s.name, "description": s.description, "body": s.body})
-                    )
-                    for s in self.config.skills
-                ]
+                default_skills = [_to_skill_def(s) for s in self.config.skills]
             self._resolved_skills = await resolve_skills_for_agent(
                 store=self.store,
                 user_id=self.user_id,
