@@ -97,7 +97,6 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
     await deps.chatService.updateMessage({
       projectId: payload.projectId,
       messageName: payload.messageId,
-      text: '✏️ Request Changes',
       cardsV2: [feedbackCard],
     });
     return;

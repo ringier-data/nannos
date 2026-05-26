@@ -639,7 +639,6 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     let accumulatedTask: Task | null = null;
     let feedbackRequestData: { sub_agents?: string[] } | null = null;
-    let interruptWidgetPosted = false;
     try {
       for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
         logger.debug(`Stream event: ${_.get(event, 'kind')}`);
@@ -683,7 +682,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             statusEvent.status.state === 'input-required' &&
             statusEvent.status.message?.extensions?.includes('urn:nannos:a2a:human-in-the-loop:1.0')
           ) {
-            interruptWidgetPosted = await processHumanInTheLoopEvent(
+            await processHumanInTheLoopEvent(
               logger,
               chatService,
               inFlightTaskStore,
@@ -765,13 +764,6 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
       logger.error(
         `No task information received from A2A server. Silently failing without sending a response to the user.`
       );
-      return;
-    }
-
-    // ---- Handle the response ----
-    // Skip if we already posted a custom interrupt widget (e.g. bug report)
-    if (interruptWidgetPosted) {
-      logger.info({ taskId: accumulatedTask?.id }, `Skipping handleTask — interrupt widget already posted`);
       return;
     }
 
