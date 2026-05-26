@@ -198,7 +198,7 @@ export async function recoverStuckPendingRequests(
   try {
     const stuckRequests = await storage.getStuckPendingRequests();
     if (stuckRequests.length === 0) {
-      logger.info('No stuck pending requests found');
+      logger.trace('No stuck pending requests found');
       return stats;
     }
 

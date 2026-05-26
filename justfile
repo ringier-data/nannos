@@ -290,7 +290,7 @@ build-pkg pkg:
     set -euo pipefail
     source scripts/release-helpers.sh
 
-    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' RESET='\033[0m'
+    CYAN='\033[1;36m' GREEN='\033[1;32m' RED='\033[1;31m' DIM='\033[2m' YELLOW='\033[1;33m' RESET='\033[0m'
     tmux_tip
     PKG="{{ pkg }}"
     DO_PUSH="{{ push }}"
