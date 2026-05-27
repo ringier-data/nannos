@@ -160,6 +160,7 @@ class SkillImportRequest(BaseModel):
     scope: ActivationScope = Field(
         default="sub-agent", description="Activation scope: 'personal', 'group', or 'sub-agent' (baked into config)"
     )
+    visibility: RegistryVisibility = Field(default="public", description="Registry visibility: 'private' or 'public'")
     group_id: str | None = Field(default=None, description="Group ID (required when scope='group')")
     overwrite: bool = Field(default=False, description="Overwrite existing skill with same name")
     force: bool = Field(

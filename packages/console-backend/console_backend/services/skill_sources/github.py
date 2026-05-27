@@ -262,8 +262,10 @@ class GitHubSource(SkillSource):
             return None
 
         for entry in tree:
-            if entry.get("type") == "tree" and entry.get("path", "").endswith(f"/{skill_name}"):
-                return entry.get("sha")
+            if entry.get("type") == "tree":
+                path = entry.get("path", "")
+                if path.endswith(f"/{skill_name}") or path == skill_name:
+                    return entry.get("sha")
             # Root-level skill (repo IS the skill) — return the root tree SHA
             if entry.get("type") == "tree" and entry.get("path") == "" and skill_name == repo_name:
                 return entry.get("sha")
@@ -299,10 +301,14 @@ class GitHubSource(SkillSource):
 
         # Find the skill's SKILL.md in the tree
         skill_md_path = None
+        target_suffix = f"/{skill_name}/SKILL.md"
+        target_exact = f"{skill_name}/SKILL.md"
         for entry in tree:
-            if entry.get("type") == "blob" and entry.get("path", "").endswith(f"/{skill_name}/SKILL.md"):
-                skill_md_path = entry["path"]
-                break
+            if entry.get("type") == "blob":
+                path = entry.get("path", "")
+                if path.endswith(target_suffix) or path == target_exact:
+                    skill_md_path = path
+                    break
 
         if not skill_md_path:
             # Try root-level skill (repo IS the skill)

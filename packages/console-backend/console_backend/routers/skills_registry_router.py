@@ -364,8 +364,7 @@ async def import_skill(
     # Step 4: Import into registry (catalog)
     from console_backend.services.skill_sources.base import SkillSourceDetail
 
-    # Map scope to registry visibility
-    visibility = body.scope if body.scope in ("private", "public") else "public"
+    visibility = body.visibility
 
     source_detail = SkillSourceDetail(
         name=skill_name,
