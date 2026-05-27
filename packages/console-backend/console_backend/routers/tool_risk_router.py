@@ -14,13 +14,13 @@ Endpoints:
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ..db.session import DbSession
 from ..dependencies import require_admin, require_admin_or_orchestrator, require_auth_or_bearer_token
 from ..models.user import User
-from ..services.tool_risk_service import tool_risk_service
+from ..services.tool_risk_service import ToolRiskService
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +66,23 @@ class PaginatedRiskScoresResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+
+
+def get_tool_risk_service(request: Request) -> ToolRiskService:
+    """Get tool risk service from app state."""
+    return request.app.state.tool_risk_service
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 
 @router.get("", response_model=PaginatedRiskScoresResponse)
 async def list_risk_scores(
+    request: Request,
     db: DbSession,
     _user: User = Depends(require_auth_or_bearer_token),
     limit: int = Query(default=100, ge=1, le=500),
@@ -81,8 +92,9 @@ async def list_risk_scores(
 
     Used by the orchestrator's ToolRiskCache periodic refresh.
     """
-    items = await tool_risk_service.get_scores_paginated(db, limit=limit, offset=offset)
-    total = await tool_risk_service.get_count(db)
+    service = get_tool_risk_service(request)
+    items = await service.get_scores_paginated(db, limit=limit, offset=offset)
+    total = await service.get_count(db)
 
     return PaginatedRiskScoresResponse(
         items=[_row_to_response(item) for item in items],
@@ -94,13 +106,15 @@ async def list_risk_scores(
 
 @router.get("/{tool_name}/{server_slug}", response_model=ToolRiskScoreResponse)
 async def get_risk_score(
+    request: Request,
     tool_name: str,
     server_slug: str,
     db: DbSession,
     _user: User = Depends(require_auth_or_bearer_token),
 ) -> ToolRiskScoreResponse:
     """Get a single risk score by tool_name and server_slug."""
-    row = await tool_risk_service.get_score(db, tool_name, server_slug)
+    service = get_tool_risk_service(request)
+    row = await service.get_score(db, tool_name, server_slug)
     if row is None:
         raise HTTPException(status_code=404, detail="Risk score not found")
     return _row_to_response(row)
@@ -108,9 +122,10 @@ async def get_risk_score(
 
 @router.put("", response_model=ToolRiskScoreResponse)
 async def upsert_risk_score(
+    request: Request,
     body: ToolRiskScoreUpsertRequest,
     db: DbSession,
-    _user: User = Depends(require_admin_or_orchestrator),
+    user: User = Depends(require_admin_or_orchestrator),
 ) -> ToolRiskScoreResponse:
     """Upsert a tool risk score.
 
@@ -118,8 +133,10 @@ async def upsert_risk_score(
     Called by the orchestrator after LLM scoring a new tool.
     Also used by admins to manually override scores via the UI.
     """
-    row = await tool_risk_service.upsert_score(
+    service = get_tool_risk_service(request)
+    row = await service.upsert_score(
         db,
+        actor=user,
         tool_name=body.tool_name,
         server_slug=body.server_slug,
         schema_hash=body.schema_hash,
@@ -132,16 +149,18 @@ async def upsert_risk_score(
 
 @router.delete("/{tool_name}/{server_slug}", status_code=204)
 async def delete_risk_score(
+    request: Request,
     tool_name: str,
     server_slug: str,
     db: DbSession,
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> None:
     """Delete/invalidate a risk score (admin only).
 
     Forces re-scoring on next tool encounter.
     """
-    deleted = await tool_risk_service.delete_score(db, tool_name, server_slug)
+    service = get_tool_risk_service(request)
+    deleted = await service.delete_score(db, actor=user, tool_name=tool_name, server_slug=server_slug)
     if not deleted:
         raise HTTPException(status_code=404, detail="Risk score not found")
 

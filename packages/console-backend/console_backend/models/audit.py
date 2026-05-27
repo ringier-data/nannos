@@ -25,6 +25,7 @@ class AuditEntityType(str, Enum):
     SCIM_TOKEN = "scim_token"  # For SCIM token management operations
     OUTBOUND_SCIM_ENDPOINT = "outbound_scim_endpoint"  # For outbound SCIM endpoint management
     SKILL = "skill"  # For skill registry operations
+    TOOL_RISK_SCORE = "tool_risk_score"  # For tool risk score operations
 
 
 class AuditAction(str, Enum):

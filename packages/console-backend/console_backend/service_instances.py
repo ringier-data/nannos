@@ -25,6 +25,7 @@ from .repositories.scheduled_job_repository import ScheduledJobRepository
 from .repositories.secrets_repository import SecretsRepository
 from .repositories.skill_registry_repository import SkillRegistryRepository
 from .repositories.sub_agent_repository import SubAgentRepository
+from .repositories.tool_risk_repository import ToolRiskRepository
 from .repositories.usage_repository import UsageRepository
 from .repositories.user_group_repository import UserGroupRepository
 from .repositories.user_repository import UserRepository
@@ -50,6 +51,7 @@ from .services.scim_service import ScimGroupService, ScimUserService
 from .services.scim_token_service import ScimTokenService
 from .services.skill_registry_service import SkillRegistryService
 from .services.sub_agent_service import SubAgentService
+from .services.tool_risk_service import ToolRiskService
 from .services.usage_service import UsageService
 from .services.user_group_service import UserGroupService
 from .services.user_settings_service import UserSettingsService
@@ -98,6 +100,12 @@ async def initialize_services(app: "FastAPI") -> None:
 
     app.state.skill_registry_service = SkillRegistryService()
     app.state.skill_registry_service.set_repository(app.state.skill_registry_repository)
+
+    app.state.tool_risk_repository = ToolRiskRepository()
+    app.state.tool_risk_repository.set_audit_service(app.state.audit_service)
+
+    app.state.tool_risk_service = ToolRiskService()
+    app.state.tool_risk_service.set_repository(app.state.tool_risk_repository)
 
     # Initialize services with repositories
     app.state.user_settings_service = UserSettingsService()

@@ -1,21 +1,38 @@
 """Service for tool risk scores CRUD operations.
 
-This is a system-level cache service (not user-owned data), so it uses
-direct SQL rather than the AuditedRepository pattern. Tool risk scores
-are auto-populated by LLM scoring in the orchestrator/agent-runner.
+Write operations (upsert/delete) are routed through ToolRiskRepository
+to ensure automatic audit logging. Read operations use direct SQL for
+performance (no audit needed).
 """
 
 import logging
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models.user import User
+from ..repositories.tool_risk_repository import ToolRiskRepository
 
 logger = logging.getLogger(__name__)
 
 
 class ToolRiskService:
-    """CRUD service for tool_risk_scores table."""
+    """Service for tool_risk_scores table, backed by ToolRiskRepository."""
+
+    def __init__(self) -> None:
+        self._repo: ToolRiskRepository | None = None
+
+    def set_repository(self, repo: ToolRiskRepository) -> None:
+        """Inject repository dependency."""
+        self._repo = repo
+
+    @property
+    def repo(self) -> ToolRiskRepository:
+        if self._repo is None:
+            raise RuntimeError(
+                "ToolRiskRepository not injected into ToolRiskService. Call set_repository() during initialization."
+            )
+        return self._repo
 
     async def get_score(
         self,
@@ -24,17 +41,7 @@ class ToolRiskService:
         server_slug: str,
     ) -> dict[str, Any] | None:
         """Get a single risk score by tool_name and server_slug."""
-        result = await db.execute(
-            text("""
-                SELECT tool_name, server_slug, schema_hash, base_score,
-                       risk_factors, allowed_actions, updated_at, created_at
-                FROM tool_risk_scores
-                WHERE tool_name = :tool_name AND server_slug = :server_slug
-            """),
-            {"tool_name": tool_name, "server_slug": server_slug},
-        )
-        row = result.mappings().first()
-        return dict(row) if row else None
+        return await self.repo.get_score(db, tool_name, server_slug)
 
     async def get_scores_paginated(
         self,
@@ -43,21 +50,12 @@ class ToolRiskService:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Get paginated scores sorted by updated_at desc (most recent first)."""
-        result = await db.execute(
-            text("""
-                SELECT tool_name, server_slug, schema_hash, base_score,
-                       risk_factors, allowed_actions, updated_at, created_at
-                FROM tool_risk_scores
-                ORDER BY updated_at DESC
-                LIMIT :limit OFFSET :offset
-            """),
-            {"limit": limit, "offset": offset},
-        )
-        return [dict(row) for row in result.mappings().all()]
+        return await self.repo.get_scores_paginated(db, limit=limit, offset=offset)
 
     async def upsert_score(
         self,
         db: AsyncSession,
+        actor: User,
         tool_name: str,
         server_slug: str,
         schema_hash: str,
@@ -65,66 +63,28 @@ class ToolRiskService:
         risk_factors: dict[str, Any],
         allowed_actions: list[str],
     ) -> dict[str, Any]:
-        """Upsert a risk score entry. Updates on conflict (tool_name, server_slug)."""
-        result = await db.execute(
-            text("""
-                INSERT INTO tool_risk_scores
-                    (tool_name, server_slug, schema_hash, base_score, risk_factors, allowed_actions, updated_at)
-                VALUES
-                    (:tool_name, :server_slug, :schema_hash, :base_score,
-                     CAST(:risk_factors AS jsonb), CAST(:allowed_actions AS jsonb), NOW())
-                ON CONFLICT (tool_name, server_slug)
-                DO UPDATE SET
-                    schema_hash = EXCLUDED.schema_hash,
-                    base_score = EXCLUDED.base_score,
-                    risk_factors = EXCLUDED.risk_factors,
-                    allowed_actions = EXCLUDED.allowed_actions,
-                    updated_at = NOW()
-                RETURNING tool_name, server_slug, schema_hash, base_score,
-                          risk_factors, allowed_actions, updated_at, created_at
-            """),
-            {
-                "tool_name": tool_name,
-                "server_slug": server_slug,
-                "schema_hash": schema_hash,
-                "base_score": base_score,
-                "risk_factors": _json_dumps(risk_factors),
-                "allowed_actions": _json_dumps(allowed_actions),
-            },
+        """Upsert a risk score entry (audited)."""
+        return await self.repo.upsert_score(
+            db,
+            actor=actor,
+            tool_name=tool_name,
+            server_slug=server_slug,
+            schema_hash=schema_hash,
+            base_score=base_score,
+            risk_factors=risk_factors,
+            allowed_actions=allowed_actions,
         )
-        row = result.mappings().first()
-        await db.commit()
-        return dict(row) if row else {}
 
     async def delete_score(
         self,
         db: AsyncSession,
+        actor: User,
         tool_name: str,
         server_slug: str,
     ) -> bool:
-        """Delete a risk score (admin invalidation). Returns True if deleted."""
-        result = await db.execute(
-            text("""
-                DELETE FROM tool_risk_scores
-                WHERE tool_name = :tool_name AND server_slug = :server_slug
-            """),
-            {"tool_name": tool_name, "server_slug": server_slug},
-        )
-        await db.commit()
-        return result.rowcount > 0
+        """Delete a risk score (audited). Returns True if deleted."""
+        return await self.repo.delete_score(db, actor=actor, tool_name=tool_name, server_slug=server_slug)
 
     async def get_count(self, db: AsyncSession) -> int:
         """Get total count of risk scores."""
-        result = await db.execute(text("SELECT COUNT(*) FROM tool_risk_scores"))
-        return result.scalar() or 0
-
-
-def _json_dumps(obj: Any) -> str:
-    """Serialize to JSON string for PostgreSQL JSONB parameters."""
-    import json
-
-    return json.dumps(obj)
-
-
-# Singleton instance
-tool_risk_service = ToolRiskService()
+        return await self.repo.get_count(db)
