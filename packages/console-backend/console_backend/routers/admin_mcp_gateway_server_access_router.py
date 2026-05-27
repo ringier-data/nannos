@@ -1,12 +1,7 @@
 """Admin router for MCP gateway server access management."""
 
-import logging
-from typing import Annotated
-
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.session import get_db_session
 from ..dependencies import require_admin
 from ..models.mcp_gateway_server_access import (
     McpGatewayGrantServerAccessRequest,
@@ -17,11 +12,7 @@ from ..models.user import User
 from ..services.mcp_gateway_server_access_service import McpGatewayServerAccessService
 from ..utils.gatana_auth import get_gatana_token
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-mcp-gateway"])
-
-DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 def get_mcp_gateway_service(request: Request) -> McpGatewayServerAccessService:
