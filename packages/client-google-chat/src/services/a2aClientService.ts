@@ -156,7 +156,7 @@ export class A2AClientService {
         googleChatThreadId: request.threadId,
         googleChatMessageId: request.messageId,
         model: MODELS.ClaudeSonnet45,
-        messageFormatting: 'plain', // TODO: update
+        messageFormatting: 'google-chat',
       },
     };
 

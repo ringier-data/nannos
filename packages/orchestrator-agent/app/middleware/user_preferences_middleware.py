@@ -111,6 +111,15 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
                 "Avoid markdown syntax that Slack doesn't support (e.g., # headers, **bold**).\n"
                 "</message_formatting>"
             )
+        elif formatting == "google-chat":
+            preferences_parts.append(
+                '<message_formatting format="google-chat">\n'
+                "Format responses using Google Chat markup syntax: *bold* for emphasis, _italic_ for secondary emphasis, "
+                "~strikethrough~ for strikethrough, `code` for inline code, ```code blocks``` for multi-line code. "
+                "Use plain URLs for links (they are auto-linked). "
+                "Avoid markdown syntax that Google Chat doesn't support (e.g., # headers, **bold**, [links](url)).\n"
+                "</message_formatting>"
+            )
         elif formatting == "plain":
             preferences_parts.append(
                 '<message_formatting format="plain">\n'

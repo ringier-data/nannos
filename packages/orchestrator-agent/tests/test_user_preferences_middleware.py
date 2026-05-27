@@ -241,6 +241,69 @@ class TestUserPreferencesMiddleware:
         assert mock_request.system_prompt == "Original prompt"
         mock_handler.assert_called_once_with(mock_request)
 
+    def test_build_preferences_addendum_with_slack_formatting(self, middleware):
+        """Should include Slack mrkdwn formatting instructions."""
+        user_context = GraphRuntimeContext(
+            user_id="user123",
+            user_sub="sub123",
+            name="Test User",
+            email="test@example.com",
+            language="en",
+            message_formatting="slack",
+        )
+        addendum = middleware._build_preferences_addendum(user_context)
+
+        assert '<message_formatting format="slack">' in addendum
+        assert "Slack mrkdwn syntax" in addendum
+        assert "*bold*" in addendum
+
+    def test_build_preferences_addendum_with_google_chat_formatting(self, middleware):
+        """Should include Google Chat markup formatting instructions."""
+        user_context = GraphRuntimeContext(
+            user_id="user123",
+            user_sub="sub123",
+            name="Test User",
+            email="test@example.com",
+            language="en",
+            message_formatting="google-chat",
+        )
+        addendum = middleware._build_preferences_addendum(user_context)
+
+        assert '<message_formatting format="google-chat">' in addendum
+        assert "Google Chat markup syntax" in addendum
+        assert "*bold*" in addendum
+        assert "~strikethrough~" in addendum
+        assert "auto-linked" in addendum
+
+    def test_build_preferences_addendum_with_plain_formatting(self, middleware):
+        """Should include plain text formatting instructions."""
+        user_context = GraphRuntimeContext(
+            user_id="user123",
+            user_sub="sub123",
+            name="Test User",
+            email="test@example.com",
+            language="en",
+            message_formatting="plain",
+        )
+        addendum = middleware._build_preferences_addendum(user_context)
+
+        assert '<message_formatting format="plain">' in addendum
+        assert "plain text only" in addendum
+
+    def test_build_preferences_addendum_with_markdown_formatting(self, middleware):
+        """Should not include message_formatting section for default markdown."""
+        user_context = GraphRuntimeContext(
+            user_id="user123",
+            user_sub="sub123",
+            name="Test User",
+            email="test@example.com",
+            language="en",
+            message_formatting="markdown",
+        )
+        addendum = middleware._build_preferences_addendum(user_context)
+
+        assert "<message_formatting" not in addendum
+
     def test_technical_terms_preserved_note(self, middleware, user_context_de):
         """Should include note about preserving technical terms."""
         addendum = middleware._build_preferences_addendum(user_context_de)

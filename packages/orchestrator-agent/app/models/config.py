@@ -69,6 +69,7 @@ class GraphRuntimeContext:
     Values:
     - 'markdown': Standard markdown formatting (default)
     - 'slack': Slack mrkdwn formatting (*bold*, _italic_, `code`, <@U123> mentions)
+    - 'google-chat': Google Chat markup (*bold*, _italic_, ~strikethrough~, `code`)
     - 'plain': Plain text with no formatting
     """
 
@@ -215,9 +216,9 @@ class UserConfig(BaseModel):
         default=None,
         description="LLM model to use (e.g. 'gpt-4o', 'claude-sonnet-4.5', or any local model ID)",
     )
-    message_formatting: Literal["markdown", "slack", "plain"] = Field(
+    message_formatting: Literal["markdown", "slack", "google-chat", "plain"] = Field(
         default="markdown",
-        description="Message formatting style: 'markdown' (default), 'slack', or 'plain'",
+        description="Message formatting style: 'markdown' (default), 'slack', 'google-chat', or 'plain'",
     )
     client_user_handle: Optional[str] = Field(
         default=None,

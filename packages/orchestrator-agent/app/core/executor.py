@@ -128,7 +128,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         user_email: str,
         user_groups: list[str],
         model_choice: ModelType | None,
-        message_formatting: Literal["markdown", "slack", "plain"],
+        message_formatting: Literal["markdown", "slack", "google-chat", "plain"],
         client_user_handle: str | None,
         sub_agent_config_hash: str | None,
         enable_thinking: bool | None = None,
