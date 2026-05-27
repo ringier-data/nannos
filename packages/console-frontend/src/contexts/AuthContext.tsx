@@ -1,6 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getCurrentUserApiV1AuthMeGetOptions, toggleAdminModeApiV1AuthAdminModePostMutation } from '../api/generated/@tanstack/react-query.gen';
+import {
+  getCurrentUserApiV1AuthMeGetOptions,
+  toggleAdminModeApiV1AuthAdminModePostMutation,
+} from '../api/generated/@tanstack/react-query.gen';
 import {
   ADMIN_MODE_STORAGE_KEY,
   getAdminModeFromStorage,
@@ -78,14 +81,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const { data, isLoading, error } = useQuery({
     ...getCurrentUserApiV1AuthMeGetOptions(),
-    retry: false,
+    // Retry on network errors / server restarts, but not on 401 (genuinely unauthenticated).
+    // The thrown error for HTTP errors is the parsed JSON body (e.g. { detail: "Not authenticated" }),
+    // while network errors are TypeError instances.
+    retry: (failureCount, err) => {
+      // Don't retry if the backend explicitly said "not authenticated"
+      if (
+        err &&
+        typeof err === 'object' &&
+        'detail' in err &&
+        (err as { detail: string }).detail === 'Not authenticated'
+      ) {
+        return false;
+      }
+      // Retry up to 3 times for network errors / transient failures (e.g., server reload)
+      return failureCount < 3;
+    },
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 5000),
+    // Re-check auth when window regains focus (recovers from transient errors)
+    refetchOnWindowFocus: true,
   });
 
   const user = data as User | null;
   const isAuthenticated = !!user && !error;
   const isAdmin = user?.is_administrator ?? false;
   const isGroupManager = useMemo(() => {
-    return user?.groups?.some(group => group.group_role === 'manager') ?? false;
+    return user?.groups?.some((group) => group.group_role === 'manager') ?? false;
   }, [user?.groups]);
 
   // Admin mode state - initialize from localStorage
@@ -107,18 +128,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   // Sync admin mode with localStorage and invalidate queries when it changes
-  const setAdminMode = useCallback((enabled: boolean) => {
-    // Only allow admin mode for actual admins
-    if (!isAdmin && enabled) {
-      return;
-    }
-    setAdminModeInStorage(enabled);
-    setAdminModeState(enabled);
-    // Log the toggle for audit trail (fire and forget - don't block UI)
-    logAdminModeToggle({ body: { enabled } });
-    // Invalidate all queries to refetch with new admin mode header
-    queryClient.invalidateQueries();
-  }, [isAdmin, queryClient, logAdminModeToggle]);
+  const setAdminMode = useCallback(
+    (enabled: boolean) => {
+      // Only allow admin mode for actual admins
+      if (!isAdmin && enabled) {
+        return;
+      }
+      setAdminModeInStorage(enabled);
+      setAdminModeState(enabled);
+      // Log the toggle for audit trail (fire and forget - don't block UI)
+      logAdminModeToggle({ body: { enabled } });
+      // Invalidate all queries to refetch with new admin mode header
+      queryClient.invalidateQueries();
+    },
+    [isAdmin, queryClient, logAdminModeToggle]
+  );
 
   const toggleAdminMode = useCallback(() => {
     setAdminMode(!adminMode);
@@ -167,62 +191,65 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   // Impersonation functions
-  const startImpersonation = useCallback(async (userId: string) => {
-    if (!isAdmin || !adminMode) {
-      throw new Error('Must be admin with admin mode enabled to impersonate');
-    }
-    
-    try {
-      // Call backend to start impersonation (logs audit)
-      const response = await fetch('/api/v1/admin/users/impersonate/start', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'X-Admin-Mode': 'true', // Must include admin mode header
-        },
-        credentials: 'same-origin',
-        body: JSON.stringify({ target_user_id: userId }),
-      });
-      
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ detail: 'Failed to start impersonation' }));
-        throw new Error(error.detail || 'Failed to start impersonation');
+  const startImpersonation = useCallback(
+    async (userId: string) => {
+      if (!isAdmin || !adminMode) {
+        throw new Error('Must be admin with admin mode enabled to impersonate');
       }
-      
-      // Update local state FIRST
-      setImpersonatedUserIdInStorage(userId);
-      setImpersonatedUserIdState(userId);
-      
-      // Force refetch all queries with new impersonation header
-      // Use resetQueries to clear cache and force immediate refetch
-      await queryClient.resetQueries();
-    } catch (error) {
-      console.error('Failed to start impersonation:', error);
-      throw error;
-    }
-  }, [isAdmin, adminMode, queryClient]);
+
+      try {
+        // Call backend to start impersonation (logs audit)
+        const response = await fetch('/api/v1/admin/users/impersonate/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Mode': 'true', // Must include admin mode header
+          },
+          credentials: 'same-origin',
+          body: JSON.stringify({ target_user_id: userId }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ detail: 'Failed to start impersonation' }));
+          throw new Error(error.detail || 'Failed to start impersonation');
+        }
+
+        // Update local state FIRST
+        setImpersonatedUserIdInStorage(userId);
+        setImpersonatedUserIdState(userId);
+
+        // Force refetch all queries with new impersonation header
+        // Use resetQueries to clear cache and force immediate refetch
+        await queryClient.resetQueries();
+      } catch (error) {
+        console.error('Failed to start impersonation:', error);
+        throw error;
+      }
+    },
+    [isAdmin, adminMode, queryClient]
+  );
 
   const stopImpersonation = useCallback(async () => {
     try {
       // Call backend to stop impersonation (logs audit)
       const response = await fetch('/api/v1/admin/users/impersonate/stop', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'X-Admin-Mode': 'true', // Must include admin mode header
         },
         credentials: 'same-origin',
       });
-      
+
       if (!response.ok) {
         const error = await response.json().catch(() => ({ detail: 'Failed to stop impersonation' }));
         throw new Error(error.detail || 'Failed to stop impersonation');
       }
-      
+
       // Clear local state FIRST
       clearImpersonatedUserId();
       setImpersonatedUserIdState(null);
-      
+
       // Force refetch all queries without impersonation header
       // Use resetQueries to clear cache and force immediate refetch
       await queryClient.resetQueries();

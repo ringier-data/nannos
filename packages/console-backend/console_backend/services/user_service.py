@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -496,6 +497,20 @@ class UserService:
                     },
                 )
                 logger.info(f"Created new user (audited): {sub}")
+
+                # First user in the system becomes admin automatically.
+                # Controlled by FIRST_USER_IS_ADMIN env var (default: false).
+                # Disable in production if using a separate admin seed process.
+                if os.getenv("FIRST_USER_IS_ADMIN", "false").lower() in ("true", "1", "yes"):
+                    count_result = await db.execute(text("SELECT COUNT(*) FROM users"))
+                    total_users = count_result.scalar()
+                    if total_users == 1:
+                        await db.execute(
+                            text("UPDATE users SET is_administrator = TRUE WHERE id = :id"),
+                            {"id": user.id},
+                        )
+                        user.is_administrator = True
+                        logger.info(f"First user {sub} auto-promoted to administrator (FIRST_USER_IS_ADMIN=true)")
             else:
                 if sub != old_sub:
                     # Audit sub change if it differs from previous

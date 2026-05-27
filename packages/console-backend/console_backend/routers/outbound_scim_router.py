@@ -16,6 +16,7 @@ from ..models.outbound_scim import (
     OutboundScimEndpointDetailResponse,
     OutboundScimEndpointListResponse,
     OutboundScimEndpointUpdate,
+    OutboundScimPushAllResponse,
     OutboundScimTestResult,
 )
 from ..models.user import PaginationMeta, User
@@ -168,3 +169,27 @@ async def test_outbound_scim_endpoint(
 
     test_result = await push_service.test_endpoint(row.endpoint_url, row.bearer_token)
     return OutboundScimTestResult(**test_result)
+
+
+@router.post("/{endpoint_id}/push-all", response_model=OutboundScimPushAllResponse)
+async def push_all_to_endpoint(
+    request: Request,
+    endpoint_id: int,
+    _: User = Depends(require_admin),
+) -> OutboundScimPushAllResponse:
+    """Push all users and groups to a specific outbound SCIM endpoint.
+
+    Enqueues all active users and groups for push. The actual push runs in the
+    background — this endpoint returns immediately with the number of items queued.
+    """
+    push_service = get_push_service(request)
+
+    result = await push_service.push_all(endpoint_id)
+    if "error" in result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=result["error"])
+
+    return OutboundScimPushAllResponse(
+        message="Push-all started in background",
+        users_queued=result["users_queued"],
+        groups_queued=result["groups_queued"],
+    )

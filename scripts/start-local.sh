@@ -882,6 +882,7 @@ procs:
     cwd: "$ROOT_DIR/packages/console-backend"
     shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5678} -m uvicorn app:asgi_app --host 127.0.0.1 --port 5001 --reload 2>&1 | tee $_LOG_DIR/console-backend.log"
     env:
+      FIRST_USER_IS_ADMIN: "true"
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "agent-console"
       OIDC_CLIENT_SECRET: "$_OIDC_SECRET_BACKEND"

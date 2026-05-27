@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, TestTube, Pencil, Globe } from 'lucide-react';
+import { Plus, Trash2, TestTube, Pencil, Globe, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { client } from '@/api/generated/client.gen';
 import { Button } from '@/components/ui/button';
@@ -59,6 +59,12 @@ interface TestResult {
   success: boolean;
   status_code: number | null;
   message: string;
+}
+
+interface PushAllResult {
+  message: string;
+  users_queued: number;
+  groups_queued: number;
 }
 
 const API_BASE = '/api/v1/admin/outbound-scim-endpoints';
@@ -157,6 +163,19 @@ export function OutboundScimPage() {
     },
     onError: () => {
       toast.error('Test request failed');
+    },
+  });
+
+  const pushAllMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await client.post<PushAllResult>({ url: `${API_BASE}/${id}/push-all` });
+      return res.data as PushAllResult;
+    },
+    onSuccess: (result) => {
+      toast.success(`Push started: ${result.users_queued} users, ${result.groups_queued} groups queued`);
+    },
+    onError: () => {
+      toast.error('Failed to start push');
     },
   });
 
@@ -271,6 +290,16 @@ export function OutboundScimPage() {
                   <TableCell className="text-sm">{formatDate(ep.created_at)}</TableCell>
                   <TableCell>
                     <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => pushAllMutation.mutate(ep.id)}
+                        disabled={pushAllMutation.isPending || !ep.enabled}
+                        title="Push all users and groups"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"

@@ -29,6 +29,7 @@ export async function processPendingRequest(
     await chatService.sendPrivateTextMessage(
       projectId,
       spaceId,
+      userId,
       '✅ Authorization successful! Now processing your request...',
       threadId
     );

@@ -1,6 +1,6 @@
 [project]
 name = "console-backend"
-version = "0.19.0"
+version = "0.20.0"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -43,6 +43,7 @@ dependencies = [
     "langchain-core>=0.3.0",
     "langchain-aws",
     "langsmith>=0.4.37",
+    "gatana-client===1.1.4",
 ]
 
 [tool.setuptools.packages.find]
