@@ -186,7 +186,11 @@ class ToolRiskCache:
         self.refresh_interval = refresh_interval
 
     def get(self, tool_name: str, server_slug: str, current_schema_hash: str) -> ToolRiskEntry | None:
-        """Get a cached entry. Returns None if expired, schema mismatch, or absent.
+        """Get a cached entry. Returns None if schema changed or absent.
+
+        When an entry is past TTL but the schema hash still matches (tool unchanged),
+        the entry is considered valid — the refresh loop handles content updates from
+        the DB. This prevents unnecessary LLM re-scoring for stable tools.
 
         Updates last_accessed_at on hit.
         """
@@ -199,13 +203,31 @@ class ToolRiskCache:
         if entry.schema_hash and current_schema_hash and entry.schema_hash != current_schema_hash:
             return None
 
-        # TTL check
+        # TTL check — but only force miss if we can't confirm schema is unchanged.
+        # If the schema hash matches (or either is empty so we can't compare),
+        # trust the entry. The periodic refresh loop keeps content fresh from the DB.
         if not self.is_record_fresh(entry):
-            return None
+            # Schema hash confirms tool unchanged — extend TTL, no re-score needed
+            if self._schema_confirms_unchanged(entry.schema_hash, current_schema_hash):
+                entry.updated_at = datetime.now(timezone.utc)
+            else:
+                return None
 
         # Update LRU timestamp
         entry.last_accessed_at = datetime.now(timezone.utc)
         return entry
+
+    @staticmethod
+    def _schema_confirms_unchanged(entry_hash: str, current_hash: str) -> bool:
+        """Check if schema hashes confirm the tool is unchanged.
+
+        Returns True when:
+        - Both hashes match (tool schema verified identical)
+        - Either hash is empty (can't disprove, trust the entry)
+        """
+        if not entry_hash or not current_hash:
+            return True
+        return entry_hash == current_hash
 
     def put(self, tool_name: str, server_slug: str, entry: ToolRiskEntry) -> None:
         """Insert or update a cache entry. Evicts LRU entry if at capacity."""
