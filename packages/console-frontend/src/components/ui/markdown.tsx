@@ -58,7 +58,18 @@ export function Markdown({ children, className, inverted = false }: MarkdownProp
         className
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children: linkChildren, ...props }) => (
+            <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+              {linkChildren}
+            </a>
+          ),
+        }}
+      >
+        {children}
+      </ReactMarkdown>
     </div>
   );
 }
