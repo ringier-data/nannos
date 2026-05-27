@@ -119,7 +119,7 @@ dev = [
 
 [[package]]
 name = "agent-runner"
-version = "0.16.0"
+version = "0.17.0"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -2619,7 +2619,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "0.13.0"
+version = "0.14.0"
 source = { editable = "../ringier-a2a-sdk" }
 dependencies = [
     { name = "a2a-sdk" },
