@@ -617,7 +617,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     const a2aRequest: A2AGoogleChatBasedRequest = {
       userId,
       projectId,
-      spaceId,
+      spaceId: source === 'space_message' ? spaceId: undefined,
       threadId: isInThread ? threadId : undefined,
       messageId,
       text: requestText,

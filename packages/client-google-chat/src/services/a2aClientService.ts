@@ -27,7 +27,7 @@ export interface GoogleChatFileUrl {
 export interface A2AGoogleChatBasedRequest {
   userId: string; // Google Chat user ID
   projectId: string; // Google Chat project number
-  spaceId: string; // Google Chat space ID
+  spaceId?: string; // Google Chat space ID
   threadId?: string; // Thread key/name if in thread
   messageId: string; // Message name
   text: string; // The user's request text
@@ -139,7 +139,6 @@ export class A2AClientService {
 
     // Build message parts (text + optional files)
     const messageParts = this.buildMessageParts(request);
-
 
     // Build A2A message send params
     const sendParams: MessageSendParams = {

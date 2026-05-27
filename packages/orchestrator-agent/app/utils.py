@@ -472,7 +472,7 @@ def build_runtime_context(
         language=user_config.language,
         timezone=user_config.timezone,
         message_formatting=user_config.message_formatting,
-        slack_user_handle=user_config.slack_user_handle,
+        client_user_handle=user_config.client_user_handle,
         custom_prompt=user_config.custom_prompt,
         groups=user_config.groups,
         tool_registry=tool_registry,

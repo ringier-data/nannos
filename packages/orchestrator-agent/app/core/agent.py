@@ -306,10 +306,10 @@ class OrchestratorDeepAgent:
             # 1. Read file content (to understand and decide next steps)
             # 2. Generate presigned URL and dispatch to sub-agents
 
-            # Build user prefix for Slack multi-user attribution
+            # Build user prefix for multi-user attribution (Slack or Google Chat)
             user_prefix = None
-            if runtime_context.slack_user_handle:
-                user_prefix = f"{runtime_context.name} {runtime_context.slack_user_handle}"
+            if runtime_context.client_user_handle:
+                user_prefix = f"{runtime_context.name} {runtime_context.client_user_handle}"
 
             text_content, pending_file_blocks = await build_text_content(
                 parts=message_parts,

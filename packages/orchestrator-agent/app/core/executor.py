@@ -129,7 +129,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         user_groups: list[str],
         model_choice: ModelType | None,
         message_formatting: Literal["markdown", "slack", "plain"],
-        slack_user_handle: str | None,
+        client_user_handle: str | None,
         sub_agent_config_hash: str | None,
         enable_thinking: bool | None = None,
         thinking_level: str | None = None,
@@ -145,7 +145,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             user_groups: User's group memberships
             model_choice: Optional model preference
             message_formatting: Message formatting style
-            slack_user_handle: Optional Slack user handle
+            client_user_handle: Optional client user handle for @-mentions (Slack: <@U123>, Google Chat: <users/123>)
             sub_agent_config_hash: Optional console mode config hash
             preferred_model: Optional preferred model from registry
             enable_thinking: Optional thinking configuration from client
@@ -164,7 +164,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             groups=user_groups,  # Pass groups for authorization
             model=model_choice,
             message_formatting=message_formatting,
-            slack_user_handle=slack_user_handle,
+            client_user_handle=client_user_handle,
             sub_agent_config_hash=sub_agent_config_hash,
             language=user.language,
             custom_prompt=user.custom_prompt,
@@ -253,10 +253,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         caller_sub: str | None = None
         if context.call_context and hasattr(context.call_context, "state"):
             caller_sub = context.call_context.state.get("user_sub")
-        # Extract caller's channel ID from message metadata (for multi-user Slack conversations)
+        # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
         if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
-            caller_channel_id = context.message.metadata.get("slackChannelId")
+            caller_channel_id = (
+                context.message.metadata.get("slackChannelId")
+                or context.message.metadata.get("googleChatSpaceId")
+            )
 
         # --- Continuous Interaction Turn: route to active stream if one exists ---
         async with _active_streams_lock:
@@ -390,19 +393,28 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         user_config = None
         try:
-            # Extract slack user handle - support both naming conventions
+            # Extract client user handle - support both Slack and Google Chat
             # Client may send 'slackUserId' (camelCase) or 'slack_user_id' (snake_case)
             slack_user_id = request_metadata.get("slackUserId")
             slack_channel_id = request_metadata.get("slackChannelId")  # for filesystem namespace isolation
 
+            # Google Chat metadata
+            google_chat_user_id = request_metadata.get("googleChatUserId")
+            google_chat_space_id = request_metadata.get("googleChatSpaceId")
+
+            # Determine channel_id from either Slack or Google Chat
+            channel_id = slack_channel_id or google_chat_space_id
+
             # Update stream info with scope and assistant_id now that we have them
-            stream_info.scope = "channel" if slack_channel_id else "personal"
-            stream_info.assistant_id = slack_channel_id if slack_channel_id else str(user.id)
+            stream_info.scope = "channel" if channel_id else "personal"
+            stream_info.assistant_id = channel_id if channel_id else str(user.id)
 
             if slack_user_id:
-                slack_user_handle = f"<@{slack_user_id}>"
+                client_user_handle = f"<@{slack_user_id}>"
+            elif google_chat_user_id:
+                client_user_handle = f"<{google_chat_user_id}>"
             else:
-                slack_user_handle = None
+                client_user_handle = None
 
             # Extract message formatting - support both naming conventions
             message_formatting = (
@@ -419,7 +431,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 user_groups=user_groups,
                 model_choice=model_choice,
                 message_formatting=message_formatting,
-                slack_user_handle=slack_user_handle,
+                client_user_handle=client_user_handle,
                 sub_agent_config_hash=sub_agent_config_hash,
                 enable_thinking=enable_thinking,
                 thinking_level=thinking_level,
@@ -457,8 +469,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "__pregel_checkpointer": graph.checkpointer,  # Required for proper checkpoint isolation
                 },
                 "metadata": {
-                    "assistant_id": slack_channel_id
-                    if slack_channel_id
+                    "assistant_id": channel_id
+                    if channel_id
                     else user.id,  # Use database ID (not OIDC sub) to match docstore tools
                     "user_id": user.id,  # Stable database ID (not OIDC sub)
                     "conversation_id": task.context_id,  # For conversation-scoped tool result storage
@@ -466,7 +478,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "group_ids": user_groups or None,  # All groups for playbook aggregation
                     "user_name": user_name,
                     "slack_thread_ts": request_metadata.get("slackThreadTs"),
-                    "scope": "personal" if not slack_channel_id else "channel",
+                    "google_chat_thread_id": request_metadata.get("googleChatThreadId"),
+                    "scope": "personal" if not channel_id else "channel",
                     "model_type": model_type,
                     "thinking_level": thinking_level,
                 },

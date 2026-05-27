@@ -121,16 +121,16 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
         # Default 'markdown' needs no special instruction - standard behavior
 
         # Multi-user conversation context
-        # Check if we have a slack_user_handle, indicating multi-user Slack context
-        slack_handle = getattr(user_context, "slack_user_handle", None)
-        if slack_handle:
+        # Check if we have a client_user_handle, indicating multi-user channel context (Slack or Google Chat)
+        client_handle = getattr(user_context, "client_user_handle", None)
+        if client_handle:
             preferences_parts.append(
                 "<multi_user_conversation>\n"
                 "This is a multi-user conversation. Each user message is prefixed "
-                "with the speaker's identity in the format `[Name <@SlackHandle>]: message`.\n"
+                "with the speaker's identity in the format `[Name <handle>]: message`.\n"
                 "- Track who said what and refer to users naturally (e.g., 'as Bob mentioned').\n"
-                "- When you need input from a specific user, mention them using their Slack handle.\n"
-                f"- The current speaker is: {user_context.name} {slack_handle}\n"
+                "- When you need input from a specific user, mention them using their handle.\n"
+                f"- The current speaker is: {user_context.name} {client_handle}\n"
                 "- Address responses appropriately when multiple users are involved.\n"
                 "</multi_user_conversation>"
             )

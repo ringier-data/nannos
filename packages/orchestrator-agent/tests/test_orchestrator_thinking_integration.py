@@ -85,7 +85,7 @@ class TestOrchestratorThinkingConfig:
                 user_groups=[],
                 model_choice=None,
                 message_formatting="markdown",
-                slack_user_handle=None,
+                client_user_handle=None,
                 sub_agent_config_hash=None,
                 enable_thinking=True,  # From client metadata
                 thinking_level="high",  # From client metadata
@@ -134,7 +134,7 @@ class TestOrchestratorThinkingConfig:
                 user_groups=[],
                 model_choice=None,
                 message_formatting="markdown",
-                slack_user_handle=None,
+                client_user_handle=None,
                 sub_agent_config_hash=None,
                 enable_thinking=True,  # Metadata override
                 thinking_level="high",  # Metadata override
@@ -267,7 +267,7 @@ class TestExecutorThinkingFlow:
                     user_groups=[],
                     model_choice=None,
                     message_formatting="markdown",
-                    slack_user_handle=None,
+                    client_user_handle=None,
                     sub_agent_config_hash=None,
                     enable_thinking=True,
                     thinking_level="medium",

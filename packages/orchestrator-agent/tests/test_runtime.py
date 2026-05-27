@@ -261,7 +261,7 @@ class TestBuildRuntimeContext:
             language="de",
             timezone="Europe/Zurich",
             message_formatting="markdown",
-            slack_user_handle="@testuser",
+            client_user_handle="@testuser",
             custom_prompt="Custom instructions here",
         )
 
@@ -270,7 +270,7 @@ class TestBuildRuntimeContext:
         assert context.language == "de"
         assert context.timezone == "Europe/Zurich"
         assert context.message_formatting == "markdown"
-        assert context.slack_user_handle == "@testuser"
+        assert context.client_user_handle == "@testuser"
         assert context.custom_prompt == "Custom instructions here"
 
     def test_local_subagents_without_agent_settings_warning(self, caplog):
