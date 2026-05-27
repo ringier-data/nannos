@@ -482,7 +482,11 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         return None
 
     def _get_threshold(self, context: Any) -> float:
-        """Get the risk threshold, potentially role-adjusted from context."""
+        """
+        Get the risk threshold
+
+        TODO: potentially role-adjusted from context.
+        """
         if context is None:
             return self._default_risk_threshold
 
