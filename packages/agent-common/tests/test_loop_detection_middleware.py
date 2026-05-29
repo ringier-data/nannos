@@ -351,3 +351,160 @@ class TestForceStop:
         assert len(result["messages"]) == 1
         assert isinstance(result["messages"][0], ToolMessage)
         assert result["messages"][0].status == "error"
+
+    @pytest.mark.asyncio
+    async def test_force_stop_same_tool_with_equal_window_and_threshold(self):
+        """Force-stop must trigger for same_tool even when window_size == max_tool_repeats.
+
+        Regression test: previously, window trimming capped repeat_count at
+        window_size+1, so force_stop_after could never be reached. The model
+        would loop block→retry indefinitely, eventually returning a stale
+        structured_response from a previous sub-agent.
+        """
+        from langchain_core.messages import AIMessage
+
+        middleware = RepeatedToolCallMiddleware(
+            max_repeats=5, max_tool_repeats=10, window_size=10, force_stop_after=3, dispatch_tools=set()
+        )
+
+        # Simulate: 10 allowed calls, then 3 consecutive blocks (calls 11, 12, 13).
+        # On each block, aafter_model should grow the history (no window trim).
+        # By the 3rd block, repeat_count should be 13 and force-stop fires.
+        tool_history = [f"hash_{i}" for i in range(10)]  # 10 unique calls
+
+        for block_round in range(3):
+            ai_message = AIMessage(
+                content="",
+                id=f"msg-fs-{block_round}",
+                tool_calls=[
+                    {"name": "search", "args": {"q": f"query_{10 + block_round}"}, "id": f"tc-fs-{block_round}"}
+                ],
+            )
+            state = {"messages": [ai_message], "tool_call_history": {"search": list(tool_history)}}
+            result = await middleware.aafter_model(state, MagicMock())
+
+            assert result is not None
+            # Update tool_history with what middleware returned
+            tool_history = result["tool_call_history"]["search"]
+
+            if block_round < 2:
+                # First 2 blocks: error ToolMessages (not force-stop yet)
+                from langchain_core.messages import ToolMessage
+
+                assert len(result["messages"]) == 1
+                assert isinstance(result["messages"][0], ToolMessage)
+            else:
+                # 3rd block: force-stop — AIMessage with stripped tool_calls
+                assert len(result["messages"]) == 1
+                assert isinstance(result["messages"][0], AIMessage)
+                assert result["messages"][0].tool_calls == []
+
+    """Test dispatch_tools parameter for exempting dispatcher tools from max_tool_repeats."""
+
+    def test_dispatch_tool_exempt_from_max_tool_repeats(self):
+        """Dispatch tools should NOT be blocked by max_tool_repeats."""
+        middleware = RepeatedToolCallMiddleware(
+            max_repeats=5, max_tool_repeats=3, window_size=20, dispatch_tools={"task"}
+        )
+
+        # 5 calls with different args — exceeds max_tool_repeats=3 but should NOT trigger
+        history = ["hash_a", "hash_b", "hash_c", "hash_d"]
+        is_loop, count, loop_type = middleware._check_for_loop("task", "hash_e", history)
+
+        assert is_loop is False
+
+    def test_dispatch_tool_still_checked_for_same_args(self):
+        """Dispatch tools should still be blocked by max_repeats (same args)."""
+        middleware = RepeatedToolCallMiddleware(
+            max_repeats=3, max_tool_repeats=5, window_size=20, dispatch_tools={"task"}
+        )
+
+        # 3 calls with identical args + 1 current = 4, exceeds max_repeats=3
+        history = ["same_hash", "same_hash", "same_hash"]
+        is_loop, count, loop_type = middleware._check_for_loop("task", "same_hash", history)
+
+        assert is_loop is True
+        assert loop_type == "same_args"
+        assert count == 4
+
+    def test_non_dispatch_tool_still_checked_for_max_tool_repeats(self):
+        """Non-dispatch tools should still be blocked by max_tool_repeats."""
+        middleware = RepeatedToolCallMiddleware(
+            max_repeats=5, max_tool_repeats=3, window_size=20, dispatch_tools={"task"}
+        )
+
+        # 'other_tool' is NOT in dispatch_tools, so max_tool_repeats applies
+        history = ["hash_a", "hash_b", "hash_c"]
+        is_loop, count, loop_type = middleware._check_for_loop("other_tool", "hash_d", history)
+
+        assert is_loop is True
+        assert loop_type == "same_tool"
+        assert count == 4
+
+    @pytest.mark.asyncio
+    async def test_dispatch_tool_not_blocked_in_aafter_model(self):
+        """Full integration: dispatch tool with many different-args calls is not blocked."""
+        from langchain_core.messages import AIMessage
+
+        middleware = RepeatedToolCallMiddleware(
+            max_repeats=5, max_tool_repeats=3, window_size=20, dispatch_tools={"task"}
+        )
+
+        # Simulate 10 previous calls to 'task' with different args
+        history = {
+            "task": [f"hash_{i}" for i in range(10)],
+        }
+
+        ai_message = AIMessage(
+            content="",
+            id="msg-dispatch",
+            tool_calls=[{"name": "task", "args": {"description": "new task", "subagent_type": "gp"}, "id": "tc-d1"}],
+        )
+
+        state = {"messages": [ai_message], "tool_call_history": history}
+        result = await middleware.aafter_model(state, MagicMock())
+
+        # Should only update history, no blocked calls
+        assert result is not None
+        assert "tool_call_history" in result
+        # No error messages — just history update
+        assert "messages" not in result
+
+    def test_dispatch_tools_default_includes_task(self):
+        """dispatch_tools defaults to {'task'}."""
+        middleware = RepeatedToolCallMiddleware(max_repeats=3)
+        assert middleware.dispatch_tools == {"task"}
+
+
+class TestErrorMessages:
+    """Test that error messages are actionable and distinct per loop type."""
+
+    def test_same_args_error_message(self):
+        """same_args error should tell model not to retry with same arguments."""
+        middleware = RepeatedToolCallMiddleware(max_repeats=3)
+        info = {
+            "tool_call": {"id": "tc-1"},
+            "tool_name": "read_file",
+            "loop_type": "same_args",
+            "description": "Tool 'read_file' called 4 times with identical arguments",
+            "repeat_count": 4,
+        }
+        msg = middleware._build_error_message(info)
+        assert "same arguments" in msg.lower()
+        assert "BLOCKED" in msg
+        assert "respond to the user" in msg
+
+    def test_same_tool_error_message(self):
+        """same_tool error should tell model to stop and respond."""
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, max_tool_repeats=5)
+        info = {
+            "tool_call": {"id": "tc-2"},
+            "tool_name": "search",
+            "loop_type": "same_tool",
+            "description": "Tool 'search' called 6 times (with 5 different argument sets)",
+            "repeat_count": 6,
+        }
+        msg = middleware._build_error_message(info)
+        assert "many times" in msg.lower()
+        assert "BLOCKED" in msg
+        assert "respond to the user" in msg
