@@ -5,10 +5,12 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { getSkillDetailApiV1SkillsRegistryDetailSkillIdGet, getSkillVersionDetailApiV1SkillsRegistryDetailSkillIdVersionsContentHashGet } from '@/api/generated/sdk.gen';
 
 interface SkillFile {
@@ -29,9 +31,21 @@ interface SkillDiffDialogProps {
   registryId: string;
   pinnedContentHash: string;
   skillName: string;
+  onConfirmUpdate?: () => void | Promise<void>;
+  confirmLabel?: string;
+  confirmPending?: boolean;
 }
 
-export function SkillDiffDialog({ open, onOpenChange, registryId, pinnedContentHash, skillName }: SkillDiffDialogProps) {
+export function SkillDiffDialog({
+  open,
+  onOpenChange,
+  registryId,
+  pinnedContentHash,
+  skillName,
+  onConfirmUpdate,
+  confirmLabel,
+  confirmPending,
+}: SkillDiffDialogProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileDiffs, setFileDiffs] = useState<FileDiff[]>([]);
@@ -152,6 +166,17 @@ export function SkillDiffDialog({ open, onOpenChange, registryId, pinnedContentH
             </div>
           ))}
         </div>
+        <DialogFooter className="mt-3">
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={!!confirmPending}>
+            {onConfirmUpdate ? 'Cancel' : 'Close'}
+          </Button>
+          {onConfirmUpdate && (
+            <Button onClick={() => void onConfirmUpdate()} disabled={loading || !!error || !!confirmPending}>
+              {confirmPending && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />}
+              {confirmLabel ?? 'Update'}
+            </Button>
+          )}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
