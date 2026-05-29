@@ -59,6 +59,25 @@ export type ActivationUpdateResponse = {
 };
 
 /**
+ * ActiveUsersResponse
+ *
+ * Response for active users over time (DAU or WAU).
+ */
+export type ActiveUsersResponse = {
+    /**
+     * Data
+     */
+    data?: Array<TimeSeriesPoint>;
+    summary: TimeSeriesSummary;
+    /**
+     * Granularity
+     *
+     * Aggregation granularity: 'day' or 'week'
+     */
+    granularity: string;
+};
+
+/**
  * AddSourceRequest
  *
  * Request model for adding a source to a catalog.
@@ -1035,6 +1054,87 @@ export type CatalogUpdate = {
 };
 
 /**
+ * ChurnRateResponse
+ *
+ * Response for churn rate analysis.
+ */
+export type ChurnRateResponse = {
+    /**
+     * Data
+     *
+     * Churn rate percentage over rolling windows
+     */
+    data?: Array<TimeSeriesPoint>;
+    summary: ChurnSummary;
+};
+
+/**
+ * ChurnSummary
+ *
+ * Summary of churn metrics.
+ */
+export type ChurnSummary = {
+    /**
+     * Previous Period Active Users
+     */
+    previous_period_active_users: number;
+    /**
+     * Current Period Active Users
+     */
+    current_period_active_users: number;
+    /**
+     * Churned Users
+     */
+    churned_users: number;
+    /**
+     * New Or Reactivated Users
+     */
+    new_or_reactivated_users: number;
+    /**
+     * Churn Rate Percent
+     */
+    churn_rate_percent?: number | null;
+};
+
+/**
+ * CohortBucket
+ *
+ * A single user cohort bucket.
+ */
+export type CohortBucket = {
+    /**
+     * Cohort
+     *
+     * Cohort label (e.g., 'New (1 week)', 'Veteran (3+ months)')
+     */
+    cohort: string;
+    /**
+     * User Count
+     */
+    user_count: number;
+    /**
+     * Percent Of Users
+     */
+    percent_of_users: number;
+};
+
+/**
+ * CohortResponse
+ *
+ * Response for user lifetime cohort analysis.
+ */
+export type CohortResponse = {
+    /**
+     * Data
+     */
+    data?: Array<CohortBucket>;
+    /**
+     * Total Active Users
+     */
+    total_active_users: number;
+};
+
+/**
  * CopyRequest
  *
  * Request to copy a skill (creating an editable local version).
@@ -1052,6 +1152,75 @@ export type CopyRequest = {
      * Slug for the copy. Auto-derived from name if omitted.
      */
     slug?: string | null;
+};
+
+/**
+ * CostOverTimeResponse
+ *
+ * Response for global cost over time.
+ */
+export type CostOverTimeResponse = {
+    /**
+     * Data
+     */
+    data?: Array<CostTimeSeriesPoint>;
+    summary: CostSummary;
+    /**
+     * Granularity
+     *
+     * Aggregation granularity: 'day', 'week', or 'month'
+     */
+    granularity: string;
+};
+
+/**
+ * CostSummary
+ *
+ * Summary of cost metrics.
+ */
+export type CostSummary = {
+    /**
+     * Total Cost Usd
+     */
+    total_cost_usd: string;
+    /**
+     * Total Requests
+     */
+    total_requests: number;
+    /**
+     * Average Cost Per Request
+     */
+    average_cost_per_request?: string | null;
+    /**
+     * Previous Period Cost Usd
+     */
+    previous_period_cost_usd?: string | null;
+    /**
+     * Change Percent
+     */
+    change_percent?: number | null;
+};
+
+/**
+ * CostTimeSeriesPoint
+ *
+ * A cost data point in a time series.
+ */
+export type CostTimeSeriesPoint = {
+    /**
+     * Period
+     *
+     * ISO date string for the period start
+     */
+    period: string;
+    /**
+     * Total Cost Usd
+     */
+    total_cost_usd: string;
+    /**
+     * Request Count
+     */
+    request_count: number;
 };
 
 /**
@@ -1205,6 +1374,44 @@ export type DetailedUsageReport = {
      * Billing Unit Breakdown
      */
     billing_unit_breakdown?: Array<BillingUnitBreakdown>;
+};
+
+/**
+ * EngagementBucket
+ *
+ * A single engagement frequency bucket.
+ */
+export type EngagementBucket = {
+    /**
+     * Bucket
+     *
+     * Bucket label (e.g., '1', '2-4', '5-10', '>10')
+     */
+    bucket: string;
+    /**
+     * User Count
+     */
+    user_count: number;
+    /**
+     * Percent Of Users
+     */
+    percent_of_users: number;
+};
+
+/**
+ * EngagementResponse
+ *
+ * Response for user engagement distribution.
+ */
+export type EngagementResponse = {
+    /**
+     * Data
+     */
+    data?: Array<EngagementBucket>;
+    /**
+     * Total Active Users
+     */
+    total_active_users: number;
 };
 
 /**
@@ -4003,6 +4210,7 @@ export type SkillImportRequest = {
      */
     agent?: string | null;
     scope?: ScopeEnum;
+    visibility?: VisibilityEnum;
     /**
      * Group Id
      *
@@ -5132,6 +5340,50 @@ export type SubAgentVersionApproval = {
 export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
 
 /**
+ * TimeSeriesPoint
+ *
+ * A single data point in a time series.
+ */
+export type TimeSeriesPoint = {
+    /**
+     * Period
+     *
+     * ISO date string for the period start (e.g., '2026-03-02')
+     */
+    period: string;
+    /**
+     * Value
+     */
+    value: number | string;
+};
+
+/**
+ * TimeSeriesSummary
+ *
+ * Summary statistics for a time-series KPI.
+ */
+export type TimeSeriesSummary = {
+    /**
+     * Current
+     *
+     * Current period value
+     */
+    current: number | string;
+    /**
+     * Previous
+     *
+     * Previous period value
+     */
+    previous: number | string;
+    /**
+     * Change Percent
+     *
+     * Percentage change from previous to current
+     */
+    change_percent?: number | null;
+};
+
+/**
  * ToolBypassRuleRequest
  *
  * Request to set or remove a tool bypass rule.
@@ -6179,6 +6431,20 @@ export type ConsoleBackendModelsSubAgentSkillSummary = {
      */
     sandbox_required?: boolean;
 };
+
+/**
+ * Granularity
+ *
+ * Aggregation granularity
+ */
+export type GranularityEnum = 'day' | 'week';
+
+/**
+ * Granularity
+ *
+ * Aggregation granularity
+ */
+export type GranularityEnum2 = 'day' | 'week' | 'month';
 
 /**
  * Scope
@@ -8786,6 +9052,174 @@ export type GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses = {
 };
 
 export type GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponse = GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses[keyof GetUserUsageSummaryApiV1UsageAdminUserUserIdSummaryGetResponses];
+
+export type GetActiveUsersApiV1AnalyticsActiveUsersGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         *
+         * Number of days to look back
+         */
+        days?: number;
+        /**
+         * Aggregation granularity
+         */
+        granularity?: GranularityEnum;
+    };
+    url: '/api/v1/analytics/active-users';
+};
+
+export type GetActiveUsersApiV1AnalyticsActiveUsersGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetActiveUsersApiV1AnalyticsActiveUsersGetError = GetActiveUsersApiV1AnalyticsActiveUsersGetErrors[keyof GetActiveUsersApiV1AnalyticsActiveUsersGetErrors];
+
+export type GetActiveUsersApiV1AnalyticsActiveUsersGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: ActiveUsersResponse;
+};
+
+export type GetActiveUsersApiV1AnalyticsActiveUsersGetResponse = GetActiveUsersApiV1AnalyticsActiveUsersGetResponses[keyof GetActiveUsersApiV1AnalyticsActiveUsersGetResponses];
+
+export type GetChurnRateApiV1AnalyticsChurnGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         *
+         * Number of days to look back
+         */
+        days?: number;
+    };
+    url: '/api/v1/analytics/churn';
+};
+
+export type GetChurnRateApiV1AnalyticsChurnGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetChurnRateApiV1AnalyticsChurnGetError = GetChurnRateApiV1AnalyticsChurnGetErrors[keyof GetChurnRateApiV1AnalyticsChurnGetErrors];
+
+export type GetChurnRateApiV1AnalyticsChurnGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: ChurnRateResponse;
+};
+
+export type GetChurnRateApiV1AnalyticsChurnGetResponse = GetChurnRateApiV1AnalyticsChurnGetResponses[keyof GetChurnRateApiV1AnalyticsChurnGetResponses];
+
+export type GetEngagementApiV1AnalyticsEngagementGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         *
+         * Number of days to look back
+         */
+        days?: number;
+    };
+    url: '/api/v1/analytics/engagement';
+};
+
+export type GetEngagementApiV1AnalyticsEngagementGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetEngagementApiV1AnalyticsEngagementGetError = GetEngagementApiV1AnalyticsEngagementGetErrors[keyof GetEngagementApiV1AnalyticsEngagementGetErrors];
+
+export type GetEngagementApiV1AnalyticsEngagementGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: EngagementResponse;
+};
+
+export type GetEngagementApiV1AnalyticsEngagementGetResponse = GetEngagementApiV1AnalyticsEngagementGetResponses[keyof GetEngagementApiV1AnalyticsEngagementGetResponses];
+
+export type GetCohortsApiV1AnalyticsCohortsGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         *
+         * Number of days to look back
+         */
+        days?: number;
+    };
+    url: '/api/v1/analytics/cohorts';
+};
+
+export type GetCohortsApiV1AnalyticsCohortsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetCohortsApiV1AnalyticsCohortsGetError = GetCohortsApiV1AnalyticsCohortsGetErrors[keyof GetCohortsApiV1AnalyticsCohortsGetErrors];
+
+export type GetCohortsApiV1AnalyticsCohortsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: CohortResponse;
+};
+
+export type GetCohortsApiV1AnalyticsCohortsGetResponse = GetCohortsApiV1AnalyticsCohortsGetResponses[keyof GetCohortsApiV1AnalyticsCohortsGetResponses];
+
+export type GetCostOverTimeApiV1AnalyticsCostOverTimeGetData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Days
+         *
+         * Number of days to look back
+         */
+        days?: number;
+        /**
+         * Aggregation granularity
+         */
+        granularity?: GranularityEnum2;
+    };
+    url: '/api/v1/analytics/cost-over-time';
+};
+
+export type GetCostOverTimeApiV1AnalyticsCostOverTimeGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetCostOverTimeApiV1AnalyticsCostOverTimeGetError = GetCostOverTimeApiV1AnalyticsCostOverTimeGetErrors[keyof GetCostOverTimeApiV1AnalyticsCostOverTimeGetErrors];
+
+export type GetCostOverTimeApiV1AnalyticsCostOverTimeGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: CostOverTimeResponse;
+};
+
+export type GetCostOverTimeApiV1AnalyticsCostOverTimeGetResponse = GetCostOverTimeApiV1AnalyticsCostOverTimeGetResponses[keyof GetCostOverTimeApiV1AnalyticsCostOverTimeGetResponses];
 
 export type ListModelsWithRatesApiV1AdminRateCardsModelsGetData = {
     body?: never;

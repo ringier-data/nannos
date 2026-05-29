@@ -77,6 +77,7 @@ from console_backend.routers.skill_activations_router import router as skill_act
 from console_backend.routers.skills_registry_router import router as skills_registry_router
 from console_backend.routers.sub_agent_router import router as sub_agent_router
 from console_backend.routers.tool_risk_router import router as tool_risk_router
+from console_backend.routers.analytics_router import router as analytics_router
 from console_backend.routers.usage_router import router as usage_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
@@ -311,6 +312,7 @@ app.include_router(admin_group_router)
 app.include_router(admin_audit_router)
 app.include_router(group_router)
 app.include_router(usage_router)
+app.include_router(analytics_router)
 app.include_router(rate_card_router)
 app.include_router(models_router)
 app.include_router(notification_router)

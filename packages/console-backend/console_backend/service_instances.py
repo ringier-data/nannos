@@ -30,6 +30,7 @@ from .repositories.usage_repository import UsageRepository
 from .repositories.user_group_repository import UserGroupRepository
 from .repositories.user_repository import UserRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
+from .services.analytics_service import AnalyticsService
 from .services.audit_service import AuditService
 from .services.bug_report_service import BugReportService
 from .services.catalog_service import CatalogService
@@ -198,6 +199,8 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.usage_service = UsageService()
     app.state.usage_service.set_repository(app.state.usage_repository)
     app.state.usage_service.set_rate_card_service(app.state.rate_card_service)
+
+    app.state.analytics_service = AnalyticsService()
 
     # Wire internal cost logger into sync pipeline (must be after usage_service init)
     if (

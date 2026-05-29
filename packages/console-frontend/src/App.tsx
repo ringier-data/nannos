@@ -17,6 +17,7 @@ import { CatalogsPage } from './pages/CatalogsPage';
 import { CatalogDetailPage } from './pages/CatalogDetailPage';
 import { AdminRoute } from './components/AdminRoute';
 import { GroupManagerRoute } from './components/GroupManagerRoute';
+import { AnalyticsPage } from './pages/admin/AnalyticsPage';
 import { UsersPage } from './pages/admin/UsersPage';
 import { UserDetailPage } from './pages/admin/UserDetailPage';
 import { GroupsPage } from './pages/admin/GroupsPage';
@@ -87,6 +88,14 @@ function App() {
             <GroupManagerRoute>
               <GroupDetailPage />
             </GroupManagerRoute>
+          }
+        />
+        <Route
+          path="admin/analytics"
+          element={
+            <AdminRoute>
+              <AnalyticsPage />
+            </AdminRoute>
           }
         />
         <Route

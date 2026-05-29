@@ -16,6 +16,7 @@ import {
   ShieldAlert,
   BookOpen,
   Package,
+  BarChart3,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -82,6 +83,11 @@ export const groupManagerNavItems: NavItem[] = [
 ];
 
 export const adminNavItems: NavItem[] = [
+  {
+    title: 'Analytics',
+    url: '/app/admin/analytics',
+    icon: BarChart3,
+  },
   {
     title: 'Users',
     url: '/app/admin/users',
