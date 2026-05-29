@@ -66,8 +66,10 @@ export function SubAgentPermissionsDialog({
   onOpenChange,
 }: SubAgentPermissionsDialogProps) {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
-  const isAdmin = user?.is_administrator ?? false;
+  const { isAdmin, adminMode } = useAuth();
+
+  // Only use admin group API if admin mode is enabled
+  const canUseAdminGroups = isAdmin && adminMode;
   const [groupPermissions, setGroupPermissions] = useState<Map<number, GroupPermissionState>>(new Map());
   const [defaultGroups, setDefaultGroups] = useState<Set<number>>(new Set());
   const [initialDefaults, setInitialDefaults] = useState<Set<number>>(new Set());
@@ -83,22 +85,22 @@ export function SubAgentPermissionsDialog({
     retry: false,
   });
 
-  // Fetch available groups - admins see all groups, others see only their groups
+  // Fetch available groups - admin mode: all groups, else only own groups
   const { data: adminGroupsData, isLoading: isLoadingAdminGroups, error: adminGroupsError } = useQuery({
     ...listGroupsApiV1AdminGroupsGetOptions({ query: { limit: 100 } }),
-    enabled: open && isAdmin,
+    enabled: open && canUseAdminGroups,
     retry: false,
   });
 
   const { data: myGroupsData, isLoading: isLoadingMyGroups, error: myGroupsError } = useQuery({
     ...listMyGroupsApiV1GroupsGetOptions(),
-    enabled: open && !isAdmin,
+    enabled: open && !canUseAdminGroups,
     retry: false,
   });
 
-  const isLoadingGroups = isAdmin ? isLoadingAdminGroups : isLoadingMyGroups;
-  const groupsError = isAdmin ? adminGroupsError : myGroupsError;
-  const availableGroups: UserGroupWithMembers[] = isAdmin
+  const isLoadingGroups = canUseAdminGroups ? isLoadingAdminGroups : isLoadingMyGroups;
+  const groupsError = canUseAdminGroups ? adminGroupsError : myGroupsError;
+  const availableGroups: UserGroupWithMembers[] = canUseAdminGroups
     ? (adminGroupsData?.data ?? [])
     : (myGroupsData ?? []);
 
