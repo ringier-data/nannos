@@ -344,7 +344,20 @@ export function UsagePage() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="name" />
                 <YAxis tickFormatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(2)}` : '$0'} />
-                <RechartsTooltip formatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(4)}` : '$0'} />
+                <RechartsTooltip formatter={(value) => {
+                  // value can be string | number | (number | string)[]
+                  if (Array.isArray(value)) {
+                    // If value is an array, format each value
+                    return value.map(v => typeof v === 'number' ? `$${v.toFixed(4)}` : `$${Number(v).toFixed(4)}`);
+                  }
+                  if (typeof value === 'number') {
+                    return `$${value.toFixed(4)}`;
+                  }
+                  if (typeof value === 'string' && !isNaN(Number(value))) {
+                    return `$${Number(value).toFixed(4)}`;
+                  }
+                  return '$0';
+                }} />
                 <Bar dataKey="cost" name="Cost (USD)">
                   {byServiceChartData.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={entry.fill} />
@@ -369,7 +382,18 @@ export function UsagePage() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="name" />
                 <YAxis tickFormatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(2)}` : '$0'} />
-                <RechartsTooltip formatter={(value: number | undefined) => value !== undefined ? `$${value.toFixed(4)}` : '$0'} />
+                <RechartsTooltip formatter={(value) => {
+                  if (Array.isArray(value)) {
+                    return value.map(v => typeof v === 'number' ? `$${v.toFixed(4)}` : `$${Number(v).toFixed(4)}`);
+                  }
+                  if (typeof value === 'number') {
+                    return `$${value.toFixed(4)}`;
+                  }
+                  if (typeof value === 'string' && !isNaN(Number(value))) {
+                    return `$${Number(value).toFixed(4)}`;
+                  }
+                  return '$0';
+                }} />
                 <Bar dataKey="cost" fill="#8b5cf6" />
               </BarChart>
             </ResponsiveContainer>
