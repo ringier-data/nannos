@@ -110,7 +110,7 @@ type SkillDiffInfo = {
   registryId: string;
   contentHash: string;
   name: string;
-  updateTarget?: { type: 'imported-skill'; skillName: string } | { type: 'activation'; activationId: number };
+  updateTarget?: { type: 'imported-skill'; skillName: string } | { type: 'imported-skill-direct'; skillName: string } | { type: 'activation'; activationId: number };
 };
 
 export function SubAgentDetailPage() {
@@ -890,6 +890,63 @@ export function SubAgentDetailPage() {
       return;
     }
 
+    if (skillDiffInfo.updateTarget.type === 'imported-skill-direct') {
+      // Direct save without entering edit mode — fetch latest and persist immediately
+      const skillName = skillDiffInfo.updateTarget.skillName;
+      setUpdatingSkillName(skillName);
+      try {
+        const { data, error } = await client.get({
+          url: '/api/v1/skills/registry/detail/{skill_id}',
+          path: { skill_id: skillDiffInfo.registryId },
+        });
+        if (error || !data) {
+          toast.error('Failed to fetch latest version from registry');
+          return;
+        }
+        const detail = data as { description?: string; content_hash?: string };
+        const currentSkills: SkillDefinition[] = Array.isArray(subAgent?.config_version?.skills)
+          ? subAgent!.config_version!.skills.map((s: any) => ({
+              name: s.name,
+              description: s.description,
+              body: s.body,
+              files: s.files?.map((f: any) => ({ path: f.path, content: f.content })),
+              registry_id: s.registry_id ?? null,
+              source: s.source ?? null,
+              content_hash: s.content_hash ?? null,
+              scope: s.scope ?? null,
+            }))
+          : [];
+        const updatedSkills = currentSkills.map((s) =>
+          s.name === skillName
+            ? { ...s, description: detail.description ?? s.description, content_hash: detail.content_hash ?? s.content_hash }
+            : s
+        );
+        updateMutation.mutate({
+          path: { sub_agent_id: parseInt(id!, 10) },
+          body: {
+            name: subAgent!.name,
+            is_public: subAgent!.is_public ?? false,
+            description: subAgent!.config_version?.description || '',
+            model: (subAgent!.config_version?.model as any) || undefined,
+            system_prompt: subAgent!.config_version?.system_prompt ?? '',
+            mcp_tools: (subAgent!.config_version?.mcp_tools as string[] | undefined)?.length ? subAgent!.config_version!.mcp_tools as string[] : undefined,
+            enable_thinking: subAgent!.config_version?.enable_thinking ?? false,
+            thinking_level: (subAgent!.config_version?.thinking_level as any) ?? undefined,
+            skills: updatedSkills,
+            sandbox_enabled: subAgent!.config_version?.sandbox_enabled ?? false,
+            change_summary: `Updated skill "${skillName}" to latest version`,
+          },
+        });
+        setSkillDiffInfo(null);
+      } catch (err) {
+        console.error('Failed to directly update skill:', err);
+        toast.error('Failed to update skill. Please try again.');
+      } finally {
+        setUpdatingSkillName(null);
+      }
+      return;
+    }
+
     try {
       await updateActivationMutation.mutateAsync({ path: { activation_id: skillDiffInfo.updateTarget.activationId } });
       setSkillDiffInfo(null);
@@ -904,8 +961,11 @@ export function SubAgentDetailPage() {
     if (skillDiffInfo.updateTarget.type === 'imported-skill') {
       return updatingSkillName === skillDiffInfo.updateTarget.skillName;
     }
+    if (skillDiffInfo.updateTarget.type === 'imported-skill-direct') {
+      return updatingSkillName === skillDiffInfo.updateTarget.skillName || updateMutation.isPending;
+    }
     return updateActivationMutation.isPending;
-  }, [skillDiffInfo, updatingSkillName, updateActivationMutation.isPending]);
+  }, [skillDiffInfo, updatingSkillName, updateActivationMutation.isPending, updateMutation.isPending]);
 
   const handleNewConversation = () => {
     createNewConversation(currentVersion || 1);
@@ -1858,9 +1918,33 @@ export function SubAgentDetailPage() {
                                     <button
                                       type="button"
                                       className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer"
-                                      onClick={() => setSkillDiffInfo({ registryId: skill.registry_id!, contentHash: skill.content_hash!, name: skill.name || 'Skill' })}
+                                      onClick={() => setSkillDiffInfo({
+                                        registryId: skill.registry_id!,
+                                        contentHash: skill.content_hash!,
+                                        name: skill.name || 'Skill',
+                                        ...(canEdit && { updateTarget: { type: 'imported-skill-direct' as const, skillName: skill.name! } }),
+                                      })}
                                     >
                                       update available
+                                    </button>
+                                  )}
+                                  {isEditing && skill.scope && skill.scope !== 'sub-agent' && skill.name && skillsWithUpdates.has(skill.name) && skill.registry_id && skill.content_hash && (
+                                    <button
+                                      type="button"
+                                      className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-1 rounded shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900 cursor-pointer"
+                                      disabled={updatingSkillName === skill.name}
+                                      onClick={() => setSkillDiffInfo({
+                                        registryId: skill.registry_id!,
+                                        contentHash: skill.content_hash!,
+                                        name: skill.name || 'Skill',
+                                        updateTarget: { type: 'imported-skill', skillName: skill.name! },
+                                      })}
+                                    >
+                                      {updatingSkillName === skill.name ? (
+                                        <Loader2 className="h-3 w-3 animate-spin inline" />
+                                      ) : (
+                                        'update available'
+                                      )}
                                     </button>
                                   )}
                                   {(skill.files?.length ?? 0) > 0 && (
@@ -1875,25 +1959,6 @@ export function SubAgentDetailPage() {
                                   )}
                                   {isEditing && skill.scope && skill.scope !== 'sub-agent' && (
                                     <div className="flex items-center gap-1 opacity-0 group-hover/skill:opacity-100 transition-opacity ml-auto shrink-0">
-                                      {skill.name && skillsWithUpdates.has(skill.name) && (
-                                        <button
-                                          type="button"
-                                          className="text-primary hover:text-primary/80 text-[10px] font-medium"
-                                          disabled={updatingSkillName === skill.name}
-                                          onClick={() => setSkillDiffInfo({
-                                            registryId: skill.registry_id!,
-                                            contentHash: skill.content_hash!,
-                                            name: skill.name || 'Skill',
-                                            updateTarget: { type: 'imported-skill', skillName: skill.name! },
-                                          })}
-                                        >
-                                          {updatingSkillName === skill.name ? (
-                                            <Loader2 className="h-3 w-3 animate-spin" />
-                                          ) : (
-                                            'Update'
-                                          )}
-                                        </button>
-                                      )}
                                       <button
                                         type="button"
                                         className="text-destructive hover:text-destructive/80"
