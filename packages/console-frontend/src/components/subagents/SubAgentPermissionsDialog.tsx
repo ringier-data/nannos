@@ -37,6 +37,7 @@ import {
   getSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsGetOptions,
   updateSubAgentPermissionsApiV1SubAgentsSubAgentIdPermissionsPutMutation,
   listMyGroupsApiV1GroupsGetOptions,
+  listGroupsApiV1AdminGroupsGetOptions,
   getGroupAccessibleAgentsApiV1GroupsGroupIdAccessibleAgentsGetOptions,
   addGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdPostMutation,
   removeGroupDefaultAgentApiV1GroupsGroupIdDefaultAgentsSubAgentIdDeleteMutation,
@@ -82,14 +83,24 @@ export function SubAgentPermissionsDialog({
     retry: false,
   });
 
-  // Fetch available groups - use regular groups endpoint (shows groups where user is a member)
-  const { data: groupsData, isLoading: isLoadingGroups, error: groupsError } = useQuery({
-    ...listMyGroupsApiV1GroupsGetOptions(),
-    enabled: open,
+  // Fetch available groups - admins see all groups, others see only their groups
+  const { data: adminGroupsData, isLoading: isLoadingAdminGroups, error: adminGroupsError } = useQuery({
+    ...listGroupsApiV1AdminGroupsGetOptions({ query: { limit: 100 } }),
+    enabled: open && isAdmin,
     retry: false,
   });
 
-  const availableGroups: UserGroupWithMembers[] = groupsData ?? [];
+  const { data: myGroupsData, isLoading: isLoadingMyGroups, error: myGroupsError } = useQuery({
+    ...listMyGroupsApiV1GroupsGetOptions(),
+    enabled: open && !isAdmin,
+    retry: false,
+  });
+
+  const isLoadingGroups = isAdmin ? isLoadingAdminGroups : isLoadingMyGroups;
+  const groupsError = isAdmin ? adminGroupsError : myGroupsError;
+  const availableGroups: UserGroupWithMembers[] = isAdmin
+    ? (adminGroupsData?.data ?? [])
+    : (myGroupsData ?? []);
 
   // Filter groups based on search
   const filteredGroups = availableGroups.filter(group => {
