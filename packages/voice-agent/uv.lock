@@ -2026,7 +2026,7 @@ wheels = [
 
 [[package]]
 name = "voice-agent"
-version = "0.12.1"
+version = "0.12.2"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
