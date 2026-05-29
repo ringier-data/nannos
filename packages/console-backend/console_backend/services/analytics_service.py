@@ -68,9 +68,7 @@ class AnalyticsService:
             granularity=granularity,
         )
 
-    async def _compute_active_users_summary(
-        self, db: AsyncSession, days: int, granularity: Granularity
-    ) -> tuple[int, int]:
+    async def _compute_active_users_summary(self, db: AsyncSession, days: int) -> tuple[int, int]:
         """Compute current and previous period active user counts."""
         now = datetime.now(timezone.utc)
         current_start = now - timedelta(days=days)
@@ -84,9 +82,7 @@ class AnalyticsService:
             WHERE invoked_at >= :previous_start
         """)
 
-        result = await db.execute(
-            query, {"current_start": current_start, "previous_start": previous_start}
-        )
+        result = await db.execute(query, {"current_start": current_start, "previous_start": previous_start})
         row = result.fetchone()
         return (row.current_count or 0, row.previous_count or 0)
 
@@ -166,7 +162,7 @@ class AnalyticsService:
                   AND invoked_at < now() - INTERVAL '7 days'
             ),
             churned AS (
-                SELECT COUNT(*) AS count
+                SELECT COUNT(*) AS churned_count
                 FROM previous_week_users p
                 WHERE p.user_id NOT IN (SELECT user_id FROM current_week_users)
             )
@@ -355,9 +351,7 @@ class AnalyticsService:
             WHERE invoked_at >= :previous_start
         """)
 
-        result = await db.execute(
-            summary_query, {"current_start": start_date, "previous_start": previous_start}
-        )
+        result = await db.execute(summary_query, {"current_start": start_date, "previous_start": previous_start})
         row = result.fetchone()
 
         current_cost = row.current_cost or Decimal("0")
