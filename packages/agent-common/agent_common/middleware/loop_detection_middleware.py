@@ -81,6 +81,9 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
     - max_tool_repeats: Same tool (any args) threshold before blocking (default: 5)
     - window_size: Sliding window size for history tracking (default: 10)
     - tool_name: Specific tool to track, or None for all tools (default: None)
+    - dispatch_tools: Tools exempt from max_tool_repeats (e.g. dispatch/meta-tools
+      like 'task' that delegate to sub-agents). These are still subject to
+      max_repeats (same args) detection.
     """
 
     state_schema = LoopDetectionState  # type: ignore[assignment]
@@ -93,6 +96,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         max_tool_repeats: int | None = None,
         window_size: int = 10,
         force_stop_after: int = 3,
+        dispatch_tools: set[str] | None = {"task"},
     ):
         """Initialize loop detection middleware.
 
@@ -105,6 +109,10 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 strip tool_calls from the AIMessage to force the graph to END.
                 This prevents infinite block-retry loops when the model ignores
                 error messages. (default: 3)
+            dispatch_tools: Set of tool names exempt from max_tool_repeats.
+                Dispatch/meta-tools (e.g. 'task') delegate to sub-agents and are
+                expected to be called many times with different arguments. They are
+                still subject to max_repeats (same args) detection.
         """
         super().__init__()
         self.tool_name = tool_name
@@ -112,10 +120,12 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         self.max_tool_repeats = max_tool_repeats
         self.window_size = window_size
         self.force_stop_after = force_stop_after
+        self.dispatch_tools = dispatch_tools or set()
         logger.info(
             f"RepeatedToolCallMiddleware initialized: tool_name={tool_name}, "
             f"max_repeats={max_repeats}, max_tool_repeats={max_tool_repeats}, "
-            f"window_size={window_size}, force_stop_after={force_stop_after}"
+            f"window_size={window_size}, force_stop_after={force_stop_after}, "
+            f"dispatch_tools={self.dispatch_tools}"
         )
 
     @property
@@ -153,6 +163,27 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         """
         return self.tool_name is None or tool_call["name"] == self.tool_name
 
+    def _build_error_message(self, info: dict[str, Any]) -> str:
+        """Build an actionable error message for a blocked tool call.
+
+        Uses different phrasing for same-args vs same-tool loops to guide
+        the model toward a useful response rather than retrying.
+        """
+        if info["loop_type"] == "same_args":
+            return (
+                f"BLOCKED: '{info['tool_name']}' — {info['description']}. "
+                f"Calling this tool again with the same arguments will produce the same result. "
+                f"Do NOT retry with the same arguments. "
+                f"Either try a substantially different approach or respond to the user with what you have so far."
+            )
+        else:  # same_tool
+            return (
+                f"BLOCKED: '{info['tool_name']}' — {info['description']}. "
+                f"You have called this tool many times. "
+                f"Stop and respond to the user with the information you have gathered so far, "
+                f"or try a completely different tool/approach."
+            )
+
     def _check_for_loop(self, tool_name: str, args_hash: str, tool_history: list[str]) -> tuple[bool, int, str]:
         """Check if adding this call would create a loop pattern.
 
@@ -178,7 +209,14 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 f"called {same_args_count} times (threshold: {self.max_repeats})"
             )
             return True, same_args_count, "same_args"
-        if self.max_tool_repeats is not None and same_tool_count > self.max_tool_repeats:
+        # Skip max_tool_repeats check for dispatch tools (e.g. 'task') —
+        # they delegate to sub-agents and are expected to be called many times
+        # with different arguments.
+        if (
+            self.max_tool_repeats is not None
+            and tool_name not in self.dispatch_tools
+            and same_tool_count > self.max_tool_repeats
+        ):
             unique_args = len(set(tool_history + [args_hash]))
             logger.warning(
                 f"Loop detected: {tool_name} called {same_tool_count} times "
@@ -221,8 +259,12 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         if not last_ai_message or not last_ai_message.tool_calls:
             return None
 
-        # Get current history (per-tool tracking)
-        history = state.get("tool_call_history", {}).copy()
+        # Get current history (per-tool tracking).
+        # Deep-copy: shallow .copy() shares inner lists, and .append() below
+        # would mutate the original state in-place before the reducer applies
+        # our return value — corrupting LangGraph's state management.
+        raw_history = state.get("tool_call_history", {})
+        history: dict[str, list[str]] = {k: list(v) for k, v in raw_history.items()}
 
         # Track blocked calls and update history
         blocked_calls: list[dict[str, Any]] = []
@@ -274,8 +316,11 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 tool_history.append(args_hash)
 
             # Always update history (for both looping and non-looping)
-            # Maintain sliding window
-            if len(tool_history) > self.window_size:
+            # Maintain sliding window — but NOT for blocked tools, so their
+            # repeat_count can grow past the threshold and trigger force_stop.
+            # Without this, window_size == max_tool_repeats causes repeat_count
+            # to plateau at window_size+1 and force_stop never fires.
+            if not is_loop and len(tool_history) > self.window_size:
                 tool_history = tool_history[-self.window_size :]
 
             history[tool_name] = tool_history
@@ -324,11 +369,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         # Frame as permanent failure (not rate-limiting) so models don't stubbornly retry
         error_messages = [
             ToolMessage(
-                content=(
-                    f"ERROR: '{info['tool_name']}' is unavailable — {info['description']}. "
-                    f"This resource cannot be accessed. Do NOT retry this tool. "
-                    f"You must proceed without it or use a different approach to accomplish your task."
-                ),
+                content=self._build_error_message(info),
                 tool_call_id=info["tool_call"]["id"],
                 name=info["tool_name"],
                 status="error",
