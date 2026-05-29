@@ -106,6 +106,13 @@ const statusConfig: Record<
   rejected: { label: 'Rejected', variant: 'destructive', icon: XCircle },
 };
 
+type SkillDiffInfo = {
+  registryId: string;
+  contentHash: string;
+  name: string;
+  updateTarget?: { type: 'imported-skill'; skillName: string } | { type: 'activation'; activationId: number };
+};
+
 export function SubAgentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -190,12 +197,7 @@ export function SubAgentDetailPage() {
   const [skillsWithUpdates, setSkillsWithUpdates] = useState<Set<string>>(new Set());
 
   // Skill diff dialog state
-  const [skillDiffInfo, setSkillDiffInfo] = useState<{
-    registryId: string;
-    contentHash: string;
-    name: string;
-    updateTarget?: { type: 'imported-skill'; skillName: string } | { type: 'activation'; activationId: number };
-  } | null>(null);
+  const [skillDiffInfo, setSkillDiffInfo] = useState<SkillDiffInfo | null>(null);
 
   // Personal/group skill activations state
   const [showActivateSkillDialog, setShowActivateSkillDialog] = useState(false);
@@ -870,6 +872,10 @@ export function SubAgentDetailPage() {
       handleFieldChange();
       toast.success(`Updated "${skillName}" to latest version`);
       return true;
+    } catch (error) {
+      console.error('Failed to update skill:', error);
+      toast.error('Failed to update skill. Please try again.');
+      return false;
     } finally {
       setUpdatingSkillName(null);
     }
@@ -887,10 +893,19 @@ export function SubAgentDetailPage() {
     try {
       await updateActivationMutation.mutateAsync({ path: { activation_id: skillDiffInfo.updateTarget.activationId } });
       setSkillDiffInfo(null);
-    } catch {
-      // handled by mutation onError toast
+    } catch (error) {
+      // mutation onError handles user-facing toast
+      console.error('Failed to update activation from diff dialog', error);
     }
   };
+
+  const isSkillDiffUpdatePending = useMemo(() => {
+    if (!skillDiffInfo?.updateTarget) return false;
+    if (skillDiffInfo.updateTarget.type === 'imported-skill') {
+      return updatingSkillName === skillDiffInfo.updateTarget.skillName;
+    }
+    return updateActivationMutation.isPending;
+  }, [skillDiffInfo, updatingSkillName, updateActivationMutation.isPending]);
 
   const handleNewConversation = () => {
     createNewConversation(currentVersion || 1);
@@ -2687,13 +2702,7 @@ export function SubAgentDetailPage() {
         pinnedContentHash={skillDiffInfo?.contentHash ?? ''}
         skillName={skillDiffInfo?.name ?? ''}
         onConfirmUpdate={skillDiffInfo?.updateTarget ? handleConfirmSkillDiffUpdate : undefined}
-        confirmPending={
-          skillDiffInfo?.updateTarget?.type === 'imported-skill'
-            ? updatingSkillName === skillDiffInfo.updateTarget.skillName
-            : skillDiffInfo?.updateTarget?.type === 'activation'
-              ? updateActivationMutation.isPending
-              : false
-        }
+        confirmPending={isSkillDiffUpdatePending}
         confirmLabel="Update to latest"
       />
     </div>

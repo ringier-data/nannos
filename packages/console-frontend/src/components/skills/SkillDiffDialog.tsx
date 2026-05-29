@@ -171,7 +171,12 @@ export function SkillDiffDialog({
             {onConfirmUpdate ? 'Cancel' : 'Close'}
           </Button>
           {onConfirmUpdate && (
-            <Button onClick={() => void onConfirmUpdate()} disabled={loading || !!error || !!confirmPending}>
+            <Button
+              onClick={async () => {
+                await onConfirmUpdate();
+              }}
+              disabled={loading || !!error || confirmPending}
+            >
               {confirmPending && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />}
               {confirmLabel ?? 'Update'}
             </Button>
