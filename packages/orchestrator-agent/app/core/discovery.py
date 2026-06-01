@@ -334,7 +334,6 @@ class ToolDiscoveryService:
                 for s in servers
                 if s.get("slug")
                 and s.get("isOutputCompressionEnabled")
-                and s.get("isOutputCompressionTransformEnabled")
             }
             if compression_server_slugs:
                 logger.info(f"Compression-enabled servers: {compression_server_slugs}")
