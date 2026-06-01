@@ -1,5 +1,7 @@
 """Orchestrator authentication handler for httpx."""
 
+import base64
+import json
 import logging
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -68,6 +70,7 @@ class OrchestratorAuth(httpx.Auth):
         self.orchestrator_base_url = f"{schema}://{config.orchestrator.base_domain}"
         self.orchestrator_base_domain = config.orchestrator.base_domain
         self._exchanged_token: str | None = None
+        self._exchanged_token_expires_at: datetime | None = None
         logger.info(f"OrchestratorAuth initialized with base URL: {self.orchestrator_base_url}")
 
     async def _get_orchestrator_token(self) -> str:
@@ -100,7 +103,7 @@ class OrchestratorAuth(httpx.Auth):
             f"now={now.isoformat()}, time_until_expiry={time_until_expiry:.1f}s, "
             f"is_expired={is_expired}"
         )
-
+        # check if access token is expired or will expire within the buffer window, and refresh if needed
         if is_expired:
             logger.info(
                 f"User access token is expired or expiring soon (expires in {time_until_expiry:.1f}s), refreshing..."
@@ -133,6 +136,7 @@ class OrchestratorAuth(httpx.Auth):
 
                 # Clear the cached exchanged token since we have a new access token
                 self._exchanged_token = None
+                self._exchanged_token_expires_at = None
 
                 # Clear orchestrator session cookie since it's tied to the old user token
                 # The orchestrator will issue a new cookie when we send the new exchanged token
@@ -152,6 +156,15 @@ class OrchestratorAuth(httpx.Auth):
                 # Raise a clear error so the caller can handle session expiration
                 raise Exception("Session expired: Unable to refresh access token. Please re-authenticate.") from e
 
+        # Check if cached exchanged token is expired (30s buffer). Mind is != access token expiry
+        # orchestrator tokens may have different lifetimes.
+        if self._exchanged_token and self._exchanged_token_expires_at:
+            now = datetime.now(timezone.utc)
+            if (self._exchanged_token_expires_at - now).total_seconds() <= 30:
+                logger.info("Cached exchanged token is expired or expiring soon, clearing cache")
+                self._exchanged_token = None
+                self._exchanged_token_expires_at = None
+
         if not self._exchanged_token:
             logger.debug(f"Exchanging token for orchestrator agent (client_id: {self.orchestrator_client_id})")
             self._exchanged_token = await self.oauth_service.exchange_token(
@@ -159,8 +172,36 @@ class OrchestratorAuth(httpx.Auth):
                 target_client_id=self.orchestrator_client_id,
                 requested_scopes=["openid", "profile", "email"],
             )
-            logger.debug("Token exchange successful")
+            self._exchanged_token_expires_at = self._decode_token_exp(self._exchanged_token)
+            logger.debug(
+                f"Token exchange successful, expires at "
+                f"{self._exchanged_token_expires_at.isoformat() if self._exchanged_token_expires_at else 'unknown'}"
+            )
         return self._exchanged_token
+
+    @staticmethod
+    def _decode_token_exp(token: str) -> datetime | None:
+        """Decode the exp claim from a JWT without verification.
+
+        Args:
+            token: A JWT access token
+
+        Returns:
+            The expiration datetime, or None if it cannot be decoded
+        """
+        try:
+            payload_part = token.split(".")[1]
+            # Add padding for base64 decoding
+            padding = 4 - len(payload_part) % 4
+            if padding != 4:
+                payload_part += "=" * padding
+            payload = json.loads(base64.urlsafe_b64decode(payload_part))
+            exp = payload.get("exp")
+            if exp:
+                return datetime.fromtimestamp(exp, tz=timezone.utc)
+        except (IndexError, ValueError, json.JSONDecodeError, KeyError):
+            logger.debug("Failed to decode exp from exchanged token")
+        return None
 
     def _is_orchestrator_request(self, url: httpx.URL) -> bool:
         """Check if the request is going to the orchestrator agent.
@@ -193,57 +234,75 @@ class OrchestratorAuth(httpx.Auth):
         logger.debug(f"Current headers: {dict(request.headers)}")
 
         # Check if this is an orchestrator request
-        if self._is_orchestrator_request(request.url):
-            logger.info(f"Orchestrator request detected: {request.url}")
-
-            # Manual Cookie Management with DynamoDB Storage:
-            # 1. First request: No cookie in DynamoDB yet, send bearer token
-            # 2. Orchestrator validates token and returns Set-Cookie: orchestrator_session=JWT
-            # 3. We extract cookie from Set-Cookie header and store in DynamoDB (with cache)
-            # 4. Subsequent requests: Retrieve cookie from cache/DynamoDB and add Cookie header
-            # 5. Orchestrator validates JWT cookie (no network call to OIDC provider!)
-            # 6. If cookie is invalid/expired, orchestrator falls back to bearer token
-            # 7. Orchestrator issues fresh cookie which we update in DynamoDB
-            #
-            # Note: We manage cookies manually (not using httpx's built-in cookie jar) because:
-            # - httpx cookie jar is in-memory only and bound to the httpx.AsyncClient instance
-            # - Our httpx clients are per-socket connection and destroyed on disconnect
-            # - DynamoDB storage enables horizontal scaling (cookies shared across multiple backend servers)
-            # - When load balancer routes requests to different servers, DynamoDB provides centralized cookie storage
-
-            # Always send bearer token as fallback for expired cookies
-            exchanged_token = await self._get_orchestrator_token()
-            request.headers["Authorization"] = f"Bearer {exchanged_token}"
-            logger.info(f"Sending request to orchestrator: {request.url}")
-
-            # Add custom headers (e.g., X-Playground-SubAgentConfig-Hash for playground mode)
-            for header_name, header_value in self.custom_headers.items():
-                request.headers[header_name] = header_value
-                logger.info(f"Added custom header: {header_name}={header_value}")
-
-            # Try to get orchestrator session cookie from cache/DynamoDB
-            cookie_data = await self.cookie_cache.get_cookie(self.session_id)
-            if cookie_data:
-                cookie, expires_at = cookie_data
-                # Check if cookie is still valid
-                now = datetime.now(timezone.utc)
-                if expires_at > now:
-                    request.headers["Cookie"] = cookie
-                    logger.debug(f"Added orchestrator session cookie (expires: {expires_at.isoformat()})")
-                else:
-                    logger.debug("Orchestrator cookie expired, will rely on bearer token")
-                    # Clear expired cookie from cache
-                    self.cookie_cache.invalidate(self.session_id)
-            else:
-                logger.debug("No orchestrator session cookie yet (first request or cache miss)")
-        else:
+        if not self._is_orchestrator_request(request.url):
             logger.debug(f"Non-orchestrator request, skipping auth: {request.url}")
+            yield request
+            return
+
+        logger.info(f"Orchestrator request detected: {request.url}")
+
+        # Manual Cookie Management with DynamoDB Storage:
+        # 1. First request: No cookie in DynamoDB yet, send bearer token
+        # 2. Orchestrator validates token and returns Set-Cookie: orchestrator_session=JWT
+        # 3. We extract cookie from Set-Cookie header and store in DynamoDB (with cache)
+        # 4. Subsequent requests: Retrieve cookie from cache/DynamoDB and add Cookie header
+        # 5. Orchestrator validates JWT cookie (no network call to OIDC provider!)
+        # 6. If cookie is invalid/expired, orchestrator falls back to bearer token
+        # 7. Orchestrator issues fresh cookie which we update in DynamoDB
+        #
+        # Note: We manage cookies manually (not using httpx's built-in cookie jar) because:
+        # - httpx cookie jar is in-memory only and bound to the httpx.AsyncClient instance
+        # - Our httpx clients are per-socket connection and destroyed on disconnect
+        # - DynamoDB storage enables horizontal scaling (cookies shared across multiple backend servers)
+        # - When load balancer routes requests to different servers, DynamoDB provides centralized cookie storage
+
+        await self._apply_auth_headers(request)
 
         response = yield request
 
+        # If orchestrator returns 401, clear cached credentials and retry once
+        if response.status_code == 401:
+            logger.warning("Orchestrator returned 401 Unauthorized, clearing cached credentials and retrying")
+            self._exchanged_token = None
+            self._exchanged_token_expires_at = None
+            await self.cookie_cache.clear_cookie(self.session_id)
+
+            await self._apply_auth_headers(request)
+            response = yield request
+
         # Extract and store orchestrator session cookie from response
-        if self._is_orchestrator_request(request.url):
-            await self._extract_and_store_cookie(response)
+        await self._extract_and_store_cookie(response)
+
+    async def _apply_auth_headers(self, request: httpx.Request) -> None:
+        """Apply authentication headers and cookies to the request.
+
+        Args:
+            request: The httpx request to authenticate
+        """
+        exchanged_token = await self._get_orchestrator_token()
+        request.headers["Authorization"] = f"Bearer {exchanged_token}"
+        logger.info(f"Sending request to orchestrator: {request.url}")
+
+        # Add custom headers (e.g., X-Playground-SubAgentConfig-Hash for playground mode)
+        for header_name, header_value in self.custom_headers.items():
+            request.headers[header_name] = header_value
+            logger.info(f"Added custom header: {header_name}={header_value}")
+
+        # Try to get orchestrator session cookie from cache/DynamoDB
+        cookie_data = await self.cookie_cache.get_cookie(self.session_id)
+        if cookie_data:
+            cookie, expires_at = cookie_data
+            # Check if cookie is still valid
+            now = datetime.now(timezone.utc)
+            if expires_at > now:
+                request.headers["Cookie"] = cookie
+                logger.debug(f"Added orchestrator session cookie (expires: {expires_at.isoformat()})")
+            else:
+                logger.debug("Orchestrator cookie expired, will rely on bearer token")
+                # Clear expired cookie from cache
+                self.cookie_cache.invalidate(self.session_id)
+        else:
+            logger.debug("No orchestrator session cookie yet (first request or cache miss)")
 
     async def _extract_and_store_cookie(self, response: httpx.Response) -> None:
         """Extract orchestrator session cookie from Set-Cookie header and store in DynamoDB.

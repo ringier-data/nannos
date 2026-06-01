@@ -334,3 +334,127 @@ class TestOrchestratorAuthCustomHeaders:
         # Assert X-Admin-Mode header is included
         assert "X-Admin-Mode" in auth.custom_headers
         assert auth.custom_headers["X-Admin-Mode"] == "true"
+
+
+class TestOrchestratorAuthRetryOn401:
+    """Test 401 retry logic."""
+
+    @pytest.mark.asyncio
+    async def test_retry_on_401_clears_cached_token(self, mock_oauth_service, mock_session_service, mock_cookie_cache):
+        """Test that a 401 response triggers token refresh and retry."""
+        # Return different tokens on first and second exchange calls
+        mock_oauth_service.exchange_token = AsyncMock(side_effect=["stale_token", "fresh_token"])
+
+        auth = OrchestratorAuth(
+            user_token="user_token",
+            session_id="session_123",
+            session_service=mock_session_service,
+            oauth_service=mock_oauth_service,
+            cookie_cache=mock_cookie_cache,
+        )
+
+        request = httpx.Request("POST", f"{auth.orchestrator_base_url}/a2a")
+
+        # Run auth flow as a generator
+        auth_flow = auth.async_auth_flow(request)
+
+        # First yield: sends request with stale token
+        first_request = await anext(auth_flow)
+        assert first_request.headers["Authorization"] == "Bearer stale_token"
+
+        # Simulate a 401 response
+        mock_401_response = MagicMock()
+        mock_401_response.status_code = 401
+        mock_401_response.headers = httpx.Headers()
+
+        # Send the 401 response back into the generator — triggers retry
+        retry_request = await auth_flow.asend(mock_401_response)
+        assert retry_request.headers["Authorization"] == "Bearer fresh_token"
+
+        # Verify cookie cache was cleared
+        mock_cookie_cache.clear_cookie.assert_called_once_with("session_123")
+        # Verify exchange was called twice (once stale, once fresh)
+        assert mock_oauth_service.exchange_token.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_no_retry_on_success(self, mock_oauth_service, mock_session_service, mock_cookie_cache):
+        """Test that successful responses do not trigger retry."""
+        auth = OrchestratorAuth(
+            user_token="user_token",
+            session_id="session_123",
+            session_service=mock_session_service,
+            oauth_service=mock_oauth_service,
+            cookie_cache=mock_cookie_cache,
+        )
+
+        request = httpx.Request("POST", f"{auth.orchestrator_base_url}/a2a")
+        auth_flow = auth.async_auth_flow(request)
+
+        # First yield
+        first_request = await anext(auth_flow)
+        assert first_request.headers["Authorization"] == "Bearer exchanged_token_123"
+
+        # Simulate a 200 response
+        mock_200_response = MagicMock()
+        mock_200_response.status_code = 200
+        mock_200_response.headers = httpx.Headers()
+
+        # Send 200 back — generator should finish (StopAsyncIteration)
+        with pytest.raises(StopAsyncIteration):
+            await auth_flow.asend(mock_200_response)
+
+        # Exchange only called once
+        assert mock_oauth_service.exchange_token.call_count == 1
+
+
+class TestOrchestratorAuthExchangedTokenExpiry:
+    """Test exchanged token expiry tracking."""
+
+    def test_decode_token_exp_valid_jwt(self):
+        """Test decoding exp claim from a valid JWT."""
+        import base64
+        import json
+        import time
+
+        # Create a fake JWT with exp claim
+        exp_time = int(time.time()) + 300  # 5 minutes from now
+        payload = {"sub": "user_123", "exp": exp_time, "aud": "orchestrator"}
+        payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+        fake_jwt = f"eyJhbGciOiJSUzI1NiJ9.{payload_b64}.signature"
+
+        result = OrchestratorAuth._decode_token_exp(fake_jwt)
+        assert result is not None
+        assert abs(result.timestamp() - exp_time) < 1
+
+    def test_decode_token_exp_invalid_jwt(self):
+        """Test graceful handling of invalid JWT."""
+        result = OrchestratorAuth._decode_token_exp("not.a.jwt")
+        # Should return None, not raise
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_expired_exchanged_token_triggers_re_exchange(
+        self, mock_oauth_service, mock_session_service, mock_cookie_cache
+    ):
+        """Test that an expired cached exchanged token is re-exchanged."""
+        mock_oauth_service.exchange_token = AsyncMock(side_effect=["first_token", "second_token"])
+
+        auth = OrchestratorAuth(
+            user_token="user_token",
+            session_id="session_123",
+            session_service=mock_session_service,
+            oauth_service=mock_oauth_service,
+            cookie_cache=mock_cookie_cache,
+        )
+
+        # First call — caches token
+        token1 = await auth._get_orchestrator_token()
+        assert token1 == "first_token"
+
+        # Simulate the exchanged token being near-expired
+        auth._exchanged_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=10)
+
+        # Second call — should detect expiry (within 30s buffer) and re-exchange
+        token2 = await auth._get_orchestrator_token()
+        assert token2 == "second_token"
+        assert mock_oauth_service.exchange_token.call_count == 2
