@@ -167,10 +167,12 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, None]):
             cache["tools"] = filtered_tools
 
         # Always include essential orchestrator tools (even if not in filtered set)
+        filtered_names = {t.name for t in filtered_tools}
         always_included = [
-            tool for tool in all_tools if tool.name in self.always_include and tool not in filtered_tools
+            tool for tool in all_tools if tool.name in self.always_include and tool.name not in filtered_names
         ]
         filtered_tools.extend(always_included)
+        filtered_names.update(t.name for t in always_included)
 
         # Auto-include all tools from the Gatana compression server when any
         # selected tool is from a compression-enabled server
@@ -184,7 +186,7 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, None]):
                     for tool in all_tools
                     if tool.metadata
                     and tool.metadata.get("server_name") == self._compression_server_slug
-                    and tool not in filtered_tools
+                    and tool.name not in filtered_names
                 ]
                 if compression_tools:
                     logger.debug(
