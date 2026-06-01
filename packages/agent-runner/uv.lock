@@ -119,7 +119,7 @@ dev = [
 
 [[package]]
 name = "agent-runner"
-version = "0.19.1"
+version = "0.19.2"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },

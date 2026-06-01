@@ -14,7 +14,8 @@
 # Compatible with bash 3.2+ (macOS default).
 #
 
-ALL_PACKAGES="agent-creator agent-runner orchestrator-agent console-backend console-frontend ringier-a2a-sdk client-slack client-slack-frontend client-email voice-agent client-google-chat soffice-worker"
+# Mind that the order is critical for correct dependency bumping: if package A depends on package B, then A must come after B in the list so that B's version is bumped before A's.
+ALL_PACKAGES="ringier-a2a-sdk soffice-worker console-backend voice-agent agent-creator agent-runner orchestrator-agent console-frontend client-slack client-slack-frontend client-email client-google-chat"
 
 # Packages that only build Docker images but share another package's version (not independently released)
 VIRTUAL_PACKAGES="catalog-worker"
@@ -132,6 +133,8 @@ bump_version() {
       ;;
     python)
       sed -i '' "s/^version = \"${current_version}\"/version = \"${new_version}\"/" "${dir}/pyproject.toml"
+      # Refresh lockfile to reflect the new version (and any bumped path deps)
+      (cd "$dir" && uv lock --quiet)
       ;;
     version)
       echo "$new_version" > "${dir}/VERSION"

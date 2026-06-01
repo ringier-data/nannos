@@ -1590,7 +1590,7 @@ wheels = [
 
 [[package]]
 name = "orchestrator-agent-a2a-server"
-version = "0.21.1"
+version = "0.21.2"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
