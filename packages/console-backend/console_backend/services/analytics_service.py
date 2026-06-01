@@ -1,9 +1,10 @@
 """Service for platform analytics KPI queries."""
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,9 +28,39 @@ logger = logging.getLogger(__name__)
 
 Granularity = Literal["day", "week", "month"]
 
+# Default cache TTL: 5 minutes. Analytics data changes slowly.
+_CACHE_TTL_SECONDS = 300
+
+
+class _AnalyticsCache:
+    """Simple in-memory TTL cache for analytics results."""
+
+    def __init__(self, ttl: int = _CACHE_TTL_SECONDS):
+        self._ttl = ttl
+        self._store: dict[str, tuple[float, Any]] = {}
+
+    def get(self, key: str) -> Any | None:
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        expires_at, value = entry
+        if time.monotonic() > expires_at:
+            del self._store[key]
+            return None
+        return value
+
+    def set(self, key: str, value: Any) -> None:
+        self._store[key] = (time.monotonic() + self._ttl, value)
+
+    def clear(self) -> None:
+        self._store.clear()
+
 
 class AnalyticsService:
     """Read-only service for platform analytics KPIs."""
+
+    def __init__(self, cache_ttl: int = _CACHE_TTL_SECONDS):
+        self._cache = _AnalyticsCache(ttl=cache_ttl)
 
     async def get_active_users(
         self,
@@ -38,6 +69,11 @@ class AnalyticsService:
         granularity: Granularity = "day",
     ) -> ActiveUsersResponse:
         """Get active users over time (DAU or WAU depending on granularity)."""
+        cache_key = f"active_users:{days}:{granularity}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         query = text("""
@@ -62,11 +98,13 @@ class AnalyticsService:
         if previous > 0:
             change_percent = round(100.0 * (current - previous) / previous, 1)
 
-        return ActiveUsersResponse(
+        response = ActiveUsersResponse(
             data=data,
             summary=TimeSeriesSummary(current=current, previous=previous, change_percent=change_percent),
             granularity=granularity,
         )
+        self._cache.set(cache_key, response)
+        return response
 
     async def _compute_active_users_summary(self, db: AsyncSession, days: int) -> tuple[int, int]:
         """Compute current and previous period active user counts."""
@@ -92,6 +130,11 @@ class AnalyticsService:
         days: int = 30,
     ) -> ChurnRateResponse:
         """Get churn rate with rolling week-over-week windows within the time range."""
+        cache_key = f"churn_rate:{days}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         # Rolling churn data points (weekly windows)
@@ -140,12 +183,14 @@ class AnalyticsService:
         result = await db.execute(query, {"start_date": start_date})
         rows = result.fetchall()
 
-        data = [TimeSeriesPoint(period=str(row.period), value=float(row.churn_rate)) for row in rows]
+        data = [TimeSeriesPoint(period=str(row.period), value=Decimal(str(row.churn_rate))) for row in rows]
 
         # Current snapshot summary
         summary = await self._compute_churn_summary(db)
 
-        return ChurnRateResponse(data=data, summary=summary)
+        response = ChurnRateResponse(data=data, summary=summary)
+        self._cache.set(cache_key, response)
+        return response
 
     async def _compute_churn_summary(self, db: AsyncSession) -> ChurnSummary:
         """Compute current churn snapshot (last 7 days vs prior 7 days)."""
@@ -195,6 +240,11 @@ class AnalyticsService:
         days: int = 7,
     ) -> EngagementResponse:
         """Get user engagement distribution by conversation frequency."""
+        cache_key = f"engagement:{days}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         query = text("""
@@ -246,7 +296,9 @@ class AnalyticsService:
 
         total = sum(b.user_count for b in data)
 
-        return EngagementResponse(data=data, total_active_users=total)
+        response = EngagementResponse(data=data, total_active_users=total)
+        self._cache.set(cache_key, response)
+        return response
 
     async def get_cohorts(
         self,
@@ -254,6 +306,11 @@ class AnalyticsService:
         days: int = 90,
     ) -> CohortResponse:
         """Get user lifetime cohort distribution."""
+        cache_key = f"cohorts:{days}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         start_date = datetime.now(timezone.utc) - timedelta(days=days)
 
         query = text("""
@@ -304,7 +361,9 @@ class AnalyticsService:
 
         total = sum(b.user_count for b in data)
 
-        return CohortResponse(data=data, total_active_users=total)
+        response = CohortResponse(data=data, total_active_users=total)
+        self._cache.set(cache_key, response)
+        return response
 
     async def get_cost_over_time(
         self,
@@ -313,6 +372,11 @@ class AnalyticsService:
         granularity: Granularity = "day",
     ) -> CostOverTimeResponse:
         """Get global cost over time."""
+        cache_key = f"cost_over_time:{days}:{granularity}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         now = datetime.now(timezone.utc)
         start_date = now - timedelta(days=days)
         previous_start = now - timedelta(days=days * 2)
@@ -366,7 +430,7 @@ class AnalyticsService:
         if current_requests > 0:
             avg_cost = current_cost / current_requests
 
-        return CostOverTimeResponse(
+        response = CostOverTimeResponse(
             data=data,
             summary=CostSummary(
                 total_cost_usd=current_cost,
@@ -377,3 +441,5 @@ class AnalyticsService:
             ),
             granularity=granularity,
         )
+        self._cache.set(cache_key, response)
+        return response

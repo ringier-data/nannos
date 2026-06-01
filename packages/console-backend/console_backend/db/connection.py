@@ -81,7 +81,7 @@ async def init_db() -> None:
         return  # Already initialized
 
     # API pool — serves HTTP handlers, middleware, scheduler, etc.
-    _engine = _make_engine(pool_size=5, max_overflow=10)
+    _engine = _make_engine(pool_size=10, max_overflow=20)
     _async_session_factory = _make_session_factory(_engine)
 
     # Sync pool — serves the catalog sync pipeline (high concurrency)
