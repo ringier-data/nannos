@@ -321,6 +321,11 @@ class AgentSettings:
     MCP_GATEWAY_URL = os.getenv("MCP_GATEWAY_URL", "https://alloych.gatana.ai/mcp")
     MCP_GATEWAY_CLIENT_ID = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
 
+    # Gatana compression: slug of the MCP server that provides compression utilities.
+    # When tools from compression-enabled servers are in use, all tools from this
+    # server are automatically included so agents can access compressed outputs.
+    GATANA_COMPRESSION_SERVER_SLUG = "compression"
+
     # Console backend URL — used to subscribe to console's MCP endpoint
     CONSOLE_BACKEND_URL: str | None = os.getenv("CONSOLE_BACKEND_URL", None)
     CONSOLE_BACKEND_CLIENT_ID: str = os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console")

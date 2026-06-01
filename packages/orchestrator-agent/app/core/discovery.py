@@ -182,14 +182,15 @@ class ToolDiscoveryService:
         self.config = config
         self.oauth2_client = oauth2_client
 
-    async def fetch_available_servers(self, token: str) -> List[Dict[str, str]]:
+    async def fetch_available_servers(self, token: str) -> List[Dict[str, Any]]:
         """Fetch list of available MCP servers from the gateway.
 
         Args:
             token: User's access token for authentication
 
         Returns:
-            List of server metadata dicts with 'slug' and 'description' keys
+            List of server metadata dicts (slug, description,
+            isOutputCompressionEnabled, isOutputCompressionTransformEnabled, etc.)
 
         Raises:
             httpx.HTTPError: If API request fails
@@ -325,6 +326,19 @@ class ToolDiscoveryService:
                 logger.warning("No MCP servers discovered, returning empty tool list")
                 return []
 
+            # Identify compression-enabled servers (Gatana-specific, always active).
+            # Gateway returns isOutputCompressionEnabled and isOutputCompressionTransformEnabled
+            # per server; we consider a server compression-enabled when both flags are true.
+            compression_server_slugs: set[str] = {
+                s["slug"]
+                for s in servers
+                if s.get("slug")
+                and s.get("isOutputCompressionEnabled")
+                and s.get("isOutputCompressionTransformEnabled")
+            }
+            if compression_server_slugs:
+                logger.info(f"Compression-enabled servers: {compression_server_slugs}")
+
             # Filter servers if include_server_slugs is provided
             if include_server_slugs:
                 servers = [s for s in servers if s.get("slug") in include_server_slugs]
@@ -391,6 +405,12 @@ class ToolDiscoveryService:
                     logger.error(f"Failed to discover tools from server '{slug}': {error_msg}")
                     failed_servers.append(slug)
                 elif isinstance(result, list):
+                    # Tag tools from compression-enabled servers
+                    if compression_server_slugs and slug in compression_server_slugs:
+                        for tool in result:
+                            if tool.metadata is None:
+                                tool.metadata = {}
+                            tool.metadata["compression_enabled"] = True
                     tools.extend(result)
 
             if failed_servers:
@@ -404,7 +424,25 @@ class ToolDiscoveryService:
 
             # Apply whitelist filtering if provided
             if white_list:
-                tools = [tool for tool in tools if tool.name in white_list]
+                white_list_set = set(white_list)
+                # Auto-include all tools from the compression server when whitelisted
+                # tools come from compression-enabled servers
+                if compression_server_slugs:
+                    compression_slug = self.config.GATANA_COMPRESSION_SERVER_SLUG
+                    whitelisted_has_compression = any(
+                        t.metadata and t.metadata.get("compression_enabled") for t in tools if t.name in white_list_set
+                    )
+                    if whitelisted_has_compression:
+                        compression_tool_names = {
+                            t.name for t in tools if t.metadata and t.metadata.get("server_name") == compression_slug
+                        }
+                        if compression_tool_names:
+                            white_list_set |= compression_tool_names
+                            logger.debug(
+                                f"Auto-including compression server tools {compression_tool_names} "
+                                f"for whitelisted tools from compression-enabled servers"
+                            )
+                tools = [tool for tool in tools if tool.name in white_list_set]
                 logger.debug(f"Filtered tools based on white list: {len(tools)} tools remain")
 
             return tools

@@ -102,17 +102,26 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, None]):
       its own ContextVar binding, set by ``clear_cache()`` before graph execution)
     """
 
-    def __init__(self, always_include: list[str] | None = None, cost_logger: CostLogger | None = None):
+    def __init__(
+        self,
+        always_include: list[str] | None = None,
+        cost_logger: CostLogger | None = None,
+        compression_server_slug: str | None = None,
+    ):
         """Initialize the toolset selector.
 
         Args:
             always_include: Tool names to always include regardless of filtering.
                 These are essential orchestrator tools that GP agent needs.
             cost_logger: Optional CostLogger for tracking tool-selection LLM costs.
+            compression_server_slug: Gatana compression server slug. Tools from
+                this server are auto-included when any selected tool comes from
+                a compression-enabled MCP server.
         """
         super().__init__()
         self.always_include = always_include or []
         self._cost_logger = cost_logger
+        self._compression_server_slug = compression_server_slug
 
     def clear_cache(self) -> None:
         """Reset cache for the current invocation.
@@ -162,6 +171,27 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, None]):
             tool for tool in all_tools if tool.name in self.always_include and tool not in filtered_tools
         ]
         filtered_tools.extend(always_included)
+
+        # Auto-include all tools from the Gatana compression server when any
+        # selected tool is from a compression-enabled server
+        if self._compression_server_slug:
+            has_compression_server = any(
+                tool.metadata and tool.metadata.get("compression_enabled") for tool in filtered_tools
+            )
+            if has_compression_server:
+                compression_tools = [
+                    tool
+                    for tool in all_tools
+                    if tool.metadata
+                    and tool.metadata.get("server_name") == self._compression_server_slug
+                    and tool not in filtered_tools
+                ]
+                if compression_tools:
+                    logger.debug(
+                        f"ToolsetSelector: Auto-including {len(compression_tools)} tools from "
+                        f"compression server '{self._compression_server_slug}'"
+                    )
+                    filtered_tools.extend(compression_tools)
 
         # Preserve provider-specific tool dicts from original request
         provider_tools = [tool for tool in request.tools if isinstance(tool, dict)]

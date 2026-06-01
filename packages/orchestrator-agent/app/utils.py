@@ -398,12 +398,41 @@ def build_runtime_context(
                                     "copy_file",
                                 ],
                                 cost_logger=cost_logger,
+                                compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,
                             ),
                         ]
                         logger.info(
                             f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
                             f"with ToolsetSelectorMiddleware"
                         )
+
+                    # Auto-expand non-GP sub-agent MCP whitelist with compression
+                    # server tools when any whitelisted tool is from a compression-enabled server
+                    if config.name != "general-purpose" and config.mcp_tools:
+                        compression_slug = AgentSettings.GATANA_COMPRESSION_SERVER_SLUG
+                        mcp_tool_set = set(config.mcp_tools)
+                        has_compression_tool = any(
+                            tool_name in mcp_tool_set
+                            and hasattr(tool_registry.get(tool_name), "metadata")
+                            and (tool_registry[tool_name].metadata or {}).get("compression_enabled")
+                            for tool_name in mcp_tool_set
+                        )
+                        if has_compression_tool:
+                            # Add all tools from the compression server
+                            compression_tools_in_registry = {
+                                name
+                                for name, tool in tool_registry.items()
+                                if hasattr(tool, "metadata")
+                                and isinstance(tool.metadata, dict)
+                                and tool.metadata.get("server_name") == compression_slug
+                            }
+                            missing = compression_tools_in_registry - mcp_tool_set
+                            if missing:
+                                config.mcp_tools = list(mcp_tool_set | missing)
+                                logger.info(
+                                    f"Sub-agent '{config.name}': auto-added compression server "
+                                    f"tools {missing} to MCP whitelist"
+                                )
 
                     dynamic_subagent = create_dynamic_local_subagent(
                         config=config,
