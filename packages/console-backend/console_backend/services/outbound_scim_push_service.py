@@ -6,6 +6,7 @@ Uses fire-and-forget pattern with retries and audit logging for failures.
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import httpx
@@ -36,6 +37,7 @@ class OutboundScimPushService:
         self._endpoint_service: "OutboundScimEndpointService | None" = None
         self._audit_service: AuditService | None = None
         self._db_session_factory: async_sessionmaker[AsyncSession] | None = None
+        self._nightly_task: asyncio.Task | None = None
 
     def set_endpoint_service(self, service: "OutboundScimEndpointService") -> None:
         self._endpoint_service = service
@@ -141,6 +143,84 @@ class OutboundScimPushService:
         )
 
         return {"users_queued": users_queued, "groups_queued": groups_queued}
+
+    # ─── Nightly Full Sync ───────────────────────────────────────────────────
+
+    def start_nightly_sync(self, hour_utc: int = 2) -> None:
+        """Start background task that runs push_all for every active endpoint daily.
+
+        Runs once per day at the given UTC hour. Safe to call multiple times — no-op
+        if already running. Use stop_nightly_sync() during graceful shutdown.
+        """
+        if self._nightly_task is not None and not self._nightly_task.done():
+            return
+        if not 0 <= hour_utc <= 23:
+            raise ValueError(f"hour_utc must be in [0, 23], got {hour_utc}")
+        self._nightly_task = asyncio.create_task(
+            self._nightly_sync_loop(hour_utc),
+            name="outbound-scim-nightly-sync",
+        )
+        logger.info(f"Outbound SCIM nightly sync scheduled at {hour_utc:02d}:00 UTC")
+
+    async def stop_nightly_sync(self) -> None:
+        """Cancel the nightly sync background task."""
+        if self._nightly_task is None:
+            return
+        self._nightly_task.cancel()
+        try:
+            await self._nightly_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Outbound SCIM nightly sync task raised on shutdown: {e}")
+        self._nightly_task = None
+
+    async def _nightly_sync_loop(self, hour_utc: int) -> None:
+        """Sleep until the next scheduled run, execute, repeat."""
+        while True:
+            now = datetime.now(timezone.utc)
+            next_run = now.replace(hour=hour_utc, minute=0, second=0, microsecond=0)
+            if next_run <= now:
+                next_run += timedelta(days=1)
+            sleep_seconds = (next_run - now).total_seconds()
+            logger.debug(
+                f"Outbound SCIM nightly sync: next run at {next_run.isoformat()} "
+                f"(sleeping {sleep_seconds:.0f}s)"
+            )
+            try:
+                await asyncio.sleep(sleep_seconds)
+                await self._run_nightly_sync()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Outbound SCIM nightly sync iteration failed: {e}", exc_info=True)
+                # Avoid tight loop on persistent failure.
+                await asyncio.sleep(60)
+
+    async def _run_nightly_sync(self) -> None:
+        """Trigger push_all for every active outbound endpoint."""
+        logger.info("Outbound SCIM nightly sync: starting full sync of all endpoints")
+        try:
+            async with self.db_session_factory() as db:
+                endpoints = await self.endpoint_service.get_active_endpoints(db)
+        except Exception as e:
+            logger.error(f"Outbound SCIM nightly sync: failed to load endpoints: {e}")
+            return
+
+        if not endpoints:
+            logger.info("Outbound SCIM nightly sync: no active endpoints, skipping")
+            return
+
+        for ep in endpoints:
+            try:
+                result = await self.push_all(ep["id"])
+                logger.info(
+                    f"Outbound SCIM nightly sync: endpoint {ep['id']} queued {result}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Outbound SCIM nightly sync: endpoint {ep['id']} failed to queue: {e}"
+                )
 
     async def _push_all_to_endpoint(self, endpoint: dict, user_ids: list[str], group_ids: list[int]) -> None:
         """Background task: push all users and groups to a single endpoint."""
@@ -355,6 +435,29 @@ class OutboundScimPushService:
                     # Check existing sync state for remote_id
                     sync_state = await self.endpoint_service.get_sync_state(db, endpoint_id, "group", entity_id)
                     remote_id = sync_state["remote_id"] if sync_state else None
+
+                # Pre-sync any members that don't yet have a remote_id at this endpoint.
+                # Without this, unsynced members are silently dropped from the group payload
+                # by _build_scim_group_payload, leaving membership incomplete on the remote.
+                # Endpoints with push_users=false are skipped (we can't sync users there).
+                if endpoint.get("push_users", True):
+                    unsynced_user_ids = [m.id for m in members if not m.remote_id]
+                    if unsynced_user_ids:
+                        logger.info(
+                            f"Outbound SCIM: group {group_id} has {len(unsynced_user_ids)} "
+                            f"unsynced members at endpoint {endpoint_id}; pushing users first"
+                        )
+                        for user_id in unsynced_user_ids:
+                            try:
+                                await self._push_user_to_endpoint(endpoint, user_id, "update")
+                            except Exception as e:
+                                logger.warning(
+                                    f"Outbound SCIM: pre-sync of member user {user_id} for "
+                                    f"group {group_id} at endpoint {endpoint_id} failed: {e}"
+                                )
+                        # Re-fetch members so newly-assigned remote_ids are picked up.
+                        async with self.db_session_factory() as db:
+                            _, members = await self._fetch_group_with_members(db, group_id, endpoint_id)
 
                 # Build SCIM payload
                 payload = self._build_scim_group_payload(group_row, members)

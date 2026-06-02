@@ -214,6 +214,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Start scheduler engine
     await app.state.scheduler_engine.start()
 
+    # Start outbound SCIM nightly full-sync (if enabled)
+    if config.outbound_scim.nightly_sync_enabled and hasattr(app.state, "outbound_scim_push_service"):
+        app.state.outbound_scim_push_service.start_nightly_sync(
+            hour_utc=config.outbound_scim.nightly_sync_hour_utc,
+        )
+
     # Start internal cost logger for catalog sync cost tracking
     from console_backend.services.llm_cost_tracking import _internal_cost_logger
 
@@ -234,6 +240,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if hasattr(app.state, "scheduler_engine"):
         await app.state.scheduler_engine.stop()
         logger.info("Scheduler engine stopped")
+    if hasattr(app.state, "outbound_scim_push_service"):
+        await app.state.outbound_scim_push_service.stop_nightly_sync()
+        logger.info("Outbound SCIM nightly sync stopped")
     if _internal_cost_logger is not None:
         await _internal_cost_logger.shutdown()
         logger.info("Internal cost logger stopped")

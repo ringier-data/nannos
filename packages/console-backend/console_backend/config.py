@@ -119,6 +119,17 @@ class SchedulerConfig(BaseModel):
     )  # NOTE: supports just bedrock models for now, but can be extended in the future
 
 
+class OutboundScimConfig(BaseModel):
+    """Outbound SCIM provisioning configuration."""
+
+    nightly_sync_enabled: bool = Field(
+        default_factory=lambda: os.getenv("OUTBOUND_SCIM_NIGHTLY_SYNC_ENABLED", "true").lower() == "true"
+    )
+    nightly_sync_hour_utc: int = Field(
+        default_factory=lambda: int(os.getenv("OUTBOUND_SCIM_NIGHTLY_SYNC_HOUR_UTC", "2"))
+    )
+
+
 class AutoApproveConfig(BaseModel):
     """Auto-approve constraints for sub-agents."""
 
@@ -126,8 +137,6 @@ class AutoApproveConfig(BaseModel):
         default_factory=lambda: int(os.getenv("AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH", "500"))
     )
     max_mcp_tools_count: int = Field(default_factory=lambda: int(os.getenv("AUTO_APPROVE_MAX_MCP_TOOLS_COUNT", "3")))
-
-
 class TwilioVerifyConfig(BaseModel):
     """Twilio Verify configuration for phone number verification."""
 
@@ -280,6 +289,7 @@ class Config(BaseModel):
     mcp_gateway: MCPGatewayConfig = Field(default_factory=MCPGatewayConfig)
     file_storage: FileStorageConfig = Field(default_factory=FileStorageConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    outbound_scim: OutboundScimConfig = Field(default_factory=OutboundScimConfig)
     auto_approve: AutoApproveConfig = Field(default_factory=AutoApproveConfig)
     twilio_verify: TwilioVerifyConfig = Field(default_factory=TwilioVerifyConfig)
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
