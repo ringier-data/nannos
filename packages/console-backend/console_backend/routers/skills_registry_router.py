@@ -156,6 +156,8 @@ async def search_skills(
 async def browse_repo(
     repo: str = Query(..., min_length=3, max_length=200, description="Git repo (owner/repo)"),
     ref: str = Query(default="main", max_length=100, description="Git ref (branch/tag/SHA)"),
+    limit: int = Query(default=50, ge=1, le=100, description="Max results to return"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
     user: User = Depends(require_auth),
 ) -> SkillSearchResponse:
     """Browse skills available in a Git repository.
@@ -170,8 +172,15 @@ async def browse_repo(
             detail="repo must be in 'owner/repo' format",
         )
 
-    results = await skills_registry_service.browse_repo(repo=repo, ref=ref)
-    return SkillSearchResponse(data=results, query=repo, count=len(results))
+    results, total = await skills_registry_service.browse_repo(repo=repo, ref=ref, limit=limit, offset=offset)
+    return SkillSearchResponse(
+        data=results,
+        query=repo,
+        count=len(results),
+        total=total,
+        offset=offset,
+        has_more=(offset + len(results)) < total,
+    )
 
 
 @router.get("/detail/{skill_id}")
@@ -1535,8 +1544,8 @@ async def mcp_search_skills(
             results.append(McpSearchSkillResult(id=r.id, name=r.name, description=None, source=r.source))
     elif body.source.startswith("repo:"):
         repo = body.source[5:]
-        browse_results = await skills_registry_service.browse_repo(repo, ref="main")
-        for r in browse_results[: body.limit]:
+        browse_results, _ = await skills_registry_service.browse_repo(repo, ref="main", limit=body.limit)
+        for r in browse_results:
             results.append(McpSearchSkillResult(id=r.id, name=r.name, description=None, source=r.source))
     else:
         raise HTTPException(

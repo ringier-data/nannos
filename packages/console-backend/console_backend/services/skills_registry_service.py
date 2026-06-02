@@ -52,10 +52,15 @@ class SkillsRegistryService:
 
     # ─── Git operations (primary source) ─────────────────────────────────────
 
-    async def browse_repo(self, repo: str, ref: str = "main") -> list[SkillSearchResult]:
-        """Browse available skills in a Git repository via GitHub source."""
+    async def browse_repo(
+        self, repo: str, ref: str = "main", limit: int = 50, offset: int = 0
+    ) -> tuple[list[SkillSearchResult], int]:
+        """Browse available skills in a Git repository via GitHub source.
+
+        Returns (results, total) for pagination.
+        """
         query = f"{repo}@{ref}" if ref != "main" else repo
-        return await self._github_source.search(query)
+        return await self._github_source.browse(query, limit=limit, offset=offset)
 
     async def fetch_skill_files_from_github(
         self, repo: str, skill_name: str, ref: str = "main"

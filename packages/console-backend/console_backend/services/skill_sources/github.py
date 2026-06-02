@@ -143,6 +143,15 @@ class GitHubSource(SkillSource):
 
         Example: 'anthropics/skills' or 'anthropics/skills@main'
         """
+        results, _ = await self.browse(query, limit=limit)
+        return results
+
+    async def browse(self, query: str, limit: int = 50, offset: int = 0) -> tuple[list[SkillSearchResult], int]:
+        """Browse a repo for skills with pagination. Returns (results, total).
+
+        Query format: 'owner/repo' with optional '@ref'.
+        Example: 'anthropics/skills' or 'anthropics/skills@main'
+        """
         ref = "main"
         repo = query
         if "@" in query:
@@ -150,19 +159,20 @@ class GitHubSource(SkillSource):
 
         parts = repo.strip("/").split("/")
         if len(parts) != 2:
-            return []
+            return [], 0
 
         owner, repo_name = parts
         tree = await self._fetch_tree(owner, repo_name, ref)
         if tree is None:
-            return []
+            return [], 0
 
         skill_md_entries = [
             entry for entry in tree if entry.get("type") == "blob" and entry.get("path", "").endswith("/SKILL.md")
         ]
+        total = len(skill_md_entries)
 
         results = []
-        for entry in skill_md_entries[:limit]:
+        for entry in skill_md_entries[offset : offset + limit]:
             path = entry["path"]
             path_parts = path.rsplit("/", 2)
             if len(path_parts) >= 2:
@@ -188,7 +198,7 @@ class GitHubSource(SkillSource):
                 )
             )
 
-        return results
+        return results, total
 
     async def fetch_skill(self, source_id: str) -> SkillSourceDetail | None:
         """Fetch a skill from GitHub.

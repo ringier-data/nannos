@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import {
   Search,
@@ -155,6 +155,10 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
   const [repoInput, setRepoInput] = useState('');
   const [browseRepo, setBrowseRepo] = useState('');
   const [browseRef, setBrowseRef] = useState('');
+  const [browseOffset, setBrowseOffset] = useState(0);
+  const [accumulatedBrowse, setAccumulatedBrowse] = useState<SkillSearchResult[]>([]);
+  const [browseHasMore, setBrowseHasMore] = useState(false);
+  const [browseTotal, setBrowseTotal] = useState(0);
 
   // Selection + import state
   const [selectedResult, setSelectedResult] = useState<SkillSearchResult | null>(null);
@@ -193,19 +197,32 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
   });
 
   // Browse query
+  const BROWSE_PAGE_SIZE = 50;
   const browseEnabled = mode === 'browse' && browseRepo.length > 0;
   const { data: browseData, isLoading: browseLoading } = useQuery({
     ...browseRepoApiV1SkillsRegistryBrowseGetOptions({
       query: {
         repo: browseRepo,
         ...(browseRef ? { ref: browseRef } : {}),
-      },
+        limit: BROWSE_PAGE_SIZE,
+        offset: browseOffset,
+      } as any,
     }),
     enabled: browseEnabled,
   });
 
-  const results = mode === 'browse' ? browseData?.data : searchData?.data;
-  const isLoading = mode === 'browse' ? browseLoading : searchLoading;
+  // Accumulate browse results as pages load
+  useEffect(() => {
+    if (mode !== 'browse' || !browseData) return;
+    const newData = browseData.data ?? [];
+    setAccumulatedBrowse((prev) => (browseOffset === 0 ? newData : [...prev, ...newData]));
+    setBrowseHasMore((browseData as any).has_more ?? false);
+    setBrowseTotal((browseData as any).total ?? newData.length);
+  }, [browseData, browseOffset, mode]);
+
+  const results = mode === 'browse' ? accumulatedBrowse : searchData?.data;
+  const isLoading = mode === 'browse' ? browseLoading && browseOffset === 0 : searchLoading;
+  const loadingMore = mode === 'browse' && browseLoading && browseOffset > 0;
 
   // Import mutation
   const importMutation = useMutation({
@@ -299,6 +316,10 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
       toast.error('Enter a valid owner/repo (e.g. "vercel-labs/agent-skills")');
       return;
     }
+    setBrowseOffset(0);
+    setAccumulatedBrowse([]);
+    setSelectedResult(null);
+    setSelectedResults(new Set());
     setBrowseRepo(repoInput);
   };
 
@@ -449,6 +470,22 @@ export function SkillImportPanel({ onClose, onImported }: SkillImportPanelProps)
                     </div>
                   </div>
                 ))}
+                {mode === 'browse' && browseHasMore && (
+                  <div className="pt-1 text-center">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => setBrowseOffset((prev) => prev + BROWSE_PAGE_SIZE)}
+                      disabled={loadingMore}
+                    >
+                      {loadingMore ? (
+                        <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                      ) : null}
+                      Load more ({results.length} of {browseTotal})
+                    </Button>
+                  </div>
+                )}
               </>
             )}
           </div>
