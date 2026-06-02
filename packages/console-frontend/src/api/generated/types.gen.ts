@@ -1597,6 +1597,10 @@ export type McpServer = {
      * Description
      */
     description?: string | null;
+    /**
+     * Visibility
+     */
+    visibility?: string | null;
 };
 
 /**
@@ -1714,6 +1718,59 @@ export type McpActivateSkillResponse = {
      * Message
      */
     message: string;
+};
+
+/**
+ * McpGatewayGrantServerAccessRequest
+ *
+ * Request body for granting or updating server access.
+ */
+export type McpGatewayGrantServerAccessRequest = {
+    role: RoleEnum2;
+};
+
+/**
+ * McpGatewayServerPermission
+ *
+ * A single server permission entry.
+ */
+export type McpGatewayServerPermission = {
+    /**
+     * Server Slug
+     */
+    server_slug: string;
+    /**
+     * Role
+     */
+    role: string;
+};
+
+/**
+ * McpGatewayServerPermissionsResponse
+ *
+ * Response listing server access permissions for a group.
+ */
+export type McpGatewayServerPermissionsResponse = {
+    /**
+     * Permissions
+     */
+    permissions: Array<McpGatewayServerPermission>;
+};
+
+/**
+ * McpGatewayStatusResponse
+ *
+ * Response for checking if a group is managed by the MCP gateway.
+ */
+export type McpGatewayStatusResponse = {
+    /**
+     * Managed
+     */
+    managed: boolean;
+    /**
+     * Team Id
+     */
+    team_id?: string | null;
 };
 
 /**
@@ -2500,6 +2557,26 @@ export type OutboundScimEndpointUpdate = {
      * Push Groups
      */
     push_groups?: boolean | null;
+};
+
+/**
+ * OutboundScimPushAllResponse
+ *
+ * Response after triggering a push-all operation.
+ */
+export type OutboundScimPushAllResponse = {
+    /**
+     * Message
+     */
+    message: string;
+    /**
+     * Users Queued
+     */
+    users_queued: number;
+    /**
+     * Groups Queued
+     */
+    groups_queued: number;
 };
 
 /**
@@ -6469,6 +6546,11 @@ export type ActionEnum = 'suspend' | 'activate' | 'delete';
 export type RoleEnum = 'read' | 'write' | 'manager';
 
 /**
+ * Role
+ */
+export type RoleEnum2 = 'admin' | 'maintainer' | 'member';
+
+/**
  * Scope
  *
  * Scope: 'personal' or 'group'
@@ -8448,6 +8530,134 @@ export type BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponses = {
 };
 
 export type BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponse = BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponses[keyof BulkDeleteGroupsApiV1AdminGroupsBulkDeleteResponses];
+
+export type GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/groups/{group_id}/mcp-gateway-status';
+};
+
+export type GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetError = GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetErrors[keyof GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetErrors];
+
+export type GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpGatewayStatusResponse;
+};
+
+export type GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetResponse = GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetResponses[keyof GetMcpGatewayStatusApiV1AdminGroupsGroupIdMcpGatewayStatusGetResponses];
+
+export type ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/groups/{group_id}/mcp-gateway-servers';
+};
+
+export type ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetError = ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetErrors[keyof ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetErrors];
+
+export type ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: McpGatewayServerPermissionsResponse;
+};
+
+export type ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetResponse = ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetResponses[keyof ListMcpGatewayServersApiV1AdminGroupsGroupIdMcpGatewayServersGetResponses];
+
+export type RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteData = {
+    body?: never;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Server Slug
+         */
+        server_slug: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/groups/{group_id}/mcp-gateway-servers/{server_slug}';
+};
+
+export type RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteError = RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteErrors[keyof RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteErrors];
+
+export type RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteResponse = RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteResponses[keyof RevokeMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugDeleteResponses];
+
+export type GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutData = {
+    body: McpGatewayGrantServerAccessRequest;
+    path: {
+        /**
+         * Group Id
+         */
+        group_id: number;
+        /**
+         * Server Slug
+         */
+        server_slug: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/groups/{group_id}/mcp-gateway-servers/{server_slug}';
+};
+
+export type GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutError = GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutErrors[keyof GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutErrors];
+
+export type GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutResponses = {
+    /**
+     * Successful Response
+     */
+    204: void;
+};
+
+export type GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutResponse = GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutResponses[keyof GrantMcpGatewayServerAccessApiV1AdminGroupsGroupIdMcpGatewayServersServerSlugPutResponses];
 
 export type ListAuditLogsApiV1AdminAuditLogsGetData = {
     body?: never;
@@ -11886,6 +12096,18 @@ export type BrowseRepoApiV1SkillsRegistryBrowseGetData = {
          * Git ref (branch/tag/SHA)
          */
         ref?: string;
+        /**
+         * Limit
+         *
+         * Max results to return
+         */
+        limit?: number;
+        /**
+         * Offset
+         *
+         * Pagination offset
+         */
+        offset?: number;
     };
     url: '/api/v1/skills/registry/browse';
 };
@@ -13474,6 +13696,36 @@ export type TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTes
 };
 
 export type TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponse = TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponses[keyof TestOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostResponses];
+
+export type PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostData = {
+    body?: never;
+    path: {
+        /**
+         * Endpoint Id
+         */
+        endpoint_id: number;
+    };
+    query?: never;
+    url: '/api/v1/admin/outbound-scim-endpoints/{endpoint_id}/push-all';
+};
+
+export type PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostError = PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostErrors[keyof PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostErrors];
+
+export type PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponses = {
+    /**
+     * Successful Response
+     */
+    200: OutboundScimPushAllResponse;
+};
+
+export type PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponse = PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponses[keyof PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponses];
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;

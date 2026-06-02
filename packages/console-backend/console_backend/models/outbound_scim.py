@@ -78,3 +78,11 @@ class OutboundScimTestResult(BaseModel):
     success: bool
     status_code: int | None = None
     detail: str | None = None
+
+
+class OutboundScimPushAllResponse(BaseModel):
+    """Response after triggering a push-all operation."""
+
+    message: str
+    users_queued: int
+    groups_queued: int
