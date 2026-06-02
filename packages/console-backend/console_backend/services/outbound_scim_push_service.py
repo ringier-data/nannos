@@ -198,29 +198,56 @@ class OutboundScimPushService:
                 await asyncio.sleep(60)
 
     async def _run_nightly_sync(self) -> None:
-        """Trigger push_all for every active outbound endpoint."""
+        """Trigger push_all for every active outbound endpoint.
+
+        Uses a PostgreSQL session-scoped advisory lock to ensure only one
+        console-backend instance queues the nightly sync per run, even when
+        deployed with multiple replicas. The lock only guards the queueing
+        phase; the actual push work runs in detached tasks afterwards.
+        """
+        # Arbitrary constant key identifying the "outbound SCIM nightly sync" lock.
+        # Chosen to be unlikely to collide with other advisory locks in the schema.
+        advisory_lock_key = 7421001
+
         logger.info("Outbound SCIM nightly sync: starting full sync of all endpoints")
         try:
             async with self.db_session_factory() as db:
-                endpoints = await self.endpoint_service.get_active_endpoints(db)
+                result = await db.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": advisory_lock_key},
+                )
+                acquired = bool(result.scalar())
+                if not acquired:
+                    logger.info(
+                        "Outbound SCIM nightly sync: another instance holds the "
+                        "advisory lock, skipping this run"
+                    )
+                    return
+
+                try:
+                    endpoints = await self.endpoint_service.get_active_endpoints(db)
+                    if not endpoints:
+                        logger.info("Outbound SCIM nightly sync: no active endpoints, skipping")
+                        return
+
+                    for ep in endpoints:
+                        try:
+                            result = await self.push_all(ep["id"])
+                            logger.info(
+                                f"Outbound SCIM nightly sync: endpoint {ep['id']} queued {result}"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Outbound SCIM nightly sync: endpoint {ep['id']} failed to queue: {e}"
+                            )
+                finally:
+                    await db.execute(
+                        text("SELECT pg_advisory_unlock(:key)"),
+                        {"key": advisory_lock_key},
+                    )
+                    await db.commit()
         except Exception as e:
-            logger.error(f"Outbound SCIM nightly sync: failed to load endpoints: {e}")
-            return
-
-        if not endpoints:
-            logger.info("Outbound SCIM nightly sync: no active endpoints, skipping")
-            return
-
-        for ep in endpoints:
-            try:
-                result = await self.push_all(ep["id"])
-                logger.info(
-                    f"Outbound SCIM nightly sync: endpoint {ep['id']} queued {result}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Outbound SCIM nightly sync: endpoint {ep['id']} failed to queue: {e}"
-                )
+            logger.error(f"Outbound SCIM nightly sync: failed: {e}", exc_info=True)
 
     async def _push_all_to_endpoint(self, endpoint: dict, user_ids: list[str], group_ids: list[int]) -> None:
         """Background task: push all users and groups to a single endpoint."""
