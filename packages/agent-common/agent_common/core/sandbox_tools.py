@@ -16,6 +16,7 @@ Design decisions:
 
 from __future__ import annotations
 
+import base64
 import logging
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 _ALLOWED_ROUTES = (
     "/memories/",
     "/skills/",
+    "/attachments/",
     "/channel_memories/",
     "/group_memories/",
     "/large_tool_results/",
@@ -47,9 +49,10 @@ class CopyToSandboxInput(BaseModel):
         ...,
         description=(
             "Path on the virtual filesystem to copy to the sandbox. "
-            "Must start with a known route: /memories/, /skills/, "
+            "Must start with a known route: /memories/, /skills/, /attachments/, "
             "/channel_memories/, /group_memories/, or /large_tool_results/. "
-            "Example: '/memories/script.py' or '/skills/analyze/main.py'"
+            "Example: '/memories/script.py', '/skills/analyze/main.py', "
+            "or '/attachments/report.pdf'"
         ),
     )
 
@@ -124,8 +127,13 @@ def create_copy_to_sandbox_tool(
         if not content:
             return f"Error: File '{virtual_path}' is empty."
 
-        # Encode to bytes for upload
-        raw = content.encode("utf-8") if isinstance(content, str) else content
+        # Decode to raw bytes for upload. Binary files (e.g. PDFs, images served
+        # from /attachments/) are returned base64-encoded; text is utf-8.
+        encoding = result.file_data.get("encoding", "utf-8")
+        if encoding == "base64" and isinstance(content, str):
+            raw = base64.b64decode(content)
+        else:
+            raw = content.encode("utf-8") if isinstance(content, str) else content
 
         # Size guard
         if len(raw) > _MAX_FILE_SIZE:
@@ -175,10 +183,11 @@ def create_copy_to_sandbox_tool(
         coroutine=copy_to_sandbox_handler,
         name="copy_to_sandbox",
         description=(
-            "Copy a file from the virtual filesystem (/memories/, /skills/, etc.) to the sandbox "
-            "for use in execute() commands. Virtual filesystem files are NOT directly accessible "
-            "in the sandbox — you must copy them first. Returns the sandbox-real path to use in "
-            "execute(). Example: copy_to_sandbox('/memories/script.py') → '/home/ubuntu/memories/script.py'"
+            "Copy a file from the virtual filesystem (/memories/, /skills/, /attachments/, etc.) to "
+            "the sandbox for use in execute() commands. Virtual filesystem files — including files "
+            "the user attached to the conversation (under /attachments/) — are NOT directly accessible "
+            "in the sandbox; you must copy them first. Returns the sandbox-real path to use in "
+            "execute(). Example: copy_to_sandbox('/attachments/report.pdf') → '/home/ubuntu/attachments/report.pdf'"
         ),
         args_schema=CopyToSandboxInput,
     )

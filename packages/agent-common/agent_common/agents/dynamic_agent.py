@@ -76,6 +76,7 @@ from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.utils import get_language_display_name
 
 if TYPE_CHECKING:
+    from agent_common.backends.attachments_store import AttachmentsStoreBackend
     from agent_common.core.sandbox_pool import SandboxPool
     from agent_common.core.tool_risk_cache import ToolRiskCache
     from agent_common.middleware.conditional_hitl import RiskScorerFn
@@ -1053,6 +1054,104 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             tool_server_map=tool_server_map or None,
         ).with_config({"recursion_limit": _SUB_AGENT_RECURSION_LIMIT})
 
+    def _build_attachments_backend(self, input_data: SubAgentInput) -> "AttachmentsStoreBackend | None":
+        """Build an ephemeral attachments backend from the incoming message.
+
+        Files attached to the conversation arrive as multi-modal content blocks
+        (with a presigned ``url`` or inline ``base64``). They are already passed
+        to the LLM as content, but to let skills/sandbox commands access them on
+        disk we additionally expose them at ``/attachments/{filename}``.
+
+        Returns ``None`` when the message carries no file attachments.
+        """
+        from agent_common.backends.attachments_store import Attachment, AttachmentsStoreBackend
+
+        try:
+            raw_content = input_data.messages[-1].content
+        except (AttributeError, IndexError, TypeError):
+            return None
+
+        if not isinstance(raw_content, list):
+            return None
+
+        attachments: list[Attachment] = []
+        used_names: set[str] = set()
+        for idx, block in enumerate(raw_content):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") not in ("image", "audio", "video", "file"):
+                continue
+
+            url = block.get("url")
+            b64 = block.get("base64")
+            mime_type = block.get("mime_type")
+            inline_bytes: bytes | None = None
+            if not url and b64:
+                try:
+                    import base64 as _b64
+
+                    inline_bytes = _b64.b64decode(b64)
+                except Exception:
+                    inline_bytes = None
+            if not url and inline_bytes is None:
+                # Nothing we can serve from disk (e.g. S3 URIs are rejected upstream)
+                continue
+
+            filename = self._derive_attachment_filename(block, url, mime_type, idx, used_names)
+            used_names.add(filename)
+            attachments.append(
+                Attachment(filename=filename, mime_type=mime_type, url=url, inline_bytes=inline_bytes)
+            )
+
+        if not attachments:
+            return None
+
+        logger.info("Mounting %d attachment(s) at /attachments/ for '%s'", len(attachments), self.name)
+        return AttachmentsStoreBackend(attachments)
+
+    @staticmethod
+    def _derive_attachment_filename(
+        block: dict, url: str | None, mime_type: str | None, idx: int, used_names: set[str]
+    ) -> str:
+        """Derive a stable, unique, flat filename for an attachment block."""
+        import mimetypes
+        import os as _os
+        from urllib.parse import unquote, urlparse
+
+        name = block.get("filename") or block.get("name")
+        if not name and url:
+            path = urlparse(url).path
+            name = _os.path.basename(unquote(path)) or None
+        if not name:
+            ext = mimetypes.guess_extension(mime_type or "") or ""
+            name = f"attachment_{idx}{ext}"
+
+        # Flatten any path separators and de-duplicate.
+        name = name.replace("/", "_").replace("\\", "_").strip() or f"attachment_{idx}"
+        if name in used_names:
+            stem, ext = _os.path.splitext(name)
+            name = f"{stem}_{idx}{ext}"
+        return name
+
+    def _compose_backend_with_attachments(
+        self,
+        base_factory: Any,
+        attachments_backend: "AttachmentsStoreBackend | None",
+    ) -> Any:
+        """Return a backend factory with the ``/attachments/`` route added.
+
+        When there are no attachments, the base factory is returned unchanged.
+        """
+        if attachments_backend is None:
+            return base_factory
+
+        if isinstance(base_factory, CompositeBackend):
+            routes = {**base_factory.routes, "/attachments/": attachments_backend}
+            return CompositeBackend(default=base_factory.default, routes=routes)
+        if base_factory is None:
+            return CompositeBackend(default=StateBackend(), routes={"/attachments/": attachments_backend})
+        return CompositeBackend(default=base_factory, routes={"/attachments/": attachments_backend})
+
     async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
         """Stream dynamic agent execution with real-time status updates and content.
 
@@ -1099,6 +1198,15 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             # Ensure tools/skills/prompt are resolved and default agent is built (lazy init)
             await self._ensure_agent()
 
+            # Build an ephemeral /attachments/ backend from this turn's message so
+            # skills/sandbox commands can access attached files on disk. Skipped on
+            # HITL resume (Command) since there is no fresh message to parse.
+            base_backend_factory = self._cached_effective_backend_factory or StateBackend()
+            attachments_backend = None if _is_hitl_resume else self._build_attachments_backend(input_data)
+            invocation_backend_factory = self._compose_backend_with_attachments(
+                base_backend_factory, attachments_backend
+            )
+
             # If sandbox enabled, build a per-invocation graph with sandbox backend
             if sandbox_active:
                 session_id = config.get("configurable", {}).get("thread_id", context_id or "unknown")
@@ -1113,12 +1221,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
                 sandboxed_backend_factory = create_sandboxed_backend_factory(
                     sandbox_backend=pooled_sandbox.backend,
-                    base_backend=self._cached_effective_backend_factory or StateBackend(),
+                    base_backend=invocation_backend_factory,
                 )
 
                 # Create copy_to_sandbox tool with access to virtual FS and sandbox
                 copy_tool = create_copy_to_sandbox_tool(
-                    composite_backend=self._cached_effective_backend_factory or StateBackend(),
+                    composite_backend=invocation_backend_factory,
                     sandbox_backend=pooled_sandbox.backend,
                     sandbox_home=sandbox_home,
                 )
@@ -1159,7 +1267,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     session_id[:8] if session_id else "?",
                 )
             else:
-                agent = self._agent
+                # Non-sandbox: rebuild the graph for this turn only when attachments
+                # are present (to mount /attachments/); otherwise reuse cached agent.
+                if attachments_backend is not None:
+                    agent = self._build_graph(invocation_backend_factory)
+                else:
+                    agent = self._agent
 
             agent_input = input_data if _is_hitl_resume else {"messages": [human_message]}
 
@@ -1172,6 +1285,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 "metadata": {
                     **config.get("metadata", {}),
                     "agent_name": self.name,  # Ensure tools resolve to this agent's skills
+                    "has_attachments": attachments_backend is not None,
                 },
                 "configurable": {
                     **config.get("configurable", {}),

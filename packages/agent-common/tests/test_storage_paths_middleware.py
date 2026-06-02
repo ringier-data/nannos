@@ -13,8 +13,9 @@ import pytest
 from langchain_core.messages import SystemMessage
 
 from agent_common.middleware.storage_paths_middleware import (
-    _FILESYSTEM_STORAGE_PATHS_PROMPT,
     StoragePathsInstructionMiddleware,
+    _attachments_present,
+    _build_non_sandbox_prompt,
     _build_sandbox_prompt,
 )
 
@@ -219,36 +220,56 @@ class TestSandboxMode:
         assert "write_file()" in prompt
 
     def test_sandbox_mode_uses_sandbox_prompt(self):
-        """When sandbox_enabled=True, should use sandbox-specific prompt."""
+        """When sandbox_enabled=True, _build_prompt should produce the sandbox variant."""
         mw = StoragePathsInstructionMiddleware(sandbox_enabled=True, sandbox_home="/home/ubuntu")
-        assert "copy_to_sandbox" in mw._prompt
-        assert _FILESYSTEM_STORAGE_PATHS_PROMPT not in mw._prompt
+        prompt = mw._build_prompt()
+        assert "copy_to_sandbox" in prompt
 
-    def test_non_sandbox_mode_uses_default_prompt(self):
-        """When sandbox_enabled=False (default), should use standard prompt."""
+    def test_non_sandbox_mode_omits_sandbox_text(self):
+        """When sandbox_enabled=False (default), prompt should not mention sandbox copy tool."""
         mw = StoragePathsInstructionMiddleware()
-        assert mw._prompt == _FILESYSTEM_STORAGE_PATHS_PROMPT
+        prompt = mw._build_prompt()
+        assert "copy_to_sandbox" not in prompt
 
-    def test_sandbox_mode_injects_prompt(self):
-        """Sandbox mode should inject sandbox-aware prompt into system message."""
-        mw = StoragePathsInstructionMiddleware(sandbox_enabled=True, sandbox_home="/home/ubuntu")
-        existing_sm = SystemMessage(content="You are a helpful assistant.")
-        request = _make_request(system_message=existing_sm)
-        received_requests = []
 
-        def handler(req):
-            received_requests.append(req)
-            return MagicMock()
+class TestAttachments:
+    """Tests for the conditional /attachments/ instruction."""
 
-        mw.wrap_model_call(request, handler)
+    def test_non_sandbox_omits_attachments_by_default(self):
+        prompt = _build_non_sandbox_prompt()
+        assert "/attachments/" not in prompt
 
-        request.override.assert_called_once()
-        _, kwargs = request.override.call_args
-        new_sm = kwargs["system_message"]
-        assert "copy_to_sandbox" in new_sm.text
-        assert "helpful assistant" in new_sm.text
+    def test_non_sandbox_includes_attachments_when_present(self):
+        prompt = _build_non_sandbox_prompt(has_attachments=True)
+        assert "/attachments/" in prompt
+        assert "attached to THIS conversation" in prompt
 
-    def test_sandbox_prompt_custom_home(self):
-        """Should use provided sandbox_home in the prompt."""
-        prompt = _build_sandbox_prompt("/home/custom")
-        assert "/home/custom" in prompt
+    def test_sandbox_omits_attachments_by_default(self):
+        prompt = _build_sandbox_prompt("/home/ubuntu")
+        assert "/attachments/" not in prompt
+
+    def test_sandbox_includes_attachments_and_copy_hint(self):
+        prompt = _build_sandbox_prompt("/home/ubuntu", has_attachments=True)
+        assert "/attachments/" in prompt
+        assert "copy_to_sandbox" in prompt
+
+    def test_attachments_present_reads_config(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            return_value={"metadata": {"has_attachments": True}},
+        ):
+            assert _attachments_present() is True
+
+    def test_attachments_present_defaults_false(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            return_value={"metadata": {}},
+        ):
+            assert _attachments_present() is False
+
+    def test_attachments_present_handles_no_config(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            side_effect=RuntimeError("outside runnable"),
+        ):
+            assert _attachments_present() is False

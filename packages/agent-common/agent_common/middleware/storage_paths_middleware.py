@@ -26,13 +26,31 @@ from typing import Awaitable, Callable
 
 from langchain.agents.middleware.types import AgentMiddleware, ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
+from langgraph.config import get_config
 
 from .utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
 
 
-_FILESYSTEM_STORAGE_PATHS_PROMPT = """
+def _attachments_present() -> bool:
+    """Return True when the current turn has files mounted at ``/attachments/``.
+
+    Set per-invocation by ``DynamicLocalAgentRunnable`` via config metadata. The
+    orchestrator never mounts attachments, so this stays False there.
+    """
+    try:
+        config = get_config()
+    except Exception:
+        return False
+    if not config:
+        return False
+    return bool(config.get("metadata", {}).get("has_attachments"))
+
+
+def _build_non_sandbox_prompt(has_attachments: bool = False) -> str:
+    """Build the non-sandbox filesystem instruction prompt."""
+    return """
 <filesystem_storage_paths>
 The filesystem supports different storage locations with different persistence:
 
@@ -49,8 +67,15 @@ Use `/group_memories/` for files shared within a user group.
 </filesystem_storage_paths>"""
 
 
-def _build_sandbox_prompt(sandbox_home: str) -> str:
+def _build_sandbox_prompt(sandbox_home: str, has_attachments: bool = False) -> str:
     """Build the sandbox-aware filesystem instruction prompt."""
+    attachments_sandbox_note = (
+        "\n- Files the user attached (`/attachments/`) also live on the virtual filesystem. "
+        "To use one in a shell command, copy it first: "
+        '`copy_to_sandbox("/attachments/<file>")` then use the returned path in execute().'
+        if has_attachments
+        else ""
+    )
     return f"""
 <filesystem_storage_paths>
 You have access to two separate filesystems:
@@ -72,7 +97,7 @@ The sandbox is your working directory for running code, scripts, and commands.
 - To use a virtual file in a shell command, first materialize it:
   1. Call `copy_to_sandbox("/memories/script.py")` — returns the sandbox path
   2. Use the returned path in execute(), e.g., `execute("python {sandbox_home}/memories/script.py")`
-- Skill files (`/skills/`) are automatically pre-synced to `{sandbox_home}/skills/` in the sandbox.
+- Skill files (`/skills/`) are automatically pre-synced to `{sandbox_home}/skills/` in the sandbox.{attachments_sandbox_note}
 
 **Sandbox files are working copies (like a git checkout):**
 - You can read, edit, and execute them freely in the sandbox.
@@ -105,22 +130,24 @@ class StoragePathsInstructionMiddleware(AgentMiddleware):
         sandbox_home: str | None = None,
     ) -> None:
         self._sandbox_enabled = sandbox_enabled
-        self._prompt = (
-            _build_sandbox_prompt(sandbox_home or "/home/ubuntu")
-            if sandbox_enabled
-            else _FILESYSTEM_STORAGE_PATHS_PROMPT
-        )
+        self._sandbox_home = sandbox_home or "/home/ubuntu"
+
+    def _build_prompt(self) -> str:
+        """Build the context-aware storage prompt for the current request."""
+        has_attachments = _attachments_present()
+        if self._sandbox_enabled:
+            return _build_sandbox_prompt(self._sandbox_home, has_attachments)
+        return _build_non_sandbox_prompt(has_attachments)
 
     def _inject_prompt(self, request: ModelRequest) -> ModelRequest:
         """Inject the storage paths prompt into the request if not already present."""
-        if request.system_message and self._prompt not in request.system_message.text:
-            new_system_message = append_to_system_message(request.system_message, self._prompt)
+        prompt = self._build_prompt()
+        if request.system_message and "<filesystem_storage_paths>" not in request.system_message.text:
+            new_system_message = append_to_system_message(request.system_message, prompt)
             return request.override(system_message=new_system_message)
         elif not request.system_message:
             logger.debug("StoragePathsInstructionMiddleware: Set storage paths as initial system prompt")
-            return request.override(
-                system_message=SystemMessage(content_blocks=[{"type": "text", "text": self._prompt}])
-            )
+            return request.override(system_message=SystemMessage(content_blocks=[{"type": "text", "text": prompt}]))
         return request
 
     def wrap_model_call(

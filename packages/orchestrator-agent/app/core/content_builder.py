@@ -16,7 +16,6 @@ import logging
 import mimetypes
 
 from a2a.types import FilePart, Part, TextPart
-from object_storage import get_object_storage_service
 from langchain_core.messages import (
     AudioContentBlock,
     ContentBlock,
@@ -24,6 +23,7 @@ from langchain_core.messages import (
     ImageContentBlock,
     VideoContentBlock,
 )
+from object_storage import get_object_storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,7 @@ def _describe_file(uri: str, mime_type: str | None, name: str | None) -> str:
             parts.append(f"[File attached] {display_name} ({display_mime})")
     else:
         parts.append(f"[File attached] {display_name}")
+    parts.append(f"path=/attachments/{display_name}")
     return " | ".join(parts)
 
 
@@ -156,6 +157,14 @@ async def _process_file_part(part: Part) -> tuple[str, ContentBlock] | None:
         if mime_type:
             block_kwargs["mime_type"] = mime_type
         content_block = FileContentBlock(**block_kwargs)
+
+    # Inject the original filename so that derive_attachment_filename (used by
+    # AttachmentsStoreBackend) produces the same stable path that _describe_file
+    # advertises above (path=/attachments/{name}).  Without this the backend falls
+    # back to extracting the basename from the presigned URL, which is an opaque
+    # UUID-like string that never matches what we told the LLM.
+    if name:
+        content_block["filename"] = name  # type: ignore[index]
 
     return description, content_block
 
