@@ -8,14 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
   Dialog,
   DialogContent,
@@ -105,7 +98,13 @@ export function OutboundScimPage() {
   });
 
   const createMutation = useMutation({
-    mutationFn: async (body: { name: string; endpoint_url: string; bearer_token: string; push_users: boolean; push_groups: boolean }) => {
+    mutationFn: async (body: {
+      name: string;
+      endpoint_url: string;
+      bearer_token: string;
+      push_users: boolean;
+      push_groups: boolean;
+    }) => {
       const res = await client.post<OutboundScimEndpointCreated>({ url: API_BASE, body });
       return res.data as OutboundScimEndpointCreated;
     },
@@ -188,7 +187,13 @@ export function OutboundScimPage() {
   };
 
   const handleCreate = () => {
-    createMutation.mutate({ name, endpoint_url: endpointUrl, bearer_token: bearerToken, push_users: pushUsers, push_groups: pushGroups });
+    createMutation.mutate({
+      name,
+      endpoint_url: endpointUrl,
+      bearer_token: bearerToken,
+      push_users: pushUsers,
+      push_groups: pushGroups,
+    });
   };
 
   const openEditDialog = (endpoint: OutboundScimEndpoint) => {
@@ -230,9 +235,7 @@ export function OutboundScimPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Outbound SCIM Endpoints</h1>
-          <p className="text-muted-foreground">
-            Push user and group changes to external SCIM 2.0 servers
-          </p>
+          <p className="text-muted-foreground">Push user and group changes to external SCIM 2.0 servers</p>
         </div>
         <Button onClick={() => setCreateDialogOpen(true)}>
           <Plus className="h-4 w-4 mr-2" />
@@ -283,50 +286,40 @@ export function OutboundScimPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant={ep.enabled ? 'default' : 'secondary'}>
-                      {ep.enabled ? 'Active' : 'Disabled'}
-                    </Badge>
+                    <Badge variant={ep.enabled ? 'default' : 'secondary'}>{ep.enabled ? 'Active' : 'Disabled'}</Badge>
                   </TableCell>
                   <TableCell className="text-sm">{formatDate(ep.created_at)}</TableCell>
                   <TableCell>
                     <div className="flex gap-1">
                       <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
+                        variant="outline"
+                        size="sm"
                         onClick={() => pushAllMutation.mutate(ep.id)}
                         disabled={pushAllMutation.isPending || !ep.enabled}
                         title="Push all users and groups"
                       >
-                        <RefreshCw className="h-4 w-4" />
+                        <RefreshCw className="h-4 w-4" /> Full Sync
                       </Button>
                       <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
+                        variant="outline"
+                        size="sm"
                         onClick={() => testMutation.mutate(ep.id)}
                         disabled={testMutation.isPending}
                         title="Test connection"
                       >
-                        <TestTube className="h-4 w-4" />
+                        <TestTube className="h-4 w-4" /> Test
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => openEditDialog(ep)} title="Edit">
+                        <Pencil className="h-4 w-4" /> Edit
                       </Button>
                       <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        onClick={() => openEditDialog(ep)}
-                        title="Edit"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-destructive hover:text-destructive"
+                        variant="outline"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
                         onClick={() => setDeleteDialog({ open: true, endpoint: ep })}
                         title="Delete"
                       >
-                        <Trash2 className="h-4 w-4" />
+                        <Trash2 className="h-4 w-4" /> Delete
                       </Button>
                     </div>
                   </TableCell>
@@ -423,19 +416,11 @@ export function OutboundScimPage() {
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label htmlFor="edit-name">Name</Label>
-              <Input
-                id="edit-name"
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-              />
+              <Input id="edit-name" value={editName} onChange={(e) => setEditName(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-url">SCIM Base URL</Label>
-              <Input
-                id="edit-url"
-                value={editEndpointUrl}
-                onChange={(e) => setEditEndpointUrl(e.target.value)}
-              />
+              <Input id="edit-url" value={editEndpointUrl} onChange={(e) => setEditEndpointUrl(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-token">Bearer Token (leave empty to keep current)</Label>
