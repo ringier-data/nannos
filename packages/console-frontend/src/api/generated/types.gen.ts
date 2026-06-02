@@ -12096,6 +12096,18 @@ export type BrowseRepoApiV1SkillsRegistryBrowseGetData = {
          * Git ref (branch/tag/SHA)
          */
         ref?: string;
+        /**
+         * Limit
+         *
+         * Max results to return
+         */
+        limit?: number;
+        /**
+         * Offset
+         *
+         * Pagination offset
+         */
+        offset?: number;
     };
     url: '/api/v1/skills/registry/browse';
 };
