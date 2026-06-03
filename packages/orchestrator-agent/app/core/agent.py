@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
 
 from a2a.types import Part, TaskState
+from agent_common.backends.attachments_store import (
+    build_attachments_backend_from_blocks,
+    reset_current_attachments_backend,
+    set_current_attachments_backend,
+)
 from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk
@@ -295,6 +300,9 @@ class OrchestratorDeepAgent:
         # UserConfig should already have tools/agents discovered by executor via discover_capabilities()
         runtime_context = self.build_runtime_context(user_config, sandbox_pool=self.sandbox_pool)
 
+        # Token for the per-turn attachments context registration (reset in finally).
+        _attachments_token = None
+
         # Determine input based on whether we're resuming or starting fresh
         if resume is not None:
             # Resume from interrupt with the provided resume value
@@ -319,6 +327,20 @@ class OrchestratorDeepAgent:
             # Store file content blocks on runtime context for deterministic
             # forwarding to sub-agents (bypasses the LLM entirely)
             runtime_context.pending_file_blocks = pending_file_blocks
+
+            # Mount the conversation's attachments at /attachments/ for THIS turn.
+            # The orchestrator graph is shared/cached per model, so the content
+            # cannot be baked into the backend — it is exposed via a context
+            # variable that the mounted ``ContextScopedAttachmentsBackend`` proxy
+            # and ``semantic_search_file`` read from. Reset in the finally block.
+            attachments_backend = build_attachments_backend_from_blocks(pending_file_blocks)
+            if attachments_backend is not None:
+                logger.info(
+                    "Mounting %d attachment(s) at /attachments/ for the orchestrator turn",
+                    len(attachments_backend._attachments),
+                )
+                _attachments_token = set_current_attachments_backend(attachments_backend)
+                config.setdefault("metadata", {})["has_attachments"] = True
 
             # NOTE: we intentionally do NOT include file content in the input to the orchestrator's graph.
             # It will be a sub-agent responsibility to read the file content if needed, using the tools available to it.
@@ -640,6 +662,11 @@ class OrchestratorDeepAgent:
                 state=TaskState.failed,
                 content="An unexpected error occurred while processing your request. Please try again.",
             )
+
+        finally:
+            # Clear the per-turn attachments context registration.
+            if _attachments_token is not None:
+                reset_current_attachments_backend(_attachments_token)
 
     def get_agent_response(self, final_state) -> AgentStreamResponse:
         """Parse the agent response to extract structured information and check for auth requirements."""

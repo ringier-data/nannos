@@ -23,6 +23,7 @@ Handles both:
 """
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -39,7 +40,7 @@ from ringier_a2a_sdk.cost_tracking.logger import (
     start_cost_batching,
 )
 
-from agent_common.core.model_factory import create_model
+from agent_common.core.model_factory import create_model, get_default_indexing_model
 from agent_common.core.semantic_chunking import TITAN_EMBED_MAX_CHARS, chunk_with_context
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,9 @@ class IndexingStoreBackend(StoreBackend):
 
     Args:
         runtime: ToolRuntime providing store access and metadata
-        bedrock_region: AWS region for Bedrock model creation
+        model_name: Model to use for indexing/chunking contextualization. When
+            ``None``, ``get_default_indexing_model()`` selects the cheapest
+            available provider model automatically.
         cost_logger: Optional CostLogger for reporting indexing costs
         namespace_factory: Optional callable for determining write namespace
     """
@@ -76,7 +79,7 @@ class IndexingStoreBackend(StoreBackend):
     def __init__(
         self,
         store: AsyncPostgresStore,
-        bedrock_region: str | None = None,
+        model_name: str | None = None,
         cost_logger: Optional[CostLogger] = None,
         namespace_factory: Optional[Any] = None,
     ):
@@ -84,7 +87,8 @@ class IndexingStoreBackend(StoreBackend):
 
         Args:
             store: AsyncPostgresStore for storage and indexing
-            bedrock_region: AWS region for Bedrock model creation
+            model_name: Model to use for chunking/contextualization. When ``None``,
+                ``get_default_indexing_model()`` picks the cheapest available model.
             cost_logger: Optional CostLogger for reporting LLM usage costs
             namespace_factory: Optional callable that takes a Runtime and returns
                 namespace tuple. Used to scope file storage (read/write operations).
@@ -93,7 +97,7 @@ class IndexingStoreBackend(StoreBackend):
         # Pass store and namespace factory to parent StoreBackend
         # This ensures read operations (grep, read_file, etc.) are scoped correctly
         super().__init__(store=store, namespace=namespace_factory)
-        self._bedrock_region = bedrock_region
+        self._model_name = model_name
         self.documents_store: AsyncPostgresStore = store
         self._cost_logger = cost_logger
 
@@ -117,6 +121,15 @@ class IndexingStoreBackend(StoreBackend):
         if result.error:
             return result
 
+        # Evicted tool results (/large_tool_results/) are NOT eagerly indexed.
+        # They are transient conversation-scoped storage; semantic access is
+        # provided lazily and on-demand via the `semantic_search_file` tool
+        # (which calls `aensure_indexed`). Durable memory paths keep eager
+        # indexing so `docstore_search` finds them. See core/CONTEXT.md (D5/D9).
+        if file_path.startswith("/large_tool_results/"):
+            logger.debug(f"Skipping eager indexing for transient tool result {file_path}")
+            return result
+
         # Index the content asynchronously (don't fail write if indexing fails)
         try:
             await self._index_content(file_path, content)
@@ -126,6 +139,24 @@ class IndexingStoreBackend(StoreBackend):
             logger.error(f"Failed to index {file_path}: {e}", exc_info=True)
 
         return result
+
+    async def aensure_indexed(self, file_path: str, content: str) -> None:
+        """Ensure a file's content is indexed for semantic search (JIT entry-point).
+
+        Public, on-demand counterpart to the eager indexing performed by
+        :meth:`awrite`. Used by the ``semantic_search_file`` tool to lazily
+        chunk + embed a single in-hand file (typically an evicted
+        ``/large_tool_results/`` blob) the first time it is searched.
+
+        Idempotent via the content-hash caching in :meth:`_index_content`:
+        re-indexing is skipped when the file's content is unchanged and
+        re-vectorised only when the content hash differs.
+
+        Args:
+            file_path: Absolute file path.
+            content: Current file content to index.
+        """
+        await self._index_content(file_path, content)
 
     async def _index_content(self, file_path: str, content: str) -> None:
         """Index file content for semantic search.
@@ -192,21 +223,25 @@ class IndexingStoreBackend(StoreBackend):
         try:
             # Detect if this is a large tool result
             is_large_tool_result = file_path.startswith("/large_tool_results/")
+            # Attachments are ephemeral, conversation-scoped files indexed lazily
+            # (JIT) by ``semantic_search_file``. They share the conversation's
+            # ``tool_results`` chunk namespace so the search finds them.
+            is_attachment = file_path.startswith("/attachments/")
 
             # Determine namespace based on file path:
-            # - /large_tool_results/: (conversation_id, "tool_results") - conversation-scoped
+            # - /large_tool_results/ and /attachments/: (conversation_id, "tool_results") - conversation-scoped
             # - /memories/: (user_id, "documents") - user-scoped
             # - /channel_memories/: (assistant_id, "documents") - channel-scoped
-            if is_large_tool_result:
+            if is_large_tool_result or is_attachment:
                 conversation_id_ns = metadata_dict.get("conversation_id")
                 if not conversation_id_ns:
                     logger.error(
-                        f"Cannot index tool result {file_path}: conversation_id missing from metadata. "
-                        f"Tool results require conversation context for proper scoping."
+                        f"Cannot index {file_path}: conversation_id missing from metadata. "
+                        f"Conversation-scoped files require conversation context for proper scoping."
                     )
                     return
                 namespace = (conversation_id_ns, "tool_results")
-                logger.debug(f"Using conversation-scoped namespace for tool result: {namespace}")
+                logger.debug(f"Using conversation-scoped namespace for {file_path}: {namespace}")
             elif file_path.startswith("/channel_memories/"):
                 # Channel files: assistant-scoped namespace
                 assistant_id = metadata_dict.get("assistant_id")
@@ -223,16 +258,32 @@ class IndexingStoreBackend(StoreBackend):
                 namespace = (user_id, "documents")
                 logger.debug(f"Using user-scoped namespace for personal file: {namespace}")
 
-            # Check if this file is already indexed to avoid re-chunking
-            # This happens when docstore_search returns large results that get evicted
+            # Content-hash caching: skip re-indexing when content is unchanged,
+            # re-vectorise when it differs. This makes both eager (awrite) and
+            # lazy (aensure_indexed) indexing idempotent and cheap to call
+            # repeatedly on the same in-hand blob. See core/CONTEXT.md (D9).
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             existing_index = await self.documents_store.aget(namespace=namespace, key=file_path)
 
-            if existing_index is not None:
+            if existing_index is not None and existing_index.value.get("content_hash") == content_hash:
                 logger.info(
-                    f"File '{file_path}' is already indexed with {existing_index.value.get('total_chunks', 0)} chunks. "
-                    f"Skipping re-indexing to avoid redundant chunking."
+                    f"File '{file_path}' already indexed with matching content hash "
+                    f"({existing_index.value.get('total_chunks', 0)} chunks). Skipping re-indexing."
                 )
                 return
+
+            # Content changed (or never hashed): drop stale chunks before re-indexing
+            # so a shorter new version doesn't leave orphaned higher-index chunks.
+            if existing_index is not None:
+                stale_chunk_keys = existing_index.value.get("chunk_keys", [])
+                if stale_chunk_keys:
+                    await asyncio.gather(
+                        *[self.documents_store.adelete(namespace=namespace, key=key) for key in stale_chunk_keys]
+                    )
+                    logger.info(
+                        f"Content changed for '{file_path}'; deleted {len(stale_chunk_keys)} stale chunks "
+                        f"before re-indexing."
+                    )
 
             # Detect and skip formatted docstore_search results
             # These are evicted tool results that contain already-formatted search output
@@ -264,7 +315,7 @@ class IndexingStoreBackend(StoreBackend):
                 }
 
             # Create model for contextualization (use haiku-4-5 for cost efficiency)
-            model = create_model("claude-haiku-4-5", bedrock_region=self._bedrock_region)
+            model = create_model(self._model_name or get_default_indexing_model())
 
             # Perform semantic chunking with contextualization
             chunks = await chunk_with_context(content, metadata, model, cost_logger=self._cost_logger)  # type: ignore[arg-type]
@@ -274,6 +325,7 @@ class IndexingStoreBackend(StoreBackend):
             # Store the file index metadata (without embedding) as a lookup
             file_index_value = {
                 "file_path": file_path,
+                "content_hash": content_hash,
                 "total_chunks": len(chunks),
                 "chunk_keys": [f"{file_path}#chunk_{i}" for i in range(len(chunks))],
                 "metadata": metadata,

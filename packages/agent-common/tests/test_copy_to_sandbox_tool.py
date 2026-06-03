@@ -256,4 +256,3 @@ async def test_copy_attachment_text_encoding():
     assert "/home/ubuntu/attachments/notes.txt" in result
     _, content = sandbox.uploaded_files[0]
     assert content == b"hello world"
-

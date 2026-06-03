@@ -57,8 +57,13 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
+from agent_common.backends.attachments_store import ContextScopedAttachmentsBackend
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
+from agent_common.middleware.conversation_context_tools_middleware import (
+    ContextGatedTool,
+    ConversationContextToolsMiddleware,
+)
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
@@ -99,23 +104,28 @@ def _should_retry_tool_error(exc: Exception) -> bool:
 
 
 _DOCSTORE_HINT = (
-    "\n\nNote: This content has also been chunked and each chunk was indexed for semantic search. "
-    "Use the `docstore_search` tool to find relevant sections without "
-    "reading the full file."
+    "\n\nNote: the full content was saved to the file above. To work with it: "
+    "use `grep` for an exact/known string, `read_file` to read it directly, or "
+    "`semantic_search_file` to find relevant passages within this file by meaning "
+    "(it is indexed on first use). Do NOT use `docstore_search` for this — that "
+    "tool only searches your durable memory notes, not this in-hand tool result."
 )
 
 # TODO: not all the conversations should have a channel configuration
 
 
 class _FilesystemMiddlewareWithDocstoreHint(FilesystemMiddleware):
-    """FilesystemMiddleware subclass that appends a docstore search hint to eviction messages.
+    """FilesystemMiddleware subclass that appends a search hint to eviction messages.
 
     When ``FilesystemMiddleware`` evicts an oversized tool result to
     ``/large_tool_results/``, it replaces the ``ToolMessage`` content with a
     summary and a ``read_file`` instruction.  This subclass appends an
-    additional line reminding the agent that the evicted content has been
-    chunked and indexed by ``IndexingStoreBackend`` and can therefore be retrieved via
-    ``docstore_search`` as well.
+    additional line reminding the agent how to work with the evicted blob:
+    ``grep`` for exact strings, ``read_file`` to read it, or
+    ``semantic_search_file`` to fuzzy-search within it (the file is indexed
+    on demand by ``IndexingStoreBackend`` the first time it is searched).
+    Evicted tool results are intentionally NOT eagerly indexed and are NOT
+    discoverable via ``docstore_search``.
 
     TODO: the orchestrator's main graph does not use this subclass because it uses `deepagents.create_deep_agent()`
     which doesn't support to override the `FilesystemMiddleware` middleware. While the orchestrator
@@ -175,6 +185,7 @@ def build_common_middleware_stack(
     default_risk_threshold: float = 0.8,
     tool_risk_cache: ToolRiskCache | None = None,
     tool_server_map: dict[str, str] | None = None,
+    context_gated_tools: list[ContextGatedTool] | None = None,
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
@@ -283,6 +294,11 @@ def build_common_middleware_stack(
             )
         )
 
+    # Conversation-context tool gate: additively injects tools (e.g.
+    # read_personal_file) only in the conversation contexts where they apply.
+    if context_gated_tools:
+        middleware.append(ConversationContextToolsMiddleware(context_gated_tools))
+
     middleware += [
         RepeatedToolCallMiddleware(max_repeats=5, max_tool_repeats=10, window_size=10),
         ToolSchemaCleaningMiddleware(),
@@ -292,9 +308,10 @@ def build_common_middleware_stack(
 
 def create_indexing_backend_factory(
     store: AsyncPostgresStore | None,
-    bedrock_region: str | None = None,
+    model_name: str | None = None,
     cost_logger: Optional[CostLogger] = None,
     resolved_skills: dict[str, ResolvedSkill] | None = None,
+    include_attachments: bool = False,
 ) -> BackendProtocol:
     """Return a backend instance for FilesystemMiddleware.
 
@@ -315,14 +332,19 @@ def create_indexing_backend_factory(
     Args:
         store: Initialised ``AsyncPostgresStore`` instance, or ``None`` when
             the document store is not configured.
-        bedrock_region: AWS region for Bedrock model creation in the
-            indexing pipeline.  When ``None`` the backend reads
-            ``AWS_BEDROCK_REGION`` / ``AWS_REGION`` from the environment.
+        model_name: Model to use for chunking/contextualization in the indexing
+            pipeline.  When ``None``, ``get_default_indexing_model()`` selects
+            the cheapest available provider model automatically.
         cost_logger: Optional ``CostLogger`` for reporting LLM usage costs
-            incurred by the indexing pipeline (contextualisation calls to
-            Claude).
+            incurred by the indexing pipeline (contextualisation calls).
         resolved_skills: Pre-resolved skills dict to mount at ``/skills/``
             as a read-only backend.  When ``None``, no skills route is added.
+        include_attachments: When ``True``, mounts a stateless
+            ``ContextScopedAttachmentsBackend`` proxy at ``/attachments/`` so
+            the shared/cached graph can read the per-turn attachments registered
+            via ``set_current_attachments_backend``.  Used by the orchestrator,
+            whose graph is shared across users and cannot bake in per-turn
+            attachment content.
 
     Returns:
         A ``BackendProtocol`` instance suitable for passing to
@@ -345,7 +367,7 @@ def create_indexing_backend_factory(
         # Personal files: user-scoped namespace
         user_documents_backend = IndexingStoreBackend(
             store=store,
-            bedrock_region=bedrock_region,
+            model_name=model_name,
             cost_logger=cost_logger,
             namespace_factory=lambda ctx: _user_scoped_namespace(ctx),
         )
@@ -353,7 +375,7 @@ def create_indexing_backend_factory(
         # Tool results: conversation-scoped namespace for isolation
         tool_results_backend = IndexingStoreBackend(
             store=store,
-            bedrock_region=bedrock_region,
+            model_name=model_name,
             cost_logger=cost_logger,
             namespace_factory=lambda ctx: _conversation_scoped_namespace(ctx),
         )
@@ -361,7 +383,7 @@ def create_indexing_backend_factory(
         # Channel files: channel-scoped namespace for shared access
         channel_documents_backend = IndexingStoreBackend(
             store=store,
-            bedrock_region=bedrock_region,
+            model_name=model_name,
             cost_logger=cost_logger,
             namespace_factory=lambda ctx: _channel_scoped_namespace(ctx),
         )
@@ -369,7 +391,7 @@ def create_indexing_backend_factory(
         # Group files: group-scoped namespace for shared group files
         group_documents_backend = IndexingStoreBackend(
             store=store,
-            bedrock_region=bedrock_region,
+            model_name=model_name,
             cost_logger=cost_logger,
             namespace_factory=lambda ctx: _group_scoped_namespace(ctx),
         )
@@ -382,6 +404,9 @@ def create_indexing_backend_factory(
         }
         if resolved_skills:
             routes["/skills/"] = SkillsStoreBackend(resolved_skills)
+
+        if include_attachments:
+            routes["/attachments/"] = ContextScopedAttachmentsBackend()
 
         return CompositeBackend(
             default=StateBackend(),
@@ -524,7 +549,7 @@ def build_sub_agent_graph(
     system_prompt: str,
     checkpointer: BaseCheckpointSaver | None,
     store: AsyncPostgresStore | None = None,
-    bedrock_region: str | None = None,
+    model_name: str | None = None,
     cost_logger: Optional[CostLogger] = None,
     response_format: Any = None,
     exclude_deep_agents_middlewares: bool = False,
@@ -538,6 +563,7 @@ def build_sub_agent_graph(
     default_risk_threshold: float = 0.8,
     tool_risk_cache: ToolRiskCache | None = None,
     tool_server_map: dict[str, str] | None = None,
+    context_gated_tools: list[ContextGatedTool] | None = None,
     **kwargs: Any,
 ) -> CompiledStateGraph:
     """Build a standard deep-agent LangGraph graph.
@@ -565,8 +591,9 @@ def build_sub_agent_graph(
         checkpointer: LangGraph checkpoint saver (DynamoDB, memory, …).
         store: Optional initialised ``AsyncPostgresStore`` for persistent
             memory / document search.
-        bedrock_region: AWS region for Bedrock model creation.
-            ``None`` triggers env-var fallback.
+        model_name: Model to use for indexing/chunking in the document store
+            pipeline.  When ``None``, ``get_default_indexing_model()`` picks
+            the cheapest available provider model automatically.
         response_format: Pre-computed structured-output strategy
             (``AutoStrategy``, ``ToolStrategy``, ``None``, …).  Pass the
             result of ``get_response_format()`` here.
@@ -589,7 +616,7 @@ def build_sub_agent_graph(
     backend = (
         backend_factory
         if backend_factory is not None
-        else create_indexing_backend_factory(store, bedrock_region, cost_logger=cost_logger)
+        else create_indexing_backend_factory(store, model_name=model_name, cost_logger=cost_logger)
     )
     middleware = build_common_middleware_stack(
         model,
@@ -603,6 +630,7 @@ def build_sub_agent_graph(
         default_risk_threshold=default_risk_threshold,
         tool_risk_cache=tool_risk_cache,
         tool_server_map=tool_server_map,
+        context_gated_tools=context_gated_tools,
     )
     if extra_middlewares:
         middleware = list(extra_middlewares) + middleware

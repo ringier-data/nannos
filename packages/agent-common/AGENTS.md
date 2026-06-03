@@ -77,6 +77,51 @@ personal > group > default
 
 A personal skill with the same name as a default/group skill overrides it completely. The resolved dict is passed to `SkillsStoreBackend` as an immutable snapshot.
 
+### Attachments Store Backend (backends/attachments_store.py)
+
+User-attached files are served at `/attachments/{filename}` so agents can `read_file`, `grep`, and `copy_to_sandbox` them. The backend is:
+
+- **Ephemeral**: built per A2A turn from the message's typed `ContentBlock` list (`pending_file_blocks`) — nothing is persisted to PostgreSQL.
+- **Lazy**: file bytes are fetched from the presigned URL only on first read and cached in memory for the lifetime of the backend instance (25 MB max per file).
+- **Read-only**: writes/edits return a message pointing the agent to `copy_to_sandbox`.
+- **Flat**: paths are always `/attachments/{filename}` — no sub-directories.
+
+#### How filenames are derived (CRITICAL for path consistency)
+
+`derive_attachment_filename(block, url, mime_type, idx, used_names)` is called by both the orchestrator and sub-agents and must produce the **same stable path** everywhere:
+
+1. `block.get("filename") or block.get("name")` — preferred source. The orchestrator's `content_builder.py` injects `"filename": name` onto every `ContentBlock` dict so this always hits for named files.
+2. `os.path.basename(urlparse(url).path)` — fallback when no explicit name. Produces an opaque UUID-like string from presigned S3 URLs, so **always set `"filename"` on the block**.
+3. `f"attachment_{idx}{ext}"` — last-resort for unnamed blobs.
+
+Path separators in the name are flattened to `_`. Duplicates get `_{idx}` appended.
+
+#### Content block → `/attachments/` path contract
+
+`_process_file_part()` in `orchestrator-agent/app/core/content_builder.py`:
+1. Generates a presigned URL from the `s3://` URI (24 h expiry).
+2. Calls `_describe_file()` which advertises `path=/attachments/{name}` in the LLM-visible text description.
+3. Builds the typed `ContentBlock` and injects `content_block["filename"] = name` so `derive_attachment_filename` returns the same name the description advertised.
+
+This three-step contract ensures the LLM can use `path=/attachments/report.pdf` directly without needing to `ls /attachments` first.
+
+#### Mounting strategy: ContextVar vs. direct bake-in
+
+The orchestrator's graph is **compiled once and shared across all users**, so it cannot bake a per-turn `AttachmentsStoreBackend` into its static `CompositeBackend`. Instead a single `ContextScopedAttachmentsBackend` is mounted at `/attachments/` — it is a stateless shell that delegates every call to whichever `AttachmentsStoreBackend` is stored in the `_current_attachments_backend` ContextVar for the running asyncio task.
+
+Sub-agents build a **new graph per invocation** (or per sandbox turn), so they bake the concrete `AttachmentsStoreBackend` directly into their `invocation_backend_factory` — they never use the ContextVar.
+
+| Consumer | Mount strategy |
+|---|---|
+| Orchestrator (shared graph) | `ContextScopedAttachmentsBackend` + ContextVar set/reset around each turn in `agent.py` |
+| Sub-agents (per-user graph) | `AttachmentsStoreBackend` baked into `_compose_backend_with_attachments` in `dynamic_agent.py` |
+
+`set_current_attachments_backend()` / `reset_current_attachments_backend()` use a `Token` so nested calls (e.g., HITL resume) restore cleanly.
+
+#### `semantic_search_file` and `aread_text()`
+
+`semantic_search_file` reads attachment content **outside** the `FilesystemMiddleware` backend (it calls `get_current_attachments_backend()` directly). Sub-agents therefore also call `set_current_attachments_backend()` at the start of each invocation so this code path can reach the right backend.
+
 ### Read-Only Skills Store Backend (backends/skills_store.py)
 
 The `/skills/` virtual filesystem is **read-only** for agents. All mutations go through the MCP console tools (which are HITL-guarded). The backend serves pre-resolved skills as files at `/skills/{skill_name}/SKILL.md` and `/skills/{skill_name}/{file_path}`.

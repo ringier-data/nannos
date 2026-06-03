@@ -147,6 +147,7 @@ def build_runtime_context(
             storage=storage,
             s3_bucket=document_store_bucket,
             user_id=user_config.user_id,  # Use database ID for docstore namespace
+            cost_logger=cost_logger,
         )
         for tool in doc_tools:
             tool_registry[tool.name] = tool
@@ -268,6 +269,16 @@ def build_runtime_context(
     # Auto-include catalog_search — always available if user has accessible catalogs
     if "catalog_search" in tool_registry:
         orchestrator_auto_tools.add("catalog_search")
+    # Auto-include document store tools so the orchestrator can search/read its own
+    # durable memory and JIT-index evicted tool results. ``read_personal_file`` is
+    # deliberately excluded here — it is conversation-context-gated (channel-only)
+    # and injected at model-call time by ConversationContextToolsMiddleware.
+    _ORCHESTRATOR_DOCSTORE_TOOLS = {
+        "docstore_search",
+        "semantic_search_file",
+        "docstore_export",
+    }
+    orchestrator_auto_tools.update(name for name in _ORCHESTRATOR_DOCSTORE_TOOLS if name in tool_registry)
     whitelisted_tool_names.update(orchestrator_auto_tools)
     logger.debug(
         f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/console tools)"
@@ -393,7 +404,7 @@ def build_runtime_context(
                                     "get_current_time",
                                     "generate_presigned_url",
                                     "docstore_search",
-                                    "read_personal_file",
+                                    "semantic_search_file",
                                     "docstore_export",
                                     "copy_file",
                                 ],

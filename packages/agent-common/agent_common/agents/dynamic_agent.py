@@ -73,7 +73,15 @@ from agent_common.a2a.structured_response import (
 )
 from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.model_factory import get_model_input_capabilities
+from agent_common.middleware.conversation_context_tools_middleware import ContextGatedTool
 from agent_common.utils import get_language_display_name
+
+# Tools that are only meaningful in specific conversation contexts. They are NOT
+# carried in any static tool list; ConversationContextToolsMiddleware injects them
+# only in the contexts listed here. See agent_common/core/CONTEXT.md (D4/D8).
+_CONTEXT_GATED_TOOL_RULES: dict[str, frozenset[str]] = {
+    "read_personal_file": frozenset({"channel"}),
+}
 
 if TYPE_CHECKING:
     from agent_common.backends.attachments_store import AttachmentsStoreBackend
@@ -261,6 +269,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self._resolved_skills: dict = {}
         # Cached intermediate state for per-invocation sandbox graph rebuild
         self._cached_tools: list[BaseTool] | None = None
+        self._cached_context_gated_tools: list[ContextGatedTool] = []
         self._cached_system_prompt: str | None = None
         self._cached_response_format: Any = None
         self._cached_hitl_guarded: dict[str, dict] | None = None
@@ -815,7 +824,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         essential_tool_names = [
             "get_current_time",
             "docstore_search",
-            "read_personal_file",
+            "semantic_search_file",
             "docstore_export",
             "create_presigned_url",
             "catalog_search",
@@ -923,6 +932,24 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             )
 
         logger.info(f"Creating LangGraph agent '{self.name}' with {len(tools)} tools")
+
+        # Route conversation-context-gated tools (e.g. read_personal_file) to the
+        # ConversationContextToolsMiddleware instead of binding them statically.
+        # The instance is sourced from any available pool; the middleware injects
+        # it only in the allowed conversation contexts.
+        gated_pool = (
+            list(self.orchestrator_tools) + list(self.inject_all_tools or []) + list(self._discovered_tools or [])
+        )
+        seen_gated: set[str] = set()
+        gated_tools: list[ContextGatedTool] = []
+        for tool in gated_pool:
+            if isinstance(tool, BaseTool) and tool.name in _CONTEXT_GATED_TOOL_RULES and tool.name not in seen_gated:
+                seen_gated.add(tool.name)
+                gated_tools.append(ContextGatedTool(tool, _CONTEXT_GATED_TOOL_RULES[tool.name]))
+        self._cached_context_gated_tools = gated_tools
+        # Ensure gated tools are not also statically bound (de-dup safety).
+        if seen_gated:
+            tools = [t for t in tools if not (isinstance(t, BaseTool) and t.name in seen_gated)]
 
         # Build system prompt with A2A protocol addendum and user preferences
         system_prompt = self.config.system_prompt + A2A_PROTOCOL_ADDENDUM
@@ -1052,6 +1079,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             risk_scorer=self._risk_scorer,
             tool_risk_cache=self._tool_risk_cache,
             tool_server_map=tool_server_map or None,
+            context_gated_tools=self._cached_context_gated_tools or None,
         ).with_config({"recursion_limit": _SUB_AGENT_RECURSION_LIMIT})
 
     def _build_attachments_backend(self, input_data: SubAgentInput) -> "AttachmentsStoreBackend | None":
@@ -1064,74 +1092,26 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         Returns ``None`` when the message carries no file attachments.
         """
-        from agent_common.backends.attachments_store import Attachment, AttachmentsStoreBackend
+        from agent_common.backends.attachments_store import build_attachments_backend_from_blocks
 
         try:
             raw_content = input_data.messages[-1].content
         except (AttributeError, IndexError, TypeError):
             return None
 
-        if not isinstance(raw_content, list):
-            return None
-
-        attachments: list[Attachment] = []
-        used_names: set[str] = set()
-        for idx, block in enumerate(raw_content):
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") not in ("image", "audio", "video", "file"):
-                continue
-
-            url = block.get("url")
-            b64 = block.get("base64")
-            mime_type = block.get("mime_type")
-            inline_bytes: bytes | None = None
-            if not url and b64:
-                try:
-                    import base64 as _b64
-
-                    inline_bytes = _b64.b64decode(b64)
-                except Exception:
-                    inline_bytes = None
-            if not url and inline_bytes is None:
-                # Nothing we can serve from disk (e.g. S3 URIs are rejected upstream)
-                continue
-
-            filename = self._derive_attachment_filename(block, url, mime_type, idx, used_names)
-            used_names.add(filename)
-            attachments.append(
-                Attachment(filename=filename, mime_type=mime_type, url=url, inline_bytes=inline_bytes)
-            )
-
-        if not attachments:
-            return None
-
-        logger.info("Mounting %d attachment(s) at /attachments/ for '%s'", len(attachments), self.name)
-        return AttachmentsStoreBackend(attachments)
+        backend = build_attachments_backend_from_blocks(raw_content)
+        if backend is not None:
+            logger.info("Mounting %d attachment(s) at /attachments/ for '%s'", len(backend._attachments), self.name)
+        return backend
 
     @staticmethod
     def _derive_attachment_filename(
         block: dict, url: str | None, mime_type: str | None, idx: int, used_names: set[str]
     ) -> str:
         """Derive a stable, unique, flat filename for an attachment block."""
-        import mimetypes
-        import os as _os
-        from urllib.parse import unquote, urlparse
+        from agent_common.backends.attachments_store import derive_attachment_filename
 
-        name = block.get("filename") or block.get("name")
-        if not name and url:
-            path = urlparse(url).path
-            name = _os.path.basename(unquote(path)) or None
-        if not name:
-            ext = mimetypes.guess_extension(mime_type or "") or ""
-            name = f"attachment_{idx}{ext}"
-
-        # Flatten any path separators and de-duplicate.
-        name = name.replace("/", "_").replace("\\", "_").strip() or f"attachment_{idx}"
-        if name in used_names:
-            stem, ext = _os.path.splitext(name)
-            name = f"{stem}_{idx}{ext}"
-        return name
+        return derive_attachment_filename(block, url, mime_type, idx, used_names)
 
     def _compose_backend_with_attachments(
         self,
@@ -1189,6 +1169,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         pooled_sandbox = None
         sandbox_active = getattr(self.config, "sandbox_enabled", False) and self.sandbox_pool is not None
 
+        # Token for the per-turn attachments context registration (reset in finally).
+        _attachments_token = None
+
         try:
             # Clear per-invocation caches on extra_middlewares (e.g. ToolsetSelectorMiddleware)
             for mw in self.extra_middlewares or []:
@@ -1206,6 +1189,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             invocation_backend_factory = self._compose_backend_with_attachments(
                 base_backend_factory, attachments_backend
             )
+
+            # Register the attachments backend for this turn so tools that read
+            # outside the FilesystemMiddleware backend (e.g. semantic_search_file)
+            # can reach the attached files. Reset in the finally block.
+            if attachments_backend is not None:
+                from agent_common.backends.attachments_store import set_current_attachments_backend
+
+                _attachments_token = set_current_attachments_backend(attachments_backend)
 
             # If sandbox enabled, build a per-invocation graph with sandbox backend
             if sandbox_active:
@@ -1456,6 +1447,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             if pooled_sandbox is not None and self.sandbox_pool is not None:
                 session_id = config.get("configurable", {}).get("thread_id", context_id or "unknown")
                 await self.sandbox_pool.release(session_id, self.name)
+
+            # Clear the per-turn attachments context registration.
+            if _attachments_token is not None:
+                from agent_common.backends.attachments_store import reset_current_attachments_backend
+
+                reset_current_attachments_backend(_attachments_token)
 
     # _translate_agent_result and _build_response_from_schema are provided by StructuredResponseMixin
 

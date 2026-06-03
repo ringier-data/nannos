@@ -30,15 +30,14 @@ def mock_store():
 
 
 @pytest.fixture
-def mock_bedrock_region():
-    """Bedrock region for testing."""
-    return "us-east-1"
+def mock_model_name():
+    return "a-test-model"
 
 
 @pytest.mark.asyncio
-async def test_large_tool_result_uses_conversation_namespace(mock_store, mock_bedrock_region):
+async def test_large_tool_result_uses_conversation_namespace(mock_store, mock_model_name):
     """Test that large tool results are stored in conversation-scoped namespace."""
-    backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_bedrock_region)
+    backend = IndexingStoreBackend(store=mock_store, model_name=mock_model_name)
 
     mock_store.aget.return_value = None  # No existing index
 
@@ -64,9 +63,9 @@ async def test_large_tool_result_uses_conversation_namespace(mock_store, mock_be
 
 
 @pytest.mark.asyncio
-async def test_user_file_uses_user_namespace(mock_store, mock_bedrock_region):
+async def test_user_file_uses_user_namespace(mock_store, mock_model_name):
     """Test that user files are stored in user-scoped namespace."""
-    backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_bedrock_region)
+    backend = IndexingStoreBackend(store=mock_store, model_name=mock_model_name)
 
     mock_store.aget.return_value = None  # No existing index
 
@@ -92,11 +91,11 @@ async def test_user_file_uses_user_namespace(mock_store, mock_bedrock_region):
 
 
 @pytest.mark.asyncio
-async def test_tool_result_without_conversation_id_logs_error(mock_bedrock_region, caplog):
+async def test_tool_result_without_conversation_id_logs_error(mock_model_name, caplog):
     """Test that tool results without conversation_id fall back to user namespace."""
     mock_store = AsyncMock()
 
-    backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_bedrock_region)
+    backend = IndexingStoreBackend(store=mock_store, model_name=mock_model_name)
     config_no_conv = {
         "metadata": {
             "user_id": "test-user-123",
@@ -117,13 +116,13 @@ async def test_tool_result_without_conversation_id_logs_error(mock_bedrock_regio
                 # Index a tool result without conversation_id
                 await backend._index_content("/large_tool_results/tool-123", "test content")
 
-    assert "Cannot index tool result" in caplog.text
+    assert "conversation_id missing from metadata" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_tool_result_skips_user_filesystem_copy(mock_store, mock_bedrock_region):
+async def test_tool_result_skips_user_filesystem_copy(mock_store, mock_model_name):
     """Test that tool results skip the user filesystem copy."""
-    backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_bedrock_region)
+    backend = IndexingStoreBackend(store=mock_store, model_name=mock_model_name)
 
     mock_store.aget.return_value = None
 
@@ -155,25 +154,18 @@ async def test_tool_result_skips_user_filesystem_copy(mock_store, mock_bedrock_r
 
 
 @pytest.mark.asyncio
-async def test_hybrid_search_combines_namespaces():
-    """Test that docstore_search searches both conversation tool results and user documents."""
+async def test_docstore_search_is_memory_only():
+    """docstore_search searches durable memory only — NOT conversation tool results (D6).
+
+    Evicted /large_tool_results/ blobs are searched on-demand via
+    semantic_search_file, so docstore_search must not touch the
+    (conversation_id, "tool_results") namespace.
+    """
     from langgraph.store.postgres.aio import AsyncPostgresStore
 
     from agent_common.core.document_store_tools import _search_documents_rag_impl
 
-    # Mock store with search results
     mock_store = AsyncMock(spec=AsyncPostgresStore)
-
-    # Mock search results - tool results and user docs
-    tool_result = Mock()
-    tool_result.value = {
-        "file_path": "/large_tool_results/tool-123",
-        "chunk_index": 0,
-        "total_chunks": 1,
-        "content": "Tool result content",
-        "context_description": "Tool result context",
-    }
-    tool_result.score = 0.9
 
     user_doc = Mock()
     user_doc.value = {
@@ -185,17 +177,17 @@ async def test_hybrid_search_combines_namespaces():
     }
     user_doc.score = 0.8
 
-    # Mock store.asearch to return different results for different namespaces
+    searched_namespaces = []
+
     def mock_asearch(namespace, query, limit):
-        if namespace == ("conv-123", "tool_results"):
-            return [tool_result]
-        elif namespace == ("user-456", "documents"):
+        searched_namespaces.append(namespace)
+        if namespace == ("user-456", "documents"):
             return [user_doc]
         return []
 
     mock_store.asearch.side_effect = mock_asearch
 
-    # Mock get_config to provide conversation_id
+    # Personal scope (no "scope" metadata defaults to personal)
     with patch("agent_common.core.document_store_tools.get_config") as mock_get_config:
         mock_get_config.return_value = {
             "metadata": {
@@ -210,25 +202,16 @@ async def test_hybrid_search_combines_namespaces():
             store=mock_store,
         )
 
-    # Verify both namespaces were searched
-    assert mock_store.asearch.call_count == 2
+    # Only the user documents namespace was searched — never tool_results
+    assert ("conv-123", "tool_results") not in searched_namespaces
+    assert ("user-456", "documents") in searched_namespaces
+    assert mock_store.asearch.call_count == 1
 
-    # Verify the result is a list of documents in LangChain format
     assert isinstance(result, list)
-    assert len(result) == 2
-
-    # Verify document structure
-    for doc in result:
-        assert "page_content" in doc
-        assert "type" in doc
-        assert doc["type"] == "Document"
-        assert "metadata" in doc
-
-    # Verify proper ordering (tool result should come first due to higher score)
-    assert result[0]["page_content"] == "Tool result content"
-    assert result[0]["metadata"]["file_path"] == "/large_tool_results/tool-123"
-    assert result[1]["page_content"] == "User document content"
-    assert result[1]["metadata"]["file_path"] == "/memories/user-doc.txt"
+    assert len(result) == 1
+    assert result[0]["type"] == "Document"
+    assert result[0]["page_content"] == "User document content"
+    assert result[0]["metadata"]["file_path"] == "/memories/user-doc.txt"
 
 
 if __name__ == "__main__":

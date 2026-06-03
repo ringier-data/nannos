@@ -373,9 +373,7 @@ class TestAttachmentMounting:
         return DynamicLocalAgentRunnable(config=config, model=MagicMock())
 
     def test_no_attachments_returns_none(self, runnable):
-        input_data = SubAgentInput(
-            a2a_tracking={}, messages=[HumanMessage(content="just text, no files")]
-        )
+        input_data = SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="just text, no files")])
         assert runnable._build_attachments_backend(input_data) is None
 
     def test_extracts_file_block_with_url(self, runnable):
@@ -422,9 +420,7 @@ class TestAttachmentMounting:
 
     def test_derive_filename_dedupes(self, runnable):
         used = {"report.pdf"}
-        name = runnable._derive_attachment_filename(
-            {}, "https://s3.example/report.pdf", "application/pdf", 3, used
-        )
+        name = runnable._derive_attachment_filename({}, "https://s3.example/report.pdf", "application/pdf", 3, used)
         assert name != "report.pdf"
         assert name.endswith(".pdf")
 

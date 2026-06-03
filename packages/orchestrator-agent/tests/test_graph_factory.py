@@ -116,27 +116,30 @@ class TestMiddlewareStack:
 
         stack = factory._create_middleware_stack()
 
-        # Verify correct order (DynamicTool first, static content before cache point,
-        # steering after cache, user prefs after steering, playbook after prefs)
-        assert len(stack) == 14
-        assert isinstance(stack[0], DynamicToolDispatchMiddleware)
-        assert isinstance(stack[1], StoragePathsInstructionMiddleware)
-        assert isinstance(stack[2], BedrockPromptCachingMiddleware)
-        # stack[3] = SteeringMiddleware (from ringier_a2a_sdk)
-        assert stack[3].__class__.__name__ == "SteeringMiddleware"
-        assert isinstance(stack[4], UserPreferencesMiddleware)
-        # stack[5] = PlaybookInjectionMiddleware
-        assert stack[5].__class__.__name__ == "PlaybookInjectionMiddleware"
-        # stack[6] = ToolStatusMiddleware (emits status for tool calls)
-        assert stack[6].__class__.__name__ == "ToolStatusMiddleware"
-        assert isinstance(stack[7], RepeatedToolCallMiddleware)
-        assert isinstance(stack[8], AuthErrorDetectionMiddleware)
-        assert stack[9].__class__.__name__ == "ErrorClassificationMiddleware"
-        # stack[10] = ConditionalHumanInTheLoopMiddleware
-        assert stack[10].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
-        assert isinstance(stack[11], ToolRetryMiddleware)
-        assert isinstance(stack[12], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[13], TodoStatusMiddleware)
+        # Verify correct order. The conversation-context gate is outermost (so its
+        # injected gated tool flows through DynamicToolDispatch's schema-cleanup),
+        # followed by DynamicTool, static content before cache point, steering after
+        # cache, user prefs after steering, playbook after prefs.
+        assert len(stack) == 15
+        assert stack[0].__class__.__name__ == "ConversationContextToolsMiddleware"
+        assert isinstance(stack[1], DynamicToolDispatchMiddleware)
+        assert isinstance(stack[2], StoragePathsInstructionMiddleware)
+        assert isinstance(stack[3], BedrockPromptCachingMiddleware)
+        # stack[4] = SteeringMiddleware (from ringier_a2a_sdk)
+        assert stack[4].__class__.__name__ == "SteeringMiddleware"
+        assert isinstance(stack[5], UserPreferencesMiddleware)
+        # stack[6] = PlaybookInjectionMiddleware
+        assert stack[6].__class__.__name__ == "PlaybookInjectionMiddleware"
+        # stack[7] = ToolStatusMiddleware (emits status for tool calls)
+        assert stack[7].__class__.__name__ == "ToolStatusMiddleware"
+        assert isinstance(stack[8], RepeatedToolCallMiddleware)
+        assert isinstance(stack[9], AuthErrorDetectionMiddleware)
+        assert stack[10].__class__.__name__ == "ErrorClassificationMiddleware"
+        # stack[11] = ConditionalHumanInTheLoopMiddleware
+        assert stack[11].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
+        assert isinstance(stack[12], ToolRetryMiddleware)
+        assert isinstance(stack[13], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[14], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
@@ -148,7 +151,7 @@ class TestMiddlewareStack:
         factory = GraphFactory(config=mock_config)
 
         stack = factory._create_middleware_stack()
-        dynamic_middleware = stack[0]
+        dynamic_middleware = stack[1]
 
         assert isinstance(dynamic_middleware, DynamicToolDispatchMiddleware)
         # Static tools are added directly to graph, not via middleware

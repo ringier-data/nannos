@@ -256,9 +256,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
         if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
-            caller_channel_id = (
-                context.message.metadata.get("slackChannelId")
-                or context.message.metadata.get("googleChatSpaceId")
+            caller_channel_id = context.message.metadata.get("slackChannelId") or context.message.metadata.get(
+                "googleChatSpaceId"
             )
 
         # --- Continuous Interaction Turn: route to active stream if one exists ---
@@ -406,8 +405,15 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             channel_id = slack_channel_id or google_chat_space_id
 
             # Update stream info with scope and assistant_id now that we have them
-            stream_info.scope = "channel" if channel_id else "personal"
-            stream_info.assistant_id = channel_id if channel_id else str(user.id)
+            # Slack: Public channels (which start with C) or private channels/group DMs (which start with G), a 1:1 direct message channel ID always starts with a D (e.g., D12345678).
+            # Google-chat: in the google-chat client we set a spaceId just whenever source != direct_message.
+            if (slack_channel_id and not slack_channel_id.startswith("D")) or google_chat_space_id:
+                stream_info.scope = "channel"
+                stream_info.assistant_id = channel_id
+            else:
+                stream_info.scope = "personal"
+                # Use database ID (not OIDC sub) to match docstore tools
+                stream_info.assistant_id = str(user.id)
 
             if slack_user_id:
                 client_user_handle = f"<@{slack_user_id}>"
@@ -469,9 +475,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "__pregel_checkpointer": graph.checkpointer,  # Required for proper checkpoint isolation
                 },
                 "metadata": {
-                    "assistant_id": channel_id
-                    if channel_id
-                    else user.id,  # Use database ID (not OIDC sub) to match docstore tools
+                    "assistant_id": stream_info.assistant_id,
                     "user_id": user.id,  # Stable database ID (not OIDC sub)
                     "conversation_id": task.context_id,  # For conversation-scoped tool result storage
                     "group_id": user_groups[0] if user_groups else None,  # Primary group for filesystem namespace
@@ -479,7 +483,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "user_name": user_name,
                     "slack_thread_ts": request_metadata.get("slackThreadTs"),
                     "google_chat_thread_id": request_metadata.get("googleChatThreadId"),
-                    "scope": "personal" if not channel_id else "channel",
+                    "scope": stream_info.scope,
                     "model_type": model_type,
                     "thinking_level": thinking_level,
                 },

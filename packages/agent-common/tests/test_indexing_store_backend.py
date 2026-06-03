@@ -10,11 +10,16 @@ which cover namespace routing. This module focuses on:
 """
 
 import asyncio
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_common.backends.indexing_store import IndexingStoreBackend
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _make_config(
@@ -41,27 +46,57 @@ def mock_agent_settings():
 
 
 class TestIdempotency:
-    """Second write to the same path must skip re-indexing."""
+    """Second write to the same path must skip re-indexing when the content is unchanged."""
 
     @pytest.mark.asyncio
-    async def test_skips_indexing_when_file_already_indexed(self, mock_agent_settings):
-        """If documents_store.aget returns non-None, chunking is NOT called."""
+    async def test_skips_indexing_when_content_hash_matches(self, mock_agent_settings):
+        """If existing index has a matching content_hash, chunking is NOT called."""
         mock_store = _make_store()
+        content = "some content here"
 
-        # Simulate file already indexed
+        # Simulate file already indexed with the SAME content hash
         existing_entry = MagicMock()
-        existing_entry.value = {"total_chunks": 3}
+        existing_entry.value = {"total_chunks": 3, "content_hash": _content_hash(content)}
         mock_store.aget.return_value = existing_entry
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
             with patch("agent_common.backends.indexing_store.chunk_with_context") as mock_chunk:
-                await backend._index_content("/memories/notes.txt", "some content here")
+                await backend._index_content("/memories/notes.txt", content)
 
         mock_chunk.assert_not_called()
         # Only aget (idempotency check) should have been called, not aput
         mock_store.aput.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reindexes_when_content_hash_differs(self, mock_agent_settings):
+        """If existing index has a different content_hash, stale chunks are dropped and re-indexed."""
+        mock_store = _make_store()
+        content = "brand new content"
+
+        existing_entry = MagicMock()
+        existing_entry.value = {
+            "total_chunks": 2,
+            "content_hash": "stale-hash",
+            "chunk_keys": ["/memories/notes.txt#chunk_0", "/memories/notes.txt#chunk_1"],
+        }
+        mock_store.aget.return_value = existing_entry
+
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
+            with patch("agent_common.backends.indexing_store.chunk_with_context") as mock_chunk:
+                mock_chunk.return_value = [("chunk text", "context")]
+                with patch("agent_common.backends.indexing_store.create_model", return_value=MagicMock()):
+                    await backend._index_content("/memories/notes.txt", content)
+
+        # Re-chunked because the hash changed
+        mock_chunk.assert_called_once()
+        # Stale chunks were deleted before re-indexing
+        deleted_keys = {call.kwargs.get("key") for call in mock_store.adelete.await_args_list}
+        assert "/memories/notes.txt#chunk_0" in deleted_keys
+        assert "/memories/notes.txt#chunk_1" in deleted_keys
 
     @pytest.mark.asyncio
     async def test_proceeds_with_indexing_when_not_yet_indexed(self, mock_agent_settings):
@@ -69,7 +104,7 @@ class TestIdempotency:
         mock_store = _make_store()
         mock_store.aget.return_value = None  # No existing index
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
             with patch("agent_common.backends.indexing_store.chunk_with_context") as mock_chunk:
@@ -79,6 +114,30 @@ class TestIdempotency:
                     await backend._index_content("/memories/new.txt", "new content")
 
         mock_chunk.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stores_content_hash_in_file_index(self, mock_agent_settings):
+        """The file index value persisted to the store includes the content_hash."""
+        mock_store = _make_store()
+        mock_store.aget.return_value = None
+        content = "indexable content"
+
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
+            with patch(
+                "agent_common.backends.indexing_store.chunk_with_context",
+                return_value=[("chunk", "ctx")],
+            ):
+                with patch("agent_common.backends.indexing_store.create_model", return_value=MagicMock()):
+                    await backend._index_content("/memories/notes.txt", content)
+
+        # Find the file-index aput (key == file_path) and assert content_hash
+        file_index_calls = [
+            call for call in mock_store.aput.await_args_list if call.kwargs.get("key") == "/memories/notes.txt"
+        ]
+        assert file_index_calls, "Expected a file-index aput keyed by the file path"
+        assert file_index_calls[0].kwargs["value"]["content_hash"] == _content_hash(content)
 
 
 class TestSkipFormattedSearchOutput:
@@ -90,7 +149,7 @@ class TestSkipFormattedSearchOutput:
         mock_store = _make_store()
         mock_store.aget.return_value = None  # Not previously indexed
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         formatted_output = "Found 5 relevant chunks:\n\n[Result 1] /memories/foo.txt (chunk 1/3)\n..."
 
@@ -106,7 +165,7 @@ class TestSkipFormattedSearchOutput:
         mock_store = _make_store()
         mock_store.aget.return_value = None
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         regular_content = '{"status": "merged", "pr_number": 42, "title": "Fix bug"}'
 
@@ -124,7 +183,7 @@ class TestSkipFormattedSearchOutput:
         mock_store = _make_store()
         mock_store.aget.return_value = None
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         # Unusual but valid: a memories file starting with "Found"
         content = "Found 5 relevant chunks: ... (user wrote this themselves)"
@@ -148,7 +207,7 @@ class TestErrorResilience:
         from deepagents.backends.protocol import WriteResult
 
         mock_store = _make_store()
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         success_result = WriteResult(path="/memories/data.txt")
 
@@ -168,7 +227,7 @@ class TestErrorResilience:
         from deepagents.backends.protocol import WriteResult
 
         mock_store = _make_store()
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         success_result = WriteResult(path="/memories/data.txt")
 
@@ -185,7 +244,7 @@ class TestErrorResilience:
         from deepagents.backends.protocol import WriteResult
 
         mock_store = _make_store()
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         failed_result = WriteResult(error="Disk full")
 
@@ -206,7 +265,7 @@ class TestMissingMetadata:
         """When user_id is absent from metadata, _index_content returns without error."""
         mock_store = _make_store()
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         with patch("agent_common.backends.indexing_store.get_config", return_value={"metadata": {}}):
             with patch("agent_common.backends.indexing_store.chunk_with_context") as mock_chunk:
@@ -221,7 +280,7 @@ class TestMissingMetadata:
         """Tool result path without conversation_id returns early without exception."""
         mock_store = _make_store()
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         config = {"metadata": {"user_id": "u1"}}  # No conversation_id
         with patch("agent_common.backends.indexing_store.get_config", return_value=config):
@@ -236,7 +295,7 @@ class TestMissingMetadata:
         """channel_memories path without assistant_id returns early without exception."""
         mock_store = _make_store()
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         config = {"metadata": {"user_id": "u1"}}  # No assistant_id
         with patch("agent_common.backends.indexing_store.get_config", return_value=config):
@@ -256,7 +315,7 @@ class TestTitanSemaphore:
         mock_store = _make_store()
         mock_store.aget.return_value = None  # Not previously indexed
 
-        backend = IndexingStoreBackend(store=mock_store, bedrock_region=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
 
         # Track how many aput calls are active simultaneously
         active_count = [0]
@@ -284,3 +343,53 @@ class TestTitanSemaphore:
         assert max_observed[0] <= 6, (
             f"Expected at most 6 concurrent aput calls (5 chunks + 1 file index), but observed {max_observed[0]}"
         )
+
+
+class TestEagerIndexingSkipsToolResults:
+    """awrite must NOT eagerly index /large_tool_results/ (lazy via semantic_search_file)."""
+
+    @pytest.mark.asyncio
+    async def test_awrite_skips_eager_index_for_large_tool_results(self, mock_agent_settings):
+        from deepagents.backends.protocol import WriteResult
+
+        mock_store = _make_store()
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        success_result = WriteResult(path="/large_tool_results/tool-1")
+
+        with patch.object(type(backend).__mro__[1], "awrite", new=AsyncMock(return_value=success_result)):
+            with patch.object(backend, "_index_content") as mock_index:
+                result = await backend.awrite("/large_tool_results/tool-1", "huge tool output")
+
+        # File still written, but NOT eagerly indexed
+        assert result.path == "/large_tool_results/tool-1"
+        mock_index.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_awrite_still_indexes_memories(self, mock_agent_settings):
+        from deepagents.backends.protocol import WriteResult
+
+        mock_store = _make_store()
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        success_result = WriteResult(path="/memories/notes.txt")
+
+        with patch.object(type(backend).__mro__[1], "awrite", new=AsyncMock(return_value=success_result)):
+            with patch.object(backend, "_index_content", new=AsyncMock()) as mock_index:
+                await backend.awrite("/memories/notes.txt", "durable note")
+
+        mock_index.assert_awaited_once()
+
+
+class TestAensureIndexed:
+    """aensure_indexed is the JIT entry-point used by semantic_search_file."""
+
+    @pytest.mark.asyncio
+    async def test_aensure_indexed_delegates_to_index_content(self, mock_agent_settings):
+        mock_store = _make_store()
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        with patch.object(backend, "_index_content", new=AsyncMock()) as mock_index:
+            await backend.aensure_indexed("/large_tool_results/tool-9", "blob content")
+
+        mock_index.assert_awaited_once_with("/large_tool_results/tool-9", "blob content")

@@ -36,12 +36,22 @@ def mock_registry_service(registry_service):
             mock_settings_resp = MagicMock()
             mock_settings_resp.status_code = 200
             mock_settings_resp.json.return_value = mock_settings_response
+            mock_catalogs_resp = MagicMock()
+            mock_catalogs_resp.status_code = 200
+            mock_catalogs_resp.json.return_value = {"items": []}
+            mock_me_resp = MagicMock()
+            mock_me_resp.status_code = 200
+            mock_me_resp.json.return_value = {"role": "member"}
 
             async def mock_get(url, **kwargs):
-                if url == "/api/v1/sub-agents":
+                if url == "/api/v1/sub-agents/activated":
                     return mock_sub_agents_resp
                 elif url == "/api/v1/auth/me/settings":
                     return mock_settings_resp
+                elif url == "/api/v1/catalogs":
+                    return mock_catalogs_resp
+                elif url == "/api/v1/auth/me":
+                    return mock_me_resp
                 raise ValueError(f"Unexpected URL: {url}")
 
             mock_client.get = mock_get

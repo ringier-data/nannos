@@ -117,11 +117,14 @@ class TestBuildRuntimeContext:
         # Verify tool_c is in registry but NOT in whitelist
         assert "tool_c" not in context.whitelisted_tool_names
 
-    def test_whitelisted_tool_names_excludes_docstore_tools(self):
-        """Test that docstore tools are not automatically added to whitelisted_tool_names.
+    def test_whitelisted_tool_names_auto_includes_searchable_docstore_tools(self):
+        """Searchable docstore tools are auto-whitelisted; read_personal_file is not.
 
-        Document store tools are added to tool_registry at runtime, but should never
-        be added to whitelisted_tool_names (which comes exclusively from DB settings).
+        ``docstore_search``, ``semantic_search_file``, and ``docstore_export`` are
+        auto-included so the orchestrator can search its own durable memory and
+        JIT-index evicted tool results. ``read_personal_file`` is excluded — it is
+        conversation-context-gated (channel-only) and injected at model-call time
+        by ConversationContextToolsMiddleware, not via the static whitelist.
         """
         mock_user_tool = Mock()
         mock_user_tool.name = "user_tool"
@@ -151,14 +154,15 @@ class TestBuildRuntimeContext:
         # Docstore tools should be in registry (added at runtime)
         assert len(context.tool_registry) > 1  # user_tool + docstore tools
 
-        # But whitelist should ONLY contain user_tool from DB
-        assert context.whitelisted_tool_names == {"user_tool"}
+        # The three searchable docstore tools are auto-whitelisted alongside user_tool.
+        assert {"user_tool", "docstore_search", "semantic_search_file", "docstore_export"} <= (
+            context.whitelisted_tool_names
+        )
 
-        # Verify docstore tools are NOT in whitelist
-        for tool_name in context.tool_registry.keys():
-            if tool_name != "user_tool":
-                # This is a docstore tool - should NOT be whitelisted
-                assert tool_name not in context.whitelisted_tool_names
+        # read_personal_file is gated, so it must NOT be in the static whitelist
+        # (even though it is present in the tool_registry).
+        assert "read_personal_file" in context.tool_registry
+        assert "read_personal_file" not in context.whitelisted_tool_names
 
     def test_user_config_with_sub_agents(self):
         """Test building context with remote A2A sub-agents (dict format)."""

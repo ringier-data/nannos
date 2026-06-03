@@ -29,6 +29,7 @@ from agent_common.core.graph_utils import build_common_middleware_stack, create_
 from agent_common.core.model_factory import _has_aws_credentials, create_model
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
+from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
@@ -279,8 +280,11 @@ class GraphFactory:
         Returns:
             A ``BackendProtocol`` instance (``CompositeBackend`` or ``StateBackend``)
         """
-        bedrock_region = self.config.get_bedrock_region() if _has_aws_credentials() else None
-        backend = create_indexing_backend_factory(self.store, bedrock_region, cost_logger=self.cost_logger)
+        backend = create_indexing_backend_factory(
+            self.store,
+            cost_logger=self.cost_logger,
+            include_attachments=True,
+        )
 
         return backend
 
@@ -418,12 +422,16 @@ class GraphFactory:
                 [0] → [1] → … → [N] → ToolNode handler
             So [0] can short-circuit before any later middleware sees the call.
 
-        IMPORTANT: ``DynamicToolDispatchMiddleware`` is deliberately first ([0])
-        because it short-circuits the ``task`` tool for A2A sub-agent dispatch.
-        Being outermost means inner middlewares (Auth, Retry, …) never see the
-        ``task`` tool call — they only see the ToolMessage result if it was
-        returned.  This is why ``AuthErrorDetectionMiddleware`` cannot intercept
-        A2A 401 errors via ``interrupt()``.
+        IMPORTANT: ``DynamicToolDispatchMiddleware`` is the first *tool-call*
+        handler.  ``ConversationContextToolsMiddleware`` is placed before it for
+        ``wrap_model_call`` (so its injected gated tool flows through
+        DynamicToolDispatch's schema-cleanup pipeline) but it has no tool-call
+        hook, so DynamicToolDispatch is still the effective ([0]) interceptor for
+        the ``task`` tool A2A sub-agent dispatch.  Being the outermost tool-call
+        handler means inner middlewares (Auth, Retry, …) never see the ``task``
+        tool call — they only see the ToolMessage result if it was returned.
+        This is why ``AuthErrorDetectionMiddleware`` cannot intercept A2A 401
+        errors via ``interrupt()``.
 
         Returns:
             Ordered middleware list (first = outermost for wrap hooks).
@@ -446,6 +454,18 @@ class GraphFactory:
 
         # StoragePathsInstructionMiddleware adds filesystem storage paths documentation
         storage_paths_middleware = StoragePathsInstructionMiddleware()
+
+        # ConversationContextToolsMiddleware gates conversation-context-specific tools
+        # (e.g. read_personal_file) so they are bound only in the contexts where they
+        # apply. The gated tool is user-scoped and lives in the runtime tool_registry
+        # (not the static whitelist), so it is resolved by name at model-call time —
+        # the orchestrator's single-graph-per-model cannot hold a per-user instance.
+        # Placed outermost so the injected tool flows through DynamicToolDispatch's
+        # schema-cleanup/dispatch pipeline; the gate has no tool-call hook, so
+        # DynamicToolDispatch remains the effective first handler for tool dispatch.
+        context_gate_middleware = ConversationContextToolsMiddleware(
+            runtime_gated_tools={"read_personal_file": frozenset({"channel"})},
+        )
 
         # Outermost → innermost (for wrap_* hooks):
         # DynamicToolDispatch[0] → StoragePaths → PromptCaching → Steering
@@ -514,6 +534,7 @@ class GraphFactory:
         hitl_middleware = _create_hitl_middleware()
 
         return [
+            context_gate_middleware,
             dynamic_tool_middleware,
             storage_paths_middleware,
             BedrockPromptCachingMiddleware(),

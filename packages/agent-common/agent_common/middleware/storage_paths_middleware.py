@@ -1,13 +1,26 @@
 """Storage Paths Instruction Middleware - Adds filesystem storage paths documentation to system prompt.
 
 This middleware appends information about the different storage paths available in the
-filesystem backend and their persistence guarantees to the system prompt. This ensures
-agents are aware of:
+filesystem backend and their persistence guarantees to the system prompt, grouped into
+two tiers, plus a shared decision tree for finding information. This ensures agents are
+aware of:
 
-1. Ephemeral storage (root `/`) - temporary files cleared after conversation
-2. Personal storage (`/memories/`) - persistent files private to the user
-3. Channel storage (`/channel_memories/`) - shared files for channel members
-4. Group storage (`/group_memories/`) - shared files for group members
+Durable memory (persists across conversations):
+1. Personal storage (`/memories/`) - persistent files private to the user
+2. Channel storage (`/channel_memories/`) - shared files for channel members (channel context only)
+3. Group storage (`/group_memories/`) - shared files for group members
+4. Skills storage (`/skills/`) - read-only agent skills
+
+Ephemeral / working storage (cleared when the conversation ends):
+5. Root `/` - scratch files written without a known prefix
+6. `/large_tool_results/` - where oversized tool outputs are auto-saved
+7. `/attachments/` - read-only files the user attached to the current conversation
+   (only present when the turn has attachments)
+
+The prompt is built per-request and is context-aware: `/channel_memories/` and the
+`read_personal_file` guidance are only included in channel context; `/attachments/`
+is only included when the current turn has attached files (signalled via the
+`has_attachments` config metadata set by ``DynamicLocalAgentRunnable``).
 
 This middleware is context-agnostic and works with any agent configuration that includes
 a filesystem backend with IndexingStoreBackend routes for `/memories/` and `/channel_memories/`.
@@ -33,6 +46,24 @@ from .utils import append_to_system_message
 logger = logging.getLogger(__name__)
 
 
+def _derive_context() -> str:
+    """Derive the conversation context from runtime metadata.
+
+    Returns ``"channel"`` when the conversation is a shared/channel scope,
+    otherwise ``"direct"`` (one-to-one / personal). Mirrors the scope handling
+    in ``ConversationContextToolsMiddleware`` so storage instructions match the
+    tools actually available in this context.
+    """
+    try:
+        config = get_config()
+    except Exception:
+        return "direct"
+    if not config:
+        return "direct"
+    scope = config.get("metadata", {}).get("scope")
+    return "channel" if scope == "channel" else "direct"
+
+
 def _attachments_present() -> bool:
     """Return True when the current turn has files mounted at ``/attachments/``.
 
@@ -48,26 +79,74 @@ def _attachments_present() -> bool:
     return bool(config.get("metadata", {}).get("has_attachments"))
 
 
-def _build_non_sandbox_prompt(has_attachments: bool = False) -> str:
+def _build_decision_tree(context: str) -> str:
+    """Build the shared "how to find information" decision tree.
+
+    Identical for sandbox and non-sandbox agents so the guidance never drifts.
+    The personal-file read line is only included in channel context, where
+    ``read_personal_file`` is available.
+    """
+    channel_personal_read = ""
+    if context == "channel":
+        channel_personal_read = (
+            "\n- Read one of the user's PERSONAL files from within a channel "
+            "(requires approval) → use `read_personal_file`."
+        )
+    return f"""
+<finding_information>
+Choosing how to locate information:
+- Exact or known string in a file → use `grep`.
+- Read a specific file when you know its path → use `read_file`.
+- Fuzzy/semantic search INSIDE one large in-hand blob (e.g. a big tool result under `/large_tool_results/`) → use `semantic_search_file`.
+- Find something across your durable memory notes by meaning (not by path) → use `docstore_search`.{channel_personal_read}
+</finding_information>"""
+
+
+def _build_storage_tiers(context: str, has_attachments: bool = False) -> str:
+    """Build the context-aware, two-tier storage description.
+
+    Durable memory persists across conversations; ephemeral/working storage is
+    cleared when the conversation ends. ``/channel_memories/`` is only shown in
+    channel context (it is unavailable in direct conversations). ``/attachments/``
+    is only shown when the user attached files to the current turn.
+    """
+    is_channel = context == "channel"
+    channel_line = "\n- `/channel_memories/` — Shared with all channel members." if is_channel else ""
+    channel_usage = (
+        "\nUse `/channel_memories/` in Slack channels when sharing files with team members." if is_channel else ""
+    )
+    attachments_line = (
+        "\n- `/attachments/` — Read-only. Files the user attached to THIS conversation "
+        "(e.g. PDFs, images, documents). Use read_file to inspect them; for skills or "
+        "sandbox commands that need the file on disk, copy it first."
+        if has_attachments
+        else ""
+    )
+    return f"""Durable memory (persists across conversations):
+- `/memories/` — Personal files, private to you.{channel_line}
+- `/group_memories/` — Shared with all members of your user group.
+- `/skills/` — Read-only. Agent skills (instructions and scripts); use read_file to load full content.
+
+Ephemeral / working storage (this conversation only, then cleared):
+- Root `/` — scratch files written without a known prefix.
+- `/large_tool_results/` — where oversized tool outputs are automatically saved.{attachments_line}
+
+Use `/memories/` for documents, notes, and data you want to keep long-term.{channel_usage}
+Use `/group_memories/` for files shared within a user group."""
+
+
+def _build_non_sandbox_prompt(context: str, has_attachments: bool = False) -> str:
     """Build the non-sandbox filesystem instruction prompt."""
-    return """
+    return f"""
 <filesystem_storage_paths>
 The filesystem supports different storage locations with different persistence:
 
-- Ephemeral storage (root `/`): Files without a prefix are temporary and cleared after conversation ends.
-- Personal storage (`/memories/`): Files persist across conversations, private to you.
-- Channel storage (`/channel_memories/`): Files shared with all channel members.
-- Group storage (`/group_memories/`): Files shared with all group members.
-- Skills storage (`/skills/`): Read-only. Contains agent skills (instructions and scripts).
-  Use read_file to load full skill content.
-
-Use `/memories/` for documents, notes, and data you want to keep long-term.
-Use `/channel_memories/` in Slack channels when sharing files with team members.
-Use `/group_memories/` for files shared within a user group.
-</filesystem_storage_paths>"""
+{_build_storage_tiers(context, has_attachments)}
+</filesystem_storage_paths>
+{_build_decision_tree(context)}"""
 
 
-def _build_sandbox_prompt(sandbox_home: str, has_attachments: bool = False) -> str:
+def _build_sandbox_prompt(sandbox_home: str, context: str, has_attachments: bool = False) -> str:
     """Build the sandbox-aware filesystem instruction prompt."""
     attachments_sandbox_note = (
         "\n- Files the user attached (`/attachments/`) also live on the virtual filesystem. "
@@ -81,12 +160,8 @@ def _build_sandbox_prompt(sandbox_home: str, has_attachments: bool = False) -> s
 You have access to two separate filesystems:
 
 **1. Virtual Filesystem** (via read_file, write_file, edit_file, ls, grep):
-Persistent storage with different scopes:
-- `/memories/` — Personal files, persist across conversations, private to you.
-- `/channel_memories/` — Shared with all channel members.
-- `/group_memories/` — Shared with all group members.
-- `/skills/` — Read-only. Contains agent skills (instructions and scripts).
-- `/large_tool_results/` — Large tool outputs, scoped to this conversation.
+
+{_build_storage_tiers(context, has_attachments)}
 
 **2. Sandbox** (via execute):
 Shell commands run in an isolated container with its own filesystem at `{sandbox_home}/`.
@@ -104,24 +179,23 @@ The sandbox is your working directory for running code, scripts, and commands.
 - Edits made via execute() are NOT saved back to the virtual filesystem.
 - To persist sandbox changes, read the file content and use write_file() to save it back
   (e.g., to `/memories/`).
-
-Use `/memories/` for documents, notes, and data you want to keep long-term.
-Use `/channel_memories/` in Slack channels when sharing files with team members.
-Use `/group_memories/` for files shared within a user group.
-</filesystem_storage_paths>"""
+</filesystem_storage_paths>
+{_build_decision_tree(context)}"""
 
 
 class StoragePathsInstructionMiddleware(AgentMiddleware):
     """Middleware that appends filesystem storage paths documentation to the system prompt.
 
     This ensures agents are properly instructed about:
-    - Available storage locations (/, /memories/, /channel_memories/)
+    - Available storage locations, grouped into durable memory vs. ephemeral/working tiers
     - Persistence guarantees for each location
     - When to use each storage type
+    - A shared decision tree for finding information (grep / read_file /
+      semantic_search_file / docstore_search / read_personal_file)
     - For sandbox-enabled agents: the two-filesystem model and copy_to_sandbox usage
 
-    The middleware is lightweight and context-agnostic, making it suitable for
-    both the orchestrator and all sub-agents.
+    The prompt is built per-request and is context-aware: ``/channel_memories/``
+    and the ``read_personal_file`` guidance are only included in channel context.
     """
 
     def __init__(
@@ -134,10 +208,11 @@ class StoragePathsInstructionMiddleware(AgentMiddleware):
 
     def _build_prompt(self) -> str:
         """Build the context-aware storage prompt for the current request."""
+        context = _derive_context()
         has_attachments = _attachments_present()
         if self._sandbox_enabled:
-            return _build_sandbox_prompt(self._sandbox_home, has_attachments)
-        return _build_non_sandbox_prompt(has_attachments)
+            return _build_sandbox_prompt(self._sandbox_home, context, has_attachments)
+        return _build_non_sandbox_prompt(context, has_attachments)
 
     def _inject_prompt(self, request: ModelRequest) -> ModelRequest:
         """Inject the storage paths prompt into the request if not already present."""
