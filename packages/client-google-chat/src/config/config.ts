@@ -17,8 +17,8 @@ export interface Config {
   readonly googleChatConfigs: {
     projectName: string;
     projectNumber: string; // GCP project number for verifying Google-signed tokens
+    botName: string; // Bot display name; used as the installation_id for delivery-channel registration
     googleApplicationCredentials: any;
-    a2aNotificationSecret?: string; // Secret for validating A2A push notifications
   }[];
   readonly storage: StorageConfig;
   readonly aws: {
@@ -40,6 +40,9 @@ export interface Config {
   readonly consoleBackend?: {
     url: string;
     audience: string;
+  };
+  readonly installationSecret: {
+    ssmPrefix: string;
   };
 }
 
@@ -80,17 +83,16 @@ export async function getConfigFromEnv(): Promise<Config> {
   }
 
   const googleChatConfigs: Config['googleChatConfigs'] = [];
-  for (const project of JSON.parse(process.env.GCP_CHAT_PROJECTS) as { name: string; google_chat_app_id: string }[]) {
+  for (const project of JSON.parse(process.env.GCP_CHAT_PROJECTS) as { name: string; google_chat_app_id: string; bot_name: string }[]) {
     const envVarName = `GCP_SA_JSON_KEY_${project.name.toUpperCase().replace(/-/g, '_')}`;
     if (!process.env[envVarName]) {
       throw new Error(`Please provide ${envVarName}`);
     }
-    const secretEnvVar = `A2A_NOTIFICATION_SECRET_${project.name.toUpperCase().replace(/-/g, '_')}`;
     googleChatConfigs.push({
       projectName: project.name,
       projectNumber: project.google_chat_app_id,
+      botName: project.bot_name,
       googleApplicationCredentials: JSON.parse(process.env[envVarName]!),
-      a2aNotificationSecret: process.env[secretEnvVar],
     });
   }
 
@@ -158,5 +160,10 @@ export async function getConfigFromEnv(): Promise<Config> {
           audience: process.env.OIDC_CONSOLE_BACKEND_AUDIENCE || 'agent-console',
         }
       : undefined,
+    installationSecret: {
+      ssmPrefix:
+        process.env.INSTALLATION_SECRET_SSM_PREFIX ||
+        `/nannos/${environment}/client-google-chat/installation-secrets`,
+    },
   };
 }

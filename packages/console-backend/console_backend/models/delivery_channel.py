@@ -25,6 +25,14 @@ class DeliveryChannelCreate(BaseModel):
     group_ids: list[int] = Field(
         description="IDs of user groups whose members can see and use this channel.",
     )
+    installation_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Stable client-supplied identifier enabling idempotent re-registration. "
+        ),
+    )
 
 
 class DeliveryChannelUpdate(BaseModel):
@@ -47,6 +55,10 @@ class DeliveryChannelResponse(BaseModel):
     client_id: str = Field(description="Keycloak client ID of the A2A service that registered this channel.")
     registered_by: str = Field(description="OIDC subject (sub) of the token used to register this channel.")
     group_ids: list[int] = Field(description="IDs of groups that can use this channel.")
+    installation_id: str | None = Field(
+        default=None,
+        description="Stable client-supplied identifier (set when the channel was self-registered).",
+    )
     created_at: datetime
     updated_at: datetime
 

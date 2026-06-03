@@ -13,6 +13,11 @@ import { handleOAuthCallback, generateCallbackHTML } from './utils/oauthCallback
 import { processPendingRequest } from './utils/processPendingRequest.js';
 import { recoverOrphanedTasks } from './utils/taskRecovery.js';
 import { MultiTenantHTTPReceiver } from './receivers/MultiTenantHTTPReceiver.js';
+import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
+import { registerInstallations } from './services/installationRegistrar.js';
+import { AwsSsmInstallationSecretService } from './services/awsSsmInstallationSecretService.js';
+import { SSMClient } from '@aws-sdk/client-ssm';
+import { Task } from '@a2a-js/sdk';
 import { ParamsIncomingMessage } from '@slack/bolt/dist/receivers/ParamsIncomingMessage.js';
 import { ServerResponse } from 'node:http';
 let userAuthService: UserAuthService;
@@ -71,6 +76,38 @@ export async function startSlackApp(config: Config) {
     }
 
     // ----- Custom routes (used by both HTTP receiver and socket-mode) -----
+    // Per-installation notification secrets are stored in AWS SSM Parameter Store;
+    // the registrar generates them on first registration and the callback validator
+    // resolves them here to authenticate inbound A2A notifications.
+    const installationSecretService = new AwsSsmInstallationSecretService(
+      new SSMClient({ region: config.aws.region }),
+      config.installationSecret.ssmPrefix
+    );
+
+    /**
+     * Verify a notification token by matching it against the SSM-stored secret
+     * for any active bot installation. Resolves true on first match.
+     */
+    /**
+     * Verify a notification token by matching it against the SSM-stored secret
+     * for any active bot installation. Returns the matching installation on
+     * success (so the caller can route the notification to the correct team)
+     * or `null` if no installation matched.
+     */
+    const validateNotificationToken = async (token: string) => {
+      const installations = await storage.botInstallation.listAll();
+      for (const bot of installations) {
+        if (!bot.isActive) continue;
+        try {
+          const secret = await installationSecretService.get(bot.botName);
+          if (secret && token === secret) return bot;
+        } catch (err) {
+          logger.warn(`Failed to resolve secret for ${bot.botName}: ${err}`);
+        }
+      }
+      return null;
+    };
+
     const customRoutes = [
       {
         path: '/api/v1/health',
@@ -187,8 +224,70 @@ export async function startSlackApp(config: Config) {
       {
         path: '/api/v1/a2a/callback',
         method: 'POST' as const,
-        handler: async (_req: ParamsIncomingMessage, _res: ServerResponse) => {
-          logger.warn('Received request on /api/v1/a2a/callback — NOT IMPLEMENTED YET');
+        handler: async (req: ParamsIncomingMessage, res: ServerResponse) => {
+          // Read request body
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) {
+            chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+          }
+          const body = Buffer.concat(chunks).toString('utf-8');
+
+          // Validate notification token
+          const notificationToken = req.headers['x-a2a-notification-token'] as string | undefined;
+          if (!notificationToken) {
+            logger.warn('[A2ACallback] Missing X-A2A-Notification-Token header');
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing notification token' }));
+            return;
+          }
+
+          const botInstallation = await validateNotificationToken(notificationToken);
+          if (!botInstallation) {
+            logger.warn('[A2ACallback] Invalid notification token');
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid notification token' }));
+            return;
+          }
+
+          // Parse task payload
+          let task: Task;
+          try {
+            task = JSON.parse(body) as Task;
+          } catch {
+            logger.warn('[A2ACallback] Invalid JSON body');
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+            return;
+          }
+
+          if (!task || task.kind !== 'task' || !task.status) {
+            logger.warn('[A2ACallback] Invalid task payload');
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid task payload' }));
+            return;
+          }
+
+          // Only process completed/failed notifications
+          const state = task.status.state;
+          if (state !== 'completed' && state !== 'failed') {
+            logger.debug(`[A2ACallback] Ignoring notification with state=${state}`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ acknowledged: true }));
+            return;
+          }
+
+          logger.info(`[A2ACallback] Processing ${state} notification for taskId=${task.id}`);
+
+          // Respond immediately to acknowledge receipt
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ acknowledged: true }));
+
+          // Process notification asynchronously
+          handleA2ANotification(task, botInstallation, {
+            userAuthStorage: storage.userAuth,
+          }).catch((error) => {
+            logger.error(error, `[A2ACallback] Error handling notification: ${error}`);
+          });
         },
       },
     ];
@@ -301,6 +400,17 @@ export async function startSlackApp(config: Config) {
     }
     logger.info(`A2A Server: ${config.a2aServer.url}`);
     logger.info(`OIDC Issuer: ${config.oidc.issuerUrl}`);
+
+    // Self-register each Slack workspace as a delivery channel with console-backend.
+    // Failures are isolated and never block startup.
+    registerInstallations({
+      config,
+      oidcClient,
+      botInstallationStore: storage.botInstallation,
+      installationSecretService,
+    }).catch((error) => {
+        logger.error(error, `Delivery-channel self-registration failed: ${error}`);
+    });
 
     // Task recovery configuration
     const RECOVERY_MIN_AGE_MS = 2 * 60 * 1000; // 2 minutes - only recover tasks older than this

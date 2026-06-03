@@ -146,6 +146,21 @@ export class OIDCClient {
   }
 
   /**
+   * Acquire a server-to-server access token via the OAuth2 client_credentials grant.
+   */
+  async getServiceToken(audience: string): Promise<string> {
+    const config = await this.getConfiguration();
+    this.logger.info(`Requesting client_credentials token for audience=${audience}`);
+    
+    const response = await client.clientCredentialsGrant(config, {
+      audience,
+      scope: 'openid',
+    });
+    
+    return response.access_token;
+  }
+
+  /**
    * Map openid-client token set to UserAuthToken
    */
   private mapTokenSet(
