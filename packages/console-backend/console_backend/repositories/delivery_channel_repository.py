@@ -28,6 +28,7 @@ def _row_to_response(row: Any, group_ids: list[int]) -> DeliveryChannelResponse:
         client_id=row["client_id"],
         registered_by=row["registered_by"],
         group_ids=group_ids,
+        installation_id=row["installation_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -70,6 +71,7 @@ class DeliveryChannelRepository(AuditedRepository):
                 "secret": data.secret,
                 "client_id": client_id,
                 "registered_by": actor.sub,
+                "installation_id": data.installation_id,
                 "created_at": now,
                 "updated_at": now,
             },
@@ -241,3 +243,55 @@ class DeliveryChannelRepository(AuditedRepository):
     async def get_channel_group_ids(self, db: AsyncSession, channel_id: int) -> list[int]:
         """Return the group IDs associated with a channel."""
         return await _fetch_group_ids(db, channel_id)
+
+    async def get_by_installation(
+        self,
+        db: AsyncSession,
+        client_id: str,
+        installation_id: str,
+    ) -> DeliveryChannelResponse | None:
+        """Look up a channel by its (client_id, installation_id) idempotency key."""
+        result = await db.execute(
+            text(
+                "SELECT * FROM delivery_channels "
+                "WHERE client_id = :client_id AND installation_id = :installation_id"
+            ),
+            {"client_id": client_id, "installation_id": installation_id},
+        )
+        row = result.mappings().first()
+        if row is None:
+            return None
+        group_ids = await _fetch_group_ids(db, row["id"])
+        return _row_to_response(row, group_ids)
+
+    async def upsert_channel_by_installation(
+        self,
+        db: AsyncSession,
+        actor: User,
+        client_id: str,
+        data: DeliveryChannelCreate,
+    ) -> tuple[DeliveryChannelResponse, bool]:
+        """Idempotently create or update a channel keyed by ``(client_id, installation_id)``.
+
+        Returns ``(channel, created)`` where ``created`` is True when a new row was inserted.
+        Mutable fields (name, description, webhook_url, secret, group_ids) are overwritten
+        on update. ``installation_id`` MUST be set on ``data``; callers should branch to
+        :meth:`create_channel` when it is not.
+        """
+        assert data.installation_id is not None, "installation_id required for upsert"
+
+        existing = await self.get_by_installation(db, client_id, data.installation_id)
+        if existing is None:
+            created = await self.create_channel(db=db, actor=actor, client_id=client_id, data=data)
+            return created, True
+
+        update = DeliveryChannelUpdate(
+            name=data.name,
+            description=data.description,
+            webhook_url=data.webhook_url,
+            secret=data.secret,
+            group_ids=data.group_ids,
+        )
+        updated = await self.update_channel(db=db, actor=actor, channel_id=existing.id, data=update)
+        assert updated is not None
+        return updated, False

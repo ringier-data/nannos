@@ -4,6 +4,9 @@ import { Config, getConfigFromEnv } from './config/config.js';
 import { Logger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
 import { OIDCClient } from './services/oidcClient.js';
+import { registerInstallations } from './services/installationRegistrar.js';
+import { AwsSsmInstallationSecretService } from './services/awsSsmInstallationSecretService.js';
+import { SSMClient } from '@aws-sdk/client-ssm';
 import { UserAuthService } from './services/userAuthService.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
@@ -152,6 +155,12 @@ function setupServerTimeouts(server: Server, config: Config) {
 
     // OIDC client
     const oidcClient = new OIDCClient(config);
+
+    // Per-installation notification secrets backed by AWS SSM Parameter Store.
+    const installationSecretService = new AwsSsmInstallationSecretService(
+      new SSMClient({ region: config.aws.region }),
+      config.installationSecret.ssmPrefix
+    );
 
     // User auth service
     const userAuthService = new UserAuthService(storage.userAuth, oidcClient, config, storage.oauthState);
@@ -430,7 +439,7 @@ function setupServerTimeouts(server: Server, config: Config) {
 
     app.post(
       '/api/v1/a2a/callback',
-      createA2ANotificationAuthMiddleware(config.googleChatConfigs),
+      createA2ANotificationAuthMiddleware(config.googleChatConfigs, installationSecretService),
       async (req: Request, res: Response) => {
         const task = req.body as Task;
         const projectId = res.locals.projectNumber as string;
@@ -472,6 +481,12 @@ function setupServerTimeouts(server: Server, config: Config) {
       logger.info(`OIDC Issuer: ${config.oidc.issuerUrl}`);
     });
     setupServerTimeouts(server, config);
+
+    // Self-register each Google Chat project as a delivery channel with console-backend.
+    // Failures are isolated and never block startup.
+    registerInstallations({ config, oidcClient, installationSecretService }).catch((error) => {
+      logger.error(error, `Delivery-channel self-registration failed: ${error}`);
+    });
 
     // -----------------------------------------------------------------------
     // Task recovery

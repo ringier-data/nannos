@@ -22,10 +22,11 @@ export class PgUserAuthStorage {
       await this.pool.query(SQL`
         INSERT INTO user_auth (
           user_id, team_id, access_token, refresh_token, expires_at,
-          token_type, scope, id_token
+          token_type, scope, id_token, oidc_sub
         ) VALUES (
           ${token.userId}, ${token.teamId}, ${token.accessToken}, ${token.refreshToken},
-          ${new Date(token.expiresAt)}, ${token.tokenType}, ${token.scope}, ${token.idToken}
+          ${new Date(token.expiresAt)}, ${token.tokenType}, ${token.scope}, ${token.idToken},
+          ${token.oidcSub}
         )
         ON CONFLICT (user_id, team_id) DO UPDATE SET
           access_token = EXCLUDED.access_token,
@@ -33,7 +34,8 @@ export class PgUserAuthStorage {
           expires_at = EXCLUDED.expires_at,
           token_type = EXCLUDED.token_type,
           scope = EXCLUDED.scope,
-          id_token = EXCLUDED.id_token
+          id_token = EXCLUDED.id_token,
+          oidc_sub = EXCLUDED.oidc_sub
       `);
       this.logger.info(`Saved auth token for user ${token.userId} in team ${token.teamId}`);
     } catch (error) {
@@ -49,7 +51,7 @@ export class PgUserAuthStorage {
     try {
       const result = await this.pool.query(SQL`
         SELECT user_id, team_id, access_token, refresh_token, expires_at,
-               token_type, scope, id_token, created_at, updated_at
+               token_type, scope, id_token, oidc_sub, created_at, updated_at
         FROM user_auth
         WHERE user_id = ${userId} AND team_id = ${teamId}
       `);
@@ -68,6 +70,7 @@ export class PgUserAuthStorage {
         tokenType: row.token_type,
         scope: row.scope,
         idToken: row.id_token,
+        oidcSub: row.oidc_sub,
         createdAt: new Date(row.created_at).getTime(),
         updatedAt: new Date(row.updated_at).getTime(),
       };
@@ -104,6 +107,7 @@ export class PgUserAuthStorage {
       refreshToken?: string;
       expiresAt?: number;
       idToken?: string;
+      oidcSub?: string;
     }
   ): Promise<void> {
     const setClauses: string[] = [];
@@ -125,6 +129,10 @@ export class PgUserAuthStorage {
     if (updates.idToken !== undefined) {
       setClauses.push(`id_token = $${paramIndex++}`);
       values.push(updates.idToken);
+    }
+    if (updates.oidcSub !== undefined) {
+      setClauses.push(`oidc_sub = $${paramIndex++}`);
+      values.push(updates.oidcSub);
     }
 
     if (setClauses.length === 0) {
@@ -162,5 +170,79 @@ export class PgUserAuthStorage {
     const isValid = token.expiresAt > now + bufferMs;
     this.logger.info(`Token found for userId=${userId}, teamId=${teamId}, valid=${isValid}`);
     return isValid;
+  }
+
+  /**
+   * Find a user auth record by OIDC subject identifier
+   */
+  async findByOidcSub(oidcSub: string): Promise<UserAuthToken | null> {
+    try {
+      const result = await this.pool.query(SQL`
+        SELECT user_id, team_id, access_token, refresh_token, expires_at,
+               token_type, scope, id_token, oidc_sub, created_at, updated_at
+        FROM user_auth
+        WHERE oidc_sub = ${oidcSub}
+        LIMIT 1
+      `);
+
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        userId: row.user_id,
+        teamId: row.team_id,
+        accessToken: row.access_token,
+        refreshToken: row.refresh_token,
+        expiresAt: new Date(row.expires_at).getTime(),
+        tokenType: row.token_type,
+        scope: row.scope,
+        idToken: row.id_token,
+        oidcSub: row.oidc_sub,
+        createdAt: new Date(row.created_at).getTime(),
+        updatedAt: new Date(row.updated_at).getTime(),
+      };
+    } catch (error) {
+      this.logger.error(error, `Failed to find user by OIDC sub: ${error}`);
+      throw new Error(`Failed to find user by OIDC sub: ${error}`);
+    }
+  }
+
+  /**
+   * Find a user auth record by OIDC subject identifier scoped to a Slack team.
+   */
+  async findByOidcSubAndTeam(oidcSub: string, teamId: string): Promise<UserAuthToken | null> {
+    try {
+      const result = await this.pool.query(SQL`
+        SELECT user_id, team_id, access_token, refresh_token, expires_at,
+               token_type, scope, id_token, oidc_sub, created_at, updated_at
+        FROM user_auth
+        WHERE oidc_sub = ${oidcSub} AND team_id = ${teamId}
+        LIMIT 1
+      `);
+
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        userId: row.user_id,
+        teamId: row.team_id,
+        accessToken: row.access_token,
+        refreshToken: row.refresh_token,
+        expiresAt: new Date(row.expires_at).getTime(),
+        tokenType: row.token_type,
+        scope: row.scope,
+        idToken: row.id_token,
+        oidcSub: row.oidc_sub,
+        createdAt: new Date(row.created_at).getTime(),
+        updatedAt: new Date(row.updated_at).getTime(),
+      };
+    } catch (error) {
+      this.logger.error(error, `Failed to find user by OIDC sub and team: ${error}`);
+      throw new Error(`Failed to find user by OIDC sub and team: ${error}`);
+    }
   }
 }

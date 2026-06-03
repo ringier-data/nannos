@@ -7,7 +7,7 @@ consumed by the scheduler when delivering job notifications.
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from ..db.session import DbSession
 from ..dependencies import get_client_id_from_request, is_admin_mode, require_auth_or_bearer_token
@@ -49,6 +49,7 @@ def _get_user_group_service(request: Request):  # type: ignore[return]
 )
 async def register_channel(
     request: Request,
+    response: Response,
     data: DeliveryChannelCreate,
     db: DbSession,
     current_user: User = Depends(require_auth_or_bearer_token),
@@ -74,6 +75,18 @@ async def register_channel(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Group ID(s) not found: {sorted(missing)}",
             )
+
+    # Idempotent path: when a Bearer-token caller supplies an installation_id,
+    # upsert by (client_id, installation_id). Returns 200 on update, 201 on create.
+    caller_client_id = await get_client_id_from_request(request)
+    if caller_client_id and data.installation_id:
+        channel, created = await repo.upsert_channel_by_installation(
+            db=db, actor=current_user, client_id=client_id, data=data
+        )
+        await db.commit()
+        if not created:
+            response.status_code = status.HTTP_200_OK
+        return channel
 
     channel = await repo.create_channel(db=db, actor=current_user, client_id=client_id, data=data)
     await db.commit()
