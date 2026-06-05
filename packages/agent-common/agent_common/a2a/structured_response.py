@@ -78,7 +78,7 @@ def get_response_format(
     """Get the appropriate response_format strategy for a model.
 
     Encapsulates the model-specific logic for structured output:
-    - OpenAI/Azure: ToolStrategy (avoids .parse() API that requires strict tools)
+    - OpenAI (Azure or direct ChatOpenAI): ToolStrategy (avoids .parse() API that requires strict tools)
     - Bedrock without thinking: AutoStrategy
     - Bedrock with thinking: None + SubAgentResponseSchema added as a tool
     - Others (Gemini, etc.): AutoStrategy
@@ -98,7 +98,7 @@ def get_response_format(
     """
     model_class = model.__class__.__name__
 
-    if model_class == "AzureChatOpenAI":
+    if model_class == "AzureChatOpenAI" or model_class == "ChatOpenAI":
         return ToolStrategy(schema=SubAgentResponseSchema)
     elif model_class == "ChatBedrockConverse":
         if thinking_enabled:

@@ -594,6 +594,12 @@ def create_model(
             api_key=api_key,
             temperature=0.7,
             callbacks=callbacks,
+            # Force OpenAI's streaming API to include `usage` in the final
+            # chunk (stream_options={"include_usage": true}) so LangChain
+            # populates `usage_metadata` on the AIMessage. Without this,
+            # CostTrackingCallback sees no usage data on plain ChatOpenAI
+            # endpoints and OpenAI-backed conversations report zero cost.
+            stream_usage=True,
         )
     else:
         # Lazy import for Azure OpenAI provider

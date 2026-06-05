@@ -52,6 +52,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ToolRetryMiddleware
 from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
+from langchain_aws import ChatBedrockConverse
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
@@ -1074,7 +1075,14 @@ def build_common_middleware_stack(
                 truncate_args_settings=summarization_defaults["truncate_args_settings"],
             ),
             AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-            BedrockPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+        ]
+        # BedrockPromptCachingMiddleware injects Bedrock-specific cache point hints
+        # into requests. Only attach it for actual Bedrock models — on OpenAI,
+        # Gemini, or local models it is at best a no-op and at worst confuses
+        # the provider with unknown fields.
+        if isinstance(model, ChatBedrockConverse):
+            middleware.append(BedrockPromptCachingMiddleware(unsupported_model_behavior="ignore"))
+        middleware += [
             PatchToolCallsMiddleware(),
             ToolRetryMiddleware(
                 max_retries=5,
