@@ -65,7 +65,7 @@ FILE_ANALYZER_DESCRIPTION = (
 # Default model for file analysis (true multimodal with audio/video support)
 # Can be overridden via FILE_ANALYZER_MODEL environment variable
 # Note: Must be a model supporting file_url content (gpt-4o, claude-3.5-sonnet, or Gemini models)
-DEFAULT_FILE_ANALYZER_MODEL: ModelType = "gemini-3-flash-preview"
+DEFAULT_FILE_ANALYZER_MODEL: ModelType = os.getenv("FILE_ANALYZER_MODEL", "gemini-3-flash-preview")  # type: ignore
 
 # Regex to extract URLs from text
 # Uses negative lookbehind to exclude trailing punctuation (periods, commas, etc.)
