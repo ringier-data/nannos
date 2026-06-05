@@ -29,13 +29,14 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import AsyncIterable, Callable
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from deepagents import CompiledSubAgent
 from deepagents.backends import StateBackend
 from deepagents.backends.composite import CompositeBackend
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.callbacks import Callbacks
@@ -70,6 +71,11 @@ from agent_common.a2a.structured_response import (
     A2A_PROTOCOL_ADDENDUM,
     StructuredResponseMixin,
     get_response_format,
+)
+from agent_common.backends.attachments_store import (
+    build_attachments_backend_from_blocks,
+    collect_attachment_blocks_from_messages,
+    set_current_attachments_backend,
 )
 from agent_common.core.graph_utils import (
     build_sub_agent_graph,
@@ -1164,6 +1170,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         _is_hitl_resume = isinstance(input_data, LGCommand)
 
+        human_message = None
         if not _is_hitl_resume:
             # Prepare input with multi-modal support (handles content blocks)
             human_message = await self._prepare_human_message_input(input_data)
@@ -1185,11 +1192,30 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             # Ensure tools/skills/prompt are resolved and default agent is built (lazy init)
             await self._ensure_agent()
 
-            # Build an ephemeral /attachments/ backend from this turn's message so
-            # skills/sandbox commands can access attached files on disk. Skipped on
-            # HITL resume (Command) since there is no fresh message to parse.
+            # Build the /attachments/ backend by merging the current message's blocks
+            # with any blocks found in the last 20 checkpoint messages.
+            # The current message is appended as the newest entry so its blocks win
+            # on filename collisions while still preserving files from prior turns.
+            # On HITL resume there is no fresh message — checkpoint only.
             base_backend_factory = self._cached_effective_backend_factory or StateBackend()
-            attachments_backend = None if _is_hitl_resume else self._build_attachments_backend(input_data)
+            # self._agent is None for sandbox agents (_ensure_agent skips building it;
+            # the sandbox graph is built later per-invocation).  Any compiled graph for
+            # this agent can read the thread's checkpoint, so we fall back to building
+            # a temporary non-sandbox graph solely for the aget_state call.
+            _graph_for_state = self._agent or self._build_graph(
+                self._cached_effective_backend_factory or StateBackend()
+            )
+            checkpoint_state = await _graph_for_state.aget_state(cast(RunnableConfig, config))
+            checkpoint_msgs = list(checkpoint_state.values.get("messages") or [])
+            msgs_to_scan = checkpoint_msgs if human_message is None else checkpoint_msgs + [human_message]
+            all_blocks = collect_attachment_blocks_from_messages(msgs_to_scan)
+            attachments_backend = build_attachments_backend_from_blocks(all_blocks)
+            if attachments_backend is not None:
+                logger.info(
+                    "Mounting %d attachment(s) at /attachments/ for '%s'",
+                    len(attachments_backend._attachments),
+                    self.name,
+                )
             invocation_backend_factory = self._compose_backend_with_attachments(
                 base_backend_factory, attachments_backend
             )
@@ -1198,8 +1224,6 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             # outside the FilesystemMiddleware backend (e.g. semantic_search_file)
             # can reach the attached files. Reset in the finally block.
             if attachments_backend is not None:
-                from agent_common.backends.attachments_store import set_current_attachments_backend
-
                 _attachments_token = set_current_attachments_backend(attachments_backend)
 
             # If sandbox enabled, build a per-invocation graph with sandbox backend
@@ -1269,7 +1293,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 else:
                     agent = self._agent
 
-            agent_input = input_data if _is_hitl_resume else {"messages": [human_message]}
+            agent_input = input_data if human_message is None else {"messages": [human_message]}
 
             # CRITICAL: Dynamic agent graphs are standalone, not subgraphs.
             # checkpoint_ns must be "" for standalone graphs (same pattern as GPAgentRunnable).

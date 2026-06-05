@@ -353,6 +353,62 @@ def get_current_attachments_backend() -> AttachmentsStoreBackend | None:
     return _current_attachments_backend.get()
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint-based attachment reconstruction
+# ---------------------------------------------------------------------------
+
+_MAX_ATTACHMENT_HISTORY_MESSAGES = 20
+
+
+def collect_attachment_blocks_from_messages(
+    messages: list,
+    max_messages: int = _MAX_ATTACHMENT_HISTORY_MESSAGES,
+) -> list[dict]:
+    """Collect file blocks from the most recent *max_messages* checkpoint messages.
+
+    Walks messages newest-first and accumulates blocks from every turn, stopping
+    after *max_messages* have been scanned.  Filenames are de-duplicated — the
+    most recent occurrence wins.
+
+    Two storage formats are handled transparently:
+
+    - ``additional_kwargs["file_blocks"]`` — orchestrator style (blocks are
+      excluded from the LLM-visible text but kept in the checkpoint).
+    - Multimodal ``content`` list — sub-agent style (blocks are passed directly
+      to the model as content blocks).
+    """
+    all_blocks: list[dict] = []
+    seen: set[str] = set()
+
+    for i, msg in enumerate(reversed(messages)):
+        if i >= max_messages:
+            break
+
+        # Orchestrator style: blocks stored outside the LLM-visible content.
+        kwargs = getattr(msg, "additional_kwargs", {}) or {}
+        prior_blocks: list[dict] | None = kwargs.get("file_blocks")
+
+        # Sub-agent style: blocks embedded in a multimodal content list.
+        if not prior_blocks:
+            content = getattr(msg, "content", None)
+            if isinstance(content, list):
+                prior_blocks = [
+                    b for b in content
+                    if isinstance(b, dict) and b.get("type") in ("image", "audio", "video", "file")
+                ] or None
+
+        if not prior_blocks:
+            continue
+
+        for block in prior_blocks:
+            key = block.get("filename") or block.get("name") or block.get("url", "")
+            if key not in seen:
+                all_blocks.append(block)
+                seen.add(key)
+
+    return all_blocks
+
+
 class ContextScopedAttachmentsBackend(BackendProtocol):
     """Stateless ``/attachments/`` backend that delegates to the current turn's backend.
 

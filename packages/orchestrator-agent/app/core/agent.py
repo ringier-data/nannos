@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 from a2a.types import Part, TaskState
 from agent_common.backends.attachments_store import (
     build_attachments_backend_from_blocks,
+    collect_attachment_blocks_from_messages,
     reset_current_attachments_backend,
     set_current_attachments_backend,
 )
@@ -330,9 +331,21 @@ class OrchestratorDeepAgent:
 
         # Determine input based on whether we're resuming or starting fresh
         if resume is not None:
-            # Resume from interrupt with the provided resume value
+            # Resume from interrupt with the provided resume value.
+            # Reconstruct the attachments backend from the checkpointed HumanMessage's
+            # additional_kwargs["file_blocks"] — stored there on the first turn so
+            # this works across nodes without any separate persistence layer.
             input_data = Command(resume=resume)
             logger.info(f"Resume input data: Command(resume={resume})")
+            checkpoint_state = await graph.aget_state(config)
+            blocks = collect_attachment_blocks_from_messages(checkpoint_state.values.get("messages") or [])
+            attachments_backend = build_attachments_backend_from_blocks(blocks)
+            if attachments_backend is not None:
+                logger.info(
+                    "Restored %d attachment(s) at /attachments/ for orchestrator HITL resume",
+                    len(attachments_backend._attachments),
+                )
+                _attachments_token = set_current_attachments_backend(attachments_backend)
         else:
             # Build text content from parts
             # Files are described as references - orchestrator decides via tools whether to:
@@ -353,12 +366,35 @@ class OrchestratorDeepAgent:
             # forwarding to sub-agents (bypasses the LLM entirely)
             runtime_context.pending_file_blocks = pending_file_blocks
 
+            # Serialize file blocks into additional_kwargs so they survive in the
+            # checkpoint (stripped by the model serialization layer — LLM never sees them).
+            # NOTE: we intentionally do NOT include file content in the message text
+            # visible to the orchestrator's LLM. Sub-agents handle file analysis via
+            # the /attachments/ virtual filesystem and their own multimodal inputs.
+            serialized_blocks = [
+                b if isinstance(b, dict) else b.model_dump()
+                for b in pending_file_blocks
+            ]
+            current_msg = HumanMessage(
+                content=text_content,
+                additional_kwargs={"file_blocks": serialized_blocks} if serialized_blocks else {},
+            )
+
             # Mount the conversation's attachments at /attachments/ for THIS turn.
-            # The orchestrator graph is shared/cached per model, so the content
-            # cannot be baked into the backend — it is exposed via a context
-            # variable that the mounted ``ContextScopedAttachmentsBackend`` proxy
-            # and ``semantic_search_file`` read from. Reset in the finally block.
-            attachments_backend = build_attachments_backend_from_blocks(pending_file_blocks)
+            # The compiled graph is shared/cached per model — its CompositeBackend
+            # routes cannot be mutated per turn (unlike DynamicLocalAgentRunnable,
+            # which rebuilds its graph when attachments are present).
+            # A ContextScopedAttachmentsBackend proxy reads from the ContextVar
+            # registered here.  Reset in the finally block.
+            #
+            # Attachments are conversation-scoped: merge the current message's blocks
+            # with any blocks from the last 20 checkpoint messages.  The current
+            # message is appended as newest so its files win on filename collisions
+            # while still preserving attachments from prior turns.
+            checkpoint_state = await graph.aget_state(config)
+            checkpoint_msgs = list(checkpoint_state.values.get("messages") or [])
+            all_blocks = collect_attachment_blocks_from_messages(checkpoint_msgs + [current_msg])
+            attachments_backend = build_attachments_backend_from_blocks(all_blocks)
             if attachments_backend is not None:
                 logger.info(
                     "Mounting %d attachment(s) at /attachments/ for the orchestrator turn",
@@ -367,11 +403,7 @@ class OrchestratorDeepAgent:
                 _attachments_token = set_current_attachments_backend(attachments_backend)
                 config.setdefault("metadata", {})["has_attachments"] = True
 
-            # NOTE: we intentionally do NOT include file content in the input to the orchestrator's graph.
-            # It will be a sub-agent responsibility to read the file content if needed, using the tools available to it.
-            # This keeps the orchestrator's graph focused on orchestration and delegation.
-            # The file-analyzer sub-agent can always be used in case the sub-agent input modalities are insufficient
-            input_data = {"messages": [HumanMessage(content=text_content)]}
+            input_data = {"messages": [current_msg]}
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0
