@@ -154,9 +154,16 @@ async def twilio_stream(websocket: WebSocket) -> None:
                             state["stream_sid"],
                             state["call_sid"],
                         )
+                        # Merge context_messages into system_prompt (not as user input, but as system instructions)
+                        system_prompt = call_config.system_prompt
+                        if call_config.context_messages:
+                            context_str = "\n".join(call_config.context_messages)
+                            system_prompt = f"{system_prompt}\n\nContext:\n{context_str}"
+                            logger.info("Merged %d context messages into system prompt", len(call_config.context_messages))
+                        
                         init_query = json.dumps(
                             {
-                                "system_prompt": call_config.system_prompt,
+                                "system_prompt": system_prompt,
                                 "voice_name": call_config.voice_name or "Kore",
                                 "mcp_tools": call_config.mcp_tools or [],
                                 "access_token": call_config.access_token,
@@ -171,22 +178,11 @@ async def twilio_stream(websocket: WebSocket) -> None:
                         init_query = json.dumps({})  # Use defaults
 
 
-                    # Start A2A agent streaming (non-blocking)
+                    # Start A2A agent streaming (non-blocking).
                     nonlocal agent_output_task
                     agent_output_task = asyncio.create_task(
                         _agent_to_twilio(state["session_key"], init_query)
                     )
-
-                    # Inject context messages as human turns after the session starts.
-                    # These are TextParts from the scheduler payload, injected via
-                    # inject_text() → audio_in queue → session.send_client_content().
-                    # We yield control once so _start_audio_session registers the
-                    # session in _active_sessions before we try to inject.
-                    if call_config and call_config.context_messages:
-                        await asyncio.sleep(0)  # yield to let _start_audio_session register the session
-                        for cm in call_config.context_messages:
-                            await _voice_agent.inject_text(state["session_key"], cm)
-                            logger.info("Injected context message into session %s: %s", state["session_key"], cm[:80])
 
                 elif event == "media":
                     if not state["session_key"]:
