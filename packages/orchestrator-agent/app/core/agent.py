@@ -27,6 +27,7 @@ from agent_common.backends.attachments_store import (
     reset_current_attachments_backend,
     set_current_attachments_backend,
 )
+from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk
@@ -50,6 +51,30 @@ from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 
 logger = logging.getLogger(__name__)
+
+
+# Tool names that must NOT surface as a bare "Using {tool}…" activity-log entry
+# on the orchestrator's own stream:
+#   - response schemas: not real tool calls;
+#   - ``task``: the dispatch middleware emits "Delegating to {subagent}…" instead;
+#   - ``write_todos``: rendered as a work-plan, not an activity line;
+#   - ``eval`` (the PTC code interpreter): an internal REPL. Sub-agents run their
+#     tools *inside* ``eval``, and those sub-agent ``eval`` tool-call chunks leak
+#     into the orchestrator's ``messages`` stream via inherited streaming
+#     callbacks — arriving with the orchestrator's own ``thread_id`` and an empty
+#     ``ns``, so the thread-id guard below cannot distinguish them. Surfacing them
+#     would duplicate the sub-agent's already-sourced "eval-agent › Using eval…"
+#     entry as an unattributed "Using eval…". The orchestrator's own PTC eval is
+#     likewise an internal mechanism, not user-facing activity.
+_ACTIVITY_LOG_EXCLUDED_TOOLS: frozenset[str] = frozenset(
+    {
+        "FinalResponseSchema",
+        "SubAgentResponseSchema",
+        "task",
+        "write_todos",
+        PTC_CODE_INTERPRETER_TOOL_NAME,
+    }
+)
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -398,16 +423,17 @@ class OrchestratorDeepAgent:
                         continue
 
                     # --- Tool call detection for status history ---
-                    # Capture tool calls (excluding FinalResponseSchema and SubAgentResponseSchema) for status history display
-                    # Skip "task" tool because middleware emits "Delegating to {subagent}..." instead
+                    # Capture tool calls for activity-log display. Internal/leaked
+                    # tools are excluded (see _ACTIVITY_LOG_EXCLUDED_TOOLS) — notably
+                    # ``eval``, whose sub-agent tool-call chunks leak in here with the
+                    # orchestrator's own thread_id and would render unattributed.
                     if msg_chunk.tool_call_chunks:
                         for tc_chunk in msg_chunk.tool_call_chunks:
                             tool_name = tc_chunk.get("name")
                             # Emit status for actual tool calls (not response schemas, not task tool)
                             if (
                                 tool_name
-                                and tool_name
-                                not in ("FinalResponseSchema", "SubAgentResponseSchema", "task", "write_todos")
+                                and tool_name not in _ACTIVITY_LOG_EXCLUDED_TOOLS
                                 and tool_name not in emitted_updates
                             ):
                                 emitted_updates.add(tool_name)
@@ -419,13 +445,28 @@ class OrchestratorDeepAgent:
                             # Incremental structured response streaming
                             delta = response_streamer.feed(tc_chunk)
                             if delta:
-                                stream_buffer.append(delta)
-                                for chunk in stream_buffer.flush_ready():
+                                if response_streamer.is_working:
+                                    # Intermediate "working" narration (e.g. emitted
+                                    # while delegating to a sub-agent) — not the final
+                                    # answer. Surface as an orchestrator thinking block,
+                                    # not as visible response content.
                                     yield AgentStreamResponse(
                                         state=TaskState.working,
-                                        content=chunk,
-                                        metadata={"streaming_chunk": True},
+                                        content=delta,
+                                        metadata={
+                                            "streaming_chunk": True,
+                                            "intermediate_output": True,
+                                            "agent_name": "orchestrator",
+                                        },
                                     )
+                                else:
+                                    stream_buffer.append(delta)
+                                    for chunk in stream_buffer.flush_ready():
+                                        yield AgentStreamResponse(
+                                            state=TaskState.working,
+                                            content=chunk,
+                                            metadata={"streaming_chunk": True},
+                                        )
                         continue
 
                     # --- Regular content streaming ---
@@ -446,13 +487,27 @@ class OrchestratorDeepAgent:
                             # (e.g. Gemini) emit as plain text instead of tool calls.
                             filtered = response_streamer.feed_content(token_text)
                             if filtered:
-                                stream_buffer.append(filtered)
-                                for chunk in stream_buffer.flush_ready():
+                                if response_streamer.is_working:
+                                    # Intermediate "working" narration (e.g. while
+                                    # delegating) — route to the orchestrator
+                                    # thinking block, not the visible response.
                                     yield AgentStreamResponse(
                                         state=TaskState.working,
-                                        content=chunk,
-                                        metadata={"streaming_chunk": True},
+                                        content=filtered,
+                                        metadata={
+                                            "streaming_chunk": True,
+                                            "intermediate_output": True,
+                                            "agent_name": "orchestrator",
+                                        },
                                     )
+                                else:
+                                    stream_buffer.append(filtered)
+                                    for chunk in stream_buffer.flush_ready():
+                                        yield AgentStreamResponse(
+                                            state=TaskState.working,
+                                            content=chunk,
+                                            metadata={"streaming_chunk": True},
+                                        )
                     continue
 
                 if part_type == "custom":

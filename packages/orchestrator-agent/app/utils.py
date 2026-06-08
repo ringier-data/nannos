@@ -125,6 +125,8 @@ def build_runtime_context(
     from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
+    from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
+
     from .agents.file_analyzer import create_file_analyzer_subagent
     from .agents.task_scheduler import create_task_scheduler_subagent
     from .middleware import ToolsetSelectorMiddleware
@@ -407,6 +409,11 @@ def build_runtime_context(
                                     "semantic_search_file",
                                     "docstore_export",
                                     "copy_file",
+                                    # The PTC code interpreter (`eval`) is the gateway to all
+                                    # PTC-exposed tools; it is a "base" tool (no server_name) so
+                                    # it survives Phase 1, but Phase 2 tool-selection can drop it.
+                                    # Pin it so the GP model never loses `tools.*` access.
+                                    PTC_CODE_INTERPRETER_TOOL_NAME,
                                 ],
                                 cost_logger=cost_logger,
                                 compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,

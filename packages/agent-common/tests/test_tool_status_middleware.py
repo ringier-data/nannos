@@ -78,6 +78,30 @@ class TestBuildStatus:
             == 'Searching documents for "quarterly revenue"\u2026'
         )
 
+    # --- eval (PTC code interpreter) ---
+    def test_eval_lists_tool_calls_in_snake_case(self):
+        code = "const r = await tools.fetchFetchMarkdown({url: 'x'}); await tools.writeFile({path: 'a'});"
+        assert _build_status("eval", {"code": code}) == "Running fetch_fetch_markdown, write_file\u2026"
+
+    def test_eval_dedupes_and_preserves_order(self):
+        code = "await tools.grep({}); await tools.readFile({}); await tools.grep({});"
+        assert _build_status("eval", {"code": code}) == "Running grep, read_file\u2026"
+
+    def test_eval_summarises_when_many_tools(self):
+        code = ";".join(f"tools.t{i}()" for i in range(8))
+        result = _build_status("eval", {"code": code})
+        assert result.startswith("Running t0, t1, t2, t3, t4 +3 more")
+
+    def test_eval_falls_back_to_code_snippet_when_no_tool_calls(self):
+        assert _build_status("eval", {"code": "const x = 1 + 1; x"}) == "Running `const x = 1 + 1; x`\u2026"
+
+    def test_eval_no_code(self):
+        assert _build_status("eval", {}) == "Using eval\u2026"
+
+    def test_eval_ignores_self_and_bracket_noise(self):
+        # Single-word camel names round-trip; underscores survive.
+        assert _build_status("eval", {"code": "await tools.search({q: 1})"}) == "Running search\u2026"
+
 
 # ---------------------------------------------------------------------------
 # Integration tests for awrap_tool_call

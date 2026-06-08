@@ -71,7 +71,11 @@ from agent_common.a2a.structured_response import (
     StructuredResponseMixin,
     get_response_format,
 )
-from agent_common.core.graph_utils import build_sub_agent_graph
+from agent_common.core.graph_utils import (
+    build_sub_agent_graph,
+    denest_parent_pregel_context,
+    isolate_parent_stream_context,
+)
 from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.middleware.conversation_context_tools_middleware import ContextGatedTool
 from agent_common.utils import get_language_display_name
@@ -1306,13 +1310,36 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
             # Stream the agent with custom events and messages using v2 format
             # v2: every chunk is a StreamPart dict: {"type": ..., "ns": ..., "data": ...}
-            async for part in agent.astream(
-                agent_input,
-                config=standalone_config,
-                stream_mode=["custom", "messages"],
-                context=subagent_context,
-                version="v2",
-            ):
+            #
+            # The sub-agent graph is invoked from inside the orchestrator's Pregel
+            # node, which leaks the parent's __pregel_task_id into our effective
+            # config and would force the sub-agent's Pregel loop to is_nested=True.
+            # In that mode a GraphInterrupt propagates as an exception instead of
+            # being suppressed + saved to the checkpoint, and the resulting
+            # checkpoint does NOT cleanly replay an interrupted tool node when the
+            # orchestrator resumes via a standalone Command(resume) (the approved
+            # call is lost and the model re-runs). denest_parent_pregel_context()
+            # strips that key so the graph runs as a standalone root: interrupts are
+            # suppressed + persisted and the post-stream aget_state check below
+            # re-raises them. The contextvar must stay active for the whole
+            # iteration, so the de-nesting wraps the astream generator itself.
+            async def _denested_agent_astream() -> AsyncIterable[Any]:
+                # denest_parent_pregel_context: run as a standalone Pregel root.
+                # isolate_parent_stream_context: drop the inherited
+                # StreamMessagesHandler so this sub-agent's token/tool-call chunks
+                # do not leak into the orchestrator's `messages` stream (where they
+                # would surface unattributed, e.g. an unprefixed "Using eval…").
+                with denest_parent_pregel_context(), isolate_parent_stream_context():
+                    async for _part in agent.astream(
+                        agent_input,
+                        config=standalone_config,
+                        stream_mode=["custom", "messages"],
+                        context=subagent_context,
+                        version="v2",
+                    ):
+                        yield _part
+
+            async for part in _denested_agent_astream():
                 part_type = part["type"]
 
                 # Capture tool calls and stream content from message chunks

@@ -25,7 +25,11 @@ from agent_common.a2a.client_runnable import A2AClientRunnable as _ClientRunnabl
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
-from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
+from agent_common.core.graph_utils import (
+    build_code_interpreter_middlewares,
+    build_common_middleware_stack,
+    create_indexing_backend_factory,
+)
 from agent_common.core.model_factory import _has_aws_credentials, create_model
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
@@ -533,6 +537,21 @@ class GraphFactory:
         # Supports argument-based conditions (e.g., docstore_search only when include_personal=True).
         hitl_middleware = _create_hitl_middleware()
 
+        # CodeInterpreterMiddleware exposes an ``eval`` JS REPL (with skills_backend).
+        # The orchestrator passes ``broaden_exposure=False`` so ``eval`` exposes
+        # only the filesystem baseline — NOT the per-user tool registry (hundreds
+        # of MCP tools). The orchestrator's job is to plan and delegate via
+        # ``task``; pulling the whole registry into the PTC prompt bloats it and
+        # strips every dispatchable tool from the model's bound list, derailing it
+        # into emitting a final response instead of dispatching. ``task``, ``eval``
+        # and the response-schema tools remain visible to the model.
+        code_interpreter_middlewares = build_code_interpreter_middlewares(
+            self.backend_factory,
+            broaden_exposure=False,
+            risk_scorer=score_tool_risk,
+            default_risk_threshold=0.8,
+        )
+
         return [
             context_gate_middleware,
             dynamic_tool_middleware,
@@ -541,6 +560,7 @@ class GraphFactory:
             steering_middleware,
             user_preferences_middleware,
             playbook_middleware,
+            *code_interpreter_middlewares,
             ToolStatusMiddleware(),
             self._loop_detection_middleware,
             self._auth_middleware,

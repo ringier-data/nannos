@@ -93,6 +93,50 @@ class StreamHandler:
         return recently_called
 
     @staticmethod
+    def is_phantom_subagent_completion(final_state: Any) -> bool:
+        """Detect a completion that claims sub-agent output but never delegated.
+
+        The model occasionally emits the final-response envelope with
+        ``include_subagent_output=true`` *without* actually calling the ``task``
+        tool (eager completion). There is then no ``task`` ToolMessage to append,
+        so the user gets an empty response. The executor uses this to re-enter the
+        graph with a corrective nudge instead of surfacing the empty completion.
+
+        Returns ``True`` only when ``include_subagent_output`` is set but no
+        sub-agent ran this turn.
+        """
+        if not isinstance(final_state, dict):
+            return False
+
+        # Resolve the structured response (current-turn tool call wins over the
+        # possibly-stale ``structured_response`` channel), mirroring
+        # ``parse_agent_response``.
+        structured: Any = None
+        messages = final_state.get("messages", [])
+        if messages:
+            for msg in reversed(StreamHandler._extract_current_turn_messages(messages)):
+                if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                    for tool_call in msg.tool_calls:
+                        if tool_call.get("name") == "FinalResponseSchema":
+                            structured = tool_call.get("args", {})
+                            break
+                if structured is not None:
+                    break
+        if structured is None:
+            structured = final_state.get("structured_response")
+
+        if isinstance(structured, dict):
+            include = bool(structured.get("include_subagent_output", False))
+        else:
+            include = bool(getattr(structured, "include_subagent_output", False))
+        if not include:
+            return False
+
+        # include_subagent_output=true is only consistent if a sub-agent actually
+        # ran this turn (produced a `task` ToolMessage).
+        return not StreamHandler._extract_recently_called_subagents(final_state)
+
+    @staticmethod
     def _check_all_agents_blocked(
         recently_called: set[str], a2a_tracking: Dict[str, Any]
     ) -> tuple[bool, Optional[tuple[str, Dict[str, Any]]]]:

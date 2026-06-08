@@ -51,6 +51,7 @@ from .a2a_extensions import (
 )
 
 # from google.adk.sessions import InMemorySessionService
+from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
 from .registry import RegistryService, User
@@ -64,6 +65,18 @@ from .steering_state import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Bounded re-entries to recover from an "eager completion" where the model sets
+# include_subagent_output=true but never actually delegated (no `task` call).
+MAX_DELEGATION_REINVOCATIONS = int(os.getenv("MAX_DELEGATION_REINVOCATIONS", "1"))
+
+# Corrective nudge fed back into the graph on such a re-entry.
+_DELEGATION_NUDGE = (
+    "Your previous response set include_subagent_output=true but you did not call the `task` tool, "
+    "so no sub-agent was actually invoked and there is no sub-agent output to include. "
+    "Do not finalize yet. Call the `task` tool now to delegate the work to the appropriate sub-agent, "
+    "then base your final response on the sub-agent's result."
+)
 
 
 class OrchestratorDeepAgentExecutor(AgentExecutor):
@@ -562,6 +575,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
             # Stable artifact ID for streaming content chunks (A2A artifact-append pattern)
             steering_reinvocations = 0
+            delegation_reinvocations = 0
 
             while True:
                 streaming_artifact_id = str(uuid.uuid4())
@@ -621,6 +635,30 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                                 f"message(s) (reinvocation {steering_reinvocations}/{MAX_STEERING_REINVOCATIONS})"
                             )
                             continue  # Loop back for another stream round
+
+                # Phantom-delegation guard: the model claimed completion with
+                # include_subagent_output=true but never actually delegated (no
+                # `task` ToolMessage this turn), which yields an empty response.
+                # Re-enter once with a corrective nudge so it performs the
+                # delegation instead of surfacing nothing.
+                if (
+                    deferred_terminal_item is not None
+                    and deferred_terminal_item.state == TaskState.completed
+                    and delegation_reinvocations < MAX_DELEGATION_REINVOCATIONS
+                ):
+                    phantom_state = graph.get_state(config)  # type: ignore
+                    phantom_values = phantom_state.values if hasattr(phantom_state, "values") else {}
+                    if StreamHandler.is_phantom_subagent_completion(phantom_values):
+                        delegation_reinvocations += 1
+                        message_parts = [Part(root=TextPart(text=_DELEGATION_NUDGE))]
+                        resume_value = None  # fresh corrective turn, not a resume
+                        logger.warning(
+                            "[DELEGATION] include_subagent_output=true but no sub-agent ran this turn — "
+                            "re-entering to force delegation (%d/%d)",
+                            delegation_reinvocations,
+                            MAX_DELEGATION_REINVOCATIONS,
+                        )
+                        continue  # Loop back for another stream round
 
                 # Emit feedback request for complex tasks before terminal event
                 if (

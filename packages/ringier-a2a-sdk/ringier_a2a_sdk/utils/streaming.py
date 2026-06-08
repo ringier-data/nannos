@@ -108,11 +108,38 @@ class StructuredResponseStreamer:
         self._content_buf = ""
         self._content_streamed = ""
         self._content_tracking = False
+        # Parsed ``task_state`` of the structured response, once it appears.
+        # ``task_state`` precedes ``message`` in the schema, so it is known
+        # before any message delta is emitted — letting callers route an
+        # intermediate ("working") message away from the final-answer channel.
+        self._task_state: Optional[str] = None
 
     @property
     def tracking(self) -> bool:
         """Whether a structured response tool call is currently being tracked."""
         return self._tracking
+
+    @property
+    def task_state(self) -> Optional[str]:
+        """The structured response's ``task_state``, or ``None`` if not yet parsed."""
+        return self._task_state
+
+    @property
+    def is_working(self) -> bool:
+        """Whether the structured response is an intermediate ``working`` status.
+
+        A ``working`` message is progress narration (e.g. emitted while the
+        orchestrator delegates to a sub-agent), not the final answer — callers
+        should route it to the intermediate/thinking channel, not the visible
+        response.
+        """
+        return self._task_state == "working"
+
+    def _capture_task_state(self, parsed: Any) -> None:
+        if isinstance(parsed, dict):
+            ts = parsed.get("task_state")
+            if isinstance(ts, str) and ts:
+                self._task_state = ts
 
     def feed(self, tc_chunk: Dict[str, Any]) -> Optional[str]:
         """Process a single tool_call_chunk and return the new message delta, if any.
@@ -126,6 +153,7 @@ class StructuredResponseStreamer:
             self._tracking = True
             self._args = ""
             self._streamed = ""
+            self._task_state = None
 
         if not self._tracking:
             return None
@@ -136,6 +164,7 @@ class StructuredResponseStreamer:
 
         self._args += args_delta
         parsed = parse_partial_json(self._args)
+        self._capture_task_state(parsed)
         if not parsed or "message" not in parsed:
             return None
 
@@ -175,6 +204,7 @@ class StructuredResponseStreamer:
         parsed = parse_partial_json(stripped)
         if not parsed:
             return None  # Suppress — not parseable yet
+        self._capture_task_state(parsed)
 
         # Check whether this looks like the target schema (has "message" key,
         # and optionally "task_state" which is the FinalResponseSchema marker).

@@ -3182,8 +3182,8 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'langgraph'", specifier = ">=1.35.0" },
     { name = "boto3", marker = "extra == 'langgraph-google'", specifier = ">=1.35.0" },
     { name = "cryptography", specifier = ">=43.0.0" },
-    { name = "deepagents", marker = "extra == 'langgraph'", specifier = ">=0.5.7,<0.6.0" },
-    { name = "deepagents", marker = "extra == 'langgraph-google'", specifier = ">=0.5.7,<0.6.0" },
+    { name = "deepagents", extras = ["quickjs"], marker = "extra == 'langgraph'", specifier = ">=0.6.0,<0.7.0" },
+    { name = "deepagents", extras = ["quickjs"], marker = "extra == 'langgraph-google'", specifier = ">=0.6.0,<0.7.0" },
     { name = "google-auth", marker = "extra == 'google-embeddings'", specifier = ">=2.25.0" },
     { name = "google-genai", marker = "extra == 'google-embeddings'", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -3206,7 +3206,7 @@ provides-extras = ["langgraph", "langgraph-google", "google-embeddings"]
 [package.metadata.requires-dev]
 dev = [
     { name = "boto3", specifier = ">=1.35.0" },
-    { name = "deepagents", specifier = ">=0.5.7,<0.6.0" },
+    { name = "deepagents", extras = ["quickjs"], specifier = ">=0.6.0,<0.7.0" },
     { name = "langchain", specifier = ">=0.3.18" },
     { name = "langchain-aws", specifier = ">=1.4.3" },
     { name = "langchain-mcp-adapters", specifier = ">=0.0.6" },

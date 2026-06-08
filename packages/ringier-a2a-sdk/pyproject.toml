@@ -21,7 +21,7 @@ langgraph = [
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=0.1.4",
     "langchain-mcp-adapters>=0.0.6",
-    "deepagents>=0.5.7,<0.6.0",
+    "deepagents[quickjs]>=0.6.0,<0.7.0",
     "boto3>=1.35.0",
 ]
 langgraph-google = [
@@ -30,7 +30,7 @@ langgraph-google = [
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=0.1.4",
     "langchain-mcp-adapters>=0.0.6",
-    "deepagents>=0.5.7,<0.6.0",
+    "deepagents[quickjs]>=0.6.0,<0.7.0",
     "boto3>=1.35.0",
 ]
 google-embeddings = [
@@ -51,7 +51,7 @@ dev = [
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=0.1.4",
     "langchain-mcp-adapters>=0.0.6",
-    "deepagents>=0.5.7,<0.6.0",
+    "deepagents[quickjs]>=0.6.0,<0.7.0",
     "boto3>=1.35.0",
 ]
 

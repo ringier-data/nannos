@@ -25,11 +25,14 @@ build_sub_agent_graph
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+import os
+import threading
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 import httpx
-from langchain_core.tools import ToolException
+from langchain_core.tools import BaseTool, ToolException
 from langgraph.errors import GraphBubbleUp
 
 if TYPE_CHECKING:
@@ -50,10 +53,12 @@ from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
+from langchain_quickjs import CodeInterpreterMiddleware
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
+from langgraph.types import interrupt
 from ringier_a2a_sdk.cost_tracking import CostLogger
 from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
 
@@ -65,11 +70,158 @@ from agent_common.middleware.conversation_context_tools_middleware import (
     ConversationContextToolsMiddleware,
 )
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+from agent_common.middleware.ptc_guard import (
+    PTC_CODE_INTERPRETER_TOOL_NAME,
+    begin_ptc_turn,
+    clear_ptc_pending,
+    end_ptc_turn,
+    resolve_ptc_thread_id,
+    take_ptc_pending,
+    wrap_tool_for_ptc,
+)
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
 from agent_common.models.skill import ResolvedSkill
 
 logger = logging.getLogger(__name__)
+
+
+# langgraph parent-Pregel scope keys (langgraph/_internal/_constants.py) that must
+# NOT leak from a parent graph's node into a sub-agent graph invoked inside it.
+# We avoid importing the private constants and pin the literal values instead.
+#
+#   * ``__pregel_task_id`` — when present in a graph's effective ``configurable``
+#     the Pregel loop marks itself ``is_nested=True`` (langgraph/pregel/_loop.py),
+#     so a ``GraphInterrupt`` propagates as an exception instead of being
+#     suppressed + saved to the checkpoint.
+#   * ``checkpoint_id`` / ``checkpoint_map`` — the parent's *checkpoint
+#     coordinates*. ``checkpoint_map`` maps a checkpoint namespace to the specific
+#     checkpoint id to load and is populated while the parent is *resuming*. If it
+#     leaks into the sub-agent's config, the sub-agent's Pregel resolves a parent
+#     checkpoint id for its own (thread, ns) instead of loading the LATEST
+#     checkpoint of its own thread — so on a standalone ``Command(resume)`` it
+#     finds no pending interrupt, discards the resume, and re-runs the model from
+#     an empty state (the "sub-agent greets / approved call lost" symptom).
+#
+# ``checkpoint_ns`` and ``__pregel_checkpointer`` are deliberately NOT stripped:
+# the sub-agent's explicit standalone config already overrides ``checkpoint_ns``
+# (to ``""``) and shares the orchestrator's single checkpointer instance, so the
+# inherited values are harmless. Stripping ``__pregel_checkpointer`` additionally
+# breaks interrupt suppression when the sub-agent does not bring its own
+# checkpointer.
+_PREGEL_TASK_ID_KEY = "__pregel_task_id"
+_PARENT_PREGEL_SCOPE_KEYS = frozenset(
+    {
+        _PREGEL_TASK_ID_KEY,
+        "checkpoint_id",
+        "checkpoint_map",
+    }
+)
+
+
+@contextlib.contextmanager
+def denest_parent_pregel_context() -> Iterator[None]:
+    """Run a sub-graph as a standalone root (``is_nested=False``).
+
+    When a sub-agent graph is invoked from *inside* a parent graph's node (as the
+    orchestrator does when dispatching a task), langgraph's ``merge_configs``
+    deep-merges the parent's ``configurable`` from the
+    ``var_child_runnable_config`` contextvar into the sub-graph's config. Parent
+    keys the sub-graph does not explicitly override therefore leak in. Two
+    failure modes result:
+
+    1. ``__pregel_task_id`` flips the sub-graph's Pregel loop to
+       ``is_nested=True``, so a ``GraphInterrupt`` *propagates as an exception*
+       instead of being suppressed and saved to the checkpoint.
+    2. The parent's *checkpoint coordinates* (``checkpoint_id`` /
+       ``checkpoint_map``) leak in. On the **resume** path — where the parent is
+       itself replaying under a ``Command(resume)`` — ``checkpoint_map`` carries
+       the parent's namespace→checkpoint-id resolution, so the sub-agent's Pregel
+       resolves a parent checkpoint id for its own thread instead of loading the
+       LATEST checkpoint of its own thread. It finds no pending interrupt,
+       silently discards the resume, and re-runs the model from an empty state —
+       the approved tool call is lost and the sub-agent answers as if freshly
+       invoked (the "sub-agent greets / approved eval lost" production symptom).
+       This leak is invisible on the *first* dispatch (the parent is not
+       resuming, so there is no stale ``checkpoint_map``), which is why the bug
+       only surfaces on HITL resume.
+
+    Stripping all of these keys (:data:`_PARENT_PREGEL_SCOPE_KEYS`) from the
+    inherited contextvar restores true standalone-root behaviour: the interrupt is
+    suppressed and persisted to the sub-agent's own checkpointer/thread, the
+    post-stream ``aget_state`` check re-raises it, and on resume the interrupted
+    tool node replays cleanly against the sub-agent's own latest checkpoint. This
+    is a no-op when there is no parent context. The contextvar must stay active
+    for the whole sub-graph iteration, so callers wrap the astream generator.
+    """
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    parent = var_child_runnable_config.get()
+    if not parent or not (_PARENT_PREGEL_SCOPE_KEYS & parent.get("configurable", {}).keys()):
+        yield
+        return
+
+    sanitized = {
+        **parent,
+        "configurable": {k: v for k, v in parent["configurable"].items() if k not in _PARENT_PREGEL_SCOPE_KEYS},
+    }
+    token = var_child_runnable_config.set(sanitized)
+    try:
+        yield
+    finally:
+        var_child_runnable_config.reset(token)
+
+
+# langgraph's stream handler for ``stream_mode=["messages"|"custom"]``
+# (langgraph/pregel/_messages.py). It is an *inheritable* callback handler, so a
+# sub-agent graph invoked inside a parent node inherits it via
+# ``var_child_runnable_config``'s callback manager. We match by class name to
+# avoid importing the private class.
+_STREAM_MESSAGES_HANDLER = "StreamMessagesHandler"
+
+
+@contextlib.contextmanager
+def isolate_parent_stream_context() -> Iterator[None]:
+    """Stop a sub-agent's token stream from leaking into the parent's stream.
+
+    A sub-agent graph invoked inside a parent graph's node inherits the parent's
+    langgraph ``StreamMessagesHandler`` through ``var_child_runnable_config``'s
+    callback manager (the handler is *inheritable*). The sub-agent's own LLM
+    token / tool-call chunks then fire the parent's handler as well, so they
+    surface on the **parent's** ``messages`` stream stamped with the *parent's*
+    ``thread_id`` and an empty namespace — indistinguishable from the parent's
+    own model output. Downstream this leaks unattributed sub-agent activity into
+    the orchestrator stream: e.g. an unprefixed ``"Using eval…"`` activity line
+    (the sub-agent's ``eval`` tool-call chunk), and sub-agent thinking/content
+    tokens mis-rendered as the orchestrator's. A ``thread_id`` filter cannot stop
+    it because the leaked copy carries the parent's ``thread_id``.
+
+    Removing only the inherited ``StreamMessagesHandler`` for the duration of the
+    sub-agent invocation stops the leak. The sub-agent's *own* ``astream``
+    installs its own ``StreamMessagesHandler`` for its own stream, so its events
+    are still captured (and re-emitted with proper attribution by the dispatch).
+    All other inherited handlers — LangSmith tracers, cost trackers — are
+    preserved, so trace nesting and cost attribution are unaffected. No-op when
+    there is no parent stream handler in context.
+    """
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    parent = var_child_runnable_config.get()
+    callbacks = parent.get("callbacks") if parent else None
+    handlers = getattr(callbacks, "handlers", None)
+    if not handlers or not any(type(h).__name__ == _STREAM_MESSAGES_HANDLER for h in handlers):
+        yield
+        return
+
+    manager = callbacks.copy()
+    for handler in list(manager.handlers):
+        if type(handler).__name__ == _STREAM_MESSAGES_HANDLER:
+            manager.remove_handler(handler)
+    token = var_child_runnable_config.set({**parent, "callbacks": manager})
+    try:
+        yield
+    finally:
+        var_child_runnable_config.reset(token)
 
 
 def _should_retry_tool_error(exc: Exception) -> bool:
@@ -101,6 +253,545 @@ def _should_retry_tool_error(exc: Exception) -> bool:
         return True
 
     return False
+
+
+# Read-only filesystem tools: safe to expose via PTC ``eval``. They can never
+# require HITL approval, so they form part of the stable PTC baseline.
+_PTC_READONLY_FS_TOOLS: frozenset[str] = frozenset({"ls", "read_file", "glob", "grep"})
+
+# Mutating filesystem tools: also exposed via PTC as part of the baseline. Their
+# per-call risk guard (inside the PTC wrapper) re-applies the user's HITL/bypass
+# rules at call time, so they are exposed (and hidden from the model) like every
+# other PTC-exposed tool.
+_PTC_MUTATING_FS_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file"})
+
+# Sandbox tools exposed via PTC *only when the backend supports execution*
+# (``supports_execution``). ``execute`` is a ``FilesystemMiddleware``-provided
+# tool, not part of the agent's explicit tool list, so it is NOT in
+# ``broaden_baseline_tools`` and would otherwise vanish from the ``eval`` REPL on
+# an interrupt *resume* (where ``request.tools`` is empty and re-exposure relies
+# on the static baseline). Wrapping it into the static baseline — gated on
+# execution support so non-sandbox agents never see a dead ``tools.execute`` —
+# keeps ``tools.execute(...)`` bound across the approve→resume re-run of ``eval``.
+_PTC_SANDBOX_TOOLS: frozenset[str] = frozenset({"execute"})
+
+# Tools that must NEVER be exposed inside the PTC ``eval`` bridge, regardless of
+# what is present on the request or in the runtime tool registry:
+#   - ``task``: sub-agent dispatch — spawns sub-agents and must run via the
+#     normal graph path (deepagents dispatch), not from inside the JS REPL.
+#   - ``write_todos``: planning/UI tool whose effect is the work-plan stream.
+#   - ``FinalResponseSchema`` / ``SubAgentResponseSchema``: structured-response
+#     schema "tools" — not executable; selecting them terminates the turn.
+# The PTC self tool (``eval``) is always auto-excluded by ``filter_tools_for_ptc``.
+_PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "task",
+        "write_todos",
+        "FinalResponseSchema",
+        "SubAgentResponseSchema",
+    }
+)
+
+
+def _code_interpreter_ptc_enabled() -> bool:
+    """Whether PTC (programmatic tool calling) is enabled for the code interpreter.
+
+    Gated by the ``CODE_INTERPRETER_PTC`` env var (default **off** for backward
+    compatibility). Set to a truthy value (``1``/``true``/``yes``/``on``) to
+    enable PTC; any falsy/unset value falls back to a bare ``eval`` tool with no
+    agent-tool bridge (tools are bound to the model and called directly).
+    """
+    return os.getenv("CODE_INTERPRETER_PTC", "0").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    }
+
+
+class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
+    """``CodeInterpreterMiddleware`` that exposes *all* eligible tools via PTC.
+
+    Two responsibilities beyond the upstream middleware:
+
+    1. **Dict-form tool tolerance.** The orchestrator injects provider-native
+       tool schemas (plain ``dict``s) into ``request.tools`` at runtime via
+       ``DynamicToolDispatchMiddleware``. The upstream ``filter_tools_for_ptc``
+       accesses ``tool.name`` on *every* request tool and raises
+       ``AttributeError: 'dict' object has no attribute 'name'`` on those
+       entries. We strip dict entries from the request used to build the PTC
+       prompt while forwarding the full, unmodified request to the model handler.
+
+    2. **Whitelisted, risk-guarded PTC exposure.** When ``broaden_exposure`` is
+       enabled (sub-agent / runner graphs), every eligible tool the agent
+       actually carries for the current turn is exposed inside ``eval`` as a
+       *risk-guarded* wrapped instance (via ``wrap_tool_for_ptc``). Eligible
+       inner tools are gathered per turn from two sources, de-duplicated by name:
+
+       * ``_static_ptc_tools`` — build-time wrapped filesystem tools (a stable
+         baseline that survives middleware ordering that hides read-only fs
+         tools from later stages);
+       * ``request.tools`` — the real ``BaseTool`` instances the graph carries
+         (a sub-agent's whitelisted tools plus its injected filesystem and
+         self-improvement tools).
+
+       The per-user runtime ``tool_registry`` is intentionally NOT harvested:
+       on the orchestrator it holds hundreds of MCP tools, which would bloat the
+       PTC prompt and over-expose tools the agent never whitelisted. The
+       orchestrator therefore sets ``broaden_exposure=False`` and exposes only
+       the filesystem baseline (it plans and delegates via ``task``).
+
+       Tools in ``_PTC_EXCLUDED_TOOL_NAMES`` (dispatch / response-schema) and the
+       PTC self tool are never exposed. The per-call risk guard inside each
+       wrapper re-applies the user's HITL/bypass rules at call time, so exposing
+       sensitive tools is safe — a guarded call returns an
+       ``human_approval_required`` payload that redirects the model to the
+       normal (HITL-gated) tool path.
+
+    3. **Hide PTC-exposed tools from the model.** Every tool exposed via PTC for
+       a turn is stripped from the model's normal (bound) tool list in
+       ``wrap_model_call`` / ``awrap_model_call`` (handling both ``BaseTool`` and
+       the orchestrator's dict schemas). The model reaches them only through
+       ``eval``, so the bound toolset — and the LangSmith trace — is limited to
+       ``eval`` plus the never-exposed dispatch / response-schema tools.
+
+    The shared-graph (orchestrator) instance is reused across users, so per-turn
+    exposure is computed locally and only momentarily assigned to ``self._ptc``
+    around the synchronous ``_prepare_for_call`` (which has no ``await`` points);
+    a lock guards the rare synchronous thread-pool model path.
+    """
+
+    def __init__(
+        self,
+        *,
+        static_ptc_tools: list[BaseTool] | None = None,
+        broaden_baseline_tools: list[BaseTool] | None = None,
+        ptc_enabled: bool = True,
+        broaden_exposure: bool = True,
+        risk_scorer: RiskScorerFn | None = None,
+        tool_risk_cache: ToolRiskCache | None = None,
+        default_risk_threshold: float = 0.8,
+        tool_server_map: dict[str, str] | None = None,
+        excluded_ptc_names: frozenset[str] = _PTC_EXCLUDED_TOOL_NAMES,
+        **kwargs: Any,
+    ) -> None:
+        # Force a fresh REPL per ``eval`` call (no cross-eval persistence).
+        #
+        # The PTC risk guard fires HITL ``interrupt()``s from inside ``eval``
+        # (a mid-tool-node pause). On resume, LangGraph re-enters at the tool
+        # node and re-runs ``eval`` so the guard can honor the approval
+        # decision. The live QuickJS interpreter is process-local state that is
+        # NOT part of the checkpoint (it is only snapshotted at turn end via
+        # ``after_agent`` and restored at turn start via ``before_agent`` —
+        # neither runs on an interrupt resume). With the default ``mode="thread"``
+        # that re-run would execute against either a stale/polluted REPL (same
+        # pod, mutated by the aborted probe run) or an empty one (a different,
+        # stateless pod), making the re-run non-deterministic and unsound.
+        #
+        # ``mode="call"`` removes persistent REPL state entirely: each ``eval``
+        # gets a fresh context, so the re-run depends only on checkpointed
+        # inputs (the ``code`` arg + the interrupt resume decisions) and is
+        # therefore deterministic and pod-independent. Callers may override by
+        # passing ``mode`` explicitly.
+        kwargs.setdefault("mode", "call")
+        super().__init__(ptc=static_ptc_tools or None, **kwargs)
+        self._ptc_enabled = ptc_enabled
+        self._broaden_exposure = broaden_exposure
+        self._static_ptc_tools: list[BaseTool] = list(static_ptc_tools or [])
+        # Durable, build-time copy of the agent's own tool instances (a
+        # sub-agent's whitelisted tools plus injected filesystem and
+        # self-improvement tools). Used to re-expose the broadened PTC set on an
+        # interrupt *resume*, where the model-call hook does not run and
+        # ``ToolCallRequest`` carries no ``tools`` list — see
+        # ``_collect_ptc_tools`` and ``awrap_tool_call``.
+        self._broaden_baseline_tools: list[BaseTool] = list(broaden_baseline_tools or [])
+        self._ptc_risk_scorer = risk_scorer
+        self._ptc_tool_risk_cache = tool_risk_cache
+        self._ptc_default_risk_threshold = default_risk_threshold
+        self._ptc_tool_server_map = tool_server_map
+        self._excluded_ptc_names = excluded_ptc_names
+        self._ptc_swap_lock = threading.Lock()
+
+    @staticmethod
+    def _basetool_only(request: Any) -> Any:
+        tools = list(getattr(request, "tools", []) or [])
+        filtered = [t for t in tools if isinstance(t, BaseTool)]
+        if len(filtered) == len(tools):
+            return request
+        return request.override(tools=filtered)
+
+    def _collect_ptc_tools(self, request: Any) -> list[BaseTool]:
+        """Gather and risk-wrap every eligible tool to expose via PTC this turn.
+
+        De-duplicates by tool name (static fs baseline wins), skips excluded and
+        self tool names, and skips non-``BaseTool`` (dict) entries. Dynamic tools
+        are wrapped fresh each turn — the wrapper closes over the specific inner
+        instance, so this avoids leaking one user's tool instance to another on
+        the shared orchestrator graph.
+        """
+        collected: list[BaseTool] = []
+        seen: set[str] = set()
+        excluded = self._excluded_ptc_names | {self._tool_name}
+
+        for tool in self._static_ptc_tools:
+            if tool.name in seen:
+                continue
+            seen.add(tool.name)
+            collected.append(tool)
+
+        # When broadened exposure is disabled (e.g. the orchestrator), expose
+        # ONLY the stable filesystem baseline via ``eval``. The orchestrator's
+        # job is to plan and delegate via ``task``; harvesting its entire
+        # per-user ``tool_registry`` (hundreds of MCP tools) into the PTC system
+        # prompt both bloats the prompt and strips every dispatchable tool from
+        # the model's bound list, derailing it into emitting a final response
+        # instead of dispatching. Sub-agents keep broadened exposure so their
+        # own tools remain reachable through ``eval``.
+        if not self._broaden_exposure:
+            return collected
+
+        def _consider(tool: Any) -> None:
+            if not isinstance(tool, BaseTool):
+                return
+            name = tool.name
+            if name in excluded or name in seen:
+                return
+            seen.add(name)
+            collected.append(
+                wrap_tool_for_ptc(
+                    tool,
+                    risk_scorer=self._ptc_risk_scorer,
+                    tool_risk_cache=self._ptc_tool_risk_cache,
+                    default_risk_threshold=self._ptc_default_risk_threshold,
+                    tool_server_map=self._ptc_tool_server_map,
+                )
+            )
+
+        # Sub-agent / runner graphs pass their concrete tool set on
+        # ``request.tools`` — exactly the sub-agent's whitelisted tools plus the
+        # injected filesystem and self-improvement tools. Exposing only these
+        # mirrors the pre-``eval`` behavior (the model reaches the same tool set,
+        # now via the ``eval`` bridge). The per-user runtime ``tool_registry`` is
+        # intentionally NOT harvested: on the orchestrator it holds hundreds of
+        # MCP tools (and the GP agent injects all 260), which would bloat the PTC
+        # prompt and over-expose tools the agent never whitelisted.
+        for tool in list(getattr(request, "tools", []) or []):
+            _consider(tool)
+
+        # Durable fallback for interrupt *resume*: the eval tool node replays
+        # without a preceding model call, so ``request.tools`` is empty (a
+        # ``ToolCallRequest`` carries no tool list). Re-expose the agent's own
+        # build-time tools here so the PTC ``tools.*`` bindings the original
+        # ``eval`` referenced are reinstalled on the rebuilt graph. ``_consider``
+        # de-duplicates by name, so this is a no-op on the normal model path
+        # (the live ``request.tools`` instances are already collected above).
+        for tool in self._broaden_baseline_tools:
+            _consider(tool)
+
+        return collected
+
+    def _ptc_prompt_and_hidden(self, request: Any) -> tuple[str, set[str]]:
+        """Build the PTC prompt and the set of tool names exposed this turn.
+
+        The returned name set is exactly what is exposed inside ``eval``; those
+        tools are then stripped from the model's normal (bound) tool list so the
+        model reaches them only via the PTC bridge — keeping the LangSmith trace
+        and the bound toolset limited to ``eval`` plus the dispatch / response-
+        schema tools that are never PTC-exposed.
+        """
+        base_request = self._basetool_only(request)
+        if not self._ptc_enabled:
+            return self._prepare_for_call(base_request), set()
+        exposed = self._collect_ptc_tools(request)
+        hidden = {tool.name for tool in exposed}
+        # _prepare_for_call reads self._ptc synchronously (no awaits) and installs
+        # the exposed tools onto the thread-local REPL. Swap in this turn's set,
+        # then restore so the shared instance never retains per-user tools.
+        with self._ptc_swap_lock:
+            saved = self._ptc
+            self._ptc = exposed or None
+            try:
+                prompt = self._prepare_for_call(base_request)
+            finally:
+                self._ptc = saved
+        return prompt, hidden
+
+    @staticmethod
+    def _tool_name_of(tool: Any) -> str | None:
+        """Extract a tool's name from a ``BaseTool`` or a provider-native dict.
+
+        Sub-agent / runner graphs carry ``BaseTool`` instances; the orchestrator
+        injects OpenAI-format dict schemas (``{"function": {"name": ...}}``) via
+        ``DynamicToolDispatchMiddleware``. Bare ``{"name": ...}`` dicts are also
+        tolerated.
+        """
+        if isinstance(tool, BaseTool):
+            return tool.name
+        if isinstance(tool, dict):
+            fn = tool.get("function")
+            if isinstance(fn, dict) and fn.get("name"):
+                return fn["name"]
+            return tool.get("name")
+        return getattr(tool, "name", None)
+
+    def _strip_hidden(self, request: Any, hidden: set[str]) -> Any:
+        """Remove PTC-exposed tools from the model's bound tool list."""
+        if not hidden:
+            return request
+        tools = list(getattr(request, "tools", []) or [])
+        if not tools:
+            return request
+        kept = [t for t in tools if self._tool_name_of(t) not in hidden]
+        if len(kept) == len(tools):
+            return request
+        return request.override(tools=kept)
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        prompt, hidden = self._ptc_prompt_and_hidden(request)
+        request = self._strip_hidden(request, hidden)
+        return handler(
+            request.override(system_message=self._extend(request.system_message, prompt)),
+        )
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        prompt, hidden = self._ptc_prompt_and_hidden(request)
+        request = self._strip_hidden(request, hidden)
+        return await handler(
+            request.override(system_message=self._extend(request.system_message, prompt)),
+        )
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        """Drive PTC HITL approvals for the ``eval`` tool from the main graph loop.
+
+        The risk guard inside ``eval`` cannot ``interrupt()`` (it runs on the PTC
+        bridge's threadsafe-dispatched task). Instead it *records* high-risk calls
+        on a per-turn collector and returns an approval payload. This hook —
+        which wraps the ``eval`` tool's execution in the main Pregel loop where
+        ``interrupt()`` works — drains that collector after each ``eval`` run,
+        fires one batched ``interrupt()`` for the turn, stores the human
+        decisions, and re-runs ``eval`` so the guard honors them.
+
+        ``interrupt()`` replays this node from the top, so the loop below does not
+        actually iterate within a single process execution: the first run raises
+        ``GraphInterrupt`` at ``interrupt()``; on resume the node re-executes,
+        ``interrupt()`` returns the decisions, they are applied, and the next
+        ``eval`` run executes the approved calls. ``eval`` runs with
+        ``mode="call"`` (fresh REPL per call) so each re-run is deterministic and
+        pod-independent — see ``ptc_guard`` for the full rationale.
+
+        Only engages for the ``eval`` tool when risk scoring is active; all other
+        tool calls (and the unguarded configuration) pass straight through.
+        """
+        tool_call = getattr(request, "tool_call", None) or {}
+        if not self._ptc_enabled or self._ptc_risk_scorer is None or tool_call.get("name") != self._tool_name:
+            return await handler(request)
+
+        runtime = getattr(request, "runtime", None)
+        thread_id = resolve_ptc_thread_id(runtime)
+        context = getattr(runtime, "context", None)
+        # On an interrupt *resume* the graph may have been rebuilt (a fresh
+        # middleware instance on a different request/pod), so the upstream
+        # ``langchain_quickjs`` middleware's per-instance ``_ptc_tools_by_thread``
+        # cache is empty — and the model-call hook that normally populates it does
+        # NOT run on resume (only this interrupted eval tool node replays). Without
+        # the cache the eval REPL installs an empty ``tools`` namespace and the
+        # replayed ``code`` throws ``TypeError: ... is not a function``, derailing
+        # the model with a bogus error. Repopulate the cache here (idempotent on
+        # the normal path, where the model hook already filled it) so the fresh
+        # per-call REPL reinstalls the same PTC bindings the original ``eval`` used.
+        if self._ptc_enabled and not self._ptc_tools_by_thread.get(thread_id):
+            self._ptc_tools_by_thread[thread_id] = tuple(self._collect_ptc_tools(request))
+        turn = begin_ptc_turn(thread_id)
+        try:
+            while True:
+                clear_ptc_pending(thread_id)
+                result = await handler(request)
+                pending = take_ptc_pending(thread_id)
+                if not pending:
+                    return result
+
+                decisions = interrupt(self._build_ptc_hitl_request(pending))["decisions"]
+                if (n := len(decisions)) != (m := len(pending)):
+                    msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
+                    raise ValueError(msg)
+                self._apply_ptc_decisions(turn, pending, decisions, context)
+        finally:
+            end_ptc_turn(thread_id)
+
+    @staticmethod
+    def _build_ptc_hitl_request(pending: list[Any]) -> Any:
+        """Build the HITL interrupt payload for a batch of pending PTC calls.
+
+        Mirrors ``ConditionalHumanInTheLoopMiddleware.aafter_model`` so the
+        frontend renders PTC approvals identically to normal tool approvals
+        (``_risk_metadata`` enrichment + per-action ``allowed_decisions``).
+        ``edit`` is never offered — the approved call is re-executed verbatim
+        from the re-run ``eval`` code, so there is no per-call arg to edit.
+        """
+        from langchain.agents.middleware.human_in_the_loop import (
+            ActionRequest,
+            HITLRequest,
+            ReviewConfig,
+        )
+
+        action_requests: list[Any] = []
+        review_configs: list[Any] = []
+        for p in pending:
+            enriched_args = {
+                **p.args,
+                "_risk_metadata": {
+                    "source": "risk_score",
+                    "score": p.score,
+                    "threshold": p.threshold,
+                    "matched_pattern": p.matched_pattern,
+                    "server_slug": p.server_slug,
+                    "tool_name": p.tool_name,
+                },
+            }
+            description = f"Tool '{p.tool_name}' has risk score {p.score:.2f} (threshold: {p.threshold:.2f})"
+            if p.matched_pattern:
+                description += f" — {p.matched_pattern}"
+            action_requests.append(
+                ActionRequest(
+                    name=p.tool_name,
+                    args=enriched_args,
+                    description=description,
+                )
+            )
+            review_configs.append(
+                ReviewConfig(
+                    action_name=p.tool_name,
+                    allowed_decisions=p.allowed_actions,
+                )
+            )
+        return HITLRequest(action_requests=action_requests, review_configs=review_configs)
+
+    @staticmethod
+    def _apply_ptc_decisions(
+        turn: Any,
+        pending: list[Any],
+        decisions: list[dict[str, Any]],
+        context: Any,
+    ) -> None:
+        """Record human decisions for the re-run and apply any bypass rules.
+
+        Re-applied on every interrupt replay (decisions arrive via the resume
+        value), so it must be idempotent. Bypass rules are written into the
+        per-user context so the orchestrator persists them after the turn.
+        """
+        from agent_common.middleware.conditional_hitl import (
+            ConditionalHumanInTheLoopMiddleware,
+        )
+
+        for p, decision in zip(pending, decisions, strict=True):
+            dtype = decision.get("type")
+            if dtype == "approve":
+                turn.decisions[p.call_key] = "approve"
+                if decision.get("bypass"):
+                    ConditionalHumanInTheLoopMiddleware._apply_bypass_rule(
+                        tool_name=p.tool_name,
+                        server_slug=p.server_slug,
+                        bypass_all=bool(decision.get("bypass_all", False)),
+                        bypass_pattern=decision.get("bypass_pattern"),
+                        context=context,
+                    )
+            else:
+                # reject / edit / unknown — PTC cannot honor edit, so block.
+                turn.decisions[p.call_key] = "reject"
+
+
+def build_code_interpreter_middlewares(
+    backend: BackendProtocol,
+    *,
+    broaden_exposure: bool = True,
+    broaden_baseline_tools: list[BaseTool] | None = None,
+    risk_scorer: RiskScorerFn | None = None,
+    tool_risk_cache: ToolRiskCache | None = None,
+    default_risk_threshold: float = 0.8,
+    tool_server_map: dict[str, str] | None = None,
+) -> list[Any]:
+    """Build the code-interpreter middleware(s) for a graph.
+
+    Returns a single ``_PTCToleranceCodeInterpreterMiddleware`` (exposing an
+    ``eval`` JS REPL with a ``skills_backend``).
+
+    When PTC (``CODE_INTERPRETER_PTC``, default off) is enabled, the eligible
+    tools the agent carries for a turn are exposed inside ``eval`` as
+    *risk-guarded* wrapped instances so the HITL approval workflow is preserved
+    per inner call (the PTC bridge otherwise bypasses ``ToolNode``). The
+    filesystem tools are wrapped here at build time to form a stable baseline (a
+    fresh ``FilesystemMiddleware`` bound to *backend* is instantiated solely to
+    harvest them). When ``broaden_exposure`` is enabled (sub-agent / runner
+    graphs), the agent's own ``request.tools`` (its whitelisted tools plus
+    injected filesystem and self-improvement tools) are also wrapped per turn by
+    the middleware. The orchestrator passes ``broaden_exposure=False`` so only
+    the filesystem baseline is exposed — it plans and delegates via ``task`` and
+    must not pull its hundreds of registry tools into the PTC prompt. Dispatch
+    and response-schema tools (``_PTC_EXCLUDED_TOOL_NAMES``) are never exposed.
+    Every PTC-exposed tool is hidden from the model's normal bound tool list by
+    the middleware itself, so no separate hiding middleware is needed.
+
+    Args:
+        backend: The filesystem/skills backend for this graph.
+        broaden_exposure: When ``True`` (default), expose the agent's
+            ``request.tools`` via ``eval`` in addition to the filesystem
+            baseline. When ``False`` (orchestrator), expose only the filesystem
+            baseline.
+        broaden_baseline_tools: The agent's own build-time tool instances (a
+            sub-agent's whitelisted tools plus injected filesystem and
+            self-improvement tools). Used only when ``broaden_exposure`` is
+            ``True`` to re-expose the broadened PTC set on an interrupt *resume*,
+            where the model-call hook does not run and ``request.tools`` is
+            unavailable.
+        risk_scorer: The dynamic risk scorer (``score_tool_risk``). When
+            ``None``, PTC tools run unguarded.
+        tool_risk_cache: Shared risk cache fallback when the runtime context
+            does not carry one.
+        default_risk_threshold: Score at/above which approval is required.
+        tool_server_map: Static tool-name -> server-slug map.
+
+    Returns:
+        Ordered middleware list to insert into a graph's stack.
+    """
+    ptc_enabled = _code_interpreter_ptc_enabled()
+    static_ptc_tools: list[Any] = []
+    if ptc_enabled:
+        from deepagents.middleware.filesystem import supports_execution
+
+        # ``execute`` is only meaningful (and only safe to advertise) when the
+        # backend can run commands; gate it so non-sandbox agents never expose a
+        # dead ``tools.execute``.
+        baseline_names = _PTC_READONLY_FS_TOOLS | _PTC_MUTATING_FS_TOOLS
+        if supports_execution(backend):
+            baseline_names = baseline_names | _PTC_SANDBOX_TOOLS
+
+        fs_tools = FilesystemMiddleware(backend=backend).tools
+        for tool in fs_tools:
+            if tool.name in baseline_names:
+                static_ptc_tools.append(
+                    wrap_tool_for_ptc(
+                        tool,
+                        risk_scorer=risk_scorer,
+                        tool_risk_cache=tool_risk_cache,
+                        default_risk_threshold=default_risk_threshold,
+                        tool_server_map=tool_server_map,
+                    )
+                )
+
+    return [
+        _PTCToleranceCodeInterpreterMiddleware(
+            static_ptc_tools=static_ptc_tools,
+            broaden_baseline_tools=broaden_baseline_tools,
+            ptc_enabled=ptc_enabled,
+            broaden_exposure=broaden_exposure,
+            risk_scorer=risk_scorer,
+            tool_risk_cache=tool_risk_cache,
+            default_risk_threshold=default_risk_threshold,
+            tool_server_map=tool_server_map,
+            skills_backend=backend,
+        )
+    ]
 
 
 _DOCSTORE_HINT = (
@@ -186,6 +877,7 @@ def build_common_middleware_stack(
     tool_risk_cache: ToolRiskCache | None = None,
     tool_server_map: dict[str, str] | None = None,
     context_gated_tools: list[ContextGatedTool] | None = None,
+    broaden_baseline_tools: list[BaseTool] | None = None,
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
@@ -244,6 +936,18 @@ def build_common_middleware_stack(
         fs_cls = _FilesystemMiddlewareWithDocstoreHint if add_docstore_hint else FilesystemMiddleware
 
         fs_middleware = fs_cls(backend=backend)
+
+        # Configure the code interpreter. When PTC is enabled the filesystem
+        # tools are exposed inside ``eval`` as risk-guarded wrapped instances and
+        # the read-only ones are hidden from the model's normal tool list.
+        middleware += build_code_interpreter_middlewares(
+            backend,
+            broaden_baseline_tools=broaden_baseline_tools,
+            risk_scorer=risk_scorer,
+            tool_risk_cache=tool_risk_cache,
+            default_risk_threshold=default_risk_threshold,
+            tool_server_map=tool_server_map,
+        )
         middleware += [
             StoragePathsInstructionMiddleware(
                 sandbox_enabled=sandbox_enabled,
@@ -300,7 +1004,19 @@ def build_common_middleware_stack(
         middleware.append(ConversationContextToolsMiddleware(context_gated_tools))
 
     middleware += [
-        RepeatedToolCallMiddleware(max_repeats=5, max_tool_repeats=10, window_size=10),
+        RepeatedToolCallMiddleware(
+            max_repeats=5,
+            max_tool_repeats=10,
+            window_size=10,
+            # ``task`` (sub-agent dispatch) and ``eval`` (the PTC code interpreter)
+            # are meta/gateway tools legitimately called many times with *different*
+            # arguments — distinct delegations / distinct code. They must be exempt
+            # from the per-tool-name ``max_tool_repeats`` cap (otherwise a normal
+            # multi-step PTC agent gets blocked mid-task and force-stopped, ending
+            # with no structured response). They remain subject to ``max_repeats``
+            # (identical-args) detection, which still catches true loops.
+            dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
+        ),
         ToolSchemaCleaningMiddleware(),
     ]
     return middleware
@@ -618,6 +1334,7 @@ def build_sub_agent_graph(
         if backend_factory is not None
         else create_indexing_backend_factory(store, model_name=model_name, cost_logger=cost_logger)
     )
+    all_tools = list(tools) + list(extra_tools or [])
     middleware = build_common_middleware_stack(
         model,
         backend,
@@ -631,10 +1348,10 @@ def build_sub_agent_graph(
         tool_risk_cache=tool_risk_cache,
         tool_server_map=tool_server_map,
         context_gated_tools=context_gated_tools,
+        broaden_baseline_tools=all_tools,
     )
     if extra_middlewares:
         middleware = list(extra_middlewares) + middleware
-    all_tools = list(tools) + list(extra_tools or [])
     return create_agent(
         model,
         system_prompt=system_prompt,

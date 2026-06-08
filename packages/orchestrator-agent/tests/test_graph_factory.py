@@ -119,8 +119,10 @@ class TestMiddlewareStack:
         # Verify correct order. The conversation-context gate is outermost (so its
         # injected gated tool flows through DynamicToolDispatch's schema-cleanup),
         # followed by DynamicTool, static content before cache point, steering after
-        # cache, user prefs after steering, playbook after prefs.
-        assert len(stack) == 15
+        # cache, user prefs after steering, playbook after prefs, then the code
+        # interpreter (_PTCToleranceCodeInterpreterMiddleware, which exposes the
+        # eval REPL + PTC bridge and hides PTC-exposed tools from the model itself).
+        assert len(stack) == 16
         assert stack[0].__class__.__name__ == "ConversationContextToolsMiddleware"
         assert isinstance(stack[1], DynamicToolDispatchMiddleware)
         assert isinstance(stack[2], StoragePathsInstructionMiddleware)
@@ -130,16 +132,19 @@ class TestMiddlewareStack:
         assert isinstance(stack[5], UserPreferencesMiddleware)
         # stack[6] = PlaybookInjectionMiddleware
         assert stack[6].__class__.__name__ == "PlaybookInjectionMiddleware"
-        # stack[7] = ToolStatusMiddleware (emits status for tool calls)
-        assert stack[7].__class__.__name__ == "ToolStatusMiddleware"
-        assert isinstance(stack[8], RepeatedToolCallMiddleware)
-        assert isinstance(stack[9], AuthErrorDetectionMiddleware)
-        assert stack[10].__class__.__name__ == "ErrorClassificationMiddleware"
-        # stack[11] = ConditionalHumanInTheLoopMiddleware
-        assert stack[11].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
-        assert isinstance(stack[12], ToolRetryMiddleware)
-        assert isinstance(stack[13], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[14], TodoStatusMiddleware)
+        # stack[7] = CodeInterpreterMiddleware (eval REPL + PTC bridge; also hides
+        # every PTC-exposed tool from the model's bound tool list)
+        assert stack[7].__class__.__name__ == "_PTCToleranceCodeInterpreterMiddleware"
+        # stack[8] = ToolStatusMiddleware (emits status for tool calls)
+        assert stack[8].__class__.__name__ == "ToolStatusMiddleware"
+        assert isinstance(stack[9], RepeatedToolCallMiddleware)
+        assert isinstance(stack[10], AuthErrorDetectionMiddleware)
+        assert stack[11].__class__.__name__ == "ErrorClassificationMiddleware"
+        # stack[12] = ConditionalHumanInTheLoopMiddleware
+        assert stack[12].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
+        assert isinstance(stack[13], ToolRetryMiddleware)
+        assert isinstance(stack[14], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[15], TodoStatusMiddleware)
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
