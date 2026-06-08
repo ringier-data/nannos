@@ -1,9 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import type { AgentResponseData, Conversation, Message, PendingInterrupt, Settings, Task, TaskHistoryEntry, TodoItem, TimelineEvent } from '../types';
-import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT, FEEDBACK_REQUEST_EXT } from '../types';
+import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT, FEEDBACK_REQUEST_EXT, HITL_EXT } from '../types';
 import { useSocket } from './SocketContext';
 import { useSessionId } from '../hooks/useLocalStorage';
 import { extractPartTexts, generateUUID, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
@@ -239,7 +239,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [workingStepsMap, setWorkingStepsMap] = useState<Map<string, TodoItem[]>>(new Map());
   const [subagentThoughtsMap, setSubagentThoughtsMap] = useState<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
   const [statusHistoryMap, setStatusHistoryMap] = useState<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
-  const [pendingInterrupt, setPendingInterrupt] = useState<PendingInterrupt | null>(null);
+  const [pendingInterruptMap, setPendingInterruptMap] = useState<Map<string, PendingInterrupt>>(new Map());
   const [pendingFeedbackRequest, setPendingFeedbackRequest] = useState<{ conversationId: string; subAgents: string[] } | null>(null);
   const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
   const streamingMapRef = useRef<Map<string, string>>(new Map());
@@ -263,6 +263,10 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   }, [activeConversationId]);
 
   // Derived state
+  const pendingInterrupt = useMemo(
+    () => (activeConversationId ? pendingInterruptMap.get(activeConversationId) ?? null : null),
+    [pendingInterruptMap, activeConversationId]
+  );
   const messages = activeConversationId ? messagesMap.get(activeConversationId) || [] : [];
   const tasks = activeConversationId ? tasksMap.get(activeConversationId) || [] : [];
   const isWaiting = activeConversationId ? waitingMap.get(activeConversationId) === true : false;
@@ -621,7 +625,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           // Detect HITL interrupt from orchestrator via extension
           if (normalizedStatus === 'input-required') {
             const extensions: string[] = data.status.message?.extensions || [];
-            const isHitlInterrupt = extensions.includes('urn:nannos:a2a:human-in-the-loop:1.0');
+            const isHitlInterrupt = extensions.includes(HITL_EXT);
 
             if (isHitlInterrupt) {
               // Extract action_requests + review_configs from DataPart
@@ -647,13 +651,17 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
               // Set a single generic interrupt — no tool-specific branching
               const firstAction = actionRequests?.[0];
               const toolName = firstAction?.name || '';
-              setPendingInterrupt({
-                conversationId: resolvedConversationId,
-                taskId: data.taskId as string | undefined,
-                toolName,
-                reason: (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || reason,
-                actionRequests,
-                reviewConfigs,
+              setPendingInterruptMap((prev) => {
+                const next = new Map(prev);
+                next.set(resolvedConversationId, {
+                  conversationId: resolvedConversationId,
+                  taskId: data.taskId as string | undefined,
+                  toolName,
+                  reason: (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || reason,
+                  actionRequests,
+                  reviewConfigs,
+                });
+                return next;
               });
             }
           }
@@ -1072,6 +1080,60 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         newMap.set(conversationId, merged);
         return newMap;
       });
+
+      // Restore pending HITL interrupt if the last agent status is still input-required.
+      // Find the most recent input-required + HITL message, then check whether a later
+      // non-input-required status-update exists (which would mean the interrupt was resolved).
+      const hitlMsg = [...raw].reverse().find((m: Record<string, unknown>) => {
+        if (m.kind !== 'status-update' || m.state !== 'input-required') return false;
+        try {
+          const payload = typeof m.raw_payload === 'string' ? JSON.parse(m.raw_payload as string) : null;
+          const extensions = (payload?.status?.message?.extensions || []) as string[];
+          return extensions.includes(HITL_EXT);
+        } catch { return false; }
+      });
+
+      if (hitlMsg) {
+        const hitlTs = new Date(((hitlMsg.created_at || hitlMsg.timestamp) as string | undefined) ?? 0).getTime();
+        const isResolved = raw.some((m: Record<string, unknown>) => {
+          if (m.kind !== 'status-update' || m.state === 'input-required') return false;
+          const ts = new Date(((m.created_at || m.timestamp) as string | undefined) ?? 0).getTime();
+          return ts > hitlTs;
+        });
+
+        if (!isResolved) {
+          try {
+            const payload = JSON.parse(hitlMsg.raw_payload as string);
+            const parts = (payload?.status?.message?.parts || []) as Array<Record<string, unknown>>;
+            let actionRequests: Array<{ name: string; args: Record<string, unknown>; description?: string }> | undefined;
+            let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
+            let reason = '';
+            for (const part of parts) {
+              if (part.kind === 'data') {
+                const d = part.data as Record<string, unknown> | undefined;
+                if (d?.action_requests) actionRequests = d.action_requests as typeof actionRequests;
+                if (d?.review_configs) reviewConfigs = d.review_configs as typeof reviewConfigs;
+              } else if (part.kind === 'text') {
+                reason = (part.text as string) || '';
+              }
+            }
+            const firstAction = actionRequests?.[0];
+            setPendingInterruptMap((prev) => {
+              if (prev.has(conversationId)) return prev; // live interrupt already set, don't overwrite
+              const next = new Map(prev);
+              next.set(conversationId, {
+                conversationId,
+                taskId: payload?.taskId as string | undefined,
+                toolName: firstAction?.name || '',
+                reason: (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || reason,
+                actionRequests,
+                reviewConfigs,
+              });
+              return next;
+            });
+          } catch { /* ignore parse errors */ }
+        }
+      }
     } catch (e) {
       console.error('loadMessages failed', e);
     } finally {
@@ -1113,8 +1175,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   }, [activeConversationId, cancelTask]);
 
   const dismissInterrupt = useCallback(() => {
-    setPendingInterrupt(null);
-  }, []);
+    if (!activeConversationId) return;
+    setPendingInterruptMap((prev) => {
+      const next = new Map(prev);
+      next.delete(activeConversationId);
+      return next;
+    });
+  }, [activeConversationId]);
 
   const dismissFeedbackRequest = useCallback(() => {
     setPendingFeedbackRequest(null);
@@ -1124,6 +1191,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const selectConversation = useCallback(
     (id: string) => {
       setActiveConversationId(id);
+      setPendingFeedbackRequest(null);
       const existingMessages = messagesMap.get(id);
       if (!existingMessages || existingMessages.length === 0) {
         loadMessages(id);
