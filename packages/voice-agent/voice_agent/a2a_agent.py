@@ -394,12 +394,19 @@ class VoiceAgent(BaseAgent):
                 )
 
         voice_name = self._active_sessions[session_key]["agent"].voice_name
+        audio_in = self._active_sessions[session_key]["audio_in"]
         event_out = self._active_sessions[session_key]["event_out"]
         yield AgentStreamResponse(
             state=TaskState.TASK_STATE_WORKING,
             content="Voice session initialized",
             metadata={"session_id": session_key, "voice_name": voice_name},
         )
+
+        # Trigger the opening greeting immediately by injecting a text turn.
+        # Without this, Gemini waits silently for user audio to clear VAD,
+        # causing 3-4 s of dead air after the callee answers.
+        await audio_in.put("[call_connected]")
+        logger.debug("Injected greeting trigger for session %s", session_key)
 
         try:
             while True:
