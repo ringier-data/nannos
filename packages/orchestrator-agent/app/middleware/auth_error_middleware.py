@@ -50,6 +50,7 @@ Integration:
 
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Dict
@@ -342,7 +343,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
                 # If no A2A auth requirement, fall back to content-based detection
                 if not auth_metadata:
-                    auth_metadata = self._detect_auth_error(result.content if isinstance(result.content, str) else "")
+                    auth_metadata = self._detect_auth_error(result.content)
 
                 if auth_metadata:
                     # Use interrupt() to pause graph execution with auth requirement
@@ -390,9 +391,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
                         # If no A2A auth requirement, fall back to content-based detection
                         if not auth_metadata:
-                            auth_metadata = self._detect_auth_error(
-                                last_msg.content if isinstance(last_msg.content, str) else ""
-                            )
+                            auth_metadata = self._detect_auth_error(last_msg.content)
 
                         if auth_metadata:
                             # Use interrupt() to pause graph execution with auth requirement
@@ -500,7 +499,30 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
 
         return None
 
-    def _detect_auth_error(self, content: str) -> Dict[str, Any] | None:
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        """Normalise tool-message content to a single string.
+
+        Provider content can arrive as a plain string, a list of content blocks
+        (``[{"type": "text", "text": "..."}]`` — common with Gemini/Anthropic),
+        or other shapes.  We flatten everything to text so pattern/JSON detection
+        below has something to scan.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    parts.append(part.get("text") or part.get("content") or "")
+                else:
+                    parts.append(str(part))
+            return " ".join(p for p in parts if p)
+        if content is None:
+            return ""
+        return str(content)
+
+    def _detect_auth_error(self, content: Any) -> Dict[str, Any] | None:
         """Detect authentication errors deterministically from tool message content.
 
         Checks for the specific error format returned by tools when authentication is required:
@@ -510,38 +532,67 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
           "message": "This tool requires secondary authorization..."
         }
 
+        The structured payload is detected in three positions, in order:
+        1. The *entire* content is that JSON object (tool returned it verbatim).
+        2. The JSON is *embedded* in a larger string.  ``ToolRetryMiddleware``
+           wraps the original ``ToolException`` as
+           ``"Tool 'X' failed after N attempts with ToolException: {...}. Please try again."``
+           so by the time this (outer) middleware sees the result the JSON is no
+           longer the whole payload — we locate the ``need-credentials`` marker
+           and pull ``authorizeUrl`` / ``message`` out of the surrounding text.
+        3. Looser free-text patterns as a last resort.
+
         Returns auth error metadata dict if auth error detected, None otherwise.
         """
-        try:
-            # First try to parse as JSON to detect structured auth errors
-            content_dict = json.loads(content)
+        content = self._content_to_text(content)
+        if not content:
+            return None
 
-            # Check for the specific "need-credentials" error format
+        # 1. Fast path: the whole content is the structured error JSON.
+        try:
+            content_dict = json.loads(content)
             if isinstance(content_dict, dict) and content_dict.get("errorCode") == "need-credentials":
                 authorize_url = content_dict.get("authorizeUrl", "")
                 error_message = content_dict.get("message", "Authentication required.")
-
                 logger.info(f"[AUTH MIDDLEWARE] Detected JSON auth error: {error_message}")
                 logger.info(f"[AUTH MIDDLEWARE] Auth URL: {authorize_url}")
-
-                # Return auth error metadata
                 return {"auth_url": authorize_url, "auth_message": error_message, "error_code": "need-credentials"}
         except json.JSONDecodeError:
-            # Not JSON, check for text patterns that might indicate auth errors
-            content_lower = content.lower()
-            auth_patterns = [
-                "authentication required",
-                "authorization required",
-                "need credentials",
-                "please authorize",
-                "login required",
-                "401 unauthorized",
-                "access denied",
-            ]
+            pass
 
-            for pattern in auth_patterns:
-                if pattern in content_lower:
-                    logger.info(f"[AUTH MIDDLEWARE] Detected text auth error pattern: {pattern}")
-                    return {"auth_url": "", "auth_message": content, "error_code": "auth-required"}
+        # 2. Embedded structured error (e.g. wrapped by ToolRetryMiddleware).
+        #    Detect the marker and extract the fields directly from the text so
+        #    we don't depend on the whole payload being parseable JSON.
+        if "need-credentials" in content:
+            url_match = re.search(r'"authorizeUrl"\s*:\s*"([^"]+)"', content)
+            msg_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
+            authorize_url = url_match.group(1) if url_match else ""
+            if msg_match:
+                try:
+                    error_message = json.loads(f'"{msg_match.group(1)}"')
+                except json.JSONDecodeError:
+                    error_message = msg_match.group(1)
+            else:
+                error_message = "This tool requires secondary authorization."
+            logger.info(f"[AUTH MIDDLEWARE] Detected embedded auth error. Auth URL: {authorize_url}")
+            return {"auth_url": authorize_url, "auth_message": error_message, "error_code": "need-credentials"}
+
+        # 3. Looser free-text patterns.
+        content_lower = content.lower()
+        auth_patterns = [
+            "authentication required",
+            "authorization required",
+            "secondary authorization",
+            "need credentials",
+            "need-credentials",
+            "please authorize",
+            "login required",
+            "401 unauthorized",
+            "access denied",
+        ]
+        for pattern in auth_patterns:
+            if pattern in content_lower:
+                logger.info(f"[AUTH MIDDLEWARE] Detected text auth error pattern: {pattern}")
+                return {"auth_url": "", "auth_message": content, "error_code": "auth-required"}
 
         return None
