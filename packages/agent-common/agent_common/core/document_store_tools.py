@@ -5,9 +5,10 @@ capabilities. Files written to long-term storage (/memories/*) are automatically
 indexed by the IndexingStoreBackend.
 
 Provides tools:
-1. docstore_search: Search indexed files using semantic similarity
-2. read_personal_file: Read files from a user's personal workspace (HITL-guarded)
-3. docstore_export: Export files (ephemeral or persisted) to S3 with presigned URLs
+1. docstore_search: Search durable memory (indexed /memories/ and /channel_memories/ files) by similarity
+2. semantic_search_file: Index + semantic-search WITHIN a single large in-hand file (e.g. evicted tool result)
+3. read_personal_file: Read files from a user's personal workspace (HITL-guarded, channel-only)
+4. docstore_export: Export files (ephemeral or persisted) to S3 with presigned URLs
 
 Privacy controls:
 - read_personal_file is guarded by HumanInTheLoopMiddleware (always requires approval)
@@ -26,6 +27,10 @@ from langgraph.config import get_config
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langsmith import traceable
 from object_storage import IObjectStorageService
+from ringier_a2a_sdk.cost_tracking import CostLogger
+
+from agent_common.backends.attachments_store import get_current_attachments_backend
+from agent_common.backends.indexing_store import IndexingStoreBackend
 
 
 class FilesystemState(dict):
@@ -123,7 +128,9 @@ async def _read_personal_file_impl(
     Returns:
         File content or error message
     """
-    # Check if this is cross-namespace access
+    # Defense-in-depth: the tool is only injected into the model's toolset in
+    # channel context by ConversationContextToolsMiddleware, so it should never be callable outside a channel.
+    # This check stays as a backstop in case the tool is reached through another path.
     if not _is_cross_namespace_access():
         raise ToolException(
             "read_personal_file is only available in Slack channel context. "
@@ -189,21 +196,9 @@ async def _search_documents_rag_impl(
         f"Semantic search for indexed files, user {user_id}: '{query}' (top_k={top_k}, include_personal={include_personal})"
     )
 
-    # Hybrid search: current conversation tool results + persistent user/channel documents
+    # Conversation tool results are NOT searched here — those are evicted /large_tool_results/ blobs
+    # that can be indexed and searched on-demand via `semantic_search_file`.
     all_results = []
-
-    # Search conversation-scoped tool results
-    config = get_config()
-    conversation_id = config.get("metadata", {}).get("conversation_id") if config else None
-    if conversation_id:
-        tool_results_namespace = (conversation_id, "tool_results")
-        tool_results = await store.asearch(
-            tool_results_namespace,
-            query=query,
-            limit=top_k,
-        )
-        all_results.extend(tool_results)
-        logger.debug(f"Found {len(tool_results)} tool result chunks in conversation {conversation_id}")
 
     # Determine which document namespaces to search based on context
     config = get_config()
@@ -275,6 +270,143 @@ async def _search_documents_rag_impl(
         )
 
     logger.info(f"RAG search returned {len(documents)} chunks")
+    return documents
+
+
+def _resolve_namespaces_for_path(
+    file_path: str,
+    user_id: str,
+    metadata: dict[str, Any],
+) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    """Resolve (filesystem, chunk) namespaces for an in-hand file path.
+
+    Mirrors the routing in ``IndexingStoreBackend._index_content`` so that
+    ``semantic_search_file`` reads the file from the same filesystem namespace
+    it was written to and searches the same chunk namespace it is indexed into.
+
+    Args:
+        file_path: Absolute path of the in-hand file.
+        user_id: Current user id (for /memories/ default route).
+        metadata: Runtime config metadata (conversation_id, assistant_id).
+
+    Returns:
+        ``(filesystem_namespace, chunk_namespace)`` or ``None`` when the
+        required scoping id is missing from metadata.
+    """
+    if file_path.startswith("/large_tool_results/"):
+        conversation_id = metadata.get("conversation_id")
+        if not conversation_id:
+            return None
+        return (conversation_id, "filesystem"), (conversation_id, "tool_results")
+    if file_path.startswith("/attachments/"):
+        # Attachments are conversation-scoped, ephemeral files. Their content is
+        # not stored in PostgreSQL (it lives in the in-memory attachments
+        # backend), so the filesystem namespace is unused — content is read via
+        # the attachments backend in ``_semantic_search_file_impl``. JIT-indexed
+        # chunks share the conversation's ``tool_results`` namespace.
+        conversation_id = metadata.get("conversation_id")
+        if not conversation_id:
+            return None
+        return (conversation_id, "filesystem"), (conversation_id, "tool_results")
+    if file_path.startswith("/channel_memories/"):
+        assistant_id = metadata.get("assistant_id")
+        if not assistant_id:
+            return None
+        return (assistant_id, "filesystem"), (assistant_id, "documents")
+    # Default: personal /memories/ files
+    return (user_id, "filesystem"), (user_id, "documents")
+
+
+async def _semantic_search_file_impl(
+    file_path: str,
+    query: str,
+    top_k: int,
+    user_id: str,
+    store: AsyncPostgresStore,
+    model_name: str | None = None,
+    cost_logger: CostLogger | None = None,
+) -> list[dict[str, Any]]:
+    """Index a single in-hand file on demand and semantic-search within it.
+
+    This is the lazy (JIT) counterpart to the eager indexing done by
+    ``IndexingStoreBackend.awrite``. Evicted ``/large_tool_results/`` blobs are
+    intentionally NOT eagerly indexed (see core/CONTEXT.md D5/D9); this tool
+    reads the in-hand file, ensures it is chunked + embedded (idempotent via
+    content-hash caching), then runs a semantic search scoped to just that file.
+
+    Args:
+        file_path: Path of the in-hand file (e.g. an evicted tool result).
+        query: Natural language search query.
+        top_k: Number of matching chunks to return.
+        user_id: User id for /memories/ routing.
+        store: AsyncPostgresStore instance.
+        model_name: Model to use for indexing/chunking. When ``None``,
+            ``IndexingStoreBackend`` selects the cheapest available model via
+            ``get_default_indexing_model()``.
+        cost_logger: Optional CostLogger for indexing cost attribution.
+
+    Returns:
+        List of documents in LangChain retriever format (page_content, type, metadata).
+    """
+    config = get_config()
+    metadata = config.get("metadata", {}) if config else {}
+
+    namespaces = _resolve_namespaces_for_path(file_path, user_id, metadata)
+    if namespaces is None:
+        raise ToolException(f"Cannot scope '{file_path}' for semantic search: missing conversation/assistant context.")
+    filesystem_namespace, chunk_namespace = namespaces
+
+    # Read the in-hand file content. Attachments live in the ephemeral in-memory
+    # attachments backend (not PostgreSQL), so they are read from the per-turn
+    # backend registered in the context variable. Everything else is read from
+    # its filesystem namespace in the store.
+    if file_path.startswith("/attachments/"):
+        attachments_backend = get_current_attachments_backend()
+        content = await attachments_backend.aread_text(file_path) if attachments_backend else None
+        if content is None:
+            raise ToolException(
+                f"File not found: '{file_path}'. Use ls/read_file to confirm the path before searching it."
+            )
+    else:
+        item = await store.aget(namespace=filesystem_namespace, key=file_path)
+        if item is None:
+            raise ToolException(
+                f"File not found: '{file_path}'. Use ls/read_file to confirm the path before searching it."
+            )
+        value = item.value
+        content_lines = value.get("content", [])
+        content = "\n".join(content_lines) if isinstance(content_lines, list) else str(content_lines)
+    if not content.strip():
+        return []
+
+    # JIT index (idempotent via content-hash caching in _index_content)
+    backend = IndexingStoreBackend(store=store, model_name=model_name, cost_logger=cost_logger)
+    await backend.aensure_indexed(file_path, content)
+
+    # Search the chunk namespace, filtered to this specific file. Over-fetch so
+    # filtering by file_path still yields up to top_k results when the namespace
+    # contains chunks from other files.
+    raw_results = await store.asearch(chunk_namespace, query=query, limit=max(top_k * 4, top_k))
+    file_results = [r for r in raw_results if r.value.get("file_path") == file_path][:top_k]
+
+    documents = []
+    for result in file_results:
+        rvalue = result.value
+        documents.append(
+            {
+                "page_content": rvalue.get("content", ""),
+                "type": "Document",
+                "metadata": {
+                    "file_path": rvalue.get("file_path", file_path),
+                    "chunk_index": rvalue.get("chunk_index", 0),
+                    "total_chunks": rvalue.get("total_chunks", 1),
+                    "context_description": rvalue.get("context_description", ""),
+                    "score": result.score if hasattr(result, "score") else None,
+                },
+            }
+        )
+
+    logger.info(f"semantic_search_file returned {len(documents)} chunks for '{file_path}'")
     return documents
 
 
@@ -381,6 +513,8 @@ def create_document_store_tools(
     storage: IObjectStorageService,
     s3_bucket: str,
     user_id: str,
+    model_name: str | None = None,
+    cost_logger: CostLogger | None = None,
 ) -> list[BaseTool]:
     """Create document store tools for semantic search, personal file access, and export.
 
@@ -394,9 +528,14 @@ def create_document_store_tools(
         storage: Object storage service for file exports
         s3_bucket: Bucket for storing exported files
         user_id: User ID for document namespacing and storage keys
+        model_name: Model to use for on-demand indexing in ``semantic_search_file``.
+            When ``None``, the cheapest available provider model is selected
+            automatically via ``get_default_indexing_model()``.
+        cost_logger: Optional CostLogger for attributing on-demand indexing costs
 
     Returns:
-        List of document store tools (search, read_personal_file, export)
+        List of document store tools (docstore_search, semantic_search_file,
+        read_personal_file, docstore_export)
     """
 
     @traceable(run_type="retriever")
@@ -476,6 +615,43 @@ def create_document_store_tools(
         )
         return _format_documents_for_llm(documents)
 
+    async def semantic_search_file(
+        file_path: str,
+        query: str,
+        top_k: int = 5,
+    ) -> str:
+        """Semantically search WITHIN a single large file you already have in hand.
+
+        Use this for one big blob (typically a large/evicted tool result under
+        /large_tool_results/) when you need to find the relevant passages by
+        meaning rather than an exact string. The file is indexed on first use
+        (cached afterwards) and the search is scoped to just that file.
+
+        Choose the right tool:
+        - Exact / known substring in a file -> use grep
+        - Read a whole (small) file -> use read_file
+        - Fuzzy search inside ONE large in-hand blob -> use this tool
+        - Find a durable memory across your notes -> use docstore_search
+
+        Args:
+            file_path: Path of the in-hand file (e.g. /large_tool_results/<id>)
+            query: Natural language description of what you're looking for
+            top_k: Number of relevant chunks to retrieve (default 5)
+
+        Returns:
+            Formatted context chunks from within that file
+        """
+        documents = await _semantic_search_file_impl(
+            file_path=file_path,
+            query=query,
+            top_k=top_k,
+            user_id=user_id,
+            store=store,
+            model_name=model_name,
+            cost_logger=cost_logger,
+        )
+        return _format_documents_for_llm(documents)
+
     async def read_personal_file(
         file_path: str,
     ) -> str:
@@ -537,14 +713,28 @@ def create_document_store_tools(
             coroutine=search_documents_rag,
             name="docstore_search",
             description=(
-                "Search files you've written to long-term storage using semantic similarity. "
-                "This searches indexed versions of files created with write_file or edit_file, plus large tool results from this conversation. "
+                "Search your durable memory (files written to long-term storage) using semantic similarity. "
+                "This searches indexed versions of files created with write_file or edit_file. "
                 "Files are automatically indexed when written to /memories/ (personal) or /channel_memories/ (shared). "
                 "In personal context: searches your /memories/ files. "
                 "In Slack channels: searches /channel_memories/ files shared with the channel. Use include_personal=True to also search your personal /memories/ files (requires permission). "
-                "Use when: you need to find information across multiple files by meaning (not just filename), "
-                "retrieve context from past work or previous tool results to answer questions. "
+                "Use when: you need to find information across multiple durable notes/files by meaning (not just filename). "
+                "Does NOT search large in-hand tool results \u2014 for that use semantic_search_file. "
                 "Returns formatted context chunks for synthesizing answers."
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=semantic_search_file,
+            name="semantic_search_file",
+            handle_tool_error=True,
+            description=(
+                "Semantically search WITHIN a single large file you already have in hand "
+                "(typically a large or evicted tool result under /large_tool_results/). "
+                "Indexes that one file on demand (cached afterwards) and finds the most relevant passages by meaning. "
+                "Use when: a tool returned a big blob and you need to find specific information inside it by meaning, not exact string. "
+                "For exact substrings use grep; to read a small file use read_file; "
+                "to search durable memory across notes use docstore_search. "
+                "Returns formatted context chunks from within that file."
             ),
         ),
         StructuredTool.from_function(

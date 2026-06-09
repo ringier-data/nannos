@@ -125,6 +125,8 @@ def build_runtime_context(
     from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
+    from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
+
     from .agents.file_analyzer import create_file_analyzer_subagent
     from .agents.task_scheduler import create_task_scheduler_subagent
     from .middleware import ToolsetSelectorMiddleware
@@ -147,6 +149,7 @@ def build_runtime_context(
             storage=storage,
             s3_bucket=document_store_bucket,
             user_id=user_config.user_id,  # Use database ID for docstore namespace
+            cost_logger=cost_logger,
         )
         for tool in doc_tools:
             tool_registry[tool.name] = tool
@@ -268,6 +271,16 @@ def build_runtime_context(
     # Auto-include catalog_search — always available if user has accessible catalogs
     if "catalog_search" in tool_registry:
         orchestrator_auto_tools.add("catalog_search")
+    # Auto-include document store tools so the orchestrator can search/read its own
+    # durable memory and JIT-index evicted tool results. ``read_personal_file`` is
+    # deliberately excluded here — it is conversation-context-gated (channel-only)
+    # and injected at model-call time by ConversationContextToolsMiddleware.
+    _ORCHESTRATOR_DOCSTORE_TOOLS = {
+        "docstore_search",
+        "semantic_search_file",
+        "docstore_export",
+    }
+    orchestrator_auto_tools.update(name for name in _ORCHESTRATOR_DOCSTORE_TOOLS if name in tool_registry)
     whitelisted_tool_names.update(orchestrator_auto_tools)
     logger.debug(
         f"Whitelisted tools for orchestrator: {len(whitelisted_tool_names)} tools (including {len(orchestrator_auto_tools)} auto-included scheduler/console tools)"
@@ -393,9 +406,14 @@ def build_runtime_context(
                                     "get_current_time",
                                     "generate_presigned_url",
                                     "docstore_search",
-                                    "read_personal_file",
+                                    "semantic_search_file",
                                     "docstore_export",
                                     "copy_file",
+                                    # The PTC code interpreter (`eval`) is the gateway to all
+                                    # PTC-exposed tools; it is a "base" tool (no server_name) so
+                                    # it survives Phase 1, but Phase 2 tool-selection can drop it.
+                                    # Pin it so the GP model never loses `tools.*` access.
+                                    PTC_CODE_INTERPRETER_TOOL_NAME,
                                 ],
                                 cost_logger=cost_logger,
                                 compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,

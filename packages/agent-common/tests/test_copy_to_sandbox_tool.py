@@ -202,3 +202,57 @@ async def test_copy_to_sandbox_result_contains_usage_hint():
     assert "execute()" in result
     assert "working copy" in result
     assert "write_file()" in result
+
+
+# --- Attachments route + binary (base64) handling ---
+
+
+class MockEncodedBackend:
+    """Mock backend that returns file_data with an explicit encoding."""
+
+    def __init__(self, files: dict[str, dict]):
+        # files maps path -> {"content": str, "encoding": "utf-8"|"base64"}
+        self._files = files
+
+    async def aread(self, path: str, **kwargs):
+        if path in self._files:
+            return FakeReadResult(file_data=self._files[path])
+        return FakeReadResult(file_data=None, error=f"File not found: {path}")
+
+
+def test_validate_accepts_attachments_route():
+    assert _validate_virtual_path("/attachments/report.pdf") == "/attachments/report.pdf"
+
+
+@pytest.mark.asyncio
+async def test_copy_attachment_decodes_base64():
+    """Binary attachments (base64) must be decoded to raw bytes before upload."""
+    import base64
+
+    pdf_bytes = b"%PDF-1.4 binary\x00\x01content"
+    encoded = base64.b64encode(pdf_bytes).decode("ascii")
+    backend = MockEncodedBackend({"/attachments/report.pdf": {"content": encoded, "encoding": "base64"}})
+    sandbox = MockSandboxBackend()
+    tool = create_copy_to_sandbox_tool(backend, sandbox, "/home/ubuntu")
+
+    result = await tool.ainvoke({"virtual_path": "/attachments/report.pdf"})
+
+    assert "/home/ubuntu/attachments/report.pdf" in result
+    assert len(sandbox.uploaded_files) == 1
+    path, content = sandbox.uploaded_files[0]
+    assert path == "/home/ubuntu/attachments/report.pdf"
+    assert content == pdf_bytes
+
+
+@pytest.mark.asyncio
+async def test_copy_attachment_text_encoding():
+    """Text attachments (utf-8) upload as encoded bytes."""
+    backend = MockEncodedBackend({"/attachments/notes.txt": {"content": "hello world", "encoding": "utf-8"}})
+    sandbox = MockSandboxBackend()
+    tool = create_copy_to_sandbox_tool(backend, sandbox, "/home/ubuntu")
+
+    result = await tool.ainvoke({"virtual_path": "/attachments/notes.txt"})
+
+    assert "/home/ubuntu/attachments/notes.txt" in result
+    _, content = sandbox.uploaded_files[0]
+    assert content == b"hello world"

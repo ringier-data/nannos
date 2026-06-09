@@ -22,6 +22,13 @@ if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
 
 from a2a.types import Part, TaskState
+from agent_common.backends.attachments_store import (
+    build_attachments_backend_from_blocks,
+    collect_attachment_blocks_from_messages,
+    reset_current_attachments_backend,
+    set_current_attachments_backend,
+)
+from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk
@@ -45,6 +52,30 @@ from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
 
 logger = logging.getLogger(__name__)
+
+
+# Tool names that must NOT surface as a bare "Using {tool}…" activity-log entry
+# on the orchestrator's own stream:
+#   - response schemas: not real tool calls;
+#   - ``task``: the dispatch middleware emits "Delegating to {subagent}…" instead;
+#   - ``write_todos``: rendered as a work-plan, not an activity line;
+#   - ``eval`` (the PTC code interpreter): an internal REPL. Sub-agents run their
+#     tools *inside* ``eval``, and those sub-agent ``eval`` tool-call chunks leak
+#     into the orchestrator's ``messages`` stream via inherited streaming
+#     callbacks — arriving with the orchestrator's own ``thread_id`` and an empty
+#     ``ns``, so the thread-id guard below cannot distinguish them. Surfacing them
+#     would duplicate the sub-agent's already-sourced "eval-agent › Using eval…"
+#     entry as an unattributed "Using eval…". The orchestrator's own PTC eval is
+#     likewise an internal mechanism, not user-facing activity.
+_ACTIVITY_LOG_EXCLUDED_TOOLS: frozenset[str] = frozenset(
+    {
+        "FinalResponseSchema",
+        "SubAgentResponseSchema",
+        "task",
+        "write_todos",
+        PTC_CODE_INTERPRETER_TOOL_NAME,
+    }
+)
 
 
 # **Role:** You are an expert Routing Delegator. Your primary function is to accurately delegate user inquiries to the appropriate specialized remote agents.
@@ -295,11 +326,26 @@ class OrchestratorDeepAgent:
         # UserConfig should already have tools/agents discovered by executor via discover_capabilities()
         runtime_context = self.build_runtime_context(user_config, sandbox_pool=self.sandbox_pool)
 
+        # Token for the per-turn attachments context registration (reset in finally).
+        _attachments_token = None
+
         # Determine input based on whether we're resuming or starting fresh
         if resume is not None:
-            # Resume from interrupt with the provided resume value
+            # Resume from interrupt with the provided resume value.
+            # Reconstruct the attachments backend from the checkpointed HumanMessage's
+            # additional_kwargs["file_blocks"] — stored there on the first turn so
+            # this works across nodes without any separate persistence layer.
             input_data = Command(resume=resume)
             logger.info(f"Resume input data: Command(resume={resume})")
+            checkpoint_state = await graph.aget_state(config)
+            blocks = collect_attachment_blocks_from_messages(checkpoint_state.values.get("messages") or [])
+            attachments_backend = build_attachments_backend_from_blocks(blocks)
+            if attachments_backend is not None:
+                logger.info(
+                    "Restored %d attachment(s) at /attachments/ for orchestrator HITL resume",
+                    len(attachments_backend._attachments),
+                )
+                _attachments_token = set_current_attachments_backend(attachments_backend)
         else:
             # Build text content from parts
             # Files are described as references - orchestrator decides via tools whether to:
@@ -320,11 +366,44 @@ class OrchestratorDeepAgent:
             # forwarding to sub-agents (bypasses the LLM entirely)
             runtime_context.pending_file_blocks = pending_file_blocks
 
-            # NOTE: we intentionally do NOT include file content in the input to the orchestrator's graph.
-            # It will be a sub-agent responsibility to read the file content if needed, using the tools available to it.
-            # This keeps the orchestrator's graph focused on orchestration and delegation.
-            # The file-analyzer sub-agent can always be used in case the sub-agent input modalities are insufficient
-            input_data = {"messages": [HumanMessage(content=text_content)]}
+            # Serialize file blocks into additional_kwargs so they survive in the
+            # checkpoint (stripped by the model serialization layer — LLM never sees them).
+            # NOTE: we intentionally do NOT include file content in the message text
+            # visible to the orchestrator's LLM. Sub-agents handle file analysis via
+            # the /attachments/ virtual filesystem and their own multimodal inputs.
+            serialized_blocks = [
+                b if isinstance(b, dict) else b.model_dump()
+                for b in pending_file_blocks
+            ]
+            current_msg = HumanMessage(
+                content=text_content,
+                additional_kwargs={"file_blocks": serialized_blocks} if serialized_blocks else {},
+            )
+
+            # Mount the conversation's attachments at /attachments/ for THIS turn.
+            # The compiled graph is shared/cached per model — its CompositeBackend
+            # routes cannot be mutated per turn (unlike DynamicLocalAgentRunnable,
+            # which rebuilds its graph when attachments are present).
+            # A ContextScopedAttachmentsBackend proxy reads from the ContextVar
+            # registered here.  Reset in the finally block.
+            #
+            # Attachments are conversation-scoped: merge the current message's blocks
+            # with any blocks from the last 20 checkpoint messages.  The current
+            # message is appended as newest so its files win on filename collisions
+            # while still preserving attachments from prior turns.
+            checkpoint_state = await graph.aget_state(config)
+            checkpoint_msgs = list(checkpoint_state.values.get("messages") or [])
+            all_blocks = collect_attachment_blocks_from_messages(checkpoint_msgs + [current_msg])
+            attachments_backend = build_attachments_backend_from_blocks(all_blocks)
+            if attachments_backend is not None:
+                logger.info(
+                    "Mounting %d attachment(s) at /attachments/ for the orchestrator turn",
+                    len(attachments_backend._attachments),
+                )
+                _attachments_token = set_current_attachments_backend(attachments_backend)
+                config.setdefault("metadata", {})["has_attachments"] = True
+
+            input_data = {"messages": [current_msg]}
         try:
             # Use streaming with memory for multi-turn conversation support
             chunk_count = 0
@@ -376,16 +455,17 @@ class OrchestratorDeepAgent:
                         continue
 
                     # --- Tool call detection for status history ---
-                    # Capture tool calls (excluding FinalResponseSchema and SubAgentResponseSchema) for status history display
-                    # Skip "task" tool because middleware emits "Delegating to {subagent}..." instead
+                    # Capture tool calls for activity-log display. Internal/leaked
+                    # tools are excluded (see _ACTIVITY_LOG_EXCLUDED_TOOLS) — notably
+                    # ``eval``, whose sub-agent tool-call chunks leak in here with the
+                    # orchestrator's own thread_id and would render unattributed.
                     if msg_chunk.tool_call_chunks:
                         for tc_chunk in msg_chunk.tool_call_chunks:
                             tool_name = tc_chunk.get("name")
                             # Emit status for actual tool calls (not response schemas, not task tool)
                             if (
                                 tool_name
-                                and tool_name
-                                not in ("FinalResponseSchema", "SubAgentResponseSchema", "task", "write_todos")
+                                and tool_name not in _ACTIVITY_LOG_EXCLUDED_TOOLS
                                 and tool_name not in emitted_updates
                             ):
                                 emitted_updates.add(tool_name)
@@ -397,13 +477,28 @@ class OrchestratorDeepAgent:
                             # Incremental structured response streaming
                             delta = response_streamer.feed(tc_chunk)
                             if delta:
-                                stream_buffer.append(delta)
-                                for chunk in stream_buffer.flush_ready():
+                                if response_streamer.is_working:
+                                    # Intermediate "working" narration (e.g. emitted
+                                    # while delegating to a sub-agent) — not the final
+                                    # answer. Surface as an orchestrator thinking block,
+                                    # not as visible response content.
                                     yield AgentStreamResponse(
                                         state=TaskState.working,
-                                        content=chunk,
-                                        metadata={"streaming_chunk": True},
+                                        content=delta,
+                                        metadata={
+                                            "streaming_chunk": True,
+                                            "intermediate_output": True,
+                                            "agent_name": "orchestrator",
+                                        },
                                     )
+                                else:
+                                    stream_buffer.append(delta)
+                                    for chunk in stream_buffer.flush_ready():
+                                        yield AgentStreamResponse(
+                                            state=TaskState.working,
+                                            content=chunk,
+                                            metadata={"streaming_chunk": True},
+                                        )
                         continue
 
                     # --- Regular content streaming ---
@@ -424,13 +519,27 @@ class OrchestratorDeepAgent:
                             # (e.g. Gemini) emit as plain text instead of tool calls.
                             filtered = response_streamer.feed_content(token_text)
                             if filtered:
-                                stream_buffer.append(filtered)
-                                for chunk in stream_buffer.flush_ready():
+                                if response_streamer.is_working:
+                                    # Intermediate "working" narration (e.g. while
+                                    # delegating) — route to the orchestrator
+                                    # thinking block, not the visible response.
                                     yield AgentStreamResponse(
                                         state=TaskState.working,
-                                        content=chunk,
-                                        metadata={"streaming_chunk": True},
+                                        content=filtered,
+                                        metadata={
+                                            "streaming_chunk": True,
+                                            "intermediate_output": True,
+                                            "agent_name": "orchestrator",
+                                        },
                                     )
+                                else:
+                                    stream_buffer.append(filtered)
+                                    for chunk in stream_buffer.flush_ready():
+                                        yield AgentStreamResponse(
+                                            state=TaskState.working,
+                                            content=chunk,
+                                            metadata={"streaming_chunk": True},
+                                        )
                     continue
 
                 if part_type == "custom":
@@ -640,6 +749,11 @@ class OrchestratorDeepAgent:
                 state=TaskState.failed,
                 content="An unexpected error occurred while processing your request. Please try again.",
             )
+
+        finally:
+            # Clear the per-turn attachments context registration.
+            if _attachments_token is not None:
+                reset_current_attachments_backend(_attachments_token)
 
     def get_agent_response(self, final_state) -> AgentStreamResponse:
         """Parse the agent response to extract structured information and check for auth requirements."""

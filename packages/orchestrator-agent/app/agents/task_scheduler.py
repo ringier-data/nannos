@@ -65,7 +65,7 @@ TASK_SCHEDULER_DESCRIPTION = (
 
 # Default model for task scheduling (strategic planning)
 # Can be overridden via TASK_SCHEDULER_MODEL environment variable
-DEFAULT_TASK_SCHEDULER_MODEL: ModelType = "claude-sonnet-4.6"
+DEFAULT_TASK_SCHEDULER_MODEL: ModelType = os.getenv("TASK_SCHEDULER_MODEL", "claude-sonnet-4.6")  # type: ignore
 CONSOLE_FRONTEND_URL = os.getenv("CONSOLE_FRONTEND_URL", "http://localhost:5173")
 # System prompt for the task scheduler agent
 TASK_SCHEDULER_SYSTEM_PROMPT = """<role>

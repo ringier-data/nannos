@@ -29,13 +29,14 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import AsyncIterable, Callable
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from deepagents import CompiledSubAgent
 from deepagents.backends import StateBackend
 from deepagents.backends.composite import CompositeBackend
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessageChunk
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.callbacks import Callbacks
@@ -71,11 +72,29 @@ from agent_common.a2a.structured_response import (
     StructuredResponseMixin,
     get_response_format,
 )
-from agent_common.core.graph_utils import build_sub_agent_graph
+from agent_common.backends.attachments_store import (
+    build_attachments_backend_from_blocks,
+    collect_attachment_blocks_from_messages,
+    set_current_attachments_backend,
+)
+from agent_common.core.graph_utils import (
+    build_sub_agent_graph,
+    denest_parent_pregel_context,
+    isolate_parent_stream_context,
+)
 from agent_common.core.model_factory import get_model_input_capabilities
+from agent_common.middleware.conversation_context_tools_middleware import ContextGatedTool
 from agent_common.utils import get_language_display_name
 
+# Tools that are only meaningful in specific conversation contexts. They are NOT
+# carried in any static tool list; ConversationContextToolsMiddleware injects them
+# only in the contexts listed here. See agent_common/core/CONTEXT.md (D4/D8).
+_CONTEXT_GATED_TOOL_RULES: dict[str, frozenset[str]] = {
+    "read_personal_file": frozenset({"channel"}),
+}
+
 if TYPE_CHECKING:
+    from agent_common.backends.attachments_store import AttachmentsStoreBackend
     from agent_common.core.sandbox_pool import SandboxPool
     from agent_common.core.tool_risk_cache import ToolRiskCache
     from agent_common.middleware.conditional_hitl import RiskScorerFn
@@ -260,6 +279,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self._resolved_skills: dict = {}
         # Cached intermediate state for per-invocation sandbox graph rebuild
         self._cached_tools: list[BaseTool] | None = None
+        self._cached_context_gated_tools: list[ContextGatedTool] = []
         self._cached_system_prompt: str | None = None
         self._cached_response_format: Any = None
         self._cached_hitl_guarded: dict[str, dict] | None = None
@@ -814,7 +834,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         essential_tool_names = [
             "get_current_time",
             "docstore_search",
-            "read_personal_file",
+            "semantic_search_file",
             "docstore_export",
             "create_presigned_url",
             "catalog_search",
@@ -922,6 +942,24 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             )
 
         logger.info(f"Creating LangGraph agent '{self.name}' with {len(tools)} tools")
+
+        # Route conversation-context-gated tools (e.g. read_personal_file) to the
+        # ConversationContextToolsMiddleware instead of binding them statically.
+        # The instance is sourced from any available pool; the middleware injects
+        # it only in the allowed conversation contexts.
+        gated_pool = (
+            list(self.orchestrator_tools) + list(self.inject_all_tools or []) + list(self._discovered_tools or [])
+        )
+        seen_gated: set[str] = set()
+        gated_tools: list[ContextGatedTool] = []
+        for tool in gated_pool:
+            if isinstance(tool, BaseTool) and tool.name in _CONTEXT_GATED_TOOL_RULES and tool.name not in seen_gated:
+                seen_gated.add(tool.name)
+                gated_tools.append(ContextGatedTool(tool, _CONTEXT_GATED_TOOL_RULES[tool.name]))
+        self._cached_context_gated_tools = gated_tools
+        # Ensure gated tools are not also statically bound (de-dup safety).
+        if seen_gated:
+            tools = [t for t in tools if not (isinstance(t, BaseTool) and t.name in seen_gated)]
 
         # Build system prompt with A2A protocol addendum and user preferences
         system_prompt = self.config.system_prompt + A2A_PROTOCOL_ADDENDUM
@@ -1051,7 +1089,58 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             risk_scorer=self._risk_scorer,
             tool_risk_cache=self._tool_risk_cache,
             tool_server_map=tool_server_map or None,
+            context_gated_tools=self._cached_context_gated_tools or None,
         ).with_config({"recursion_limit": _SUB_AGENT_RECURSION_LIMIT})
+
+    def _build_attachments_backend(self, input_data: SubAgentInput) -> "AttachmentsStoreBackend | None":
+        """Build an ephemeral attachments backend from the incoming message.
+
+        Files attached to the conversation arrive as multi-modal content blocks
+        (with a presigned ``url`` or inline ``base64``). They are already passed
+        to the LLM as content, but to let skills/sandbox commands access them on
+        disk we additionally expose them at ``/attachments/{filename}``.
+
+        Returns ``None`` when the message carries no file attachments.
+        """
+        from agent_common.backends.attachments_store import build_attachments_backend_from_blocks
+
+        try:
+            raw_content = input_data.messages[-1].content
+        except (AttributeError, IndexError, TypeError):
+            return None
+
+        backend = build_attachments_backend_from_blocks(raw_content)
+        if backend is not None:
+            logger.info("Mounting %d attachment(s) at /attachments/ for '%s'", len(backend._attachments), self.name)
+        return backend
+
+    @staticmethod
+    def _derive_attachment_filename(
+        block: dict, url: str | None, mime_type: str | None, idx: int, used_names: set[str]
+    ) -> str:
+        """Derive a stable, unique, flat filename for an attachment block."""
+        from agent_common.backends.attachments_store import derive_attachment_filename
+
+        return derive_attachment_filename(block, url, mime_type, idx, used_names)
+
+    def _compose_backend_with_attachments(
+        self,
+        base_factory: Any,
+        attachments_backend: "AttachmentsStoreBackend | None",
+    ) -> Any:
+        """Return a backend factory with the ``/attachments/`` route added.
+
+        When there are no attachments, the base factory is returned unchanged.
+        """
+        if attachments_backend is None:
+            return base_factory
+
+        if isinstance(base_factory, CompositeBackend):
+            routes = {**base_factory.routes, "/attachments/": attachments_backend}
+            return CompositeBackend(default=base_factory.default, routes=routes)
+        if base_factory is None:
+            return CompositeBackend(default=StateBackend(), routes={"/attachments/": attachments_backend})
+        return CompositeBackend(default=base_factory, routes={"/attachments/": attachments_backend})
 
     async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
         """Stream dynamic agent execution with real-time status updates and content.
@@ -1081,6 +1170,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
         _is_hitl_resume = isinstance(input_data, LGCommand)
 
+        human_message = None
         if not _is_hitl_resume:
             # Prepare input with multi-modal support (handles content blocks)
             human_message = await self._prepare_human_message_input(input_data)
@@ -1090,6 +1180,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         pooled_sandbox = None
         sandbox_active = getattr(self.config, "sandbox_enabled", False) and self.sandbox_pool is not None
 
+        # Token for the per-turn attachments context registration (reset in finally).
+        _attachments_token = None
+
         try:
             # Clear per-invocation caches on extra_middlewares (e.g. ToolsetSelectorMiddleware)
             for mw in self.extra_middlewares or []:
@@ -1098,6 +1191,40 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
             # Ensure tools/skills/prompt are resolved and default agent is built (lazy init)
             await self._ensure_agent()
+
+            # Build the /attachments/ backend by merging the current message's blocks
+            # with any blocks found in the last 20 checkpoint messages.
+            # The current message is appended as the newest entry so its blocks win
+            # on filename collisions while still preserving files from prior turns.
+            # On HITL resume there is no fresh message — checkpoint only.
+            base_backend_factory = self._cached_effective_backend_factory or StateBackend()
+            # self._agent is None for sandbox agents (_ensure_agent skips building it;
+            # the sandbox graph is built later per-invocation).  Any compiled graph for
+            # this agent can read the thread's checkpoint, so we fall back to building
+            # a temporary non-sandbox graph solely for the aget_state call.
+            _graph_for_state = self._agent or self._build_graph(
+                self._cached_effective_backend_factory or StateBackend()
+            )
+            checkpoint_state = await _graph_for_state.aget_state(cast(RunnableConfig, config))
+            checkpoint_msgs = list(checkpoint_state.values.get("messages") or [])
+            msgs_to_scan = checkpoint_msgs if human_message is None else checkpoint_msgs + [human_message]
+            all_blocks = collect_attachment_blocks_from_messages(msgs_to_scan)
+            attachments_backend = build_attachments_backend_from_blocks(all_blocks)
+            if attachments_backend is not None:
+                logger.info(
+                    "Mounting %d attachment(s) at /attachments/ for '%s'",
+                    len(attachments_backend._attachments),
+                    self.name,
+                )
+            invocation_backend_factory = self._compose_backend_with_attachments(
+                base_backend_factory, attachments_backend
+            )
+
+            # Register the attachments backend for this turn so tools that read
+            # outside the FilesystemMiddleware backend (e.g. semantic_search_file)
+            # can reach the attached files. Reset in the finally block.
+            if attachments_backend is not None:
+                _attachments_token = set_current_attachments_backend(attachments_backend)
 
             # If sandbox enabled, build a per-invocation graph with sandbox backend
             if sandbox_active:
@@ -1113,12 +1240,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
                 sandboxed_backend_factory = create_sandboxed_backend_factory(
                     sandbox_backend=pooled_sandbox.backend,
-                    base_backend=self._cached_effective_backend_factory or StateBackend(),
+                    base_backend=invocation_backend_factory,
                 )
 
                 # Create copy_to_sandbox tool with access to virtual FS and sandbox
                 copy_tool = create_copy_to_sandbox_tool(
-                    composite_backend=self._cached_effective_backend_factory or StateBackend(),
+                    composite_backend=invocation_backend_factory,
                     sandbox_backend=pooled_sandbox.backend,
                     sandbox_home=sandbox_home,
                 )
@@ -1159,9 +1286,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     session_id[:8] if session_id else "?",
                 )
             else:
-                agent = self._agent
+                # Non-sandbox: rebuild the graph for this turn only when attachments
+                # are present (to mount /attachments/); otherwise reuse cached agent.
+                if attachments_backend is not None:
+                    agent = self._build_graph(invocation_backend_factory)
+                else:
+                    agent = self._agent
 
-            agent_input = input_data if _is_hitl_resume else {"messages": [human_message]}
+            agent_input = input_data if human_message is None else {"messages": [human_message]}
 
             # CRITICAL: Dynamic agent graphs are standalone, not subgraphs.
             # checkpoint_ns must be "" for standalone graphs (same pattern as GPAgentRunnable).
@@ -1172,6 +1304,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 "metadata": {
                     **config.get("metadata", {}),
                     "agent_name": self.name,  # Ensure tools resolve to this agent's skills
+                    "has_attachments": attachments_backend is not None,
                 },
                 "configurable": {
                     **config.get("configurable", {}),
@@ -1201,13 +1334,36 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
 
             # Stream the agent with custom events and messages using v2 format
             # v2: every chunk is a StreamPart dict: {"type": ..., "ns": ..., "data": ...}
-            async for part in agent.astream(
-                agent_input,
-                config=standalone_config,
-                stream_mode=["custom", "messages"],
-                context=subagent_context,
-                version="v2",
-            ):
+            #
+            # The sub-agent graph is invoked from inside the orchestrator's Pregel
+            # node, which leaks the parent's __pregel_task_id into our effective
+            # config and would force the sub-agent's Pregel loop to is_nested=True.
+            # In that mode a GraphInterrupt propagates as an exception instead of
+            # being suppressed + saved to the checkpoint, and the resulting
+            # checkpoint does NOT cleanly replay an interrupted tool node when the
+            # orchestrator resumes via a standalone Command(resume) (the approved
+            # call is lost and the model re-runs). denest_parent_pregel_context()
+            # strips that key so the graph runs as a standalone root: interrupts are
+            # suppressed + persisted and the post-stream aget_state check below
+            # re-raises them. The contextvar must stay active for the whole
+            # iteration, so the de-nesting wraps the astream generator itself.
+            async def _denested_agent_astream() -> AsyncIterable[Any]:
+                # denest_parent_pregel_context: run as a standalone Pregel root.
+                # isolate_parent_stream_context: drop the inherited
+                # StreamMessagesHandler so this sub-agent's token/tool-call chunks
+                # do not leak into the orchestrator's `messages` stream (where they
+                # would surface unattributed, e.g. an unprefixed "Using eval…").
+                with denest_parent_pregel_context(), isolate_parent_stream_context():
+                    async for _part in agent.astream(
+                        agent_input,
+                        config=standalone_config,
+                        stream_mode=["custom", "messages"],
+                        context=subagent_context,
+                        version="v2",
+                    ):
+                        yield _part
+
+            async for part in _denested_agent_astream():
                 part_type = part["type"]
 
                 # Capture tool calls and stream content from message chunks
@@ -1342,6 +1498,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             if pooled_sandbox is not None and self.sandbox_pool is not None:
                 session_id = config.get("configurable", {}).get("thread_id", context_id or "unknown")
                 await self.sandbox_pool.release(session_id, self.name)
+
+            # Clear the per-turn attachments context registration.
+            if _attachments_token is not None:
+                from agent_common.backends.attachments_store import reset_current_attachments_backend
+
+                reset_current_attachments_backend(_attachments_token)
 
     # _translate_agent_result and _build_response_from_schema are provided by StructuredResponseMixin
 

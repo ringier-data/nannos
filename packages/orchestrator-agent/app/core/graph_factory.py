@@ -25,10 +25,15 @@ from agent_common.a2a.client_runnable import A2AClientRunnable as _ClientRunnabl
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
-from agent_common.core.graph_utils import build_common_middleware_stack, create_indexing_backend_factory
+from agent_common.core.graph_utils import (
+    build_code_interpreter_middlewares,
+    build_common_middleware_stack,
+    create_indexing_backend_factory,
+)
 from agent_common.core.model_factory import _has_aws_credentials, create_model
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
+from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
@@ -279,8 +284,11 @@ class GraphFactory:
         Returns:
             A ``BackendProtocol`` instance (``CompositeBackend`` or ``StateBackend``)
         """
-        bedrock_region = self.config.get_bedrock_region() if _has_aws_credentials() else None
-        backend = create_indexing_backend_factory(self.store, bedrock_region, cost_logger=self.cost_logger)
+        backend = create_indexing_backend_factory(
+            self.store,
+            cost_logger=self.cost_logger,
+            include_attachments=True,
+        )
 
         return backend
 
@@ -418,12 +426,16 @@ class GraphFactory:
                 [0] → [1] → … → [N] → ToolNode handler
             So [0] can short-circuit before any later middleware sees the call.
 
-        IMPORTANT: ``DynamicToolDispatchMiddleware`` is deliberately first ([0])
-        because it short-circuits the ``task`` tool for A2A sub-agent dispatch.
-        Being outermost means inner middlewares (Auth, Retry, …) never see the
-        ``task`` tool call — they only see the ToolMessage result if it was
-        returned.  This is why ``AuthErrorDetectionMiddleware`` cannot intercept
-        A2A 401 errors via ``interrupt()``.
+        IMPORTANT: ``DynamicToolDispatchMiddleware`` is the first *tool-call*
+        handler.  ``ConversationContextToolsMiddleware`` is placed before it for
+        ``wrap_model_call`` (so its injected gated tool flows through
+        DynamicToolDispatch's schema-cleanup pipeline) but it has no tool-call
+        hook, so DynamicToolDispatch is still the effective ([0]) interceptor for
+        the ``task`` tool A2A sub-agent dispatch.  Being the outermost tool-call
+        handler means inner middlewares (Auth, Retry, …) never see the ``task``
+        tool call — they only see the ToolMessage result if it was returned.
+        This is why ``AuthErrorDetectionMiddleware`` cannot intercept A2A 401
+        errors via ``interrupt()``.
 
         Returns:
             Ordered middleware list (first = outermost for wrap hooks).
@@ -446,6 +458,18 @@ class GraphFactory:
 
         # StoragePathsInstructionMiddleware adds filesystem storage paths documentation
         storage_paths_middleware = StoragePathsInstructionMiddleware()
+
+        # ConversationContextToolsMiddleware gates conversation-context-specific tools
+        # (e.g. read_personal_file) so they are bound only in the contexts where they
+        # apply. The gated tool is user-scoped and lives in the runtime tool_registry
+        # (not the static whitelist), so it is resolved by name at model-call time —
+        # the orchestrator's single-graph-per-model cannot hold a per-user instance.
+        # Placed outermost so the injected tool flows through DynamicToolDispatch's
+        # schema-cleanup/dispatch pipeline; the gate has no tool-call hook, so
+        # DynamicToolDispatch remains the effective first handler for tool dispatch.
+        context_gate_middleware = ConversationContextToolsMiddleware(
+            runtime_gated_tools={"read_personal_file": frozenset({"channel"})},
+        )
 
         # Outermost → innermost (for wrap_* hooks):
         # DynamicToolDispatch[0] → StoragePaths → PromptCaching → Steering
@@ -513,13 +537,30 @@ class GraphFactory:
         # Supports argument-based conditions (e.g., docstore_search only when include_personal=True).
         hitl_middleware = _create_hitl_middleware()
 
+        # CodeInterpreterMiddleware exposes an ``eval`` JS REPL (with skills_backend).
+        # The orchestrator passes ``broaden_exposure=False`` so ``eval`` exposes
+        # only the filesystem baseline — NOT the per-user tool registry (hundreds
+        # of MCP tools). The orchestrator's job is to plan and delegate via
+        # ``task``; pulling the whole registry into the PTC prompt bloats it and
+        # strips every dispatchable tool from the model's bound list, derailing it
+        # into emitting a final response instead of dispatching. ``task``, ``eval``
+        # and the response-schema tools remain visible to the model.
+        code_interpreter_middlewares = build_code_interpreter_middlewares(
+            self.backend_factory,
+            broaden_exposure=False,
+            risk_scorer=score_tool_risk,
+            default_risk_threshold=0.8,
+        )
+
         return [
+            context_gate_middleware,
             dynamic_tool_middleware,
             storage_paths_middleware,
             BedrockPromptCachingMiddleware(),
             steering_middleware,
             user_preferences_middleware,
             playbook_middleware,
+            *code_interpreter_middlewares,
             ToolStatusMiddleware(),
             self._loop_detection_middleware,
             self._auth_middleware,

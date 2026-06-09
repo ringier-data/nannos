@@ -786,7 +786,10 @@ async def _process_a2a_response(
                                     kind="status-update",
                                 )
                                 response_data["persistedMessageId"] = saved_msg.message_id
-                                safety_net_saved = True
+                                # For HITL interrupts (input-required), don't block save_agent_response:
+                                # the HITL event carries action_requests/review_configs/extensions in its
+                                # raw payload that must be persisted so the widget can be restored on reload.
+                                safety_net_saved = status_state != "input-required"
                         elif is_last_chunk:
                             logger.warning(
                                 f"[STREAMING] last_chunk=True but accumulated content is empty "

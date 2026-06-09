@@ -47,6 +47,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from agent_common.core.tool_risk_cache import ToolRiskCache, ToolRiskEntry
+from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -251,8 +252,13 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             tool_name: str = tool_call["name"]
             args: dict[str, Any] = tool_call.get("args", {})
 
-            # 1. Sub-agent dispatch is never interrupted here
-            if tool_name == "task":
+            # 1. Sub-agent dispatch and the PTC code interpreter are never
+            #    interrupted here. ``task`` is a dispatch primitive; ``eval`` (the
+            #    code interpreter) carries its risk guard on the inner wrapped
+            #    tool calls (which return an approval-required payload instead of
+            #    executing). Interrupting ``eval`` would trigger a graph
+            #    interrupt/resume cycle the PTC bridge is designed to avoid.
+            if tool_name in ("task", PTC_CODE_INTERPRETER_TOOL_NAME):
                 continue
 
             # 2. Static guards take priority

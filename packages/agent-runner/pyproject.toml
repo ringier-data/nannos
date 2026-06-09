@@ -1,6 +1,6 @@
 [project]
 name = "agent-runner"
-version = "0.19.3"
+version = "0.20.0"
 description = "Internal execution service for scheduled automated sub-agent jobs"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,7 +10,7 @@ dependencies = [
     # HTTP server
     "uvicorn>=0.38.0",
     # LangChain / DeepAgents
-    "deepagents>=0.5.7,<0.6.0",
+    "deepagents[quickjs]>=0.6.0,<0.7.0",
     "langchain>=1.0.0",
     "langchain-aws>=1.4.3",
     "langchain-mcp-adapters>=0.1.11",

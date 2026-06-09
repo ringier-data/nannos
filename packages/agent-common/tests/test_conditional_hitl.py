@@ -2,7 +2,10 @@
 
 import types
 
+from langchain_core.messages import AIMessage
+
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
+from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
 
 class TestApplyBypassRule:
@@ -211,3 +214,41 @@ class TestIsBypassed:
             )
             is False
         )
+
+
+class TestRiskScoringExclusions:
+    """The risk-based guard must never interrupt dispatch/PTC primitives."""
+
+    async def _run(self, tool_name: str):
+        scored: list[str] = []
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            scored.append(name)
+            return 0.99, None  # always high-risk
+
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={},
+            risk_scorer=scorer,
+            default_risk_threshold=0.8,
+        )
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": tool_name, "args": {"code": "x"}, "id": "1", "type": "tool_call"}],
+        )
+        state = {"messages": [ai]}
+        runtime = types.SimpleNamespace(
+            context=types.SimpleNamespace(tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[])
+        )
+        # Returns None (no interrupt) and never scores the excluded tool.
+        result = await mw.aafter_model(state, runtime)
+        return result, scored
+
+    async def test_eval_tool_never_interrupted_or_scored(self):
+        result, scored = await self._run(PTC_CODE_INTERPRETER_TOOL_NAME)
+        assert result is None
+        assert PTC_CODE_INTERPRETER_TOOL_NAME not in scored
+
+    async def test_task_dispatch_never_interrupted_or_scored(self):
+        result, scored = await self._run("task")
+        assert result is None
+        assert "task" not in scored

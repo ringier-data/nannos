@@ -14,7 +14,7 @@ dependencies = [
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
     # DeepAgents
-    "deepagents>=0.5.7,<0.6.0",
+    "deepagents[quickjs]>=0.6.0,<0.7.0",
     # MCP adapters
     "langchain-mcp-adapters>=0.1.11",
     # HTTP client

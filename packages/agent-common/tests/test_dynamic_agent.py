@@ -357,3 +357,99 @@ class TestCreateDynamicLocalSubagent:
         runnable = subagent["runnable"]
         assert len(runnable.orchestrator_tools) == 1
         assert runnable.orchestrator_tools[0].name == "test_tool"
+
+
+class TestAttachmentMounting:
+    """Tests for the per-invocation /attachments/ backend helpers."""
+
+    @pytest.fixture
+    def runnable(self):
+        config = LocalLangGraphSubAgentConfig(
+            type="langgraph",
+            name="attach-agent",
+            description="Agent under attachment test",
+            system_prompt="You are a test.",
+        )
+        return DynamicLocalAgentRunnable(config=config, model=MagicMock())
+
+    def test_no_attachments_returns_none(self, runnable):
+        input_data = SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="just text, no files")])
+        assert runnable._build_attachments_backend(input_data) is None
+
+    def test_extracts_file_block_with_url(self, runnable):
+        content = [
+            {"type": "text", "text": "Please summarize"},
+            {
+                "type": "file",
+                "url": "https://s3.example/bucket/report.pdf?sig=abc",
+                "mime_type": "application/pdf",
+            },
+        ]
+        input_data = SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content=content)])
+        backend = runnable._build_attachments_backend(input_data)
+        assert backend is not None
+        assert "report.pdf" in backend._attachments
+
+    def test_extracts_inline_base64_block(self, runnable):
+        import base64
+
+        b64 = base64.b64encode(b"hello").decode("ascii")
+        content = [
+            {"type": "image", "base64": b64, "mime_type": "image/png", "filename": "pic.png"},
+        ]
+        input_data = SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content=content)])
+        backend = runnable._build_attachments_backend(input_data)
+        assert backend is not None
+        assert backend._attachments["pic.png"].inline_bytes == b"hello"
+
+    def test_skips_block_without_source(self, runnable):
+        content = [{"type": "file", "mime_type": "application/pdf"}]
+        input_data = SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content=content)])
+        assert runnable._build_attachments_backend(input_data) is None
+
+    def test_derive_filename_from_url(self, runnable):
+        name = runnable._derive_attachment_filename(
+            {}, "https://s3.example/path/My%20Doc.pdf?x=1", "application/pdf", 0, set()
+        )
+        assert name == "My Doc.pdf"
+
+    def test_derive_filename_fallback_uses_mime_extension(self, runnable):
+        name = runnable._derive_attachment_filename({}, None, "application/pdf", 2, set())
+        assert name.startswith("attachment_2")
+        assert name.endswith(".pdf")
+
+    def test_derive_filename_dedupes(self, runnable):
+        used = {"report.pdf"}
+        name = runnable._derive_attachment_filename({}, "https://s3.example/report.pdf", "application/pdf", 3, used)
+        assert name != "report.pdf"
+        assert name.endswith(".pdf")
+
+    def test_compose_adds_attachments_route_to_composite(self, runnable):
+        from deepagents.backends import StateBackend
+        from deepagents.backends.composite import CompositeBackend
+
+        from agent_common.backends.attachments_store import Attachment, AttachmentsStoreBackend
+
+        att_backend = AttachmentsStoreBackend([Attachment(filename="a.txt", inline_bytes=b"x")])
+        base = CompositeBackend(default=StateBackend(), routes={"/skills/": StateBackend()})
+        composed = runnable._compose_backend_with_attachments(base, att_backend)
+        assert isinstance(composed, CompositeBackend)
+        assert "/attachments/" in composed.routes
+        assert "/skills/" in composed.routes
+
+    def test_compose_returns_base_when_no_attachments(self, runnable):
+        from deepagents.backends import StateBackend
+
+        base = StateBackend()
+        assert runnable._compose_backend_with_attachments(base, None) is base
+
+    def test_compose_wraps_non_composite_base(self, runnable):
+        from deepagents.backends import StateBackend
+        from deepagents.backends.composite import CompositeBackend
+
+        from agent_common.backends.attachments_store import Attachment, AttachmentsStoreBackend
+
+        att_backend = AttachmentsStoreBackend([Attachment(filename="a.txt", inline_bytes=b"x")])
+        composed = runnable._compose_backend_with_attachments(StateBackend(), att_backend)
+        assert isinstance(composed, CompositeBackend)
+        assert "/attachments/" in composed.routes

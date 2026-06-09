@@ -441,6 +441,34 @@ class TestForceStop:
         assert loop_type == "same_tool"
         assert count == 4
 
+    def test_eval_exempt_from_max_tool_repeats_with_distinct_code(self):
+        """The PTC code interpreter (`eval`) is a gateway tool: many *distinct*
+        calls (different code) must NOT be blocked by max_tool_repeats — a normal
+        multi-step PTC agent would otherwise be force-stopped mid-task."""
+        middleware = RepeatedToolCallMiddleware(
+            max_repeats=5, max_tool_repeats=10, window_size=10, dispatch_tools={"task", "eval"}
+        )
+
+        # 12 distinct eval calls — exceeds max_tool_repeats=10 but exempt.
+        history = [f"hash{i}" for i in range(11)]
+        is_loop, _count, _loop_type = middleware._check_for_loop("eval", "hash_new", history)
+
+        assert is_loop is False
+
+    def test_eval_still_blocked_on_identical_code(self):
+        """`eval` remains subject to max_repeats: identical code repeated is a real
+        loop (mode='call' → identical code yields identical result, no progress)."""
+        middleware = RepeatedToolCallMiddleware(
+            max_repeats=5, max_tool_repeats=10, window_size=20, dispatch_tools={"task", "eval"}
+        )
+
+        history = ["same"] * 5  # 5 identical + current = 6 > max_repeats=5
+        is_loop, count, loop_type = middleware._check_for_loop("eval", "same", history)
+
+        assert is_loop is True
+        assert loop_type == "same_args"
+        assert count == 6
+
     @pytest.mark.asyncio
     async def test_dispatch_tool_not_blocked_in_aafter_model(self):
         """Full integration: dispatch tool with many different-args calls is not blocked."""

@@ -51,6 +51,7 @@ from .a2a_extensions import (
 )
 
 # from google.adk.sessions import InMemorySessionService
+from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
 from .registry import RegistryService, User
@@ -64,6 +65,18 @@ from .steering_state import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Bounded re-entries to recover from an "eager completion" where the model sets
+# include_subagent_output=true but never actually delegated (no `task` call).
+MAX_DELEGATION_REINVOCATIONS = int(os.getenv("MAX_DELEGATION_REINVOCATIONS", "1"))
+
+# Corrective nudge fed back into the graph on such a re-entry.
+_DELEGATION_NUDGE = (
+    "Your previous response set include_subagent_output=true but you did not call the `task` tool, "
+    "so no sub-agent was actually invoked and there is no sub-agent output to include. "
+    "Do not finalize yet. Call the `task` tool now to delegate the work to the appropriate sub-agent, "
+    "then base your final response on the sub-agent's result."
+)
 
 
 class OrchestratorDeepAgentExecutor(AgentExecutor):
@@ -256,9 +269,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
         if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
-            caller_channel_id = (
-                context.message.metadata.get("slackChannelId")
-                or context.message.metadata.get("googleChatSpaceId")
+            caller_channel_id = context.message.metadata.get("slackChannelId") or context.message.metadata.get(
+                "googleChatSpaceId"
             )
 
         # --- Continuous Interaction Turn: route to active stream if one exists ---
@@ -406,8 +418,15 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             channel_id = slack_channel_id or google_chat_space_id
 
             # Update stream info with scope and assistant_id now that we have them
-            stream_info.scope = "channel" if channel_id else "personal"
-            stream_info.assistant_id = channel_id if channel_id else str(user.id)
+            # Slack: Public channels (which start with C) or private channels/group DMs (which start with G), a 1:1 direct message channel ID always starts with a D (e.g., D12345678).
+            # Google-chat: in the google-chat client we set a spaceId just whenever source != direct_message.
+            if (slack_channel_id and not slack_channel_id.startswith("D")) or google_chat_space_id:
+                stream_info.scope = "channel"
+                stream_info.assistant_id = channel_id
+            else:
+                stream_info.scope = "personal"
+                # Use database ID (not OIDC sub) to match docstore tools
+                stream_info.assistant_id = str(user.id)
 
             if slack_user_id:
                 client_user_handle = f"<@{slack_user_id}>"
@@ -469,9 +488,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "__pregel_checkpointer": graph.checkpointer,  # Required for proper checkpoint isolation
                 },
                 "metadata": {
-                    "assistant_id": channel_id
-                    if channel_id
-                    else user.id,  # Use database ID (not OIDC sub) to match docstore tools
+                    "assistant_id": stream_info.assistant_id,
                     "user_id": user.id,  # Stable database ID (not OIDC sub)
                     "conversation_id": task.context_id,  # For conversation-scoped tool result storage
                     "group_id": user_groups[0] if user_groups else None,  # Primary group for filesystem namespace
@@ -479,7 +496,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     "user_name": user_name,
                     "slack_thread_ts": request_metadata.get("slackThreadTs"),
                     "google_chat_thread_id": request_metadata.get("googleChatThreadId"),
-                    "scope": "personal" if not channel_id else "channel",
+                    "scope": stream_info.scope,
                     "model_type": model_type,
                     "thinking_level": thinking_level,
                 },
@@ -558,6 +575,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
             # Stable artifact ID for streaming content chunks (A2A artifact-append pattern)
             steering_reinvocations = 0
+            delegation_reinvocations = 0
 
             while True:
                 streaming_artifact_id = str(uuid.uuid4())
@@ -617,6 +635,30 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                                 f"message(s) (reinvocation {steering_reinvocations}/{MAX_STEERING_REINVOCATIONS})"
                             )
                             continue  # Loop back for another stream round
+
+                # Phantom-delegation guard: the model claimed completion with
+                # include_subagent_output=true but never actually delegated (no
+                # `task` ToolMessage this turn), which yields an empty response.
+                # Re-enter once with a corrective nudge so it performs the
+                # delegation instead of surfacing nothing.
+                if (
+                    deferred_terminal_item is not None
+                    and deferred_terminal_item.state == TaskState.completed
+                    and delegation_reinvocations < MAX_DELEGATION_REINVOCATIONS
+                ):
+                    phantom_state = graph.get_state(config)  # type: ignore
+                    phantom_values = phantom_state.values if hasattr(phantom_state, "values") else {}
+                    if StreamHandler.is_phantom_subagent_completion(phantom_values):
+                        delegation_reinvocations += 1
+                        message_parts = [Part(root=TextPart(text=_DELEGATION_NUDGE))]
+                        resume_value = None  # fresh corrective turn, not a resume
+                        logger.warning(
+                            "[DELEGATION] include_subagent_output=true but no sub-agent ran this turn — "
+                            "re-entering to force delegation (%d/%d)",
+                            delegation_reinvocations,
+                            MAX_DELEGATION_REINVOCATIONS,
+                        )
+                        continue  # Loop back for another stream round
 
                 # Emit feedback request for complex tasks before terminal event
                 if (

@@ -315,6 +315,42 @@ def get_default_model() -> ModelType:
     return get_resolved_default_model()
 
 
+# Ordered preference for cheap/fast models suitable for indexing/chunking.
+# Only models that are registered in MODEL_CONFIG (i.e. have live credentials)
+# will be selected.
+_INDEXING_MODEL_PREFERENCE: list[str] = [
+    "claude-haiku-4-5",  # Bedrock — fastest Claude, very cheap
+    "gpt-4o-mini",  # Azure — cost-effective GPT
+    "gemini-3-flash-preview",  # GCP — fast Gemini
+]
+
+
+def get_default_indexing_model() -> ModelType:
+    """Return the cheapest/fastest available model for semantic indexing.
+
+    Iterates through _INDEXING_MODEL_PREFERENCE and returns the first entry
+    that is registered in MODEL_CONFIG (i.e. has valid provider credentials).
+    Falls back to the first available model when none of the preferred ones
+    are configured.
+
+    Returns:
+        A model key from MODEL_CONFIG suitable for chunking/contextualization.
+
+    Raises:
+        RuntimeError: When no model provider credentials are configured.
+    """
+    for model in _INDEXING_MODEL_PREFERENCE:
+        if model in MODEL_CONFIG:
+            return model  # type: ignore[return-value]
+    if MODEL_CONFIG:
+        return next(iter(MODEL_CONFIG))  # type: ignore[return-value]
+    raise RuntimeError(
+        "No model provider credentials found. Cannot determine an indexing model. "
+        "Configure at least one of: AWS (Bedrock), Azure OpenAI, GCP (Vertex AI), "
+        "or a local OpenAI-compatible endpoint."
+    )
+
+
 def get_models_prompt_text() -> str:
     """Generate a prompt-ready text block describing all available models.
 

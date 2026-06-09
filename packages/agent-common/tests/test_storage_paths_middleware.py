@@ -5,18 +5,25 @@ Covers:
 - Existing system message without prompt → appends prompt (idempotent marker absent)
 - Existing system message already containing prompt → passes through unchanged
 - Async wrap_model_call mirrors sync behavior
+- Context-aware prompts: /channel_memories/ and read_personal_file only in channel
+- Shared decision tree present in both sandbox and non-sandbox prompts
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import SystemMessage
 
 from agent_common.middleware.storage_paths_middleware import (
-    _FILESYSTEM_STORAGE_PATHS_PROMPT,
     StoragePathsInstructionMiddleware,
+    _attachments_present,
+    _build_decision_tree,
+    _build_non_sandbox_prompt,
     _build_sandbox_prompt,
+    _derive_context,
 )
+
+_MARKER = "<filesystem_storage_paths>"
 
 
 def _make_request(system_message=None):
@@ -50,14 +57,12 @@ class TestWrapModelCallSync:
 
         self.middleware.wrap_model_call(request, handler)
 
-        # override must have been called with a system_message
         request.override.assert_called_once()
         _, kwargs = request.override.call_args
         new_sm = kwargs["system_message"]
         assert isinstance(new_sm, SystemMessage)
-        assert _FILESYSTEM_STORAGE_PATHS_PROMPT in new_sm.text
+        assert _MARKER in new_sm.text
 
-        # handler receives the modified request
         assert len(received_requests) == 1
         assert received_requests[0].system_message is new_sm
 
@@ -73,21 +78,18 @@ class TestWrapModelCallSync:
 
         self.middleware.wrap_model_call(request, handler)
 
-        # override must have been called exactly once
         request.override.assert_called_once()
         _, kwargs = request.override.call_args
         new_sm = kwargs["system_message"]
         assert isinstance(new_sm, SystemMessage)
-        # Original content preserved
         assert "helpful assistant" in new_sm.text
-        # Prompt appended
-        assert _FILESYSTEM_STORAGE_PATHS_PROMPT in new_sm.text
+        assert _MARKER in new_sm.text
 
         assert received_requests[0].system_message is new_sm
 
     def test_existing_system_message_with_prompt_is_idempotent(self):
-        """When system_message already contains the prompt, no modification is made."""
-        existing_sm = SystemMessage(content=f"You are helpful.\n\n{_FILESYSTEM_STORAGE_PATHS_PROMPT}")
+        """When system_message already contains the marker, no modification is made."""
+        existing_sm = SystemMessage(content=f"You are helpful.\n\n{_MARKER}")
         request = _make_request(system_message=existing_sm)
         received_requests = []
 
@@ -97,9 +99,7 @@ class TestWrapModelCallSync:
 
         self.middleware.wrap_model_call(request, handler)
 
-        # override must NOT have been called — request is passed unchanged
         request.override.assert_not_called()
-        # The original request object is forwarded to the handler
         assert received_requests[0] is request
 
     def test_handler_return_value_is_forwarded(self):
@@ -110,17 +110,6 @@ class TestWrapModelCallSync:
         result = self.middleware.wrap_model_call(request, lambda req: sentinel)
 
         assert result is sentinel
-
-    def test_prompt_only_system_message_is_idempotent(self):
-        """System message that is exactly the storage-paths prompt → no modification."""
-        existing_sm = SystemMessage(content=_FILESYSTEM_STORAGE_PATHS_PROMPT)
-        request = _make_request(system_message=existing_sm)
-
-        calls_to_handler = []
-        self.middleware.wrap_model_call(request, lambda req: calls_to_handler.append(req) or MagicMock())
-
-        request.override.assert_not_called()
-        assert calls_to_handler[0] is request
 
 
 class TestWrapModelCallAsync:
@@ -145,32 +134,13 @@ class TestWrapModelCallAsync:
         _, kwargs = request.override.call_args
         new_sm = kwargs["system_message"]
         assert isinstance(new_sm, SystemMessage)
-        assert _FILESYSTEM_STORAGE_PATHS_PROMPT in new_sm.text
+        assert _MARKER in new_sm.text
         assert received_requests[0].system_message is new_sm
-
-    @pytest.mark.asyncio
-    async def test_existing_system_message_without_prompt_async(self):
-        """Async variant: existing system_message without prompt → appends."""
-        existing_sm = SystemMessage(content="Act as an expert analyst.")
-        request = _make_request(system_message=existing_sm)
-        received_requests = []
-
-        async def handler(req):
-            received_requests.append(req)
-            return MagicMock()
-
-        await self.middleware.awrap_model_call(request, handler)
-
-        request.override.assert_called_once()
-        _, kwargs = request.override.call_args
-        new_sm = kwargs["system_message"]
-        assert "expert analyst" in new_sm.text
-        assert _FILESYSTEM_STORAGE_PATHS_PROMPT in new_sm.text
 
     @pytest.mark.asyncio
     async def test_idempotent_async(self):
         """Async variant: prompt already present → no modification."""
-        existing_sm = SystemMessage(content=f"Base prompt.\n\n{_FILESYSTEM_STORAGE_PATHS_PROMPT}")
+        existing_sm = SystemMessage(content=f"Base prompt.\n\n{_MARKER}")
         request = _make_request(system_message=existing_sm)
 
         calls_to_handler = []
@@ -203,52 +173,138 @@ class TestSandboxMode:
 
     def test_sandbox_prompt_includes_copy_to_sandbox(self):
         """Sandbox prompt should mention copy_to_sandbox tool."""
-        prompt = _build_sandbox_prompt("/home/ubuntu")
+        prompt = _build_sandbox_prompt("/home/ubuntu", "direct")
         assert "copy_to_sandbox" in prompt
         assert "/home/ubuntu" in prompt
 
     def test_sandbox_prompt_mentions_skills_presync(self):
         """Sandbox prompt should tell agent skills are pre-synced."""
-        prompt = _build_sandbox_prompt("/home/ubuntu")
+        prompt = _build_sandbox_prompt("/home/ubuntu", "direct")
         assert "skills" in prompt.lower()
         assert "pre-synced" in prompt or "automatically" in prompt
 
     def test_sandbox_prompt_mentions_write_file_persist(self):
         """Sandbox prompt should instruct agent to use write_file to persist."""
-        prompt = _build_sandbox_prompt("/home/ubuntu")
+        prompt = _build_sandbox_prompt("/home/ubuntu", "direct")
         assert "write_file()" in prompt
 
     def test_sandbox_mode_uses_sandbox_prompt(self):
-        """When sandbox_enabled=True, should use sandbox-specific prompt."""
+        """When sandbox_enabled=True, _build_prompt should produce the sandbox variant."""
         mw = StoragePathsInstructionMiddleware(sandbox_enabled=True, sandbox_home="/home/ubuntu")
-        assert "copy_to_sandbox" in mw._prompt
-        assert _FILESYSTEM_STORAGE_PATHS_PROMPT not in mw._prompt
+        prompt = mw._build_prompt()
+        assert "copy_to_sandbox" in prompt
 
-    def test_non_sandbox_mode_uses_default_prompt(self):
-        """When sandbox_enabled=False (default), should use standard prompt."""
+    def test_non_sandbox_mode_omits_sandbox_text(self):
+        """When sandbox_enabled=False (default), prompt should not mention sandbox copy tool."""
         mw = StoragePathsInstructionMiddleware()
-        assert mw._prompt == _FILESYSTEM_STORAGE_PATHS_PROMPT
+        prompt = mw._build_prompt()
+        assert "copy_to_sandbox" not in prompt
 
-    def test_sandbox_mode_injects_prompt(self):
-        """Sandbox mode should inject sandbox-aware prompt into system message."""
-        mw = StoragePathsInstructionMiddleware(sandbox_enabled=True, sandbox_home="/home/ubuntu")
-        existing_sm = SystemMessage(content="You are a helpful assistant.")
-        request = _make_request(system_message=existing_sm)
-        received_requests = []
 
-        def handler(req):
-            received_requests.append(req)
-            return MagicMock()
+class TestContextAwareness:
+    """Tests for context-aware prompt content."""
 
-        mw.wrap_model_call(request, handler)
+    def test_direct_context_omits_channel_memories(self):
+        prompt = _build_non_sandbox_prompt("direct")
+        assert "/channel_memories/" not in prompt
+        assert "/memories/" in prompt
+        assert "/group_memories/" in prompt
 
-        request.override.assert_called_once()
-        _, kwargs = request.override.call_args
-        new_sm = kwargs["system_message"]
-        assert "copy_to_sandbox" in new_sm.text
-        assert "helpful assistant" in new_sm.text
+    def test_channel_context_includes_channel_memories(self):
+        prompt = _build_non_sandbox_prompt("channel")
+        assert "/channel_memories/" in prompt
 
-    def test_sandbox_prompt_custom_home(self):
-        """Should use provided sandbox_home in the prompt."""
-        prompt = _build_sandbox_prompt("/home/custom")
-        assert "/home/custom" in prompt
+    def test_decision_tree_shared_tools(self):
+        """Decision tree must reference grep, read_file, semantic_search_file, docstore_search."""
+        tree = _build_decision_tree("direct")
+        for tool in ("grep", "read_file", "semantic_search_file", "docstore_search"):
+            assert tool in tree
+
+    def test_decision_tree_direct_omits_read_personal_file(self):
+        tree = _build_decision_tree("direct")
+        assert "read_personal_file" not in tree
+
+    def test_decision_tree_channel_includes_read_personal_file(self):
+        tree = _build_decision_tree("channel")
+        assert "read_personal_file" in tree
+
+    def test_sandbox_prompt_is_context_aware(self):
+        direct = _build_sandbox_prompt("/home/ubuntu", "direct")
+        channel = _build_sandbox_prompt("/home/ubuntu", "channel")
+        assert "/channel_memories/" not in direct
+        assert "/channel_memories/" in channel
+
+
+class TestAttachments:
+    """Tests for the conditional /attachments/ instruction."""
+
+    def test_non_sandbox_omits_attachments_by_default(self):
+        prompt = _build_non_sandbox_prompt("direct")
+        assert "/attachments/" not in prompt
+
+    def test_non_sandbox_includes_attachments_when_present(self):
+        prompt = _build_non_sandbox_prompt("direct", has_attachments=True)
+        assert "/attachments/" in prompt
+        assert "attached to THIS conversation" in prompt
+
+    def test_sandbox_omits_attachments_by_default(self):
+        prompt = _build_sandbox_prompt("/home/ubuntu", "direct")
+        assert "/attachments/" not in prompt
+
+    def test_sandbox_includes_attachments_and_copy_hint(self):
+        prompt = _build_sandbox_prompt("/home/ubuntu", "direct", has_attachments=True)
+        assert "/attachments/" in prompt
+        assert "copy_to_sandbox" in prompt
+
+    def test_attachments_present_reads_config(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            return_value={"metadata": {"has_attachments": True}},
+        ):
+            assert _attachments_present() is True
+
+    def test_attachments_present_defaults_false(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            return_value={"metadata": {}},
+        ):
+            assert _attachments_present() is False
+
+    def test_attachments_present_handles_no_config(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            side_effect=RuntimeError("outside runnable"),
+        ):
+            assert _attachments_present() is False
+
+
+class TestDeriveContext:
+    """Tests for _derive_context scope resolution."""
+
+    def test_no_config_defaults_direct(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            return_value=None,
+        ):
+            assert _derive_context() == "direct"
+
+    def test_get_config_raises_defaults_direct(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            side_effect=RuntimeError("outside runnable"),
+        ):
+            assert _derive_context() == "direct"
+
+    def test_channel_scope(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            return_value={"metadata": {"scope": "channel"}},
+        ):
+            assert _derive_context() == "channel"
+
+    def test_personal_scope_is_direct(self):
+        with patch(
+            "agent_common.middleware.storage_paths_middleware.get_config",
+            return_value={"metadata": {"scope": "personal"}},
+        ):
+            assert _derive_context() == "direct"

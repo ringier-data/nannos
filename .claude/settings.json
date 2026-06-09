@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh pr *)",
+      "WebFetch(domain:github.com)",
+      "Bash(gh api *)",
+      "Bash(gh search *)",
+      "WebFetch(domain:reference.langchain.com)",
+      "WebFetch(domain:python.langchain.com)",
+      "WebSearch",
+      "WebFetch(domain:www.langchain.com)",
+      "Bash(pip show *)",
+      "Bash(python -c \"from langgraph.pregel import TimeoutPolicy; print\\('available'\\)\")",
+      "Bash(python -c \"import langgraph; print\\(langgraph.__version__\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import sys,json; print\\('deleted', json.load\\(sys.stdin\\).get\\('id'\\)\\)\")"
+    ]
+  }
+}
