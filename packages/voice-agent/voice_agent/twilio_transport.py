@@ -58,6 +58,7 @@ from voice_agent.a2a_agent import VoiceAgent
 from voice_agent.call_bridge import (
     _CALL_FUTURES,
     _PENDING_CALLS,
+    build_effective_prompt
 )
 
 logger = logging.getLogger(__name__)
@@ -154,12 +155,7 @@ async def twilio_stream(websocket: WebSocket) -> None:
                             state["stream_sid"],
                             state["call_sid"],
                         )
-                        # Merge context_messages into system_prompt (not as user input, but as system instructions)
-                        system_prompt = call_config.system_prompt
-                        if call_config.context_messages:
-                            context_str = "\n".join(call_config.context_messages)
-                            system_prompt = f"{system_prompt}\n\nContext:\n{context_str}"
-                            logger.info("Merged %d context messages into system prompt", len(call_config.context_messages))
+                        system_prompt = build_effective_prompt(call_config.system_prompt, call_config.context_messages)
                         
                         init_query = json.dumps(
                             {

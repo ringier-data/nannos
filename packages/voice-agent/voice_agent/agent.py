@@ -107,8 +107,7 @@ SYSTEM_PROMPT = """
  You are a helpful voice assistant for a product named Nannos.
  In your first response, greet him and introduce yourself as a voice assistant for Nannos,
  and provide assistance as needed. Keep your responses concise and natural — as if speaking out loud.
- Do NOT use markdown, bullet points, numbered lists, or special characters.
- Respond in short, clear sentences."""
+ """
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -119,6 +118,13 @@ _TOOL_MAP: dict[str, object] = {}
 
 
 # ── Live config ───────────────────────────────────────────────────────────────
+
+
+_NO_PROACTIVE_TOOLS_INSTRUCTION = (
+    "\n\nCRITICAL: Your FIRST action must always be to speak a greeting to the user. "
+    "Never call any tools before your first spoken response. "
+    "After the greeting you may use tools freely."
+)
 
 
 def build_live_config(
@@ -134,6 +140,8 @@ def build_live_config(
         tools: List of tools to make available. If None, uses default [get_current_time].
     """
     prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
+    if tools:
+        prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION
     tool_list = tools
 
     return types.LiveConnectConfig(
