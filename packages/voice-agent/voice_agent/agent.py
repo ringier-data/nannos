@@ -126,6 +126,28 @@ _NO_PROACTIVE_TOOLS_INSTRUCTION = (
     "After the greeting you may use tools freely."
 )
 
+_WRITE_TOOL_INSTRUCTION = (
+    "\n\nFor any tool that creates, modifies, deletes, or sends data — such as creating "
+    "issues, posting messages, committing code, or sending emails — you MUST first ask "
+    "the user for explicit verbal confirmation. Say what you are about to do and ask "
+    "'Shall I proceed?' Wait for a clear yes before calling the tool."
+)
+
+# Keywords that indicate a tool has write/mutate side-effects.
+_WRITE_KEYWORDS = frozenset(
+    {
+        "create", "update", "delete", "remove", "post", "write", "send", "push",
+        "modify", "edit", "close", "merge", "publish", "commit", "open", "add",
+        "insert", "patch", "put", "submit", "deploy", "release",
+    }
+)
+
+
+def _is_write_tool(name: str, description: str) -> bool:
+    """Return True if the tool name or description suggests a write/mutate operation."""
+    text = (name + " " + description).lower().replace("_", " ").replace("-", " ")
+    return any(kw in text.split() for kw in _WRITE_KEYWORDS)
+
 
 def build_live_config(
     voice_name: str = VOICE_NAME,
@@ -141,7 +163,7 @@ def build_live_config(
     """
     prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
     if tools:
-        prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION
+        prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION + _WRITE_TOOL_INSTRUCTION
     tool_list = tools
 
     return types.LiveConnectConfig(
@@ -211,6 +233,14 @@ class GeminiLiveAgent:
         # Wrapped in a list so closures can mutate it.
         _auth_notified = [False]
 
+        # Human-in-the-loop confirmation gate for write tools.
+        # When a write tool is called for the first time in a turn, _exec
+        # returns a CONFIRMATION_REQUIRED message instead of executing.
+        # Gemini then asks the user verbally; if they confirm, Gemini calls
+        # the tool again — that second call executes for real.
+        # The set holds tool names currently awaiting confirmation.
+        _awaiting_confirmation: set[str] = set()
+
         for tool in tools_result.tools:
             # If a tool filter was specified, skip tools not in the list.
             if self.mcp_tool_filter and tool.name not in self.mcp_tool_filter:
@@ -218,6 +248,7 @@ class GeminiLiveAgent:
                 continue
             raw_schema = dict(tool.inputSchema or {})
             logger.debug("MCP tool schema for %r: %s", tool.name, raw_schema)
+            is_write = _is_write_tool(tool.name, tool.description or "")
             declarations.append(
                 types.FunctionDeclaration(
                     name=tool.name,
@@ -226,8 +257,27 @@ class GeminiLiveAgent:
                 )
             )
 
-            # Capture tool.name in default arg to avoid late-binding closure issues.
-            async def _exec(args: dict, *, _name: str = tool.name) -> str:
+            # Capture loop variables in default args to avoid late-binding closure issues.
+            async def _exec(
+                args: dict,
+                *,
+                _name: str = tool.name,
+                _write: bool = is_write,
+            ) -> str:
+                if _write:
+                    if _name not in _awaiting_confirmation:
+                        # First call — gate it: ask Gemini to get verbal confirmation.
+                        _awaiting_confirmation.add(_name)
+                        logger.info("Write tool %r intercepted — requesting confirmation", _name)
+                        return (
+                            f"CONFIRMATION_REQUIRED: Before calling {_name}, tell the user "
+                            f"exactly what you are about to do and ask 'Shall I proceed?' "
+                            f"Only call {_name} again once they have clearly said yes."
+                        )
+                    # Second call — user has confirmed; execute and clear the gate.
+                    _awaiting_confirmation.discard(_name)
+                    logger.info("Write tool %r executing after confirmation", _name)
+
                 result = await mcp_session.call_tool(_name, arguments=args)
                 if result.isError:
                     # Check whether the gateway returned a need-credentials error.
@@ -266,7 +316,7 @@ class GeminiLiveAgent:
                 return "\n".join(texts) if texts else str(result.content)
 
             self.tool_map[tool.name] = traceable(name=tool.name, run_type="tool")(_exec)
-            logger.debug("MCP tool registered: %s", tool.name)
+            logger.info("MCP tool registered: %s (write=%s)", tool.name, is_write)
 
         return declarations
 

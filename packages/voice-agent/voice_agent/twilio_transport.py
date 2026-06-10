@@ -56,6 +56,7 @@ from fastapi.responses import Response
 
 from voice_agent.a2a_agent import VoiceAgent
 from voice_agent.call_bridge import (
+    _CALL_ANSWERED,
     _CALL_FUTURES,
     _PENDING_CALLS,
     build_effective_prompt
@@ -173,6 +174,11 @@ async def twilio_stream(websocket: WebSocket) -> None:
                         )
                         init_query = json.dumps({})  # Use defaults
 
+
+                    # Signal _stream_phone_call that the callee answered.
+                    answered_future = _CALL_ANSWERED.pop(state["call_sid"], None)
+                    if answered_future and not answered_future.done():
+                        answered_future.set_result(True)
 
                     # Start A2A agent streaming (non-blocking).
                     nonlocal agent_output_task
