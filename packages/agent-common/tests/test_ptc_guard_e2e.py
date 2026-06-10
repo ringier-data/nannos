@@ -15,6 +15,8 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Optional
 
+import pytest
+
 from langchain.agents.factory import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -322,6 +324,51 @@ async def test_high_risk_eval_call_rejected_returns_rejection_payload():
     assert "__interrupt__" not in resumed
 
 
+_TWO_HIGH_RISK_CALLS = (
+    "const a = await tools.safeRead({path: '/etc/passwd'});"
+    "const b = await tools.safeRead({path: '/etc/shadow'});"
+    "JSON.stringify([a, b])"
+)
+
+
+async def test_multiple_pending_eval_calls_resume_with_matching_decisions():
+    """Two high-risk inner calls in one eval → one interrupt with 2 action_requests.
+
+    Post-migration the resume arrives with exactly one decision per pending call
+    (the orchestrator's ``executor._build_interrupt_resume_map`` replicates the single
+    blanket UI decision to the interrupt's action_request count and keys it by
+    interrupt id). ``awrap_tool_call`` now applies them 1:1 — no replication/truncation.
+    """
+    agent, executed = _build_hitl_agent(0.95, _TWO_HIGH_RISK_CALLS)
+    config = {"configurable": {"thread_id": "t-multi-approve"}}
+
+    result = await agent.ainvoke({"messages": [HumanMessage("go")]}, config=config)
+    assert executed == []
+    assert "__interrupt__" in result
+    assert len(result["__interrupt__"][0].value["action_requests"]) == 2
+
+    resumed = await agent.ainvoke(
+        Command(resume={"decisions": [{"type": "approve"}, {"type": "approve"}]}), config=config
+    )
+    assert executed == ["/etc/passwd", "/etc/shadow"]
+    assert "__interrupt__" not in resumed
+
+
+async def test_decision_count_mismatch_raises():
+    """A single decision for 2 pending eval calls now raises (strict 1:1 contract).
+
+    The migration guarantees the resume is pre-replicated upstream, so a count
+    mismatch here is a genuine bug rather than a stale-resume artefact — the
+    tolerant middleware no longer silently replicates or truncates.
+    """
+    agent, _ = _build_hitl_agent(0.95, _TWO_HIGH_RISK_CALLS)
+    config = {"configurable": {"thread_id": "t-multi-mismatch"}}
+
+    await agent.ainvoke({"messages": [HumanMessage("go")]}, config=config)
+    with pytest.raises(ValueError, match="does not match number of pending eval tool calls"):
+        await agent.ainvoke(Command(resume={"decisions": [{"type": "approve"}]}), config=config)
+
+
 async def test_low_risk_eval_call_never_interrupts_with_tolerant_middleware():
     code = "const r = await tools.safeRead({path: '/data/a'}); r"
     agent, executed = _build_hitl_agent(0.1, code)
@@ -435,7 +482,7 @@ async def test_inner_interrupted_nested_resume_through_resuming_parent():
     *directly* (outside a resuming parent) does NOT reproduce this — the failure
     requires the resuming-parent ambient context.
     """
-    from typing import Any, TypedDict
+    from typing import TypedDict
 
     from langgraph.errors import GraphInterrupt
     from langgraph.graph import END, START, StateGraph

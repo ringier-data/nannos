@@ -719,22 +719,15 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 if not pending:
                     return result
 
-                decisions_raw = interrupt(self._build_ptc_hitl_request(pending))["decisions"]
-                # Normalise the three possible count relationships:
-                # 1 → N  Single blanket decision (executor sends 1, user approved all at once).
-                #        Replicate against live pending count — only here is it authoritative.
-                # N → N  Exact match — use as-is.
-                # M > N  Stale resume: LangGraph delivers the same Command(resume=value) to
-                #        *every* interrupt() call within a single resumed execution, so a prior
-                #        eval's decisions bleed into subsequent evals with fewer pending items.
-                #        Truncate to the first N; the excess are artefacts of the prior turn.
-                # M < N  Genuine under-count — raise so the caller can investigate.
-                if len(decisions_raw) == 1 and len(pending) > 1:
-                    decisions = decisions_raw * len(pending)
-                elif len(decisions_raw) >= len(pending):
-                    decisions = decisions_raw[:len(pending)]
-                else:
-                    msg = f"Number of PTC human decisions ({len(decisions_raw)}) does not match number of pending eval tool calls ({len(pending)})."
+                # Decisions arrive already aligned 1:1 with `pending`. The orchestrator's
+                # resume path (executor._build_interrupt_resume_map) replicates the single
+                # blanket UI decision to this interrupt's action_request count and keys the
+                # resume by interrupt id, so each interrupt() returns exactly its own
+                # decisions — no cross-eval bleed from LangGraph's multi-interrupt resume.
+                # Any count mismatch here is therefore a genuine bug, not a resume artefact.
+                decisions = interrupt(self._build_ptc_hitl_request(pending))["decisions"]
+                if (n := len(decisions)) != (m := len(pending)):
+                    msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
                     raise ValueError(msg)
                 self._apply_ptc_decisions(turn, pending, decisions, context)
         finally:
