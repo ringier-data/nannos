@@ -134,7 +134,7 @@ async def _iter_subagent_stream_with_stall_timeout(
     parallel ``task`` tool calls), so operators can group log lines by dispatch
     and downstream alerting can correlate logs to events.
     """
-    iterator = stream_iter.__aiter__() if hasattr(stream_iter, "__aiter__") else stream_iter
+    iterator = aiter(stream_iter)
     loop = asyncio.get_event_loop()
     stall_started_at = loop.time()
     item_count = 0
