@@ -2481,6 +2481,7 @@ export function SubAgentDetailPage() {
             versions={versionHistory}
             isOwner={isOwner}
             isAdmin={adminMode}
+            hasWriteAccess={hasGroupWriteAccess}
             isCollapsed={versionSidebarCollapsed}
             onCollapsedChange={(collapsed) => {
               setVersionSidebarCollapsed(collapsed);
