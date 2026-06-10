@@ -64,8 +64,8 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from langgraph.types import interrupt
 from ringier_a2a_sdk.cost_tracking import CostLogger
-from typing_extensions import NotRequired
 from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMiddleware
+from typing_extensions import NotRequired
 
 from agent_common.backends.attachments_store import ContextScopedAttachmentsBackend
 from agent_common.backends.indexing_store import IndexingStoreBackend
@@ -306,6 +306,10 @@ _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
 # original call used, instead of falling back to the full build-time baseline.
 # Must equal the field name on ``_PTCExposureState``.
 PTC_EXPOSED_TOOL_NAMES_STATE_KEY = "ptc_exposed_tool_names"
+
+# Max characters of a tool result kept inline before the code-interpreter
+# middleware evicts it to a file. Override via env for tuning. Default: 20k chars.
+PTC_MAX_RESULT_CHARS = int(os.getenv("PTC_MAX_RESULT_CHARS", "20000"))
 
 
 # Per-invocation relay of the names exposed inside ``eval`` on the current model
@@ -901,6 +905,7 @@ def build_code_interpreter_middlewares(
             tool_server_map=tool_server_map,
             backend_supports_execution=exec_supported,
             skills_backend=backend,
+            max_result_chars=PTC_MAX_RESULT_CHARS,
         )
     ]
 
