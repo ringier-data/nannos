@@ -803,7 +803,18 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             ConditionalHumanInTheLoopMiddleware,
         )
 
-        for p, decision in zip(pending, decisions, strict=True):
+        # Match each decision to its pending call by id when the client returned
+        # per-call decisions. ``Promise.all``-style eval calls register concurrently,
+        # so the re-run's ``pending`` order can differ from the order the decisions
+        # were collected/displayed in — a positional zip would then apply a decision
+        # to the WRONG call (e.g. approve `/memories` lands on `/`). ``call_id`` equals
+        # ``call_key`` (deterministic on tool+args), so by-id matching is order-
+        # independent. Fall back to positional zip for legacy decisions without ids.
+        by_id = {d["id"]: d for d in decisions if isinstance(d, dict) and "id" in d}
+        use_by_id = bool(by_id) and all(p.call_key in by_id for p in pending)
+
+        for i, p in enumerate(pending):
+            decision = by_id[p.call_key] if use_by_id else decisions[i]
             dtype = decision.get("type")
             if dtype == "approve":
                 turn.decisions[p.call_key] = "approve"

@@ -354,6 +354,31 @@ async def test_multiple_pending_eval_calls_resume_with_matching_decisions():
     assert "__interrupt__" not in resumed
 
 
+async def test_per_call_decisions_applied_by_id_end_to_end():
+    """Approve one call and reject the other, matched by call_id through the real eval.
+
+    Decisions are deliberately keyed by id (as the client now sends them); only the
+    approved path must execute, regardless of the concurrent re-run ordering.
+    """
+    agent, executed = _build_hitl_agent(0.95, _TWO_HIGH_RISK_CALLS)
+    config = {"configurable": {"thread_id": "t-multi-by-id"}}
+
+    result = await agent.ainvoke({"messages": [HumanMessage("go")]}, config=config)
+    action_requests = result["__interrupt__"][0].value["action_requests"]
+    call_id_by_path = {
+        ar["args"]["path"]: ar["args"]["_risk_metadata"]["call_id"] for ar in action_requests
+    }
+
+    decisions = [
+        {"id": call_id_by_path["/etc/passwd"], "type": "approve"},
+        {"id": call_id_by_path["/etc/shadow"], "type": "reject"},
+    ]
+    resumed = await agent.ainvoke(Command(resume={"decisions": decisions}), config=config)
+
+    assert executed == ["/etc/passwd"]  # only the approved call ran
+    assert "__interrupt__" not in resumed
+
+
 async def test_decision_count_mismatch_raises():
     """A single decision for 2 pending eval calls now raises (strict 1:1 contract).
 
