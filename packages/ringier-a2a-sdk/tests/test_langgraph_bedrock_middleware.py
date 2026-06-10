@@ -282,3 +282,99 @@ class TestBedrockImagePreprocessing:
         assert "broken.png" in content[0]["text"]
         assert "https://example.com/broken.png" in content[0]["text"]
         assert "could not load" in content[0]["text"]
+
+
+class TestBedrockContentBlockPreprocessing:
+    """Tests for preprocess_content_blocks_for_bedrock (image/file/video URL→base64)."""
+
+    def _mock_httpx(self, payload: bytes):
+        from unittest.mock import AsyncMock
+
+        mock_response = MagicMock()
+        mock_response.content = payload
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_url_file_converted_to_base64_document(self):
+        """URL-based file (document) blocks must be inlined as base64 for Bedrock."""
+        import base64
+        from unittest.mock import patch
+
+        from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
+
+        blocks = [
+            {"type": "text", "text": "summarize this"},
+            {
+                "type": "file",
+                "url": "https://example.com/report.pdf?sig=abc",
+                "mime_type": "application/pdf",
+                "filename": "report.pdf",
+            },
+        ]
+        fake_bytes = b"%PDF-1.4 fake"
+        expected_b64 = base64.b64encode(fake_bytes).decode("utf-8")
+
+        with patch("httpx.AsyncClient", return_value=self._mock_httpx(fake_bytes)):
+            result = await preprocess_content_blocks_for_bedrock(blocks)
+
+        # text + URL-reference text + base64 document
+        assert len(result) == 3
+        assert result[0] == {"type": "text", "text": "summarize this"}
+        assert result[1]["type"] == "text"
+        assert "report.pdf" in result[1]["text"]
+        assert result[2]["type"] == "file"
+        assert result[2]["base64"] == expected_b64
+        assert result[2]["mime_type"] == "application/pdf"
+        # Document name must be sanitized (no extension/dots) for Bedrock; carried
+        # as top-level `filename` per the codebase convention (content_builder /
+        # attachments_store), which Bedrock Converse also reads.
+        assert result[2]["filename"] == "report"
+
+    @pytest.mark.asyncio
+    async def test_file_mime_inferred_from_extension(self):
+        """A file block without a MIME type infers it from the filename extension."""
+        from unittest.mock import patch
+
+        from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
+
+        blocks = [{"type": "file", "url": "https://example.com/notes.csv"}]
+        with patch("httpx.AsyncClient", return_value=self._mock_httpx(b"a,b,c")):
+            result = await preprocess_content_blocks_for_bedrock(blocks)
+
+        assert result[-1]["type"] == "file"
+        assert result[-1]["mime_type"] == "text/csv"
+
+    @pytest.mark.asyncio
+    async def test_base64_file_passes_through(self):
+        """Files already supplied as base64 are left unchanged."""
+        from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
+
+        blocks = [{"type": "file", "base64": "x==", "mime_type": "application/pdf"}]
+        result = await preprocess_content_blocks_for_bedrock(blocks)
+        assert result == blocks
+
+    @pytest.mark.asyncio
+    async def test_file_download_failure_falls_back_to_text(self):
+        """A document that fails to download degrades to a text reference."""
+        from unittest.mock import AsyncMock, patch
+
+        from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=Exception("boom"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        blocks = [{"type": "file", "url": "https://example.com/x.pdf", "mime_type": "application/pdf"}]
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await preprocess_content_blocks_for_bedrock(blocks)
+
+        assert len(result) == 1
+        assert result[0]["type"] == "text"
+        assert "could not load" in result[0]["text"]
