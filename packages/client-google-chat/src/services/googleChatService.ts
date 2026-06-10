@@ -646,6 +646,105 @@ export class GoogleChatService {
   }
 
   /**
+   * Build a multi-action HITL approval card for interrupts carrying more than one
+   * action_request (e.g. parallel tool calls). Renders the detail of EVERY call (so
+   * nothing is approved unseen) with a per-call Approve/Reject radio. "Submit
+   * decisions" sends one decision per call (batched via formInputs), each echoing its
+   * call_id so the server aligns by id. "Approve all"/"Reject all" send a blanket
+   * decision (the server replicates it) for the common case.
+   */
+  buildMultiHitlCard(
+    config: Config,
+    parameters: Record<string, unknown>,
+    actionRequests: any[],
+  ): chat_v1.Schema$CardWithId {
+    const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
+    const CONTENT_KEYS = ['content', 'body', 'description'];
+    const HIDDEN_KEYS = ['reason', '_risk_metadata'];
+
+    const callIds = actionRequests.map((a) => a?.args?._risk_metadata?.call_id);
+    const params = { ...parameters, callIds };
+    const paramsJson = JSON.stringify(params);
+
+    const widgets: any[] = [];
+    actionRequests.forEach((action, i) => {
+      const args = action?.args || {};
+      const toolLabel = String(action?.name || 'unknown').replace(/_/g, ' ');
+      const reason = String((args.description ?? args.reason) || '');
+      const riskMeta = args._risk_metadata as { source?: string; score?: number; matched_pattern?: string | null } | undefined;
+      const isRiskScored = riskMeta?.source === 'risk_score';
+      const contentKey = CONTENT_KEYS.find((k: string) => k in args);
+      const proposedContent = contentKey ? String(args[contentKey] || '') : '';
+      const metaEntries = Object.entries(args).filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k));
+
+      if (i > 0) widgets.push({ divider: {} });
+      widgets.push({
+        textParagraph: { text: `<b>${i + 1}. ${toolLabel}</b>${reason ? `\n${reason.substring(0, 1000)}` : ''}` },
+      });
+      if (isRiskScored && riskMeta) {
+        const pct = Math.round((riskMeta.score ?? 0) * 100);
+        const riskLabel = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
+        let riskText = `🛡️ <b>Risk:</b> ${riskLabel} (${pct}%)`;
+        if (riskMeta.matched_pattern) riskText += ` — matched: <code>${riskMeta.matched_pattern}</code>`;
+        widgets.push({ textParagraph: { text: riskText } });
+      }
+      if (metaEntries.length > 0) {
+        widgets.push({
+          textParagraph: { text: metaEntries.map(([k, v]) => `<b>${k}:</b> ${String(v).substring(0, 200)}`).join('\n') },
+        });
+      }
+      if (proposedContent) {
+        widgets.push({ textParagraph: { text: `<b>Proposed content:</b>\n<code>${proposedContent.substring(0, 1500)}</code>` } });
+      }
+      widgets.push({
+        selectionInput: {
+          name: `decision_${i}`,
+          label: 'Decision',
+          type: 'RADIO_BUTTON',
+          items: [
+            { text: 'Approve', value: 'approve', selected: true },
+            { text: 'Reject', value: 'reject', selected: false },
+          ],
+        },
+      });
+    });
+
+    const mkButton = (text: string, action: string, color?: any) => ({
+      text,
+      onClick: {
+        action: {
+          function: buttonClickHandlerUrl,
+          parameters: [
+            { key: 'cardId', value: 'hitl_multi_card' },
+            { key: 'action', value: action },
+            { key: 'parameters', value: paramsJson },
+          ],
+        },
+      },
+      ...(color ? { color } : {}),
+    });
+
+    widgets.push({ divider: {} });
+    widgets.push({
+      buttonList: {
+        buttons: [
+          mkButton('✅ Approve all', 'approve'),
+          mkButton('❌ Reject all', 'reject'),
+          mkButton('⚖️ Submit decisions', 'submit_multi', { red: 0.0, green: 0.54, blue: 0.86, alpha: 1 }),
+        ],
+      },
+    });
+
+    return {
+      cardId: 'hitl_multi_card',
+      card: {
+        header: { title: '⚠️ Approval Required', subtitle: `${actionRequests.length} actions`, imageType: 'CIRCLE' },
+        sections: [{ widgets }],
+      },
+    };
+  }
+
+  /**
    * Build a HITL feedback form card with a text input for the user to describe
    * what should be changed. Replaces the approval card when "Request Changes" is clicked.
    */

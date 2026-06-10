@@ -145,6 +145,67 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
   await handleIncomingMessage(syntheticMessage, deps);
 }
 
+const REJECT_MESSAGE =
+  'The user rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.';
+
+/**
+ * Handle the multi-action HITL card: "Approve all"/"Reject all" send a blanket
+ * decision (server replicates), "Submit decisions" reads the per-call radios from
+ * formInputs and sends one decision per call, echoing each call_id so the server
+ * aligns decisions by id (no unseen-call approvals).
+ */
+async function handleHitlMultiCardClick(payload: ButtonClickedPayload, deps: HandlerDependencies) {
+  const logger = Logger.getLogger('handleHitlMultiCardClick');
+  const params = payload.actionParameters as unknown as { taskId?: string; callIds?: string[] };
+
+  let confirmText: string;
+  let decisions: Record<string, unknown>;
+
+  if (payload.action === 'approve') {
+    confirmText = '✅ Approved all';
+    decisions = { decisions: [{ type: 'approve' }] };
+  } else if (payload.action === 'reject') {
+    confirmText = '❌ Rejected all';
+    decisions = { decisions: [{ type: 'reject', message: REJECT_MESSAGE }] };
+  } else {
+    // submit_multi — one decision per call, in action_request order, by id.
+    const callIds: string[] = Array.isArray(params.callIds) ? params.callIds : [];
+    const decisionList = callIds.map((id, idx) => {
+      const selected = payload.formInputs?.[`decision_${idx}`]?.stringInputs?.value?.[0];
+      const type = selected === 'reject' ? 'reject' : 'approve';
+      const decision: Record<string, unknown> = { type };
+      if (id) decision.id = id; // echo call id → server aligns by id
+      if (type === 'reject') decision.message = REJECT_MESSAGE;
+      return decision;
+    });
+    decisions = { decisions: decisionList };
+    const rejected = decisionList.filter((d) => d.type === 'reject').length;
+    confirmText = `Submitted ${decisionList.length} decision(s) — ${decisionList.length - rejected} approved, ${rejected} rejected`;
+    logger.info(`HITL multi-decision submitted for taskId=${params.taskId}: ${decisionList.length} decision(s)`);
+  }
+
+  await deps.chatService.updateMessage({
+    projectId: payload.projectId,
+    messageName: payload.messageId,
+    text: confirmText,
+    cardsV2: [],
+  });
+
+  const syntheticMessage: NormalizedMessage = {
+    userId: payload.userId,
+    userEmail: payload.userEmail,
+    projectId: payload.projectId,
+    spaceId: payload.spaceId,
+    messageId: `synthetic-${randomUUID()}`,
+    threadId: payload.threadId,
+    rawText: '',
+    dataParts: [decisions],
+    source: 'direct_message',
+  };
+
+  await handleIncomingMessage(syntheticMessage, deps);
+}
+
 /**
  * Handle HITL feedback form submission (from the feedback card).
  */
@@ -232,6 +293,15 @@ export async function handleButtonClicked(
 
     case 'hitl_card': {
       await handleHitlCardClick(
+        payload,
+        deps,
+      );
+
+      break;
+    }
+
+    case 'hitl_multi_card': {
+      await handleHitlMultiCardClick(
         payload,
         deps,
       );
