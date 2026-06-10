@@ -51,6 +51,11 @@ _PENDING_CALLS: dict[str, OutboundCallRequest] = {}
 # twilio_stream's finally block in twilio_transport.py.
 _CALL_FUTURES: dict[str, asyncio.Future] = {}
 
+# Maps call_sid → asyncio.Future that resolves when the callee answers
+# (i.e. when Twilio sends the "start" Media Stream event).
+# Used to split the timeout into a ringing phase and a call-duration phase.
+_CALL_ANSWERED: dict[str, asyncio.Future] = {}
+
 
 def build_effective_prompt(base_prompt: str, context_messages: list[str]) -> str:
     """Merge context_messages into base_prompt as system context."""

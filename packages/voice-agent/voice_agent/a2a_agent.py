@@ -79,6 +79,7 @@ from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 from voice_agent.agent import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
 from voice_agent.agent import GeminiLiveAgent
 from voice_agent.call_bridge import (
+    _CALL_ANSWERED,
     _CALL_FUTURES,
     _PENDING_CALLS,
     OutboundCallRequest,
@@ -659,7 +660,8 @@ class VoiceAgent(BaseAgent):
           8. Yield ``completed`` with the formatted transcript.
         """
         public_url: str = os.environ.get("PUBLIC_URL") or os.environ.get("VOICE_AGENT_BASE_URL", "")
-        timeout: int = int(os.getenv("CALL_TIMEOUT_SECONDS", "60"))
+        connect_timeout: int = int(os.getenv("CALL_CONNECT_TIMEOUT_SECONDS", "60"))
+        duration_timeout: int = int(os.getenv("CALL_DURATION_TIMEOUT_SECONDS", "3600"))
 
         # Validate PUBLIC_URL — Twilio must be able to reach /twilio/voice via this URL.
         # localhost / 127.0.0.1 will cause Twilio to fail silently when the call is answered.
@@ -779,26 +781,59 @@ class VoiceAgent(BaseAgent):
             context_messages=context_messages,
         )
 
-        # Register future — twilio_stream finally block will resolve it
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        # Register futures:
+        #   _CALL_ANSWERED — resolved by twilio_stream on the "start" event (callee answered)
+        #   _CALL_FUTURES  — resolved by twilio_stream's finally block (call ended)
+        loop = asyncio.get_event_loop()
+        answered_future: asyncio.Future = loop.create_future()
+        _CALL_ANSWERED[call_sid] = answered_future
+        future: asyncio.Future = loop.create_future()
         _CALL_FUTURES[call_sid] = future
 
-        logger.info("Call %s initiated (timeout=%ds)", call_sid, timeout)
+        logger.info(
+            "Call %s initiated (connect_timeout=%ds, duration_timeout=%ds)",
+            call_sid, connect_timeout, duration_timeout,
+        )
         yield AgentStreamResponse(
             state=TaskState.TASK_STATE_WORKING,
             content=f"Call ringing (call_sid={call_sid}). Waiting for the call to complete...",
             metadata={"type": "call_ringing", "call_sid": call_sid},
         )
 
-        # Wait for the Twilio stream to end
+        # Phase 1 — wait for the callee to answer.
         try:
-            result: dict = await asyncio.wait_for(future, timeout=timeout)
+            await asyncio.wait_for(asyncio.shield(answered_future), timeout=connect_timeout)
+            logger.info("Call %s answered", call_sid)
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_WORKING,
+                content="Call answered.",
+                metadata={"type": "call_answered", "call_sid": call_sid},
+            )
         except asyncio.TimeoutError:
+            _CALL_ANSWERED.pop(call_sid, None)
             _CALL_FUTURES.pop(call_sid, None)
-            logger.warning("Call %s timed out after %ds", call_sid, timeout)
+            logger.warning("Call %s not answered within %ds", call_sid, connect_timeout)
             yield AgentStreamResponse(
                 state=TaskState.TASK_STATE_FAILED,
-                content=f"Call timed out after {timeout}s without completion.",
+                content=f"Call not answered within {connect_timeout}s.",
+            )
+            return
+        except Exception as exc:
+            _CALL_ANSWERED.pop(call_sid, None)
+            _CALL_FUTURES.pop(call_sid, None)
+            logger.exception("Unexpected error waiting for call %s to be answered", call_sid)
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=f"Call error: {exc}")
+            return
+
+        # Phase 2 — wait for the call to end.
+        try:
+            result: dict = await asyncio.wait_for(future, timeout=duration_timeout)
+        except asyncio.TimeoutError:
+            _CALL_FUTURES.pop(call_sid, None)
+            logger.warning("Call %s exceeded max duration of %ds", call_sid, duration_timeout)
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_FAILED,
+                content=f"Call exceeded maximum duration of {duration_timeout}s.",
             )
             return
         except Exception as exc:
