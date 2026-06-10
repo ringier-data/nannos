@@ -95,13 +95,23 @@ export function registerHitlModalHandler(app: App, makeDeps: () => HandlerDepend
       const callList: any[] = Array.isArray(calls) ? calls : [];
 
       const decisions = callList.map((c: any, idx: number) => {
-        const selected = view.state?.values?.[`call_${idx}`]?.[`decision_${idx}`]?.selected_option?.value;
-        const type = selected === 'reject' ? 'reject' : 'approve';
-        const decision: Record<string, unknown> = { type };
+        const selected = view.state?.values?.[`call_${idx}`]?.[`decision_${idx}`]?.selected_option?.value || 'approve';
+        const decision: Record<string, unknown> = {};
         if (c?.id) decision.id = c.id; // echo call id → server aligns by id
-        if (type === 'reject') {
+        if (selected === 'reject') {
+          decision.type = 'reject';
           decision.message =
             'The user rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry unless the user explicitly asks.';
+        } else if (selected === 'approve_bypass_tool') {
+          decision.type = 'approve';
+          decision.bypass = true;
+          decision.bypass_all = true;
+        } else if (selected === 'approve_bypass_pattern') {
+          decision.type = 'approve';
+          decision.bypass = true;
+          decision.bypass_pattern = c?.pattern;
+        } else {
+          decision.type = 'approve';
         }
         return decision;
       });

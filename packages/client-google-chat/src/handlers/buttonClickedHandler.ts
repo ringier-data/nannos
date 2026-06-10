@@ -156,7 +156,7 @@ const REJECT_MESSAGE =
  */
 async function handleHitlMultiCardClick(payload: ButtonClickedPayload, deps: HandlerDependencies) {
   const logger = Logger.getLogger('handleHitlMultiCardClick');
-  const params = payload.actionParameters as unknown as { taskId?: string; callIds?: string[] };
+  const params = payload.actionParameters as unknown as { taskId?: string; calls?: Array<{ id?: string; pattern?: string }> };
 
   let confirmText: string;
   let decisions: Record<string, unknown>;
@@ -169,13 +169,25 @@ async function handleHitlMultiCardClick(payload: ButtonClickedPayload, deps: Han
     decisions = { decisions: [{ type: 'reject', message: REJECT_MESSAGE }] };
   } else {
     // submit_multi — one decision per call, in action_request order, by id.
-    const callIds: string[] = Array.isArray(params.callIds) ? params.callIds : [];
-    const decisionList = callIds.map((id, idx) => {
-      const selected = payload.formInputs?.[`decision_${idx}`]?.stringInputs?.value?.[0];
-      const type = selected === 'reject' ? 'reject' : 'approve';
-      const decision: Record<string, unknown> = { type };
-      if (id) decision.id = id; // echo call id → server aligns by id
-      if (type === 'reject') decision.message = REJECT_MESSAGE;
+    const calls = Array.isArray(params.calls) ? params.calls : [];
+    const decisionList = calls.map((c, idx) => {
+      const selected = payload.formInputs?.[`decision_${idx}`]?.stringInputs?.value?.[0] || 'approve';
+      const decision: Record<string, unknown> = {};
+      if (c?.id) decision.id = c.id; // echo call id → server aligns by id
+      if (selected === 'reject') {
+        decision.type = 'reject';
+        decision.message = REJECT_MESSAGE;
+      } else if (selected === 'approve_bypass_tool') {
+        decision.type = 'approve';
+        decision.bypass = true;
+        decision.bypass_all = true;
+      } else if (selected === 'approve_bypass_pattern') {
+        decision.type = 'approve';
+        decision.bypass = true;
+        decision.bypass_pattern = c?.pattern;
+      } else {
+        decision.type = 'approve';
+      }
       return decision;
     });
     decisions = { decisions: decisionList };

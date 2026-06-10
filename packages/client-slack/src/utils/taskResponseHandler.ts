@@ -617,13 +617,29 @@ export function buildMultiHitlInterruptWidget(data: HitlInterruptWidgetData): an
     threadTs: data.threadTs,
   };
   const blanketValue = Buffer.from(JSON.stringify(base)).toString('base64');
-  // Compact per-call routing for the modal (id + name + short detail) — kept small
-  // so it fits in Slack's button-value limit without a server-side store.
-  const calls = actions.map((a) => ({
-    id: callIdOf(a),
-    name: a?.name || 'unknown',
-    detail: String((a?.args?.description ?? a?.args?.reason) || '').substring(0, 150),
-  }));
+  // Compact per-call routing for the modal — kept small so it fits in Slack's
+  // button-value limit without a server-side store. `detail` summarizes the
+  // distinguishing args (e.g. `path: /memories/`) so the modal rows are
+  // distinguishable; risk/pattern drive the per-call bypass options.
+  const CONTENT_KEYS = ['content', 'body', 'description'];
+  const HIDDEN_KEYS = ['reason', '_risk_metadata'];
+  const calls = actions.map((a) => {
+    const args = a?.args || {};
+    const riskMeta = args._risk_metadata as { source?: string; matched_pattern?: string | null } | undefined;
+    const isRiskScored = riskMeta?.source === 'risk_score';
+    const argSummary = Object.entries(args)
+      .filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k))
+      .map(([k, v]) => `${k}: ${String(v)}`)
+      .join(', ');
+    const detail = (argSummary || String((args.description ?? args.reason) || '')).substring(0, 180);
+    return {
+      id: callIdOf(a),
+      name: a?.name || 'unknown',
+      detail,
+      risk: isRiskScored,
+      pattern: isRiskScored ? (riskMeta?.matched_pattern || undefined) : undefined,
+    };
+  });
   const reviewValue = Buffer.from(JSON.stringify({ ...base, calls })).toString('base64');
 
   blocks.push({ type: 'divider' });

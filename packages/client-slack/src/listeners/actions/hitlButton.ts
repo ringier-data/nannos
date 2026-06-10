@@ -353,6 +353,16 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
           type: 'section',
           text: { type: 'mrkdwn', text: `*${idx + 1}. ${label}*${c?.detail ? `\n${String(c.detail)}` : ''}` },
         });
+        const approveOption = { text: { type: 'plain_text', text: 'Approve' }, value: 'approve' };
+        const options: any[] = [approveOption];
+        // Bypass variants — only for risk-scored tools, mirroring the single-action card.
+        if (c?.risk) {
+          options.push({ text: { type: 'plain_text', text: 'Approve · always allow this tool' }, value: 'approve_bypass_tool' });
+          if (c?.pattern) {
+            options.push({ text: { type: 'plain_text', text: 'Approve · allow this pattern' }, value: 'approve_bypass_pattern' });
+          }
+        }
+        options.push({ text: { type: 'plain_text', text: 'Reject' }, value: 'reject' });
         blocks.push({
           type: 'input',
           block_id: `call_${idx}`,
@@ -360,16 +370,13 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
           element: {
             type: 'radio_buttons',
             action_id: `decision_${idx}`,
-            initial_option: { text: { type: 'plain_text', text: 'Approve' }, value: 'approve' },
-            options: [
-              { text: { type: 'plain_text', text: 'Approve' }, value: 'approve' },
-              { text: { type: 'plain_text', text: 'Reject' }, value: 'reject' },
-            ],
+            initial_option: approveOption,
+            options,
           },
         });
       });
 
-      // Only routing data + ordered call ids in private_metadata (kept well under
+      // Only routing data + per-call id/pattern in private_metadata (kept well under
       // Slack's 3000-char limit); display content already shown in-channel.
       const privateMetadata = JSON.stringify({
         taskId,
@@ -377,7 +384,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         channelId,
         threadTs,
         messageTs,
-        calls: callList.map((c: any) => ({ id: c?.id })),
+        calls: callList.map((c: any) => ({ id: c?.id, pattern: c?.pattern })),
       });
 
       await client.views.open({

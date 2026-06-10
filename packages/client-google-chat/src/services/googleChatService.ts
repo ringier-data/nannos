@@ -662,8 +662,13 @@ export class GoogleChatService {
     const CONTENT_KEYS = ['content', 'body', 'description'];
     const HIDDEN_KEYS = ['reason', '_risk_metadata'];
 
-    const callIds = actionRequests.map((a) => a?.args?._risk_metadata?.call_id);
-    const params = { ...parameters, callIds };
+    // Per-call routing for the batched submit: id + matched pattern (for bypass).
+    const calls = actionRequests.map((a) => {
+      const rm = a?.args?._risk_metadata as { source?: string; call_id?: string; matched_pattern?: string | null } | undefined;
+      const isRisk = rm?.source === 'risk_score';
+      return { id: rm?.call_id, pattern: isRisk ? (rm?.matched_pattern || undefined) : undefined };
+    });
+    const params = { ...parameters, calls };
     const paramsJson = JSON.stringify(params);
 
     const widgets: any[] = [];
@@ -696,15 +701,22 @@ export class GoogleChatService {
       if (proposedContent) {
         widgets.push({ textParagraph: { text: `<b>Proposed content:</b>\n<code>${proposedContent.substring(0, 1500)}</code>` } });
       }
+      // Per-call decision radio; bypass variants only for risk-scored tools
+      // (mirrors the single-action card).
+      const items: any[] = [{ text: 'Approve', value: 'approve', selected: true }];
+      if (isRiskScored) {
+        items.push({ text: 'Approve · always allow this tool', value: 'approve_bypass_tool', selected: false });
+        if (riskMeta?.matched_pattern) {
+          items.push({ text: 'Approve · allow this pattern', value: 'approve_bypass_pattern', selected: false });
+        }
+      }
+      items.push({ text: 'Reject', value: 'reject', selected: false });
       widgets.push({
         selectionInput: {
           name: `decision_${i}`,
           label: 'Decision',
           type: 'RADIO_BUTTON',
-          items: [
-            { text: 'Approve', value: 'approve', selected: true },
-            { text: 'Reject', value: 'reject', selected: false },
-          ],
+          items,
         },
       });
     });
