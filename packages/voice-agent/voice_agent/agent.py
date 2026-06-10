@@ -133,7 +133,7 @@ _WRITE_TOOL_INSTRUCTION = (
     "'Shall I proceed?' Wait for a clear yes before calling the tool."
 )
 
-# Keywords that indicate a tool has write/mutate side-effects.
+# Keywords that indicate a tool has write/mutate side-effects (fallback only).
 _WRITE_KEYWORDS = frozenset(
     {
         "create", "update", "delete", "remove", "post", "write", "send", "push",
@@ -147,6 +147,81 @@ def _is_write_tool(name: str, description: str) -> bool:
     """Return True if the tool name or description suggests a write/mutate operation."""
     text = (name + " " + description).lower().replace("_", " ").replace("-", " ")
     return any(kw in text.split() for kw in _WRITE_KEYWORDS)
+
+
+# ── Tool risk scoring ─────────────────────────────────────────────────────────
+
+# Risk score threshold: >= this value → treat tool as write/mutate (require confirmation).
+_WRITE_RISK_THRESHOLD: float = 0.4
+
+# Module-level cache: tool_name → risk score. Persists across sessions within the process.
+_TOOL_RISK_CACHE: dict[str, float] = {}
+
+# Lightweight flash model used only for tool classification (separate from the Live session model).
+_RISK_SCORER_MODEL: str = os.getenv("GEMINI_RISK_SCORER_MODEL", "gemini-3-flash-preview")
+
+_RISK_SCORING_SYSTEM_PROMPT = """\
+You are a security analyst evaluating the risk level of AI agent tool calls.
+Given a tool's name, description, and JSON schema, return a JSON object with exactly two keys:
+  "score": number 0.0-1.0 — inherent risk when called with typical arguments.
+    0.0-0.2: Safe    — read-only queries, status checks, information retrieval
+    0.2-0.4: Low     — filtered reads, access to user's own data
+    0.4-0.6: Moderate — reversible writes to user's own resources
+    0.6-0.8: Elevated — writes to shared resources, external API calls, credential access
+    0.8-1.0: Critical — destructive, irreversible, or security-sensitive operations
+  "reasoning": string — one sentence explanation.
+Return only the JSON object, no extra text.\
+"""
+
+
+async def _llm_score_tool_risk(
+    client: genai.Client,
+    name: str,
+    description: str,
+    input_schema: dict,
+) -> float:
+    """Use Gemini Flash to score a tool's write risk. Returns 0.0–1.0."""
+    schema_str = json.dumps(input_schema, indent=2) if input_schema else "No schema available"
+    user_prompt = (
+        f"Tool name: {name}\n"
+        f"Description: {description or 'No description available'}\n"
+        f"Input schema:\n{schema_str}"
+    )
+    response = await client.aio.models.generate_content(
+        model=_RISK_SCORER_MODEL,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=_RISK_SCORING_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+        ),
+    )
+    data = json.loads(response.text)
+    return float(data["score"])
+
+
+async def _score_tool_risk(
+    client: genai.Client,
+    name: str,
+    description: str,
+    input_schema: dict,
+) -> float:
+    """Return write-risk score for an MCP tool (0.0–1.0).
+
+    Resolution order: module-level cache → LLM scoring → keyword fallback.
+    """
+    cached = _TOOL_RISK_CACHE.get(name)
+    if cached is not None:
+        return cached
+
+    try:
+        score = await _llm_score_tool_risk(client, name, description, input_schema)
+        logger.debug("Tool %r LLM risk score: %.2f", name, score)
+    except Exception:
+        logger.warning("LLM risk scoring failed for %r, using keyword fallback", name, exc_info=True)
+        score = 0.9 if _is_write_tool(name, description) else 0.1
+
+    _TOOL_RISK_CACHE[name] = score
+    return score
 
 
 def build_live_config(
@@ -217,7 +292,7 @@ class GeminiLiveAgent:
         self.mcp_status: asyncio.Future[bool] | None = None
 
     async def _init_mcp_tools(
-        self, mcp_session: ClientSession, event_out: asyncio.Queue[dict]
+        self, mcp_session: ClientSession, event_out: asyncio.Queue[dict], client: genai.Client
     ) -> list[types.FunctionDeclaration]:
         """Discover tools from an already-initialised MCP session.
 
@@ -234,12 +309,11 @@ class GeminiLiveAgent:
         _auth_notified = [False]
 
         # Human-in-the-loop confirmation gate for write tools.
-        # When a write tool is called for the first time in a turn, _exec
-        # returns a CONFIRMATION_REQUIRED message instead of executing.
-        # Gemini then asks the user verbally; if they confirm, Gemini calls
-        # the tool again — that second call executes for real.
-        # The set holds tool names currently awaiting confirmation.
-        _awaiting_confirmation: set[str] = set()
+        # Maps tool_name → the exact args dict that was intercepted.
+        # Only a second call with identical args is treated as confirmed;
+        # a call with different args re-triggers the gate from scratch,
+        # preventing a retry with different arguments from slipping through.
+        _awaiting_confirmation: dict[str, dict] = {}
 
         for tool in tools_result.tools:
             # If a tool filter was specified, skip tools not in the list.
@@ -248,7 +322,8 @@ class GeminiLiveAgent:
                 continue
             raw_schema = dict(tool.inputSchema or {})
             logger.debug("MCP tool schema for %r: %s", tool.name, raw_schema)
-            is_write = _is_write_tool(tool.name, tool.description or "")
+            risk_score = await _score_tool_risk(client, tool.name, tool.description or "", raw_schema)
+            is_risky = risk_score >= _WRITE_RISK_THRESHOLD
             declarations.append(
                 types.FunctionDeclaration(
                     name=tool.name,
@@ -262,21 +337,28 @@ class GeminiLiveAgent:
                 args: dict,
                 *,
                 _name: str = tool.name,
-                _write: bool = is_write,
+                _risky: bool = is_risky,
             ) -> str:
-                if _write:
-                    if _name not in _awaiting_confirmation:
-                        # First call — gate it: ask Gemini to get verbal confirmation.
-                        _awaiting_confirmation.add(_name)
-                        logger.info("Write tool %r intercepted — requesting confirmation", _name)
-                        return (
-                            f"CONFIRMATION_REQUIRED: Before calling {_name}, tell the user "
-                            f"exactly what you are about to do and ask 'Shall I proceed?' "
-                            f"Only call {_name} again once they have clearly said yes."
-                        )
-                    # Second call — user has confirmed; execute and clear the gate.
-                    _awaiting_confirmation.discard(_name)
-                    logger.info("Write tool %r executing after confirmation", _name)
+                if _risky:
+                    confirmation_msg = (
+                        f"CONFIRMATION_REQUIRED: Before calling {_name}, tell the user "
+                        f"exactly what you are about to do and ask 'Shall I proceed?' "
+                        f"Only call {_name} again once they have clearly said yes."
+                    )
+                    pending = _awaiting_confirmation.get(_name)
+                    if pending is None:
+                        # First call — gate it.
+                        _awaiting_confirmation[_name] = args
+                        logger.info("Risky tool %r intercepted — requesting confirmation", _name)
+                        return confirmation_msg
+                    if args != pending:
+                        # Different args — treat as a new attempt, re-gate.
+                        _awaiting_confirmation[_name] = args
+                        logger.info("Risky tool %r re-intercepted with different args", _name)
+                        return confirmation_msg
+                    # Same args — user confirmed; execute and clear the gate.
+                    del _awaiting_confirmation[_name]
+                    logger.info("Tool %r executing after confirmation", _name)
 
                 result = await mcp_session.call_tool(_name, arguments=args)
                 if result.isError:
@@ -316,7 +398,7 @@ class GeminiLiveAgent:
                 return "\n".join(texts) if texts else str(result.content)
 
             self.tool_map[tool.name] = traceable(name=tool.name, run_type="tool")(_exec)
-            logger.info("MCP tool registered: %s (write=%s)", tool.name, is_write)
+            logger.info("MCP tool registered: %s (write=%s, risk=%.2f)", tool.name, is_risky, risk_score)
 
         return declarations
 
@@ -349,7 +431,7 @@ class GeminiLiveAgent:
                 ) as (read, write, _):
                     async with ClientSession(read, write) as mcp_session:
                         await mcp_session.initialize()
-                        declarations = await self._init_mcp_tools(mcp_session, event_out)
+                        declarations = await self._init_mcp_tools(mcp_session, event_out, client)
                         gemini_tools = [types.Tool(function_declarations=declarations)] if declarations else None
                         config = build_live_config(self.voice_name, self.system_prompt, tools=gemini_tools)
                         logger.info(
