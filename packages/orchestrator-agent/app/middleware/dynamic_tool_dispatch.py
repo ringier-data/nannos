@@ -323,6 +323,30 @@ class FileFilteringResponse(BaseModel):
     relevant_indices: list[int]
 
 
+def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decisions: Any) -> Command:
+    """Build the ``Command(resume=...)`` used to resume a sub-agent after HITL approval.
+
+    For *local* in-process sub-agents (``LocalA2ARunnable`` — including
+    ``DynamicLocalAgentRunnable``) the resume is replayed against the sub-agent's own
+    LangGraph checkpoint, so it must be an interrupt-id-keyed map: LangGraph >=1.2 raises
+    ``RuntimeError`` on a bare ``Command(resume=value)`` whenever the sub-agent has more
+    than one pending interrupt (e.g. nested parallel ``task`` calls). ``interrupt_obj.id``
+    is the xxh3 namespace hash LangGraph matches the map against
+    (``types.Interrupt.from_ns`` <-> ``pregel/_algo._scratchpad``).
+
+    For *remote* A2A sub-agents the ``Command`` never reaches the remote as-is — the
+    remote executor rebuilds its own resume from the A2A DataPart using its own namespace
+    — so the plain-payload form is kept unchanged.
+    """
+    payload = user_decisions if isinstance(user_decisions, dict) else {}
+    intr_id = getattr(interrupt_obj, "id", None)
+    if intr_id is None and isinstance(interrupt_obj, dict):
+        intr_id = interrupt_obj.get("id")
+    if isinstance(runnable, LocalA2ARunnable) and intr_id:
+        return Command(resume={intr_id: payload})
+    return Command(resume=payload)
+
+
 class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]):
     """Middleware for runtime MCP tool injection and A2A subagent handling.
 
@@ -1697,6 +1721,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                                     )
                                 )
                             else:
+                                _int_obj = _pw_value
                                 pending_interrupt_value = _pw_value
                             logger.info(
                                 f"[HITL] Sub-agent '{subagent_type}' has pending HITL interrupt "
@@ -1707,12 +1732,13 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                             user_decisions = interrupt(pending_interrupt_value)
                             # ── Resumed after user approval ──────────────────────────────────────
                             logger.info(f"[HITL] User responded to '{subagent_type}' HITL: {user_decisions}")
-                            # Pass decisions through as-is. Replication (single blanket decision
-                            # → N items) happens inside awrap_tool_call where len(pending) is
-                            # known accurately. Replicating here against the checkpoint's
-                            # action_requests count can produce the wrong N if the checkpoint
-                            # snapshot and the live pending list diverge.
-                            subagent_input = Command(resume=user_decisions if isinstance(user_decisions, dict) else {})
+                            # Resume the sub-agent. For local in-process sub-agents this is an
+                            # interrupt-id-keyed map (LangGraph >=1.2 multi-interrupt safety);
+                            # remote A2A sub-agents keep the plain payload. Replication (single
+                            # blanket decision → N items) happens inside awrap_tool_call where
+                            # len(pending) is known accurately — not here against the checkpoint's
+                            # action_requests count, which can diverge from the live pending list.
+                            subagent_input = _build_subagent_resume_command(runnable, _int_obj, user_decisions)
                             break
             except GraphInterrupt:
                 # interrupt() raised — orchestrator will suspend; let it propagate
@@ -1972,8 +1998,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             user_decisions = interrupt(sub_interrupt_value)
             # ── Resumed after user approval (via except handler) ─────────────────────
             logger.info(f"[HITL] User responded to '{subagent_type}' HITL (resume): {user_decisions}")
-            # Pass decisions through as-is — replication happens in awrap_tool_call.
-            resume_command = Command(resume=user_decisions if isinstance(user_decisions, dict) else {})
+            # Resume the sub-agent: id-keyed map for local in-process sub-agents (LangGraph
+            # >=1.2 multi-interrupt safety), plain payload for remote A2A. Replication
+            # happens in awrap_tool_call where len(pending) is known accurately.
+            _first_sub_interrupt = sub_interrupts[0] if sub_interrupts else None
+            resume_command = _build_subagent_resume_command(runnable, _first_sub_interrupt, user_decisions)
             # Re-stream the sub-agent with the resume command
             final_result = None
             async for result in astream_a2a_agent(resume_command, subagent_config):

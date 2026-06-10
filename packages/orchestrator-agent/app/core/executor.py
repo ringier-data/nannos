@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -131,6 +131,36 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         logger.warning("[HITL] No DataPart with decisions found, defaulting to reject")
         return {"decisions": [{"type": "reject"}]}
+
+    @staticmethod
+    def _build_interrupt_resume_map(interrupts: Any, hitl_decisions: list, query: Any) -> dict[str, Any]:
+        """Build an interrupt-id-keyed resume map for ``Command(resume=...)``.
+
+        LangGraph >=1.2 requires an id-keyed map whenever more than one interrupt is
+        pending (e.g. two parallel ``task`` dispatches that each surfaced a sub-agent
+        HITL) — a bare ``Command(resume=value)`` raises RuntimeError in that case.
+        ``Interrupt.id`` is the xxh3 namespace hash the runtime matches the map against
+        (``types.Interrupt.from_ns`` <-> ``pregel/_algo._scratchpad``), so keying by
+        ``intr.id`` is correct for 1 *or* N pending interrupts.
+
+        ``hitl_decisions`` is the single blanket approve/reject the UI sends; it is
+        replicated to each HITL interrupt's own ``action_requests`` count. Non-HITL
+        interrupts (auth, etc.) resume with the raw ``query``.
+        """
+        resume_map: dict[str, Any] = {}
+        for intr in interrupts:
+            intr_value = getattr(intr, "value", intr)
+            if isinstance(intr_value, dict) and "action_requests" in intr_value:
+                action_requests = intr_value.get("action_requests", [])
+                n = len(action_requests)
+                per = hitl_decisions * n if (len(hitl_decisions) == 1 and n > 1) else hitl_decisions
+                resume_map[intr.id] = {"decisions": per}
+                tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
+                logger.info(f"Resuming HITL interrupt {intr.id} for tools {tool_names} with {len(per)} decision(s)")
+            else:
+                resume_map[intr.id] = query
+                logger.info(f"Resuming non-HITL interrupt {intr.id}")
+        return resume_map
 
     async def _build_user_config(
         self,
@@ -512,40 +542,21 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Check if the graph is currently interrupted and this might be a resume request
             resume_value = None  # Initialize resume_value
             if hasattr(current_state, "interrupts") and current_state.interrupts:
-                # Parse interrupt type and handle accordingly
-                last_interrupt = current_state.interrupts[-1]
-                interrupt_value = getattr(last_interrupt, "value", last_interrupt)
-
-                if isinstance(interrupt_value, dict) and "action_requests" in interrupt_value:
-                    # HumanInTheLoopMiddleware interrupt (HITLRequest format)
-                    # This handles ALL HITL guards: self-improvement tools, privacy tools,
-                    # and orchestrator-specific tools (bug reports).
-                    # Per LangChain docs, resume with Command(resume={"decisions": [...]})
-                    # Clients should send decisions as a DataPart (structured JSON, no XML wrapping).
-                    action_requests = interrupt_value.get("action_requests", [])
-                    tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
-                    logger.info(f"Resuming from HITL interrupt for tools: {tool_names}")
-
-                    resume_value = self._extract_hitl_decisions(context)
-
-                    # The HITL middleware expects exactly one decision per interrupted
-                    # tool call.  Models that support parallel tool calling (e.g. Gemini)
-                    # can produce N tool calls in a single AIMessage, resulting in N
-                    # action_requests.  The UI currently sends a single blanket decision
-                    # (approve / reject).  Replicate that decision so the count matches,
-                    # otherwise the middleware raises ValueError on mismatch.
-                    # see https://docs.langchain.com/oss/python/deepagents/human-in-the-loop#multiple-tool-calls
-                    decisions = resume_value.get("decisions", [])
-                    expected_count = len(action_requests)
-                    if len(decisions) == 1 and expected_count > 1:
-                        logger.info(f"Replicating single HITL decision to match {expected_count} action_requests")
-                        resume_value = {"decisions": decisions * expected_count}
-
-                    logger.info(f"HITL resume_value: {resume_value}")
-                else:
-                    # Other interrupt types (auth, etc.)
-                    resume_value = query
-                    logger.info("Resuming from non-HITL interrupt")
+                # LangGraph >=1.2 requires an interrupt-id-keyed resume map whenever
+                # more than one interrupt is pending (e.g. two parallel `task`
+                # dispatches that each surfaced a sub-agent HITL). A bare
+                # Command(resume=value) raises RuntimeError in that case
+                # (pregel/_loop.py: "you must specify the interrupt id when resuming").
+                # Interrupt.id IS the xxh3 namespace hash the runtime matches against
+                # (types.Interrupt.from_ns <-> pregel/_algo._scratchpad), so keying by
+                # intr.id is correct for 1 *or* N pending interrupts.
+                #
+                # NOTE: this applies the same blanket decision to every co-pending
+                # interrupt (matching today's single approve/reject UI). Per-interrupt
+                # decisions would require the client to key decisions by interrupt id.
+                # Clients send decisions as a DataPart (structured JSON, no XML).
+                hitl_decisions = self._extract_hitl_decisions(context).get("decisions", [])
+                resume_value = self._build_interrupt_resume_map(current_state.interrupts, hitl_decisions, query)
 
             if resume_value is None:
                 logger.info("Normal execution (not resuming from interrupt)")

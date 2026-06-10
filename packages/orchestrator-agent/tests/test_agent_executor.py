@@ -738,81 +738,80 @@ class TestExtractHitlDecisions:
         result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)
         assert result == {"decisions": [{"type": "reject"}]}
 
+    @staticmethod
+    def _interrupt(intr_id, action_requests=None, value=None):
+        """Build a fake Interrupt-like object (has .id and .value)."""
+        return Mock(id=intr_id, value=value if value is not None else {"action_requests": action_requests or []})
+
     def test_single_reject_replicated_for_parallel_tool_calls(self, dynamodb_table):
-        """Test that a single reject decision is replicated to match N action_requests.
+        """A single reject is replicated to match N action_requests, keyed by interrupt id.
 
-        This is the core fix for the bug where Gemini models make parallel tool
-        calls (N tool_calls in one AIMessage), the HITL middleware creates N
-        action_requests, but the UI sends only 1 decision. Without replication,
-        the middleware raises ValueError('Number of human decisions (1) does not
-        match number of hanging tool calls (N)').
+        Core fix for parallel tool calls (N tool_calls in one AIMessage → N
+        action_requests) while the UI sends 1 decision. Without replication the HITL
+        middleware raises ValueError('Number of human decisions (1) does not match
+        number of hanging tool calls (N)').
         """
-        from a2a.types import DataPart
-
-        # Simulate: model made 3 parallel HITL-guarded tool calls
-        action_requests = [
-            {"name": "console_activate_skill", "args": {"skill": "printing"}},
-            {"name": "console_activate_skill", "args": {"skill": "scanning"}},
-            {"name": "console_activate_skill", "args": {"skill": "faxing"}},
-        ]
-
-        # UI sends 1 blanket reject
+        intr = self._interrupt("a" * 32, action_requests=[{"name": "s1"}, {"name": "s2"}, {"name": "s3"}])
         decisions = [{"type": "reject", "message": "User declined"}]
-        resume_value = {"decisions": decisions}
 
-        # Replicate (same logic as executor.py)
-        expected_count = len(action_requests)
-        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
-            resume_value = {"decisions": resume_value["decisions"] * expected_count}
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
 
-        assert len(resume_value["decisions"]) == 3
-        assert all(d["type"] == "reject" for d in resume_value["decisions"])
-        assert all(d["message"] == "User declined" for d in resume_value["decisions"])
+        assert set(resume_map) == {"a" * 32}
+        replicated = resume_map["a" * 32]["decisions"]
+        assert len(replicated) == 3
+        assert all(d["type"] == "reject" and d["message"] == "User declined" for d in replicated)
 
     def test_single_approve_replicated_for_parallel_tool_calls(self, dynamodb_table):
-        """Test that a single approve decision is replicated for N action_requests."""
-        action_requests = [
-            {"name": "tool_a", "args": {}},
-            {"name": "tool_b", "args": {}},
-        ]
+        """A single approve is replicated for N action_requests."""
+        intr = self._interrupt("b" * 32, action_requests=[{"name": "tool_a"}, {"name": "tool_b"}])
 
-        decisions = [{"type": "approve"}]
-        resume_value = {"decisions": decisions}
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], [{"type": "approve"}], query="q")
 
-        expected_count = len(action_requests)
-        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
-            resume_value = {"decisions": resume_value["decisions"] * expected_count}
-
-        assert len(resume_value["decisions"]) == 2
-        assert all(d["type"] == "approve" for d in resume_value["decisions"])
+        replicated = resume_map["b" * 32]["decisions"]
+        assert len(replicated) == 2
+        assert all(d["type"] == "approve" for d in replicated)
 
     def test_no_replication_when_counts_match(self, dynamodb_table):
-        """Test that decisions are not replicated when counts already match."""
-        action_requests = [{"name": "tool_a", "args": {}}]
-        decisions = [{"type": "reject"}]
-        resume_value = {"decisions": decisions}
+        """A single decision for a single action_request is not replicated."""
+        intr = self._interrupt("c" * 32, action_requests=[{"name": "tool_a"}])
 
-        expected_count = len(action_requests)
-        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
-            resume_value = {"decisions": resume_value["decisions"] * expected_count}
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], [{"type": "reject"}], query="q")
 
-        # 1 decision, 1 action_request — no replication
-        assert len(resume_value["decisions"]) == 1
+        assert len(resume_map["c" * 32]["decisions"]) == 1
 
     def test_no_replication_when_multiple_decisions_sent(self, dynamodb_table):
-        """Test that multiple decisions are not replicated (future UI support)."""
-        action_requests = [
-            {"name": "tool_a", "args": {}},
-            {"name": "tool_b", "args": {}},
-        ]
+        """Multiple decisions are passed through unchanged (future per-call UI)."""
+        intr = self._interrupt("d" * 32, action_requests=[{"name": "tool_a"}, {"name": "tool_b"}])
         decisions = [{"type": "approve"}, {"type": "reject"}]
-        resume_value = {"decisions": decisions}
 
-        expected_count = len(action_requests)
-        if len(resume_value.get("decisions", [])) == 1 and expected_count > 1:
-            resume_value = {"decisions": resume_value["decisions"] * expected_count}
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([intr], decisions, query="q")
 
-        # 2 decisions, 2 action_requests — no replication needed
-        assert len(resume_value["decisions"]) == 2
-        assert resume_value["decisions"][0]["type"] == "approve"
-        assert resume_value["decisions"][1]["type"] == "reject"
+        passed = resume_map["d" * 32]["decisions"]
+        assert [d["type"] for d in passed] == ["approve", "reject"]
+
+    def test_multiple_pending_interrupts_each_keyed_and_replicated(self, dynamodb_table):
+        """The migration's core case: >1 co-pending interrupt → id-keyed map.
+
+        Two parallel ``task`` dispatches each surfaced a sub-agent HITL with a
+        different action_request count. The single blanket decision is replicated
+        per interrupt and keyed by interrupt id, so LangGraph >=1.2 does not raise
+        'you must specify the interrupt id when resuming'.
+        """
+        intr_a = self._interrupt("a" * 32, action_requests=[{"name": "x"}, {"name": "y"}])
+        intr_b = self._interrupt("b" * 32, action_requests=[{"name": "z"}])
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            [intr_a, intr_b], [{"type": "approve"}], query="q"
+        )
+
+        assert set(resume_map) == {"a" * 32, "b" * 32}
+        assert len(resume_map["a" * 32]["decisions"]) == 2  # replicated to its own count
+        assert len(resume_map["b" * 32]["decisions"]) == 1
+
+    def test_non_hitl_interrupt_resumes_with_query(self, dynamodb_table):
+        """A non-HITL interrupt (no action_requests, e.g. auth) resumes with the raw query."""
+        auth_intr = self._interrupt("e" * 32, value={"auth_url": "https://example/oauth"})
+
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map([auth_intr], [{"type": "approve"}], query="auth-token")
+
+        assert resume_map["e" * 32] == "auth-token"
