@@ -30,8 +30,10 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import textwrap
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterable, Optional, TypedDict, cast
 
@@ -82,6 +84,208 @@ from ..core.steering_state import ActiveSubagentDispatch, clear_active_subagent_
 from ..models.config import GraphRuntimeContext
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    """Read a positive float from env with a safe default on parse error / non-positive."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+# Per-iteration heartbeat tick: how long to wait for the next sub-agent stream item
+# before logging a "still waiting on <agent> after Ns" heartbeat and continuing to wait.
+SUBAGENT_STREAM_TICK_SECONDS = _positive_float_env("SUBAGENT_STREAM_TICK_SECONDS", 30.0)
+
+# Hard cap: total seconds with no new stream item from the sub-agent before the
+# consumer loop gives up and surfaces an ErrorEvent through the existing error path.
+SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS = _positive_float_env(
+    "SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS", 300.0
+)
+
+
+async def _iter_subagent_stream_with_stall_timeout(
+    stream_iter: AsyncIterable[Any],
+    *,
+    subagent_type: str,
+    orchestrator_conversation_id: Optional[str],
+    subagent_thread_id: str,
+    tick_seconds: float = SUBAGENT_STREAM_TICK_SECONDS,
+    hard_cap_seconds: float = SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS,
+) -> AsyncIterable[Any]:
+    """Wrap a sub-agent async stream with a per-item stall timeout.
+
+    Yields each item from `stream_iter` as it arrives. If no item arrives for
+    `tick_seconds`, emits a heartbeat warning log and keeps waiting. If the
+    cumulative wait since the last item exceeds `hard_cap_seconds`, logs a
+    structured stall error, closes the upstream iterator best-effort, yields a
+    single `ErrorEvent` describing the stall, and stops. Never propagates the
+    internal `asyncio.TimeoutError` out of the generator.
+
+    Each invocation generates a short ``dispatch_id`` once and threads it into
+    every log line (entry, heartbeat, stall-error) and into the metadata of any
+    yielded ``ErrorEvent``. This disambiguates concurrent sub-agent dispatches
+    that share the same ``subagent_thread_id`` (the orchestrator fans out
+    parallel ``task`` tool calls), so operators can group log lines by dispatch
+    and downstream alerting can correlate logs to events.
+    """
+    iterator = aiter(stream_iter)
+    loop = asyncio.get_event_loop()
+    stall_started_at = loop.time()
+    item_count = 0
+    stalled_out = False
+    pending: Optional[asyncio.Task] = None
+
+    dispatch_id = uuid.uuid4().hex[:8]
+
+    logger.info(
+        "[STREAMING] Starting sub-agent dispatch %s: agent=%s, "
+        "orchestrator_conversation_id=%s, subagent_thread_id=%s, "
+        "tick=%.1fs, hard_cap=%.1fs",
+        dispatch_id,
+        subagent_type,
+        orchestrator_conversation_id,
+        subagent_thread_id,
+        tick_seconds,
+        hard_cap_seconds,
+    )
+
+    # Drive the upstream async iterator from a SINGLE long-lived task. The
+    # sub-agent stream sets/resets ContextVars (the parent stream context in
+    # graph_utils and the attachments backend) whose ``contextvars.Token``
+    # objects are bound to the exact context that executed ``set()``. Driving
+    # ``__anext__`` from a fresh ``asyncio`` task per item gives each item a
+    # *copied* context, so a later ``reset(token)`` runs in a different context
+    # and raises "Token was created in a different Context". Consuming the whole
+    # stream inside one task keeps every set()/reset() pair in the same context.
+    # The per-item heartbeat/stall logic below then waits on a queue instead of
+    # on ``__anext__`` directly.
+    stream_done = object()
+    queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=1)
+    consumer_error: list[BaseException] = []
+
+    async def _drain_stream() -> None:
+        try:
+            async for produced in iterator:
+                await queue.put(produced)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # surfaced to the consumer loop below
+            consumer_error.append(exc)
+        await queue.put(stream_done)
+
+    consumer_task: asyncio.Task = asyncio.ensure_future(_drain_stream())
+
+    try:
+        while True:
+            if pending is None:
+                # Observe the next queued item without cancelling the in-flight
+                # read on a heartbeat tick. The upstream ``__anext__`` runs in
+                # the consumer task above (never cancelled by a tick); only this
+                # queue read is parked across heartbeats. Cancellation of the
+                # in-flight read happens only once the hard cap is exceeded.
+                pending = asyncio.ensure_future(queue.get())
+
+            done, _ = await asyncio.wait({pending}, timeout=tick_seconds)
+
+            if not done:
+                waited = loop.time() - stall_started_at
+                if waited >= hard_cap_seconds:
+                    logger.error(
+                        "[STREAMING] Sub-agent stream stalled: dispatch_id=%s, "
+                        "agent=%s, orchestrator_conversation_id=%s, "
+                        "subagent_thread_id=%s, waited=%.1fs, "
+                        "last_item_count=%d, hard_cap=%.1fs",
+                        dispatch_id,
+                        subagent_type,
+                        orchestrator_conversation_id,
+                        subagent_thread_id,
+                        waited,
+                        item_count,
+                        hard_cap_seconds,
+                    )
+                    stalled_out = True
+                    break
+                logger.warning(
+                    "[STREAMING] Still waiting on sub-agent '%s' after %.1fs "
+                    "(dispatch_id=%s, orchestrator_conversation_id=%s, "
+                    "subagent_thread_id=%s, items_so_far=%d, hard_cap=%.1fs)",
+                    subagent_type,
+                    waited,
+                    dispatch_id,
+                    orchestrator_conversation_id,
+                    subagent_thread_id,
+                    item_count,
+                    hard_cap_seconds,
+                )
+                # Leave `pending` in place across the heartbeat — do NOT cancel it.
+                continue
+
+            # The queue read completed; consume it and prepare for the next item.
+            task = pending
+            pending = None
+            item = task.result()
+            if item is stream_done:
+                # Upstream finished (or raised). Surface a stream exception with
+                # the same propagation semantics as a plain ``async for``.
+                if consumer_error:
+                    raise consumer_error[0]
+                return
+
+            stall_started_at = loop.time()
+            item_count += 1
+            yield item
+    finally:
+        # Stop observing the queue if a read is still parked (heartbeat in
+        # flight when we leave the loop).
+        if pending is not None and not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Cancel the upstream consumer if it is still running (stall hard cap,
+        # generator close, or exception leaving the loop). This cancels the
+        # in-flight ``__anext__``, matching the previous behavior of only
+        # cancelling the read once the hard cap is exceeded.
+        if not consumer_task.done():
+            consumer_task.cancel()
+        try:
+            await consumer_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    if stalled_out:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception as close_exc:  # pragma: no cover - best effort cleanup
+                logger.debug(
+                    "[STREAMING] Ignoring error while closing stalled sub-agent iterator: %s",
+                    close_exc,
+                )
+        yield ErrorEvent(
+            error=(
+                f"Sub-agent '{subagent_type}' stopped producing output for more than "
+                f"{int(hard_cap_seconds)}s and was aborted by the orchestrator stall timeout."
+            ),
+            data=TaskResponseData(
+                metadata={
+                    "dispatch_id": dispatch_id,
+                    "subagent_type": subagent_type,
+                    "orchestrator_conversation_id": orchestrator_conversation_id,
+                    "subagent_thread_id": subagent_thread_id,
+                    "hard_cap_seconds": hard_cap_seconds,
+                    "stall_reason": "subagent_stream_stall_timeout",
+                }
+            ),
+        )
 
 
 class A2ACompiledSubAgent(TypedDict, total=False):
@@ -1558,7 +1762,21 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 hasattr(agent_state, "resume"),
                 agent_config.get("configurable", {}).get("thread_id", "?"),
             )
-            async for item in runnable.astream(agent_state, agent_config):  # type: ignore[arg-type]
+
+            # Iterate with per-item stall timeout so a silent sub-agent (parked LLM
+            # call, bad MCP content type, unresponsive provider, DB lock) cannot hang
+            # the orchestrator indefinitely. The helper emits heartbeat warnings on
+            # each tick and yields an ErrorEvent through the existing error path
+            # after the hard cap.
+            sub_thread_id = agent_config.get("configurable", {}).get("thread_id", "?")
+            wrapped_stream = _iter_subagent_stream_with_stall_timeout(
+                runnable.astream(agent_state, agent_config),  # type: ignore[arg-type]
+                subagent_type=subagent_type,
+                orchestrator_conversation_id=orchestrator_conversation_id,
+                subagent_thread_id=sub_thread_id,
+            )
+
+            async for item in wrapped_stream:
                 item_count += 1
                 item_type = type(item).__name__
                 logger.info(f"[STREAMING] astream_a2a_agent received item #{item_count}: {item_type}")
