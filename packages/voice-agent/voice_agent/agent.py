@@ -593,7 +593,32 @@ class GeminiLiveAgent:
             fn = dispatch_map.get(name)
             if fn is not None:
                 try:
-                    result = await fn(args)
+                    task = asyncio.ensure_future(fn(args))
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.shield(task), timeout=2.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.info(
+                            "Tool %r still running after 1s — notifying model", name
+                        )
+                        await session.send_client_content(
+                            turns=[
+                                types.Content(
+                                    role="user",
+                                    parts=[
+                                        types.Part(
+                                            text=(
+                                                f"repeat this in natural way: The tool '{name}' is still executing. "
+                                                "Briefly let the user know you're working on it."
+                                            )
+                                        )
+                                    ],
+                                )
+                            ],
+                            turn_complete=True,
+                        )
+                        result = await task
                 except Exception:
                     logger.exception("Tool %r raised an exception", name)
                     result = f"Tool error: {name} raised an exception"
@@ -601,7 +626,9 @@ class GeminiLiveAgent:
                 result = f"Unknown function: {name}"
                 logger.warning("Unknown tool called: %s", name)
 
-            is_confirmation = isinstance(result, str) and "CONFIRMATION_REQUIRED" in result
+            is_confirmation = (
+                isinstance(result, str) and "CONFIRMATION_REQUIRED" in result
+            )
             scheduling = "INTERRUPT" if is_confirmation else "WHEN_IDLE"
             logger.info("Tool %r response ready (scheduling=%s)", name, scheduling)
             try:
