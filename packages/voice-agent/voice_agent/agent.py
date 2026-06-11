@@ -577,6 +577,50 @@ class GeminiLiveAgent:
                 except Exception:
                     pass
 
+        _running_tools: set[str] = set()
+
+        async def _dispatch_tool_call(call_id: str, name: str, args: dict) -> None:
+            """Execute one tool call in the background and send the response.
+
+            Runs as an asyncio.create_task so the receive loop is never blocked
+            by slow MCP calls. Scheduling hints tell Gemini when to surface the
+            result:
+              INTERRUPT — confirmation prompts: speak immediately, interrupting
+                          any in-progress audio.
+              WHEN_IDLE — normal results: wait for a natural pause so the agent
+                          can finish its current sentence first.
+            """
+            fn = dispatch_map.get(name)
+            if fn is not None:
+                try:
+                    if asyncio.iscoroutinefunction(fn):
+                        result = await fn(args)
+                    else:
+                        result = fn(**args)
+                except Exception:
+                    logger.exception("Tool %r raised an exception", name)
+                    result = f"Tool error: {name} raised an exception"
+            else:
+                result = f"Unknown function: {name}"
+                logger.warning("Unknown tool called: %s", name)
+
+            is_confirmation = isinstance(result, str) and "CONFIRMATION_REQUIRED" in result
+            scheduling = "INTERRUPT" if is_confirmation else "WHEN_IDLE"
+            logger.info("Tool %r response ready (scheduling=%s)", name, scheduling)
+            try:
+                await session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(
+                            id=call_id,
+                            name=name,
+                            response={"result": result},
+                            scheduling=scheduling,
+                        )
+                    ]
+                )
+            finally:
+                _running_tools.discard(name)
+
         async def _receive_loop() -> None:
             nonlocal t_first_audio_sent, first_response_logged
             turn = 0
@@ -587,36 +631,31 @@ class GeminiLiveAgent:
                 while True:
                     async for response in session.receive():
                         # ── Tool calls ───────────────────────────────────
-                        # Must respond or Gemini waits indefinitely.
+                        # Dispatch each call as a background task so the
+                        # receive loop is never blocked by slow MCP calls.
                         if response.tool_call:
-                            fn_responses = []
                             for fc in response.tool_call.function_calls:
+                                if fc.name in _running_tools:
+                                    logger.debug(
+                                        "Tool %r still running — ignoring duplicate call (id=%s)",
+                                        fc.name,
+                                        fc.id,
+                                    )
+                                    continue
+                                _running_tools.add(fc.name)
                                 logger.info(
                                     "Tool call: %s(%s) (turn=%d)",
                                     fc.name,
                                     dict(fc.args or {}),
                                     turn,
                                 )
-                                fn = dispatch_map.get(fc.name)
-                                if fn is not None:
-                                    kwargs = dict(fc.args) if fc.args else {}
-                                    if asyncio.iscoroutinefunction(fn):
-                                        result = await fn(kwargs)
-                                    else:
-                                        result = fn(**kwargs)
-                                else:
-                                    result = f"Unknown function: {fc.name}"
-                                    logger.warning("Unknown tool called: %s", fc.name)
-                                fn_responses.append(
-                                    types.FunctionResponse(
-                                        id=fc.id,
-                                        name=fc.name,
-                                        response={"result": result},
+                                asyncio.create_task(
+                                    _dispatch_tool_call(
+                                        fc.id,
+                                        fc.name,
+                                        dict(fc.args or {}),
                                     )
                                 )
-                            await session.send_tool_response(
-                                function_responses=fn_responses
-                            )
                             continue
 
                         sc = response.server_content
