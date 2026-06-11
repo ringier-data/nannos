@@ -54,6 +54,45 @@ async def _create_sub_agent(
     return await subagent_service.create_sub_agent(session, data, user)
 
 
+async def _grant_group_write_access(
+    session: AsyncSession,
+    sub_agent_id: int,
+    user: User,
+    group_name: str = "Write Group",
+) -> int:
+    """Create a group, add `user` as a write member, and grant the group write access on the sub-agent."""
+    from sqlalchemy import text
+
+    group_id = (
+        await session.execute(
+            text("""
+                INSERT INTO user_groups (name, description, created_at, updated_at)
+                VALUES (:name, 'Test group', NOW(), NOW())
+                RETURNING id
+            """),
+            {"name": group_name},
+        )
+    ).scalar_one()
+
+    await session.execute(
+        text("""
+            INSERT INTO user_group_members (user_group_id, user_id, group_role, created_at)
+            VALUES (:group_id, :user_id, 'write', NOW())
+        """),
+        {"group_id": group_id, "user_id": user.id},
+    )
+
+    await session.execute(
+        text("""
+            INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id, permissions, created_at)
+            VALUES (:sub_agent_id, :group_id, ARRAY['write'], NOW())
+        """),
+        {"sub_agent_id": sub_agent_id, "group_id": group_id},
+    )
+    await session.commit()
+    return group_id
+
+
 class TestSubAgentVersionCreation:
     """Test version creation and hash generation."""
 
@@ -695,6 +734,48 @@ class TestVersionSubmissionWorkflow:
             )
 
     @pytest.mark.asyncio
+    async def test_admin_can_submit_version_for_approval(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User, test_admin_user_db: User
+    ):
+        """Test that an admin can submit a version for approval on a sub-agent they don't own."""
+        service = sub_agent_service
+        owner = test_user_db
+        admin = test_admin_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        result = await service.submit_version_for_approval(
+            pg_session, agent.id, 1, "Admin submission", actor=admin, is_admin=True
+        )
+
+        assert result is not None
+        assert result.config_version is not None
+        assert result.config_version.status == SubAgentStatus.PENDING_APPROVAL
+
+    @pytest.mark.asyncio
+    async def test_group_write_user_can_submit_version_for_approval(
+        self,
+        pg_session: AsyncSession,
+        sub_agent_service: SubAgentService,
+        test_user_db: User,
+        test_approver_user_db: User,
+    ):
+        """Test that a non-owner with group write access can submit a version for approval."""
+        service = sub_agent_service
+        owner = test_user_db
+        writer = test_approver_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        await _grant_group_write_access(pg_session, agent.id, writer)
+
+        result = await service.submit_version_for_approval(
+            pg_session, agent.id, 1, "Writer submission", actor=writer
+        )
+
+        assert result is not None
+        assert result.config_version is not None
+        assert result.config_version.status == SubAgentStatus.PENDING_APPROVAL
+
+    @pytest.mark.asyncio
     async def test_cannot_submit_pending_version(
         self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User
     ):
@@ -990,8 +1071,58 @@ class TestVersionReversion:
         agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
 
         # Try to revert as non-owner
-        with pytest.raises(PermissionError, match="Only the owner can revert"):
+        with pytest.raises(PermissionError, match="don't have permission to revert"):
             await service.revert_to_version(pg_session, agent.id, 1, actor=other)
+
+    @pytest.mark.asyncio
+    async def test_admin_can_revert_version(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User, test_admin_user_db: User
+    ):
+        """Test that an admin can revert a version on a sub-agent they don't own."""
+        service = sub_agent_service
+        owner = test_user_db
+        admin = test_admin_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        # Create version 2 so there is something to revert from
+        await service.update_sub_agent(
+            pg_session, agent.id, SubAgentUpdate(system_prompt="V2 prompt" * 100), actor=owner
+        )
+
+        # Admin reverts to version 1
+        result = await service.revert_to_version(pg_session, agent.id, 1, actor=admin, is_admin=True)
+
+        assert result is not None
+        assert result.config_version is not None
+        assert result.config_version.status == SubAgentStatus.DRAFT
+
+    @pytest.mark.asyncio
+    async def test_group_write_user_can_revert_version(
+        self,
+        pg_session: AsyncSession,
+        sub_agent_service: SubAgentService,
+        test_user_db: User,
+        test_approver_user_db: User,
+    ):
+        """Test that a non-owner with group write access can revert a version."""
+        service = sub_agent_service
+        owner = test_user_db
+        writer = test_approver_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        # Create version 2 so there is something to revert from
+        await service.update_sub_agent(
+            pg_session, agent.id, SubAgentUpdate(system_prompt="V2 prompt" * 100), actor=owner
+        )
+
+        await _grant_group_write_access(pg_session, agent.id, writer)
+
+        # Group-write user reverts to version 1
+        result = await service.revert_to_version(pg_session, agent.id, 1, actor=writer)
+
+        assert result is not None
+        assert result.config_version is not None
+        assert result.config_version.status == SubAgentStatus.DRAFT
 
     @pytest.mark.asyncio
     async def test_cannot_revert_to_nonexistent_version(
@@ -1111,8 +1242,70 @@ class TestDefaultVersionManagement:
         await service.approve_version(pg_session, agent.id, 1, True, actor=admin)
 
         # Try to set default as non-owner
-        with pytest.raises(PermissionError, match="Only the owner can set the default version"):
+        with pytest.raises(PermissionError, match="don't have permission to set the default version"):
             await service.set_default_version(pg_session, agent.id, 1, actor=other)
+
+    @pytest.mark.asyncio
+    async def test_admin_can_set_default_version(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User, test_admin_user_db: User
+    ):
+        """Test that an admin can set the default version on a sub-agent they don't own."""
+        service = sub_agent_service
+        owner = test_user_db
+        admin = test_admin_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        # Approve version 1
+        await service.submit_for_approval(pg_session, agent.id, "V1", actor=owner)
+        await service.approve_version(pg_session, agent.id, 1, True, actor=admin)
+
+        # Create and approve version 2 (so v1 is not already the only/default option)
+        await service.update_sub_agent(
+            pg_session, agent.id, SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"), actor=owner
+        )
+        await service.submit_for_approval(pg_session, agent.id, "V2", actor=owner)
+        await service.approve_version(pg_session, agent.id, 2, True, actor=admin)
+
+        # Admin sets version 1 as default
+        result = await service.set_default_version(pg_session, agent.id, 1, actor=admin, is_admin=True)
+
+        assert result is not None
+        assert result.default_version == 1
+
+    @pytest.mark.asyncio
+    async def test_group_write_user_can_set_default_version(
+        self,
+        pg_session: AsyncSession,
+        sub_agent_service: SubAgentService,
+        test_user_db: User,
+        test_admin_user_db: User,
+        test_approver_user_db: User,
+    ):
+        """Test that a non-owner with group write access can set the default version."""
+        service = sub_agent_service
+        owner = test_user_db
+        admin = test_admin_user_db
+        writer = test_approver_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        # Approve version 1
+        await service.submit_for_approval(pg_session, agent.id, "V1", actor=owner)
+        await service.approve_version(pg_session, agent.id, 1, True, actor=admin)
+
+        # Create and approve version 2
+        await service.update_sub_agent(
+            pg_session, agent.id, SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"), actor=owner
+        )
+        await service.submit_for_approval(pg_session, agent.id, "V2", actor=owner)
+        await service.approve_version(pg_session, agent.id, 2, True, actor=admin)
+
+        await _grant_group_write_access(pg_session, agent.id, writer)
+
+        # Group-write user sets version 1 as default
+        result = await service.set_default_version(pg_session, agent.id, 1, actor=writer)
+
+        assert result is not None
+        assert result.default_version == 1
 
 
 class TestVersionDeletion:
@@ -1240,8 +1433,54 @@ class TestVersionDeletion:
         )
 
         # Try to delete as non-owner
-        with pytest.raises(PermissionError, match="Only the owner can delete versions"):
+        with pytest.raises(PermissionError, match="don't have permission to delete this version"):
             await service.delete_version(pg_session, agent.id, 2, actor=other)
+
+    @pytest.mark.asyncio
+    async def test_admin_can_delete_version(
+        self, pg_session: AsyncSession, sub_agent_service: SubAgentService, test_user_db: User, test_admin_user_db: User
+    ):
+        """Test that an admin can delete a version on a sub-agent they don't own."""
+        service = sub_agent_service
+        owner = test_user_db
+        admin = test_admin_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        # Create version 2 (draft)
+        await service.update_sub_agent(
+            pg_session, agent.id, SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"), actor=owner
+        )
+
+        # Admin deletes version 2
+        result = await service.delete_version(pg_session, agent.id, 2, actor=admin, is_admin=True)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_group_write_user_can_delete_version(
+        self,
+        pg_session: AsyncSession,
+        sub_agent_service: SubAgentService,
+        test_user_db: User,
+        test_approver_user_db: User,
+    ):
+        """Test that a non-owner with group write access can delete a version."""
+        service = sub_agent_service
+        owner = test_user_db
+        writer = test_approver_user_db
+        agent = await _create_sub_agent(pg_session, owner, "Agent", sub_agent_service)
+
+        # Create version 2 (draft)
+        await service.update_sub_agent(
+            pg_session, agent.id, SubAgentUpdate(system_prompt="V2 prompt" * 100, description="Version 2"), actor=owner
+        )
+
+        await _grant_group_write_access(pg_session, agent.id, writer)
+
+        # Group-write user deletes version 2
+        result = await service.delete_version(pg_session, agent.id, 2, actor=writer)
+
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_delete_rejected_version(

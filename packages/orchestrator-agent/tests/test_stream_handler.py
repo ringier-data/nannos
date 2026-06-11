@@ -797,6 +797,55 @@ class TestConservativeOverrideLogic:
         assert response.state == TaskState.working
         assert "background" in response.content
 
+    def test_no_subagents_this_turn_does_not_override(self):
+        """Greeting turn (no sub-agent calls) must not be overridden by stale blocked tracking.
+
+        Regression: a sub-agent flagged blocked in an earlier turn (e.g. file-analyzer)
+        leaked into a2a_tracking. On a later, unrelated greeting turn with no tool
+        calls, the override branch incorrectly fired and suppressed the LLM's final
+        "Hello!" reply. The current-turn extraction MUST short-circuit when no sub-agent
+        was actually invoked in the current turn.
+        """
+        from app.models.schemas import FinalResponseSchema
+
+        final_state = {
+            "messages": [
+                # Earlier turn: file-analyzer was called and got blocked
+                HumanMessage(content="Analyze that file"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "file-analyzer"},
+                            "id": "call_old",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content="Need credentials", tool_call_id="call_old"),
+                AIMessage(content="I need access to analyze that."),
+                # Current turn: simple greeting, no tool calls
+                HumanMessage(content="hi"),
+                AIMessage(content="Hello! How can I help you today?"),
+            ],
+            "structured_response": FinalResponseSchema(
+                task_state=TaskState.completed,
+                message="Hello! How can I help you today?",
+                reasoning="Greeting response",
+            ),
+            # Stale blocked tracking from earlier turn — must NOT trigger override now
+            "a2a_tracking": {
+                "file-analyzer": {"requires_input": True, "is_complete": False},
+            },
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        # Must trust LLM and emit the greeting — no override allowed
+        assert response.state == TaskState.completed
+        assert response.content == "Hello! How can I help you today?"
+
     def test_single_agent_blocked_overrides_when_completed(self):
         """Test: Single agent called, LLM says completed, agent blocked → override."""
         from app.models.schemas import FinalResponseSchema
@@ -908,3 +957,114 @@ class TestIncludeSubagentOutput:
 
         assert response.state == TaskState.completed
         assert response.content == "Here's the joke:"
+
+    def test_include_subagent_output_empty_message_no_tool_message_uses_fallback(self):
+        """include_subagent_output=True + empty message + no sub-agent ToolMessage → safe fallback (not empty)."""
+        # Reproduces the production bug: orchestrator picks include_subagent_output=True
+        # and authors message="", but no "task" ToolMessage exists in the current turn.
+        # Client must never see an empty `completed` reply.
+        final_state = {
+            "messages": [
+                HumanMessage(content="Schedule a meeting"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_empty",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.completed
+        assert response.content, "Client must never receive empty completed content"
+        # Fallback is short, neutral, and does not leak internal IDs / stack traces
+        assert "call_final" not in response.content
+        assert "ToolMessage" not in response.content
+        assert "tool_call_id" not in response.content
+
+    def test_include_subagent_output_tool_message_with_empty_extracted_content_uses_fallback(self):
+        """include_subagent_output=True + ToolMessage whose extracted content is "" → safe fallback."""
+        # Sub-agent ToolMessage IS present, but its JSON payload has message="" — extraction
+        # produces an empty string. We must still surface a visible reply to the user.
+        final_state = {
+            "messages": [
+                HumanMessage(content="What's on my calendar?"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "task",
+                            "args": {"subagent_type": "task-scheduler"},
+                            "id": "call_task_empty",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(content='{"message": ""}', tool_call_id="call_task_empty"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "",
+                                "include_subagent_output": True,
+                            },
+                            "id": "call_final_empty_extracted",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.completed
+        assert response.content, "Client must never receive empty completed content"
+        assert "call_task" not in response.content
+
+    def test_include_subagent_output_false_empty_message_passes_through(self):
+        """include_subagent_output=False + empty message → message passes through unchanged (no fallback injected).
+
+        The fallback is scoped strictly to the include_subagent_output=True path: an explicit
+        empty message with include_subagent_output=False is a different (and unusual) decision
+        by the orchestrator, and we don't second-guess it here.
+        """
+        final_state = {
+            "messages": [
+                HumanMessage(content="hi"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {
+                                "task_state": "completed",
+                                "message": "",
+                                "include_subagent_output": False,
+                            },
+                            "id": "call_final_no_include",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.completed
+        assert response.content == ""

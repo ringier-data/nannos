@@ -30,8 +30,10 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import textwrap
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterable, Optional, TypedDict, cast
 
@@ -84,6 +86,208 @@ from ..models.config import GraphRuntimeContext
 logger = logging.getLogger(__name__)
 
 
+def _positive_float_env(name: str, default: float) -> float:
+    """Read a positive float from env with a safe default on parse error / non-positive."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+# Per-iteration heartbeat tick: how long to wait for the next sub-agent stream item
+# before logging a "still waiting on <agent> after Ns" heartbeat and continuing to wait.
+SUBAGENT_STREAM_TICK_SECONDS = _positive_float_env("SUBAGENT_STREAM_TICK_SECONDS", 30.0)
+
+# Hard cap: total seconds with no new stream item from the sub-agent before the
+# consumer loop gives up and surfaces an ErrorEvent through the existing error path.
+SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS = _positive_float_env(
+    "SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS", 300.0
+)
+
+
+async def _iter_subagent_stream_with_stall_timeout(
+    stream_iter: AsyncIterable[Any],
+    *,
+    subagent_type: str,
+    orchestrator_conversation_id: Optional[str],
+    subagent_thread_id: str,
+    tick_seconds: float = SUBAGENT_STREAM_TICK_SECONDS,
+    hard_cap_seconds: float = SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS,
+) -> AsyncIterable[Any]:
+    """Wrap a sub-agent async stream with a per-item stall timeout.
+
+    Yields each item from `stream_iter` as it arrives. If no item arrives for
+    `tick_seconds`, emits a heartbeat warning log and keeps waiting. If the
+    cumulative wait since the last item exceeds `hard_cap_seconds`, logs a
+    structured stall error, closes the upstream iterator best-effort, yields a
+    single `ErrorEvent` describing the stall, and stops. Never propagates the
+    internal `asyncio.TimeoutError` out of the generator.
+
+    Each invocation generates a short ``dispatch_id`` once and threads it into
+    every log line (entry, heartbeat, stall-error) and into the metadata of any
+    yielded ``ErrorEvent``. This disambiguates concurrent sub-agent dispatches
+    that share the same ``subagent_thread_id`` (the orchestrator fans out
+    parallel ``task`` tool calls), so operators can group log lines by dispatch
+    and downstream alerting can correlate logs to events.
+    """
+    iterator = aiter(stream_iter)
+    loop = asyncio.get_event_loop()
+    stall_started_at = loop.time()
+    item_count = 0
+    stalled_out = False
+    pending: Optional[asyncio.Task] = None
+
+    dispatch_id = uuid.uuid4().hex[:8]
+
+    logger.info(
+        "[STREAMING] Starting sub-agent dispatch %s: agent=%s, "
+        "orchestrator_conversation_id=%s, subagent_thread_id=%s, "
+        "tick=%.1fs, hard_cap=%.1fs",
+        dispatch_id,
+        subagent_type,
+        orchestrator_conversation_id,
+        subagent_thread_id,
+        tick_seconds,
+        hard_cap_seconds,
+    )
+
+    # Drive the upstream async iterator from a SINGLE long-lived task. The
+    # sub-agent stream sets/resets ContextVars (the parent stream context in
+    # graph_utils and the attachments backend) whose ``contextvars.Token``
+    # objects are bound to the exact context that executed ``set()``. Driving
+    # ``__anext__`` from a fresh ``asyncio`` task per item gives each item a
+    # *copied* context, so a later ``reset(token)`` runs in a different context
+    # and raises "Token was created in a different Context". Consuming the whole
+    # stream inside one task keeps every set()/reset() pair in the same context.
+    # The per-item heartbeat/stall logic below then waits on a queue instead of
+    # on ``__anext__`` directly.
+    stream_done = object()
+    queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=1)
+    consumer_error: list[BaseException] = []
+
+    async def _drain_stream() -> None:
+        try:
+            async for produced in iterator:
+                await queue.put(produced)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # surfaced to the consumer loop below
+            consumer_error.append(exc)
+        await queue.put(stream_done)
+
+    consumer_task: asyncio.Task = asyncio.ensure_future(_drain_stream())
+
+    try:
+        while True:
+            if pending is None:
+                # Observe the next queued item without cancelling the in-flight
+                # read on a heartbeat tick. The upstream ``__anext__`` runs in
+                # the consumer task above (never cancelled by a tick); only this
+                # queue read is parked across heartbeats. Cancellation of the
+                # in-flight read happens only once the hard cap is exceeded.
+                pending = asyncio.ensure_future(queue.get())
+
+            done, _ = await asyncio.wait({pending}, timeout=tick_seconds)
+
+            if not done:
+                waited = loop.time() - stall_started_at
+                if waited >= hard_cap_seconds:
+                    logger.error(
+                        "[STREAMING] Sub-agent stream stalled: dispatch_id=%s, "
+                        "agent=%s, orchestrator_conversation_id=%s, "
+                        "subagent_thread_id=%s, waited=%.1fs, "
+                        "last_item_count=%d, hard_cap=%.1fs",
+                        dispatch_id,
+                        subagent_type,
+                        orchestrator_conversation_id,
+                        subagent_thread_id,
+                        waited,
+                        item_count,
+                        hard_cap_seconds,
+                    )
+                    stalled_out = True
+                    break
+                logger.warning(
+                    "[STREAMING] Still waiting on sub-agent '%s' after %.1fs "
+                    "(dispatch_id=%s, orchestrator_conversation_id=%s, "
+                    "subagent_thread_id=%s, items_so_far=%d, hard_cap=%.1fs)",
+                    subagent_type,
+                    waited,
+                    dispatch_id,
+                    orchestrator_conversation_id,
+                    subagent_thread_id,
+                    item_count,
+                    hard_cap_seconds,
+                )
+                # Leave `pending` in place across the heartbeat — do NOT cancel it.
+                continue
+
+            # The queue read completed; consume it and prepare for the next item.
+            task = pending
+            pending = None
+            item = task.result()
+            if item is stream_done:
+                # Upstream finished (or raised). Surface a stream exception with
+                # the same propagation semantics as a plain ``async for``.
+                if consumer_error:
+                    raise consumer_error[0]
+                return
+
+            stall_started_at = loop.time()
+            item_count += 1
+            yield item
+    finally:
+        # Stop observing the queue if a read is still parked (heartbeat in
+        # flight when we leave the loop).
+        if pending is not None and not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Cancel the upstream consumer if it is still running (stall hard cap,
+        # generator close, or exception leaving the loop). This cancels the
+        # in-flight ``__anext__``, matching the previous behavior of only
+        # cancelling the read once the hard cap is exceeded.
+        if not consumer_task.done():
+            consumer_task.cancel()
+        try:
+            await consumer_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    if stalled_out:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception as close_exc:  # pragma: no cover - best effort cleanup
+                logger.debug(
+                    "[STREAMING] Ignoring error while closing stalled sub-agent iterator: %s",
+                    close_exc,
+                )
+        yield ErrorEvent(
+            error=(
+                f"Sub-agent '{subagent_type}' stopped producing output for more than "
+                f"{int(hard_cap_seconds)}s and was aborted by the orchestrator stall timeout."
+            ),
+            data=TaskResponseData(
+                metadata={
+                    "dispatch_id": dispatch_id,
+                    "subagent_type": subagent_type,
+                    "orchestrator_conversation_id": orchestrator_conversation_id,
+                    "subagent_thread_id": subagent_thread_id,
+                    "hard_cap_seconds": hard_cap_seconds,
+                    "stall_reason": "subagent_stream_stall_timeout",
+                }
+            ),
+        )
+
+
 class A2ACompiledSubAgent(TypedDict, total=False):
     """A pre-compiled agent spec.
 
@@ -117,6 +321,59 @@ class FileFilteringResponse(BaseModel):
     """Response model for file filtering with LLM."""
 
     relevant_indices: list[int]
+
+
+def _replicate_blanket_decision(payload: Any, interrupt_value: Any) -> Any:
+    """Expand a single blanket decision to the interrupt's action_request count.
+
+    The sub-agent's HITL middleware enforces exactly one decision per pending call and
+    raises ``ValueError`` on a mismatch. When the orchestrator/client forwarded a single
+    blanket approve/reject for N parallel calls, replicate it to N so the sub-agent does
+    not raise. This is the backstop the removed inline blocks provided: it covers the
+    ordinary ``ConditionalHumanInTheLoopMiddleware`` path, which (unlike the PTC
+    ``eval`` path's ``awrap_tool_call``) has no replication of its own. Per-call decision
+    lists (``len != 1`` — already aligned, possibly by id) pass through unchanged.
+    """
+    if not isinstance(payload, dict) or not isinstance(interrupt_value, dict):
+        return payload
+    decisions = payload.get("decisions")
+    if not isinstance(decisions, list) or len(decisions) != 1:
+        return payload
+    n = len(interrupt_value.get("action_requests", []))
+    if n > 1:
+        return {**payload, "decisions": decisions * n}
+    return payload
+
+
+def _build_subagent_resume_command(runnable: Any, interrupt_obj: Any, user_decisions: Any) -> Command:
+    """Build the ``Command(resume=...)`` used to resume a sub-agent after HITL approval.
+
+    For *local* in-process sub-agents (``LocalA2ARunnable`` — including
+    ``DynamicLocalAgentRunnable``) the resume is replayed against the sub-agent's own
+    LangGraph checkpoint, so it must be an interrupt-id-keyed map: LangGraph >=1.2 raises
+    ``RuntimeError`` on a bare ``Command(resume=value)`` whenever the sub-agent has more
+    than one pending interrupt (e.g. nested parallel ``task`` calls). ``interrupt_obj.id``
+    is the xxh3 namespace hash LangGraph matches the map against
+    (``types.Interrupt.from_ns`` <-> ``pregel/_algo._scratchpad``). A single blanket
+    decision is replicated to the interrupt's action_request count here (see
+    ``_replicate_blanket_decision``) so the sub-agent's HITL middleware sees the 1:1
+    count it requires — the orchestrator usually pre-replicates, but this keeps the local
+    path self-sufficient for non-PTC sub-agents that have no ``awrap_tool_call`` backstop.
+
+    For *remote* A2A sub-agents the ``Command`` never reaches the remote as-is — the
+    remote executor rebuilds its own resume from the A2A DataPart using its own namespace,
+    replicating there — so the plain-payload form is kept unchanged.
+    """
+    payload = user_decisions if isinstance(user_decisions, dict) else {}
+    intr_id = getattr(interrupt_obj, "id", None)
+    intr_value = getattr(interrupt_obj, "value", interrupt_obj)
+    if intr_id is None and isinstance(interrupt_obj, dict):
+        intr_id = interrupt_obj.get("id")
+    if isinstance(runnable, LocalA2ARunnable):
+        payload = _replicate_blanket_decision(payload, intr_value)
+        if intr_id:
+            return Command(resume={intr_id: payload})
+    return Command(resume=payload)
 
 
 class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]):
@@ -1493,6 +1750,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                                     )
                                 )
                             else:
+                                _int_obj = _pw_value
                                 pending_interrupt_value = _pw_value
                             logger.info(
                                 f"[HITL] Sub-agent '{subagent_type}' has pending HITL interrupt "
@@ -1503,23 +1761,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                             user_decisions = interrupt(pending_interrupt_value)
                             # ── Resumed after user approval ──────────────────────────────────────
                             logger.info(f"[HITL] User responded to '{subagent_type}' HITL: {user_decisions}")
-                            # Safety net: replicate single decision for multiple action_requests.
-                            # The frontend always sends exactly 1 decision; the executor normally
-                            # replicates it, but this guards against edge cases where it doesn't.
-                            if isinstance(user_decisions, dict):
-                                decisions_list = user_decisions.get("decisions", [])
-                                expected = (
-                                    len(pending_interrupt_value.get("action_requests", []))
-                                    if isinstance(pending_interrupt_value, dict)
-                                    else 0
-                                )
-                                if len(decisions_list) == 1 and expected > 1:
-                                    logger.info(
-                                        f"[HITL] Replicating single decision to match {expected} action_requests "
-                                        f"for '{subagent_type}' (PATH 1)"
-                                    )
-                                    user_decisions = {"decisions": decisions_list * expected}
-                            subagent_input = Command(resume=user_decisions if isinstance(user_decisions, dict) else {})
+                            # Resume the sub-agent. For local in-process sub-agents this is an
+                            # interrupt-id-keyed map (LangGraph >=1.2 multi-interrupt safety) with
+                            # a single blanket decision replicated to the action_request count;
+                            # remote A2A sub-agents keep the plain payload (the remote replicates).
+                            subagent_input = _build_subagent_resume_command(runnable, _int_obj, user_decisions)
                             break
             except GraphInterrupt:
                 # interrupt() raised — orchestrator will suspend; let it propagate
@@ -1558,7 +1804,21 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 hasattr(agent_state, "resume"),
                 agent_config.get("configurable", {}).get("thread_id", "?"),
             )
-            async for item in runnable.astream(agent_state, agent_config):  # type: ignore[arg-type]
+
+            # Iterate with per-item stall timeout so a silent sub-agent (parked LLM
+            # call, bad MCP content type, unresponsive provider, DB lock) cannot hang
+            # the orchestrator indefinitely. The helper emits heartbeat warnings on
+            # each tick and yields an ErrorEvent through the existing error path
+            # after the hard cap.
+            sub_thread_id = agent_config.get("configurable", {}).get("thread_id", "?")
+            wrapped_stream = _iter_subagent_stream_with_stall_timeout(
+                runnable.astream(agent_state, agent_config),  # type: ignore[arg-type]
+                subagent_type=subagent_type,
+                orchestrator_conversation_id=orchestrator_conversation_id,
+                subagent_thread_id=sub_thread_id,
+            )
+
+            async for item in wrapped_stream:
                 item_count += 1
                 item_type = type(item).__name__
                 logger.info(f"[STREAMING] astream_a2a_agent received item #{item_count}: {item_type}")
@@ -1765,19 +2025,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             user_decisions = interrupt(sub_interrupt_value)
             # ── Resumed after user approval (via except handler) ─────────────────────
             logger.info(f"[HITL] User responded to '{subagent_type}' HITL (resume): {user_decisions}")
-            # Safety net: replicate single decision for multiple action_requests.
-            if isinstance(user_decisions, dict):
-                decisions_list = user_decisions.get("decisions", [])
-                expected = (
-                    len(sub_interrupt_value.get("action_requests", [])) if isinstance(sub_interrupt_value, dict) else 0
-                )
-                if len(decisions_list) == 1 and expected > 1:
-                    logger.info(
-                        f"[HITL] Replicating single decision to match {expected} action_requests "
-                        f"for '{subagent_type}' (PATH 2)"
-                    )
-                    user_decisions = {"decisions": decisions_list * expected}
-            resume_command = Command(resume=user_decisions if isinstance(user_decisions, dict) else {})
+            # Resume the sub-agent: id-keyed map for local in-process sub-agents (LangGraph
+            # >=1.2 multi-interrupt safety) with a single blanket decision replicated to the
+            # action_request count; plain payload for remote A2A (the remote replicates).
+            _first_sub_interrupt = sub_interrupts[0] if sub_interrupts else None
+            resume_command = _build_subagent_resume_command(runnable, _first_sub_interrupt, user_decisions)
             # Re-stream the sub-agent with the resume command
             final_result = None
             async for result in astream_a2a_agent(resume_command, subagent_config):

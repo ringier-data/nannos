@@ -1105,6 +1105,7 @@ class SubAgentService:
         sub_agent_id: int,
         version: int,
         actor: User,
+        is_admin: bool = False,
     ) -> bool:
         """Soft-delete a specific version.
 
@@ -1121,20 +1122,20 @@ class SubAgentService:
             True if deleted, False if version not found
 
         Raises:
-            PermissionError: If user is not the owner
+            PermissionError: If user lacks write access (and is not an admin)
             ValueError: If version is approved (cannot delete approved versions)
         """
         existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
-        can_delete = self.check_user_permission(
-            db, sub_agent_id, actor.id, required_permission="write", sub_agent=existing
-        )
-        if not can_delete:
-            raise PermissionError("You don't have permission to delete this version")
         if not existing:
             return False
 
-        if existing.owner_user_id != actor.id:
-            raise PermissionError("Only the owner can delete versions")
+        # Owner, admin, or group members with write access can delete versions
+        if not is_admin:
+            can_delete = await self.check_user_permission(
+                db, sub_agent_id, actor.id, required_permission="write", sub_agent=existing
+            )
+            if not can_delete:
+                raise PermissionError("You don't have permission to delete this version")
 
         if not existing.config_version:
             return False
@@ -1824,6 +1825,7 @@ class SubAgentService:
         version: int,
         change_summary: str,
         actor: User,
+        is_admin: bool = False,
     ) -> SubAgent | None:
         """Submit a specific version for approval.
 
@@ -1839,10 +1841,13 @@ class SubAgentService:
         if not existing:
             return None
 
-        # Check if user has write permission (owner or group write access)
-        has_write_permission = await self.check_user_permission(db, sub_agent_id, actor.id, "write", sub_agent=existing)
-        if not has_write_permission:
-            raise PermissionError("You don't have permission to submit this sub-agent for approval")
+        # Check if user has write permission (owner, admin, or group write access)
+        if not is_admin:
+            has_write_permission = await self.check_user_permission(
+                db, sub_agent_id, actor.id, "write", sub_agent=existing
+            )
+            if not has_write_permission:
+                raise PermissionError("You don't have permission to submit this sub-agent for approval")
 
         if not existing.config_version:
             raise ValueError(f"Version {version} not found")
@@ -1900,14 +1905,20 @@ class SubAgentService:
         sub_agent_id: int,
         version: int,
         actor: User,
+        is_admin: bool = False,
     ) -> SubAgent | None:
         """Set an approved version as the default version."""
         existing = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)
         if not existing:
             return None
 
-        if existing.owner_user_id != actor.id:
-            raise PermissionError("Only the owner can set the default version")
+        # Owner, admin, or group members with write access can set the default version
+        if not is_admin:
+            has_write_permission = await self.check_user_permission(
+                db, sub_agent_id, actor.id, "write", sub_agent=existing
+            )
+            if not has_write_permission:
+                raise PermissionError("You don't have permission to set the default version")
 
         if not existing.config_version:
             raise ValueError(f"Version {version} not found")
@@ -2138,14 +2149,20 @@ class SubAgentService:
         sub_agent_id: int,
         version: int,
         actor: User,
+        is_admin: bool = False,
     ) -> SubAgent | None:
         """Revert to a previous version by creating a new version with its config."""
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
 
-        if existing.owner_user_id != actor.id:
-            raise PermissionError("Only the owner can revert versions")
+        # Owner, admin, or group members with write access can create a draft from a version
+        if not is_admin:
+            has_write_permission = await self.check_user_permission(
+                db, sub_agent_id, actor.id, "write", sub_agent=existing
+            )
+            if not has_write_permission:
+                raise PermissionError("You don't have permission to revert versions")
 
         # Fetch the target version
         target = await self.get_sub_agent_by_id(db, sub_agent_id, version=version)

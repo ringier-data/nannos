@@ -129,7 +129,7 @@ def build_runtime_context(
 
     from .agents.file_analyzer import create_file_analyzer_subagent
     from .agents.task_scheduler import create_task_scheduler_subagent
-    from .middleware import ToolsetSelectorMiddleware
+    from .middleware import AuthErrorDetectionMiddleware, ToolsetSelectorMiddleware
     from .models.config import GraphRuntimeContext
 
     # Convert tools list to tool_registry (name -> tool mapping)
@@ -394,13 +394,22 @@ def build_runtime_context(
 
                     # GP agent gets special treatment: all MCP tools injected directly
                     # + ToolsetSelectorMiddleware for smart LLM-driven filtering
-                    gp_extra_middlewares = None
+                    # Every sub-agent runs its OWN graph (build_sub_agent_graph), which does
+                    # NOT inherit the orchestrator main graph's AuthErrorDetectionMiddleware.
+                    # Without it, a sub-agent tool returning need-credentials is flattened by
+                    # ToolRetryMiddleware into a "Tool failed… Please try again" ToolMessage and
+                    # the sub-agent LLM rationalises around it (e.g. asking the user to paste
+                    # content) instead of surfacing the auth requirement. Adding it here (as an
+                    # extra_middleware → prepended outermost, so it intercepts the ToolException
+                    # before ToolRetryMiddleware) fires a resumable interrupt that the dispatch
+                    # layer re-surfaces and the orchestrator maps to TaskState.auth_required.
+                    subagent_extra_middlewares: list[Any] = [AuthErrorDetectionMiddleware()]
                     gp_inject_all_tools = None
                     if config.name == "general-purpose":
                         # Inject ALL MCP tools from tool_registry (already discovered by orchestrator)
                         gp_inject_all_tools = [t for t in tool_registry.values() if isinstance(t, BaseTool)]
                         # Add ToolsetSelectorMiddleware for smart tool filtering
-                        gp_extra_middlewares = [
+                        subagent_extra_middlewares.append(
                             ToolsetSelectorMiddleware(
                                 always_include=[
                                     "get_current_time",
@@ -417,8 +426,8 @@ def build_runtime_context(
                                 ],
                                 cost_logger=cost_logger,
                                 compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,
-                            ),
-                        ]
+                            )
+                        )
                         logger.info(
                             f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
                             f"with ToolsetSelectorMiddleware"
@@ -470,7 +479,7 @@ def build_runtime_context(
                         user_id=user_config.user_id,
                         group_ids=user_config.groups if user_config.groups else None,
                         sandbox_pool=sandbox_pool if getattr(config, "sandbox_enabled", False) else None,
-                        extra_middlewares=gp_extra_middlewares,
+                        extra_middlewares=subagent_extra_middlewares,
                         inject_all_tools=gp_inject_all_tools,
                         risk_scorer=_get_risk_scorer(),
                         tool_risk_cache=tool_risk_cache,

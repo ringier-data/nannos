@@ -585,11 +585,14 @@ async def revert_to_version(
     """Revert a local sub-agent to a previous configuration version.
 
     Creates a new version with the reverted configuration.
-    Only owner can revert. Only works for local sub-agents.
+    Owner, admin, or users with write access can revert. Only works for local sub-agents.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agent = await sub_agent_service.revert_to_version(db, sub_agent_id, version, actor=user)
+        effective_admin = is_admin_mode(request, user)
+        sub_agent = await sub_agent_service.revert_to_version(
+            db, sub_agent_id, version, actor=user, is_admin=effective_admin
+        )
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent
@@ -615,13 +618,14 @@ async def submit_version_for_approval(
 ) -> SubAgent:
     """Submit a specific version for admin approval.
 
-    Only the owner can submit. Version must be in 'draft' or 'rejected' status.
+    Owner, admin, or users with write access can submit. Version must be in 'draft' or 'rejected' status.
     Requires a change_summary describing what changed in this version.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
+        effective_admin = is_admin_mode(request, user)
         sub_agent = await sub_agent_service.submit_version_for_approval(
-            db, sub_agent_id, version, data.change_summary, actor=user
+            db, sub_agent_id, version, data.change_summary, actor=user, is_admin=effective_admin
         )
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
@@ -647,13 +651,16 @@ async def delete_version(
 ) -> dict:
     """Delete a specific version (soft-delete).
 
-    Only the owner can delete versions.
+    Owner, admin, or users with write access can delete versions.
     Only draft, pending_approval, or rejected versions can be deleted.
     Approved versions cannot be deleted to preserve release history.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        deleted = await sub_agent_service.delete_version(db, sub_agent_id, version, actor=user)
+        effective_admin = is_admin_mode(request, user)
+        deleted = await sub_agent_service.delete_version(
+            db, sub_agent_id, version, actor=user, is_admin=effective_admin
+        )
         if not deleted:
             raise HTTPException(status_code=404, detail="Version not found")
         return {"success": True, "message": f"Version {version} deleted successfully"}
@@ -731,12 +738,15 @@ async def set_default_version(
 ) -> SubAgent:
     """Set an approved version as the default version.
 
-    Only the owner can set the default version.
+    Owner, admin, or users with write access can set the default version.
     The version must be in 'approved' status.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:
-        sub_agent = await sub_agent_service.set_default_version(db, sub_agent_id, data.version, actor=user)
+        effective_admin = is_admin_mode(request, user)
+        sub_agent = await sub_agent_service.set_default_version(
+            db, sub_agent_id, data.version, actor=user, is_admin=effective_admin
+        )
         if not sub_agent:
             raise HTTPException(status_code=404, detail="Sub-agent not found")
         return sub_agent

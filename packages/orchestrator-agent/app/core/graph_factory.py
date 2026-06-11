@@ -42,6 +42,7 @@ from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain.agents.structured_output import AutoStrategy, ToolStrategy
+from langchain_aws import ChatBedrockConverse
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
@@ -415,7 +416,7 @@ class GraphFactory:
             self._models[cache_key] = self._create_model(model_type, thinking_level)
         return self._models[cache_key]
 
-    def _create_middleware_stack(self) -> list[Any]:
+    def _create_middleware_stack(self, model: BaseChatModel | None = None) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
         Middleware Execution Order (LangChain convention):
@@ -552,11 +553,18 @@ class GraphFactory:
             default_risk_threshold=0.8,
         )
 
-        return [
+        middleware_stack: list[Any] = [
             context_gate_middleware,
             dynamic_tool_middleware,
             storage_paths_middleware,
-            BedrockPromptCachingMiddleware(),
+        ]
+        # BedrockPromptCachingMiddleware injects Bedrock-specific cache point
+        # hints. Only attach it for actual Bedrock models — on OpenAI, Gemini
+        # or local models it is at best a no-op and at worst confuses the
+        # provider with unknown request fields.
+        if isinstance(model, ChatBedrockConverse):
+            middleware_stack.append(BedrockPromptCachingMiddleware())
+        middleware_stack += [
             steering_middleware,
             user_preferences_middleware,
             playbook_middleware,
@@ -570,6 +578,7 @@ class GraphFactory:
             self._a2a_middleware,
             self._todo_middleware,
         ]
+        return middleware_stack
 
     def get_static_tools(self, with_response_tool: bool = False) -> list[BaseTool]:
         """Get static tools for the given model type.
@@ -663,7 +672,7 @@ class GraphFactory:
             requires_response_tool = True
         else:
             response_format = AutoStrategy(schema=FinalResponseSchema)
-        middleware = self._create_middleware_stack()
+        middleware = self._create_middleware_stack(model=model)
         static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
 
         # Add Google built-in tools for Gemini models

@@ -458,7 +458,7 @@ class TestHITLRejectIntegration:
             m for m in msgs_t2
             if isinstance(m, ToolMessage) and m.tool_call_id == "tc-t2"
         ]
-        assert reject_msgs, f"Should have ToolMessage for turn 2's rejected tool call"
+        assert reject_msgs, "Should have ToolMessage for turn 2's rejected tool call"
         assert reject_msgs[0].status == "error", (
             f"Rejected tool message should have error status, got: {reject_msgs[0].status}"
         )
@@ -986,20 +986,29 @@ class TestTwoLevelInterruptProxying:
 
     @pytest.mark.asyncio
     async def test_two_level_single_reject_for_parallel_calls(self):
-        """Two-level: single reject decision for multiple parallel calls (production bug).
+        """Two-level, real separate-checkpoint dispatch: one blanket reject for N parallel calls.
 
-        The frontend sends exactly 1 decision regardless of how many tool calls exist.
-        The executor replicates it. This test verifies the flow AFTER replication.
-        But also tests what happens WITHOUT replication (should error, not execute).
+        Mirrors production rather than a shared subgraph: the sub-agent runs on its OWN
+        thread/checkpointer. The orchestrator node detects the sub-agent's pending
+        interrupt in its checkpoint (PATH 1), surfaces it via its own ``interrupt()``,
+        and on resume rebuilds the sub-agent resume with the real
+        ``_build_subagent_resume_command`` (id-keyed map, local branch). The orchestrator
+        itself is resumed via the real ``executor._build_interrupt_resume_map``, which
+        replicates the single blanket reject to the interrupt's action_request count and
+        keys it by interrupt id. Exercises both helpers end to end.
         """
-        from langgraph.errors import GraphInterrupt
+        from unittest.mock import Mock
 
-        inner_checkpointer = MemorySaver()
+        from agent_common.a2a.base import LocalA2ARunnable
+        from app.core.executor import OrchestratorDeepAgentExecutor
+        from app.middleware.dynamic_tool_dispatch import _build_subagent_resume_command
+
+        # ── Sub-agent: real graph, its OWN checkpointer + thread (separate from orchestrator) ──
         inner_model = FakeToolCallModel(
             responses=deque([
                 AIMessage(content="", tool_calls=[
-                    ToolCall(type="tool_call", name="dangerous_tool", args={"action": "x"}, id="tc-single-x"),
-                    ToolCall(type="tool_call", name="dangerous_tool", args={"action": "y"}, id="tc-single-y"),
+                    ToolCall(type="tool_call", name="dangerous_tool", args={"action": "x"}, id="tc-x"),
+                    ToolCall(type="tool_call", name="dangerous_tool", args={"action": "y"}, id="tc-y"),
                 ]),
                 AIMessage(content="Rejected."),
             ])
@@ -1012,72 +1021,66 @@ class TestTwoLevelInterruptProxying:
                     interrupt_on={"dangerous_tool": InterruptOnConfig(allowed_decisions=["approve", "reject"])}
                 ),
             ],
-            checkpointer=inner_checkpointer,
+            checkpointer=MemorySaver(),
         )
-
         inner_config = {"configurable": {"thread_id": "inner-single-reject"}}
-        outer_checkpointer = MemorySaver()
+
+        # Stand-in for a local in-process sub-agent so _build_subagent_resume_command
+        # takes its LocalA2ARunnable (id-keyed map) branch.
+        local_runnable = Mock(spec=LocalA2ARunnable)
 
         async def delegate_to_subagent(state: State) -> dict:
-            subagent_input = {"messages": [HumanMessage(content="do two things")]}
-            try:
-                async for _ in inner_graph.astream(subagent_input, inner_config, stream_mode="updates"):
+            # PATH 1: if the sub-agent already has a pending interrupt in its checkpoint,
+            # surface + resume it — do NOT re-run fresh input over an interrupted thread.
+            sub_state = await inner_graph.aget_state(inner_config)
+            if not sub_state.interrupts:
+                async for _ in inner_graph.astream(
+                    {"messages": [HumanMessage(content="do two things")]}, inner_config, stream_mode="updates"
+                ):
                     pass
-                post_state = await inner_graph.aget_state(inner_config)
-                if post_state and post_state.interrupts:
-                    raise GraphInterrupt(post_state.interrupts)
-                final_state = await inner_graph.aget_state(inner_config)
-                final_msgs = final_state.values.get("messages", [])
-                last_ai = next((m for m in reversed(final_msgs) if isinstance(m, AIMessage)), None)
-                return {"messages": [AIMessage(content=last_ai.content if last_ai else "done")]}
-            except GraphInterrupt as gi:
-                sub_interrupt_value = gi.args[0][0].value if gi.args and gi.args[0] else {}
-                user_decisions = interrupt(sub_interrupt_value)
+                sub_state = await inner_graph.aget_state(inner_config)
 
-                # Simulate executor's decision replication
-                decisions = user_decisions.get("decisions", []) if isinstance(user_decisions, dict) else []
-                action_requests = sub_interrupt_value.get("action_requests", [])
-                if len(decisions) == 1 and len(action_requests) > 1:
-                    user_decisions = {"decisions": decisions * len(action_requests)}
-
-                resume_cmd = Command(resume=user_decisions if isinstance(user_decisions, dict) else {})
+            if sub_state.interrupts:
+                sub_interrupt = sub_state.interrupts[-1]
+                # First orchestrator pass: raises → orchestrator suspends. Resume: returns decisions.
+                user_decisions = interrupt(sub_interrupt.value)
+                resume_cmd = _build_subagent_resume_command(local_runnable, sub_interrupt, user_decisions)
                 async for _ in inner_graph.astream(resume_cmd, inner_config, stream_mode="updates"):
                     pass
-                post_state = await inner_graph.aget_state(inner_config)
-                if post_state and post_state.interrupts:
-                    raise GraphInterrupt(post_state.interrupts)
-                final_state = await inner_graph.aget_state(inner_config)
-                final_msgs = final_state.values.get("messages", [])
-                last_ai = next((m for m in reversed(final_msgs) if isinstance(m, AIMessage)), None)
-                return {"messages": [AIMessage(content=last_ai.content if last_ai else "done after resume")]}
+
+            final_state = await inner_graph.aget_state(inner_config)
+            final_msgs = final_state.values.get("messages", [])
+            last_ai = next((m for m in reversed(final_msgs) if isinstance(m, AIMessage)), None)
+            return {"messages": [AIMessage(content=last_ai.content if last_ai else "done")]}
 
         outer_graph_builder = StateGraph(State)
         outer_graph_builder.add_node("delegate", delegate_to_subagent)
         outer_graph_builder.add_edge(START, "delegate")
         outer_graph_builder.add_edge("delegate", END)
-        outer_graph = outer_graph_builder.compile(checkpointer=outer_checkpointer)
+        outer_graph = outer_graph_builder.compile(checkpointer=MemorySaver())
 
         outer_config = {"configurable": {"thread_id": "outer-single-reject"}}
 
-        # Run → interrupt
+        # Run → orchestrator suspends at its own interrupt() carrying the sub-agent's 2 action_requests.
         async for _ in outer_graph.astream(
             {"messages": [HumanMessage(content="delegate")]}, outer_config, stream_mode="updates",
         ):
             pass
 
         outer_state = await outer_graph.aget_state(outer_config)
-        assert outer_state.next, "Should be interrupted"
+        assert outer_state.next, "Orchestrator should be interrupted"
         assert len(outer_state.interrupts[-1].value["action_requests"]) == 2
 
-        # Resume with SINGLE reject (frontend behavior) — replication happens in delegate_to_subagent
-        reject_cmd = Command(resume={"decisions": [{"type": "reject", "message": "No!"}]})
-        async for _ in outer_graph.astream(reject_cmd, outer_config, stream_mode="updates"):
+        # Resume the orchestrator exactly as the real executor does: a single blanket reject
+        # → id-keyed map, replicated to the interrupt's 2 action_requests.
+        resume_map = OrchestratorDeepAgentExecutor._build_interrupt_resume_map(
+            outer_state.interrupts, [{"type": "reject", "message": "No!"}], query=""
+        )
+        async for _ in outer_graph.astream(Command(resume=resume_map), outer_config, stream_mode="updates"):
             pass
 
-        # Verify: NO tools executed
-        assert not tool_execution_log, (
-            f"No tools should execute after replicated reject, log: {tool_execution_log}"
-        )
+        # Both parallel calls were rejected → no tool executed.
+        assert not tool_execution_log, f"No tools should execute after reject, log: {tool_execution_log}"
 
 
 class TestGeminiMessageFormat:

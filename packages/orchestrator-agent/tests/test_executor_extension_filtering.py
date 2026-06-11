@@ -73,7 +73,7 @@ class TestActivityLogExtensionFiltering:
             active_extensions=None,
         )
         updater.update_status.assert_not_called()
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_suppressed_when_other_extensions_requested(self, executor, updater, task):
@@ -91,7 +91,7 @@ class TestActivityLogExtensionFiltering:
             active_extensions={WORK_PLAN_EXTENSION},
         )
         updater.update_status.assert_not_called()
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_emitted_when_extension_active(self, executor, updater, task):
@@ -113,7 +113,7 @@ class TestActivityLogExtensionFiltering:
         assert call_args[0][0] == TaskState.working
         msg = call_args[0][1]
         assert ACTIVITY_LOG_EXTENSION in msg.extensions
-        assert result is False  # first_chunk_sent unchanged
+        assert result[0] is False  # first_chunk_sent unchanged
 
     @pytest.mark.asyncio
     async def test_preserves_first_chunk_sent_flag(self, executor, updater, task):
@@ -131,7 +131,7 @@ class TestActivityLogExtensionFiltering:
             first_chunk_sent=True,
             active_extensions={ACTIVITY_LOG_EXTENSION},
         )
-        assert result is True  # preserved
+        assert result[0] is True  # preserved
 
 
 # ===========================================================================
@@ -158,7 +158,7 @@ class TestWorkPlanExtensionFiltering:
             active_extensions=None,
         )
         updater.update_status.assert_not_called()
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_suppressed_when_other_extensions_requested(self, executor, updater, task):
@@ -227,7 +227,7 @@ class TestIntermediateOutputExtensionFiltering:
             active_extensions=None,
         )
         updater.add_artifact.assert_not_called()
-        assert result is False  # first_chunk_sent unchanged
+        assert result[0] is False  # first_chunk_sent unchanged
 
     @pytest.mark.asyncio
     async def test_suppressed_when_other_extensions_requested(self, executor, updater, task):
@@ -250,7 +250,7 @@ class TestIntermediateOutputExtensionFiltering:
             active_extensions={ACTIVITY_LOG_EXTENSION, WORK_PLAN_EXTENSION},
         )
         updater.add_artifact.assert_not_called()
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_emitted_when_extension_active(self, executor, updater, task):
@@ -278,7 +278,7 @@ class TestIntermediateOutputExtensionFiltering:
         assert call_kwargs["extensions"] == [INTERMEDIATE_OUTPUT_EXTENSION]
         assert call_kwargs["metadata"]["agent_name"] == "research-agent"
         # intermediate output should NOT set first_chunk_sent
-        assert result is False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_does_not_set_first_chunk_sent(self, executor, updater, task):
@@ -301,7 +301,7 @@ class TestIntermediateOutputExtensionFiltering:
             first_chunk_sent=False,
             active_extensions=ALL_EXTENSIONS,
         )
-        assert result is False  # must remain False
+        assert result[0] is False
 
     @pytest.mark.asyncio
     async def test_preserves_first_chunk_sent_true(self, executor, updater, task):
@@ -324,7 +324,7 @@ class TestIntermediateOutputExtensionFiltering:
             first_chunk_sent=True,
             active_extensions=ALL_EXTENSIONS,
         )
-        assert result is True  # preserved
+        assert result[0] is True  # preserved
 
 
 # ===========================================================================
@@ -355,7 +355,7 @@ class TestMainStreamingChunks:
         call_kwargs = updater.add_artifact.call_args[1]
         assert call_kwargs["artifact_id"] == "art-1"
         assert call_kwargs["extensions"] is None
-        assert result is True  # first_chunk_sent becomes True
+        assert result[0] is True  # first_chunk_sent becomes True
 
     @pytest.mark.asyncio
     async def test_emitted_when_all_extensions_active(self, executor, updater, task):
@@ -374,7 +374,7 @@ class TestMainStreamingChunks:
             active_extensions=ALL_EXTENSIONS,
         )
         updater.add_artifact.assert_awaited_once()
-        assert result is True
+        assert result[0] is True
 
 
 # ===========================================================================
@@ -473,7 +473,7 @@ class TestSlackScenario:
             streaming_artifact_id=artifact_id,
             active_extensions=no_extensions,
         )
-        assert result is True
+        assert result[0] is True
         updater.add_artifact.assert_awaited_once()
         call_kwargs = updater.add_artifact.call_args[1]
         assert call_kwargs["artifact_id"] == artifact_id
@@ -557,7 +557,7 @@ class TestConsoleScenario:
             streaming_artifact_id=artifact_id,
             active_extensions=all_ext,
         )
-        assert result is True
+        assert result[0] is True
         assert updater.add_artifact.await_count == 2
         main_kwargs = updater.add_artifact.call_args[1]
         assert main_kwargs["artifact_id"] == artifact_id

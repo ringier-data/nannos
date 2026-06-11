@@ -10,11 +10,12 @@ Note: This file focuses on testing real behavior without excessive mocking.
 Graph creation with actual models should be tested in integration tests.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from langchain.agents.middleware import ToolRetryMiddleware
+from langchain_aws import ChatBedrockConverse
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 
 from app.core.graph_factory import GraphFactory
@@ -111,10 +112,11 @@ class TestMiddlewareStack:
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
     @patch("langgraph_checkpoint_aws.DynamoDBSaver")
     def test_middleware_stack_order(self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config):
-        """Test that middleware stack is assembled in the correct order."""
+        """Test that middleware stack is assembled in the correct order for a Bedrock model."""
         factory = GraphFactory(config=mock_config)
 
-        stack = factory._create_middleware_stack()
+        bedrock_model = MagicMock(spec=ChatBedrockConverse)
+        stack = factory._create_middleware_stack(model=bedrock_model)
 
         # Verify correct order. The conversation-context gate is outermost (so its
         # injected gated tool flows through DynamicToolDispatch's schema-cleanup),
@@ -145,6 +147,36 @@ class TestMiddlewareStack:
         assert isinstance(stack[13], ToolRetryMiddleware)
         assert isinstance(stack[14], A2ATaskTrackingMiddleware)
         assert isinstance(stack[15], TodoStatusMiddleware)
+
+    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
+    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
+    def test_middleware_stack_excludes_bedrock_caching_for_non_bedrock_models(
+        self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config
+    ):
+        """BedrockPromptCachingMiddleware must NOT be attached for non-Bedrock models."""
+        factory = GraphFactory(config=mock_config)
+
+        # Non-Bedrock model (e.g. OpenAI / Gemini): plain Mock that is NOT a ChatBedrockConverse
+        non_bedrock_model = Mock()
+        stack = factory._create_middleware_stack(model=non_bedrock_model)
+
+        assert not any(isinstance(m, BedrockPromptCachingMiddleware) for m in stack)
+        # One fewer middleware than the Bedrock case (cache middleware skipped)
+        assert len(stack) == 13
+
+    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
+    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
+    def test_middleware_stack_excludes_bedrock_caching_when_model_is_none(
+        self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config
+    ):
+        """Default (model=None) call path must not inject Bedrock caching either."""
+        factory = GraphFactory(config=mock_config)
+
+        stack = factory._create_middleware_stack()
+
+        assert not any(isinstance(m, BedrockPromptCachingMiddleware) for m in stack)
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")

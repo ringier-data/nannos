@@ -50,7 +50,7 @@ _MAX_RECURSION_LIMIT = 50
 
 def _get_default_recursion_limit() -> int:
     """Get recursion limit from environment or default."""
-    return int(os.getenv("LANGGRAPH_RECURSION_LIMIT", str(_MAX_RECURSION_LIMIT)))
+    return int(os.getenv("MAX_RECURSION_LIMIT", str(_MAX_RECURSION_LIMIT)))
 
 
 class FinalResponseSchema(BaseModel):

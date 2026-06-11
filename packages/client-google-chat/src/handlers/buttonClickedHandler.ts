@@ -6,7 +6,6 @@ import { handleIncomingMessage, NormalizedMessage } from './messageHandler.js';
 import { HandlerDependencies } from "./types.js";
 import { GoogleChatService } from '../services/googleChatService.js';
 
-
 export interface ButtonClickedPayload {
   cardId: string,
   action: string,
@@ -119,7 +118,8 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
     decisions = { decisions: [{ type: 'approve', bypass: true, bypass_pattern: matchedPattern }] };
   } else {
     confirmText = '❌ Rejected';
-    decisions = { decisions: [{ type: 'reject', message: 'The user explicitly rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.' }] };
+    // No message → the server supplies the default rejection text.
+    decisions = { decisions: [{ type: 'reject' }] };
   }
 
   await deps.chatService.updateMessage({
@@ -130,6 +130,77 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
   });
 
   // Send as a synthetic message via handleIncomingMessage (no visible chat message)
+  const syntheticMessage: NormalizedMessage = {
+    userId: payload.userId,
+    userEmail: payload.userEmail,
+    projectId: payload.projectId,
+    spaceId: payload.spaceId,
+    messageId: `synthetic-${randomUUID()}`,
+    threadId: payload.threadId,
+    rawText: '',
+    dataParts: [decisions],
+    source: 'direct_message',
+  };
+
+  await handleIncomingMessage(syntheticMessage, deps);
+}
+
+/**
+ * Handle the multi-action HITL card: "Approve all"/"Reject all" send a blanket
+ * decision (server replicates), "Submit decisions" reads the per-call radios from
+ * formInputs and sends one decision per call, echoing each call_id so the server
+ * aligns decisions by id (no unseen-call approvals).
+ */
+async function handleHitlMultiCardClick(payload: ButtonClickedPayload, deps: HandlerDependencies) {
+  const logger = Logger.getLogger('handleHitlMultiCardClick');
+  const params = payload.actionParameters as unknown as { taskId?: string; calls?: Array<{ id?: string; pattern?: string }> };
+
+  let confirmText: string;
+  let decisions: Record<string, unknown>;
+
+  if (payload.action === 'approve') {
+    confirmText = '✅ Approved all';
+    decisions = { decisions: [{ type: 'approve' }] };
+  } else if (payload.action === 'reject') {
+    confirmText = '❌ Rejected all';
+    // No message → the server supplies the default rejection text.
+    decisions = { decisions: [{ type: 'reject' }] };
+  } else {
+    // submit_multi — one decision per call, in action_request order, by id.
+    const calls = Array.isArray(params.calls) ? params.calls : [];
+    const decisionList = calls.map((c, idx) => {
+      const selected = payload.formInputs?.[`decision_${idx}`]?.stringInputs?.value?.[0] || 'approve';
+      const decision: Record<string, unknown> = {};
+      if (c?.id) decision.id = c.id; // echo call id → server aligns by id
+      if (selected === 'reject') {
+        decision.type = 'reject';
+        // No message → the server supplies the default rejection text.
+      } else if (selected === 'approve_bypass_tool') {
+        decision.type = 'approve';
+        decision.bypass = true;
+        decision.bypass_all = true;
+      } else if (selected === 'approve_bypass_pattern') {
+        decision.type = 'approve';
+        decision.bypass = true;
+        decision.bypass_pattern = c?.pattern;
+      } else {
+        decision.type = 'approve';
+      }
+      return decision;
+    });
+    decisions = { decisions: decisionList };
+    const rejected = decisionList.filter((d) => d.type === 'reject').length;
+    confirmText = `Submitted ${decisionList.length} decision(s) — ${decisionList.length - rejected} approved, ${rejected} rejected`;
+    logger.info(`HITL multi-decision submitted for taskId=${params.taskId}: ${decisionList.length} decision(s)`);
+  }
+
+  await deps.chatService.updateMessage({
+    projectId: payload.projectId,
+    messageName: payload.messageId,
+    text: confirmText,
+    cardsV2: [],
+  });
+
   const syntheticMessage: NormalizedMessage = {
     userId: payload.userId,
     userEmail: payload.userEmail,
@@ -232,6 +303,15 @@ export async function handleButtonClicked(
 
     case 'hitl_card': {
       await handleHitlCardClick(
+        payload,
+        deps,
+      );
+
+      break;
+    }
+
+    case 'hitl_multi_card': {
+      await handleHitlMultiCardClick(
         payload,
         deps,
       );

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -131,6 +131,74 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         logger.warning("[HITL] No DataPart with decisions found, defaulting to reject")
         return {"decisions": [{"type": "reject"}]}
+
+    @staticmethod
+    def _action_request_call_id(action_request: Any) -> Any:
+        """Extract the stable per-call id an action_request carries, if any.
+
+        Attached as top-level ``args._call_id`` by the outbound HITL builders (PTC
+        ``_build_ptc_hitl_request`` and ConditionalHumanInTheLoopMiddleware) for EVERY
+        interrupted call — static guard, risk-scored, or PTC eval. Returns ``None`` for
+        action_requests that predate / don't carry it.
+        """
+        if not isinstance(action_request, dict):
+            return None
+        return (action_request.get("args") or {}).get("_call_id")
+
+    @classmethod
+    def _decisions_for_interrupt(cls, action_requests: list, hitl_decisions: list, decisions_by_id: dict) -> list:
+        """Resolve the decision list for ONE interrupt, aligned to its action_requests.
+
+        - By id (new clients): when the client sent id-keyed decisions, align each
+          action_request to its own decision by ``call_id``. Robust to client ordering,
+          to model replay reordering, and to a flat by-id list spanning multiple
+          co-pending interrupts. Any call whose decision is missing (stale/absent
+          ``call_id``) defaults to a safe reject — the returned list is therefore always
+          exactly ``len(action_requests)`` long, so a partial payload can never crash the
+          downstream count check nor silently auto-approve an unanswered call.
+        - Blanket (legacy clients): a single decision is replicated to the
+          action_request count. Anything else passes through unchanged.
+        """
+        n = len(action_requests)
+        if n > 0 and decisions_by_id:
+            call_ids = [cls._action_request_call_id(ar) for ar in action_requests]
+            return [decisions_by_id.get(cid, {"type": "reject"}) for cid in call_ids]
+        if len(hitl_decisions) == 1 and n > 1:
+            return hitl_decisions * n
+        return hitl_decisions
+
+    @classmethod
+    def _build_interrupt_resume_map(cls, interrupts: Any, hitl_decisions: list, query: Any) -> dict[str, Any]:
+        """Build an interrupt-id-keyed resume map for ``Command(resume=...)``.
+
+        LangGraph >=1.2 requires an id-keyed map whenever more than one interrupt is
+        pending (e.g. two parallel ``task`` dispatches that each surfaced a sub-agent
+        HITL) — a bare ``Command(resume=value)`` raises RuntimeError in that case.
+        ``Interrupt.id`` is the xxh3 namespace hash the runtime matches the map against
+        (``types.Interrupt.from_ns`` <-> ``pregel/_algo._scratchpad``), so keying by
+        ``intr.id`` is correct for 1 *or* N pending interrupts.
+
+        Decisions are aligned to each interrupt's ``action_requests`` by per-call id
+        when the client sends them (one decision per call), else the single blanket
+        decision is replicated. A flat by-id decision list is self-routing across both
+        levels of multiplicity — interrupts (by ``intr.id``) and action_requests within
+        an interrupt (by ``call_id``). Non-HITL interrupts (auth, etc.) resume with the
+        raw ``query``.
+        """
+        decisions_by_id = {d["id"]: d for d in hitl_decisions if isinstance(d, dict) and "id" in d}
+        resume_map: dict[str, Any] = {}
+        for intr in interrupts:
+            intr_value = getattr(intr, "value", intr)
+            if isinstance(intr_value, dict) and "action_requests" in intr_value:
+                action_requests = intr_value.get("action_requests", [])
+                per = cls._decisions_for_interrupt(action_requests, hitl_decisions, decisions_by_id)
+                resume_map[intr.id] = {"decisions": per}
+                tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
+                logger.info(f"Resuming HITL interrupt {intr.id} for tools {tool_names} with {len(per)} decision(s)")
+            else:
+                resume_map[intr.id] = query
+                logger.info(f"Resuming non-HITL interrupt {intr.id}")
+        return resume_map
 
     async def _build_user_config(
         self,
@@ -512,40 +580,21 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Check if the graph is currently interrupted and this might be a resume request
             resume_value = None  # Initialize resume_value
             if hasattr(current_state, "interrupts") and current_state.interrupts:
-                # Parse interrupt type and handle accordingly
-                last_interrupt = current_state.interrupts[-1]
-                interrupt_value = getattr(last_interrupt, "value", last_interrupt)
-
-                if isinstance(interrupt_value, dict) and "action_requests" in interrupt_value:
-                    # HumanInTheLoopMiddleware interrupt (HITLRequest format)
-                    # This handles ALL HITL guards: self-improvement tools, privacy tools,
-                    # and orchestrator-specific tools (bug reports).
-                    # Per LangChain docs, resume with Command(resume={"decisions": [...]})
-                    # Clients should send decisions as a DataPart (structured JSON, no XML wrapping).
-                    action_requests = interrupt_value.get("action_requests", [])
-                    tool_names = [ar.get("name") for ar in action_requests if isinstance(ar, dict)]
-                    logger.info(f"Resuming from HITL interrupt for tools: {tool_names}")
-
-                    resume_value = self._extract_hitl_decisions(context)
-
-                    # The HITL middleware expects exactly one decision per interrupted
-                    # tool call.  Models that support parallel tool calling (e.g. Gemini)
-                    # can produce N tool calls in a single AIMessage, resulting in N
-                    # action_requests.  The UI currently sends a single blanket decision
-                    # (approve / reject).  Replicate that decision so the count matches,
-                    # otherwise the middleware raises ValueError on mismatch.
-                    # see https://docs.langchain.com/oss/python/deepagents/human-in-the-loop#multiple-tool-calls
-                    decisions = resume_value.get("decisions", [])
-                    expected_count = len(action_requests)
-                    if len(decisions) == 1 and expected_count > 1:
-                        logger.info(f"Replicating single HITL decision to match {expected_count} action_requests")
-                        resume_value = {"decisions": decisions * expected_count}
-
-                    logger.info(f"HITL resume_value: {resume_value}")
-                else:
-                    # Other interrupt types (auth, etc.)
-                    resume_value = query
-                    logger.info("Resuming from non-HITL interrupt")
+                # LangGraph >=1.2 requires an interrupt-id-keyed resume map whenever
+                # more than one interrupt is pending (e.g. two parallel `task`
+                # dispatches that each surfaced a sub-agent HITL). A bare
+                # Command(resume=value) raises RuntimeError in that case
+                # (pregel/_loop.py: "you must specify the interrupt id when resuming").
+                # Interrupt.id IS the xxh3 namespace hash the runtime matches against
+                # (types.Interrupt.from_ns <-> pregel/_algo._scratchpad), so keying by
+                # intr.id is correct for 1 *or* N pending interrupts.
+                #
+                # NOTE: this applies the same blanket decision to every co-pending
+                # interrupt (matching today's single approve/reject UI). Per-interrupt
+                # decisions would require the client to key decisions by interrupt id.
+                # Clients send decisions as a DataPart (structured JSON, no XML).
+                hitl_decisions = self._extract_hitl_decisions(context).get("decisions", [])
+                resume_value = self._build_interrupt_resume_map(current_state.interrupts, hitl_decisions, query)
 
             if resume_value is None:
                 logger.info("Normal execution (not resuming from interrupt)")
@@ -579,7 +628,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
             while True:
                 streaming_artifact_id = str(uuid.uuid4())
-                first_chunk_sent = False  # Track if we've sent the initial artifact
+                first_chunk_sent = False  # Track if we've sent the initial MAIN artifact chunk
+                first_intermediate_chunk_sent = False  # Track if we've sent the initial INTERMEDIATE artifact chunk
+                streamed_chars = 0  # Total chars streamed via the MAIN artifact (code points, not wire bytes; for completion diagnostics)
                 deferred_terminal_item = None
 
                 async for item in self.agent.stream(message_parts, user_config, config=config, resume=resume_value):
@@ -594,6 +645,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     metadata = item.metadata or {}
                     if metadata.get("streaming_chunk"):
                         is_final = True  # Doesn't matter for streaming chunks
+                        # Track MAIN-artifact bytes only (intermediate sub-agent thoughts
+                        # go to a separate "-thought" artifact and aren't part of the
+                        # main response stream the client renders).
+                        if not metadata.get("intermediate_output") and item.content:
+                            streamed_chars += len(item.content)
                     else:
                         current_state = graph.get_state(config)  # type: ignore
                         if hasattr(current_state, "interrupts") and current_state.interrupts:
@@ -601,15 +657,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         else:
                             is_final = True
 
-                    # Pass first_chunk_sent flag and update it after each chunk
-                    first_chunk_sent = await self._handle_stream_item(
+                    # Pass per-artifact first_chunk_sent flags and update after each chunk
+                    first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
                         item,
                         updater,
                         task,
                         is_final=is_final,
                         streaming_artifact_id=streaming_artifact_id,
                         first_chunk_sent=first_chunk_sent,
+                        first_intermediate_chunk_sent=first_intermediate_chunk_sent,
                         active_extensions=requested_extensions,
+                        streamed_chars=streamed_chars,
                     )
 
                 # Check for steering messages that arrived after the last abefore_model
@@ -710,14 +768,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             is_final = False
                         else:
                             is_final = True
-                    await self._handle_stream_item(
+                    first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
                         deferred_terminal_item,
                         updater,
                         task,
                         is_final=is_final,
                         streaming_artifact_id=streaming_artifact_id,
                         first_chunk_sent=first_chunk_sent,
+                        first_intermediate_chunk_sent=first_intermediate_chunk_sent,
                         active_extensions=requested_extensions,
+                        streamed_chars=streamed_chars,
                     )
                 break  # Done — no re-invocation needed
         except asyncio.CancelledError:
@@ -776,13 +836,18 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         is_final: bool,
         streaming_artifact_id: str = "",
         first_chunk_sent: bool = False,
+        first_intermediate_chunk_sent: bool = False,
         active_extensions: set[str] | None = None,
-    ) -> bool:
+        streamed_chars: int = 0,
+    ) -> tuple[bool, bool]:
         """Handle a stream item from the agent and update the task accordingly.
 
         Streaming chunks (metadata.streaming_chunk=True) are emitted as
-        TaskArtifactUpdateEvents with append=True for ALL chunks (including first).
-        The backend accumulates all artifact-update messages into a single response.
+        TaskArtifactUpdateEvents. The FIRST chunk for a given artifact_id must
+        be a create (append=False) so the A2A SDK registers the artifact;
+        subsequent chunks use append=True. Main content and intermediate
+        (sub-agent thought) chunks use separate artifact IDs and are therefore
+        tracked independently.
         Status updates and terminal events use TaskStatusUpdateEvents.
 
         Args:
@@ -791,10 +856,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             task: Current task
             is_final: Whether this is the final state
             streaming_artifact_id: Stable artifact ID for streaming chunks
-            first_chunk_sent: Whether we've already sent the first chunk
+            first_chunk_sent: Whether the first main-artifact chunk has been sent
+            first_intermediate_chunk_sent: Whether the first intermediate-artifact chunk has been sent
 
         Returns:
-            Updated first_chunk_sent flag
+            Updated (first_chunk_sent, first_intermediate_chunk_sent) tuple
         """
         # item is an AgentStreamResponse object
         state = item.state
@@ -810,7 +876,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # Must be handled BEFORE streaming_chunk check.
         if metadata.get("activity_log"):
             if not _ext_active(ACTIVITY_LOG_EXTENSION):
-                return first_chunk_sent  # Client didn't request this extension
+                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
             source = metadata.get("source")
             logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, content: {content[:50]}")
             await updater.update_status(
@@ -822,12 +888,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     source=source,
                 ),
             )
-            return first_chunk_sent  # Don't modify first_chunk_sent flag
+            return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
 
         # --- Work plan items (todo snapshots) → status-update with DataPart extension ---
         if metadata.get("work_plan"):
             if not _ext_active(WORK_PLAN_EXTENSION):
-                return first_chunk_sent  # Client didn't request this extension
+                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
             todos = metadata.get("todos", [])
             logger.info(f"[WORK_PLAN] Emitting work plan with {len(todos)} todos")
             await updater.update_status(
@@ -838,7 +904,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.id,
                 ),
             )
-            return first_chunk_sent  # Don't modify first_chunk_sent flag
+            return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
 
         # --- Streaming content chunks → artifact-append ---
         # NOTE: Using proper A2A artifact-append protocol
@@ -852,20 +918,33 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Main response chunks use streaming_artifact_id; thoughts use a "-thought" suffix.
             # This also ensures first_chunk_sent correctly reflects MAIN CONTENT only, so that
             # include_subagent_output=True can still produce a non-streaming final response.
-            if metadata.get("intermediate_output"):
+            is_intermediate = bool(metadata.get("intermediate_output"))
+            if is_intermediate:
                 effective_artifact_id = streaming_artifact_id + "-thought"
             else:
                 effective_artifact_id = streaming_artifact_id
 
-            append = True  # Always True for all chunks (backend accumulates all artifact-update messages)
+            # A2A protocol: first chunk for an artifact_id MUST be a create
+            # (append=False) so the SDK registers the artifact; subsequent
+            # chunks may append (append=True). Sending append=True for the
+            # very first chunk causes the A2A layer to drop the bytes with:
+            #   "Received append=True for nonexistent artifact index ... Ignoring chunk."
+            # Track main and intermediate artifact creation independently because
+            # they use distinct artifact IDs.
+            if is_intermediate:
+                append = first_intermediate_chunk_sent
+            else:
+                append = first_chunk_sent
+
+            # Determine artifact extensions for intermediate output (sub-agent thoughts)
+            artifact_extensions = [INTERMEDIATE_OUTPUT_EXTENSION] if is_intermediate else None
+            # If intermediate output extension isn't active, suppress entirely (don't leak reasoning to clients)
+            if artifact_extensions and not _ext_active(INTERMEDIATE_OUTPUT_EXTENSION):
+                return first_chunk_sent, first_intermediate_chunk_sent
+
             logger.info(
                 f"[STREAMING] Calling add_artifact: len={len(content)}, append={append}, artifact_id={effective_artifact_id}"
             )
-            # Determine artifact extensions for intermediate output (sub-agent thoughts)
-            artifact_extensions = [INTERMEDIATE_OUTPUT_EXTENSION] if metadata.get("intermediate_output") else None
-            # If intermediate output extension isn't active, suppress entirely (don't leak reasoning to clients)
-            if artifact_extensions and not _ext_active(INTERMEDIATE_OUTPUT_EXTENSION):
-                return first_chunk_sent
             # Keep agent_name in artifact metadata for attribution
             artifact_metadata = {}
             if metadata.get("agent_name"):
@@ -880,13 +959,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             )
             logger.info("[STREAMING] Artifact chunk enqueued")
             # Intermediate-output chunks are supplementary (sub-agent thinking).
-            # They must NOT claim first_chunk_sent — the main response comes later
+            # They must NOT claim first_chunk_sent (main) — the main response comes later
             # either as regular orchestrator streaming tokens or via include_subagent_output.
             # If we set first_chunk_sent=True here the executor would skip emitting the
             # include_subagent_output content and the final answer would never reach the user.
-            if metadata.get("intermediate_output"):
-                return first_chunk_sent
-            return True  # Mark that first chunk has been sent
+            if is_intermediate:
+                return first_chunk_sent, True  # Mark intermediate artifact created
+            return True, first_intermediate_chunk_sent  # Mark main artifact created
 
         # Handle different A2A task states
         if state == TaskState.working and not is_final:
@@ -942,62 +1021,115 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     context_id=task.context_id,
                     task_id=task.id,
                 )
+                # Close any open streaming artifact before emitting the structured
+                # HITL status. A turn that streamed orchestrator tokens before
+                # hitting a guarded tool would otherwise leave the artifact stream
+                # permanently open on the client. NOTE: unlike the plain-text
+                # branches below, we do NOT set final_answer_source here — HITL is
+                # intentionally not routed through the artifact text-fallback
+                # (clients need the structured message); we only seal the stream.
+                if first_chunk_sent:
+                    await updater.add_artifact(
+                        [Part(root=TextPart(text=""))],
+                        artifact_id=streaming_artifact_id,
+                        append=True,
+                        last_chunk=True,
+                        metadata={},
+                    )
+                await updater.update_status(
+                    TaskState.input_required,
+                    msg,
+                )
             else:
-                # Generic input_required (no HITL extension or not subscribed)
+                # Generic input_required (no HITL extension or not subscribed).
+                #
+                # CONTRACT FOR CLIENTS: Mirror the `completed` path — the terminal
+                # input_required status ALWAYS carries the authoritative
+                # FinalResponseSchema.message in its message body, and (if the
+                # orchestrator streamed token chunks this turn) we close the
+                # streaming artifact cleanly first. This guarantees the user
+                # receives the orchestrator's reply even if intermediate SSE
+                # artifact frames were dropped or the client only renders status
+                # messages. The `final_answer_source: "fallback"` metadata flag
+                # signals well-behaved clients to dedupe against the artifact.
+                final_answer = content if content else "Additional input is required to continue."
                 msg = new_agent_text_message(
-                    content,
+                    final_answer,
                     task.context_id,
                     task.id,
                 )
                 if item.interrupt_reason:
                     msg.metadata = {"interrupt_reason": item.interrupt_reason}
-            await updater.update_status(
-                TaskState.input_required,
-                msg,
-            )
+                await self._close_streaming_artifact_and_respond(
+                    updater,
+                    TaskState.input_required,
+                    msg,
+                    streaming_artifact_id=streaming_artifact_id,
+                    first_chunk_sent=first_chunk_sent,
+                    streamed_chars=streamed_chars,
+                    final_message_len=len(final_answer),
+                    base_metadata=metadata,
+                )
 
         elif state == TaskState.auth_required:
-            # Authentication required - leave task in auth_required state
-            await updater.update_status(
+            # Authentication required - leave task in auth_required state.
+            #
+            # CONTRACT FOR CLIENTS: Mirror the `completed` path — the terminal
+            # auth_required status ALWAYS carries the authoritative
+            # FinalResponseSchema.message in its message body, and (if the
+            # orchestrator streamed token chunks this turn) we close the
+            # streaming artifact cleanly first. The `final_answer_source:
+            # "fallback"` metadata flag signals well-behaved clients to dedupe
+            # against the artifact text they already rendered.
+            final_answer = content if content else "Authentication is required to continue."
+            await self._close_streaming_artifact_and_respond(
+                updater,
                 TaskState.auth_required,
                 new_agent_text_message(
-                    content,
+                    final_answer,
                     task.context_id,
                     task.id,
                 ),
+                streaming_artifact_id=streaming_artifact_id,
+                first_chunk_sent=first_chunk_sent,
+                streamed_chars=streamed_chars,
+                final_message_len=len(final_answer),
+                base_metadata=metadata,
             )
 
         elif state == TaskState.completed and is_final:
-            # Task completed successfully
-            if first_chunk_sent:
-                # We streamed ORCHESTRATOR token chunks (not sub-agent thoughts)
-                # Close the artifact stream and send completion status without message.
-                # The streamed chunks already contain the complete response.
-                logger.info("[STREAMING] Closing artifact stream (orchestrator content already streamed)")
-                await updater.add_artifact(
-                    [Part(root=TextPart(text=""))],
-                    artifact_id=streaming_artifact_id,
-                    append=True,
-                    last_chunk=True,
-                    metadata={},
-                )
-                await updater.update_status(
-                    TaskState.completed,
-                    metadata=metadata or None,
-                )
-            else:
-                # Non-streaming completion: include content in the status message.
-                # This is the orchestrator's FINAL ANSWER - always send it.
-                # Sub-agent outputs were intermediate thoughts; this is authoritative.
-                await updater.update_status(
-                    TaskState.completed,
-                    new_agent_text_message(
-                        content if content else "Task completed successfully",
-                        task.context_id,
-                        task.id,
-                    ),
-                    metadata=metadata or None,
-                )
+            # Task completed successfully.
+            #
+            # CONTRACT FOR CLIENTS: The terminal `completed` status ALWAYS carries the
+            # authoritative final answer in its message body (the validated
+            # FinalResponseSchema.message). This is true for both the streamed and
+            # non-streamed branches. Clients that already rendered the streamed
+            # artifact chunks should treat this terminal message as the source of
+            # truth (dedupe / replace) rather than appending it — the
+            # `final_answer_source: "fallback"` metadata flag on the status update
+            # signals that the same text was also delivered via artifact-append.
+            # This guarantees the user receives the reply even if any intermediate
+            # SSE artifact frame fails to parse on the client side.
+            final_answer = content if content else "Task completed successfully"
+            # Streamed and non-streamed completions converge here: the helper
+            # closes the streaming artifact (only when token chunks were streamed
+            # this turn) and emits the terminal `completed` status carrying the
+            # authoritative final answer, tagged `final_answer_source: "fallback"`
+            # when it duplicates already-streamed artifact text.
+            await self._close_streaming_artifact_and_respond(
+                updater,
+                TaskState.completed,
+                new_agent_text_message(
+                    final_answer,
+                    task.context_id,
+                    task.id,
+                ),
+                streaming_artifact_id=streaming_artifact_id,
+                first_chunk_sent=first_chunk_sent,
+                streamed_chars=streamed_chars,
+                final_message_len=len(final_answer),
+                base_metadata=metadata,
+            )
 
         elif state == TaskState.completed and not is_final:
             logger.info(f"Contradictory completed non-final state, treating as input_required: {content}")
@@ -1019,8 +1151,57 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             )
             await updater.complete()
 
-        # Return first_chunk_sent unchanged for non-streaming paths
-        return first_chunk_sent
+        # Return flags unchanged for non-streaming paths
+        return first_chunk_sent, first_intermediate_chunk_sent
+
+    async def _close_streaming_artifact_and_respond(
+        self,
+        updater: TaskUpdater,
+        state: TaskState,
+        msg: Message,
+        *,
+        streaming_artifact_id: str,
+        first_chunk_sent: bool,
+        streamed_chars: int,
+        final_message_len: int,
+        base_metadata: dict | None,
+    ) -> None:
+        """Seal an open streaming artifact (if any) and emit a terminal status update.
+
+        Shared by the ``input_required``, ``auth_required`` and ``completed``
+        fallback branches. When the orchestrator streamed token chunks this turn
+        (``first_chunk_sent``), the streaming artifact is closed with a final
+        empty chunk and the status metadata is tagged
+        ``final_answer_source="fallback"`` so well-behaved clients dedupe the
+        terminal message against the artifact text they already rendered.
+
+        Centralising this keeps the artifact-close, the completion log line and
+        the metadata key in one place so a format/key change cannot silently
+        miss one branch.
+        """
+        status_metadata = dict(base_metadata) if base_metadata else {}
+        if first_chunk_sent:
+            await updater.add_artifact(
+                [Part(root=TextPart(text=""))],
+                artifact_id=streaming_artifact_id,
+                append=True,
+                last_chunk=True,
+                metadata={},
+            )
+            logger.info(
+                "[STREAMING] Completion: artifact_id=%s streamed_chars=%d "
+                "final_message_len=%d task_state=%s",
+                streaming_artifact_id,
+                streamed_chars,
+                final_message_len,
+                state,
+            )
+            status_metadata["final_answer_source"] = "fallback"
+        await updater.update_status(
+            state,
+            msg,
+            metadata=status_metadata or None,
+        )
 
     def _validate_request(self, context: RequestContext) -> bool:
         return False

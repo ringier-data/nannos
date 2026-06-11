@@ -248,7 +248,7 @@ class StreamHandler:
             if messages:
                 last_message = messages[-1]
                 content = getattr(last_message, "content", "The agent failed to complete the task.")
-                content = extract_text_from_content(content)[0]
+                content = (extract_text_from_content(content) or [""])[0]
             else:
                 content = "The agent failed to complete the task."
 
@@ -262,7 +262,7 @@ class StreamHandler:
             if messages:
                 last_message = messages[-1]
                 content = getattr(last_message, "content", "Additional input required to complete the task.")
-                content = extract_text_from_content(content)[0]
+                content = (extract_text_from_content(content) or [""])[0]
             else:
                 content = "Additional input required to complete the task."
 
@@ -409,52 +409,59 @@ class StreamHandler:
                 # - FinalResponseSchema (Bedrock structured output)
                 # - Other tools (file operations, etc.)
                 # Only extract from ToolMessages that correspond to "task" tool calls (sub-agents)
+                subagent_content = None
+
                 if isinstance(final_state, dict):
                     messages = final_state.get("messages", [])
                     if messages:
                         # Get current turn messages (after last HumanMessage)
                         current_turn_messages = StreamHandler._extract_current_turn_messages(messages)
 
-                        # Build a map of tool_call_id -> tool_name for filtering
+                        # Build a map of tool_call_id -> tool_call so we can filter
+                        # ToolMessages down to "task" calls (sub-agents) only.
                         tool_call_map = {}
                         for msg in current_turn_messages:
                             if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
                                 for tool_call in msg.tool_calls:
                                     tool_call_map[tool_call.get("id")] = tool_call
 
-                        # Find the most recent "task" ToolMessage (sub-agent response)
-                        subagent_content = None
+                        # Adopt the most-recent "task" ToolMessage whose extracted content
+                        # is actually non-empty. An empty extraction must NOT short-circuit
+                        # the search — keep walking so we surface a usable reply.
                         for msg in reversed(current_turn_messages):
-                            if isinstance(msg, ToolMessage):
-                                tool_call = tool_call_map.get(msg.tool_call_id)
-                                # Filter: only process "task" tool calls (sub-agents)
-                                if tool_call and tool_call.get("name") == "task":
-                                    # Found a sub-agent ToolMessage
-                                    try:
-                                        # Sub-agent content may be JSON-wrapped
-                                        if isinstance(msg.content, str):
-                                            parsed_content = json.loads(msg.content)
-                                            if isinstance(parsed_content, dict):
-                                                subagent_content = parsed_content.get("message", msg.content)
-                                            elif isinstance(parsed_content, list):
-                                                # Content is a list of blocks (e.g., thinking + text)
-                                                subagent_content = extract_text_from_content(parsed_content)[0]
-                                            else:
-                                                subagent_content = msg.content
-                                        elif isinstance(msg.content, list):
-                                            # Content is already a list of blocks
-                                            subagent_content = extract_text_from_content(msg.content)[0]
-                                        else:
-                                            subagent_content = msg.content
-                                    except json.JSONDecodeError:
-                                        subagent_content = msg.content
+                            if not isinstance(msg, ToolMessage):
+                                continue
+                            tool_call = tool_call_map.get(msg.tool_call_id)
+                            # Filter: only process "task" tool calls (sub-agents)
+                            if not (tool_call and tool_call.get("name") == "task"):
+                                continue
 
-                                    logger.info(
-                                        f"[STREAM HANDLER] Found sub-agent ToolMessage (tool_call_id={msg.tool_call_id}, "
-                                        f"subagent={tool_call.get('args', {}).get('subagent_type')}, "
-                                        f"content_length={len(subagent_content) if subagent_content else 0})"
-                                    )
-                                    break
+                            # Extract content (sub-agent content may be JSON-wrapped).
+                            try:
+                                if isinstance(msg.content, str):
+                                    parsed_content = json.loads(msg.content)
+                                    if isinstance(parsed_content, dict):
+                                        extracted = parsed_content.get("message", msg.content)
+                                    elif isinstance(parsed_content, list):
+                                        extracted = (extract_text_from_content(parsed_content) or [""])[0]
+                                    else:
+                                        extracted = msg.content
+                                elif isinstance(msg.content, list):
+                                    extracted = (extract_text_from_content(msg.content) or [""])[0]
+                                else:
+                                    extracted = msg.content
+                            except json.JSONDecodeError:
+                                extracted = msg.content
+
+                            extracted_str = extracted if isinstance(extracted, str) else ""
+                            if extracted_str:
+                                subagent_content = extracted_str
+                                logger.info(
+                                    f"[STREAM HANDLER] Found sub-agent ToolMessage (tool_call_id={msg.tool_call_id}, "
+                                    f"subagent={tool_call.get('args', {}).get('subagent_type')}, "
+                                    f"content_length={len(subagent_content)})"
+                                )
+                                break
 
                         if subagent_content:
                             # Append sub-agent output to message
@@ -470,14 +477,30 @@ class StreamHandler:
                             )
                         else:
                             logger.warning(
-                                "[STREAM HANDLER] include_subagent_output=true but no sub-agent ToolMessage found in current turn "
-                                "(FinalResponseSchema and other tool messages filtered out)"
+                                "[STREAM HANDLER] include_subagent_output=true but no usable sub-agent ToolMessage "
+                                "found in current turn. parsed_message_length=%d",
+                                len(parsed.message),
                             )
                     else:
                         logger.warning("[STREAM HANDLER] include_subagent_output=true but no messages in state")
                 else:
                     logger.warning(
                         f"[STREAM HANDLER] include_subagent_output=true but final_state is not a dict: {type(final_state)}"
+                    )
+
+                # FINAL GUARD: include_subagent_output was requested but the message is
+                # still empty (orchestrator authored "" expecting a sub-agent forward,
+                # and we found nothing usable). Never let an empty `completed` reply
+                # reach the client — emit a short, neutral, user-safe fallback. The
+                # warning above carries the debugging detail; the user message stays
+                # clean (no IDs, no internals).
+                if not message:
+                    message = (
+                        "I wasn't able to put together a response this time. "
+                        "Could you try rephrasing or asking again?"
+                    )
+                    logger.warning(
+                        "[STREAM HANDLER] Substituted fallback message for empty include_subagent_output reply"
                     )
 
             # Build metadata
@@ -524,6 +547,10 @@ class StreamHandler:
                     a2a_tracking = final_state.get("a2a_tracking", {})
                     recently_called = StreamHandler._extract_recently_called_subagents(final_state)
 
+                    # The empty-set invariant is owned by _check_all_agents_blocked: it
+                    # returns (False, None) when no sub-agent ran this turn (e.g. a short
+                    # greeting "hi" → "Hello!"), so we skip the override and trust the
+                    # LLM's completed state below without a separate pre-check here.
                     all_blocked, prioritized_agent = StreamHandler._check_all_agents_blocked(
                         recently_called, a2a_tracking
                     )
@@ -556,7 +583,7 @@ class StreamHandler:
         if messages:
             last_message = messages[-1]
             content = getattr(last_message, "content", str(last_message))
-            content = extract_text_from_content(content)[0]
+            content = (extract_text_from_content(content) or [""])[0]
         else:
             content = "Task completed successfully"
 

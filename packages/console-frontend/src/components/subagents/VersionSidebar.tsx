@@ -58,6 +58,7 @@ interface VersionSidebarProps {
   versions: SubAgentConfigVersion[];
   isOwner: boolean;
   isAdmin: boolean;
+  hasWriteAccess?: boolean;
   isCollapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
   onRefresh?: () => void;
@@ -69,7 +70,8 @@ export function VersionSidebar({
   subAgent,
   versions,
   isOwner,
-  isAdmin: _isAdmin,
+  isAdmin,
+  hasWriteAccess = false,
   isCollapsed = false,
   onCollapsedChange,
   onRefresh,
@@ -268,16 +270,20 @@ export function VersionSidebar({
                 const isApproved = status === 'approved';
                 const isDraft = status === 'draft';
                 const isRejected = status === 'rejected';
-                const canSetDefault = isOwner && isApproved && !isDefault;
-                const canSubmit = isOwner && (isDraft || isRejected);
-                const canRevert = isOwner && !isCurrent;
+                // Owners and admins (in admin mode) can manage versions.
+                // Group members with write access can also create/submit drafts.
+                const canManage = isOwner || isAdmin;
+                const canWrite = canManage || hasWriteAccess;
+                const canSetDefault = canWrite && isApproved && !isDefault;
+                const canSubmit = canWrite && (isDraft || isRejected);
+                const canRevert = canWrite && !isCurrent;
                 const canCompare = version.version > 1 || (defaultVersion !== undefined && defaultVersion !== version.version);
                 // Check if there's actually a previous version available in the list
                 const sortedVersions = [...allVersions].sort((a, b) => a.version - b.version);
                 const currentVersionIndex = sortedVersions.findIndex((v) => v.version === version.version);
                 const hasPreviousVersion = currentVersionIndex > 0;
                 // Can delete non-approved versions (except if it's the only version)
-                const canDelete = isOwner && !isApproved && versions.length > 1;
+                const canDelete = canManage && !isApproved && versions.length > 1;
 
                 return (
                   <div
