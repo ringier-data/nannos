@@ -149,17 +149,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
     def _decisions_for_interrupt(cls, action_requests: list, hitl_decisions: list, decisions_by_id: dict) -> list:
         """Resolve the decision list for ONE interrupt, aligned to its action_requests.
 
-        - By id (new clients): when every action_request carries a ``call_id`` and the
-          client sent a decision for each, return one decision per action_request in
-          action_request order. Robust to client ordering and to model replay
-          reordering — the downstream consumers match positionally, so order matters.
+        - By id (new clients): when the client sent id-keyed decisions, align each
+          action_request to its own decision by ``call_id``. Robust to client ordering,
+          to model replay reordering, and to a flat by-id list spanning multiple
+          co-pending interrupts. Any call whose decision is missing (stale/absent
+          ``call_id``) defaults to a safe reject — the returned list is therefore always
+          exactly ``len(action_requests)`` long, so a partial payload can never crash the
+          downstream count check nor silently auto-approve an unanswered call.
         - Blanket (legacy clients): a single decision is replicated to the
           action_request count. Anything else passes through unchanged.
         """
         n = len(action_requests)
-        call_ids = [cls._action_request_call_id(ar) for ar in action_requests]
-        if n > 0 and all(cid is not None for cid in call_ids) and all(cid in decisions_by_id for cid in call_ids):
-            return [decisions_by_id[cid] for cid in call_ids]
+        if n > 0 and decisions_by_id:
+            call_ids = [cls._action_request_call_id(ar) for ar in action_requests]
+            return [decisions_by_id.get(cid, {"type": "reject"}) for cid in call_ids]
         if len(hitl_decisions) == 1 and n > 1:
             return hitl_decisions * n
         return hitl_decisions
