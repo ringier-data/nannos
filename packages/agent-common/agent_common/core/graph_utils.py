@@ -754,6 +754,12 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         for p in pending:
             enriched_args = {
                 **p.args,
+                # Top-level, risk-independent per-call id the client echoes so the
+                # resume path aligns decisions by id (see
+                # executor._build_interrupt_resume_map) instead of positionally —
+                # the latter is fragile to model replay reordering. ``call_key`` is
+                # deterministic on tool+args.
+                "_call_id": p.call_key,
                 "_risk_metadata": {
                     "source": "risk_score",
                     "score": p.score,
@@ -761,11 +767,6 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                     "matched_pattern": p.matched_pattern,
                     "server_slug": p.server_slug,
                     "tool_name": p.tool_name,
-                    # Stable per-call id so the client can return one decision per
-                    # action_request and the resume path can align decisions by id
-                    # (see executor._build_interrupt_resume_map). Positional within a
-                    # single interrupt otherwise — fragile to model replay reordering.
-                    "call_id": p.call_key,
                 },
             }
             description = f"Tool '{p.tool_name}' has risk score {p.score:.2f} (threshold: {p.threshold:.2f})"

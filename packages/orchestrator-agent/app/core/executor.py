@@ -136,14 +136,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
     def _action_request_call_id(action_request: Any) -> Any:
         """Extract the stable per-call id an action_request carries, if any.
 
-        Attached under ``args._risk_metadata.call_id`` by the outbound HITL builders
-        (PTC ``_build_ptc_hitl_request`` and ConditionalHumanInTheLoopMiddleware).
-        Returns ``None`` for action_requests that predate / don't carry it.
+        Attached as top-level ``args._call_id`` by the outbound HITL builders (PTC
+        ``_build_ptc_hitl_request`` and ConditionalHumanInTheLoopMiddleware) for EVERY
+        interrupted call — static guard, risk-scored, or PTC eval. Returns ``None`` for
+        action_requests that predate / don't carry it.
         """
         if not isinstance(action_request, dict):
             return None
-        meta = (action_request.get("args") or {}).get("_risk_metadata") or {}
-        return meta.get("call_id") if isinstance(meta, dict) else None
+        return (action_request.get("args") or {}).get("_call_id")
 
     @classmethod
     def _decisions_for_interrupt(cls, action_requests: list, hitl_decisions: list, decisions_by_id: dict) -> list:

@@ -63,3 +63,30 @@ def test_non_dict_user_decisions_become_empty_payload():
 def test_none_interrupt_obj_is_safe():
     cmd = _build_subagent_resume_command(_local_runnable(), None, DECISIONS)
     assert cmd.resume == DECISIONS
+
+
+def test_local_blanket_decision_replicated_to_action_request_count():
+    """A single blanket decision is replicated to N for local sub-agents.
+
+    Backstop for non-PTC ConditionalHumanInTheLoopMiddleware sub-agents, which enforce
+    one decision per pending call and have no awrap_tool_call replication of their own.
+    """
+    intr = SimpleNamespace(id=INTERRUPT_ID, value={"action_requests": [{"name": "x"}, {"name": "y"}]})
+    cmd = _build_subagent_resume_command(_local_runnable(), intr, {"decisions": [{"type": "approve"}]})
+    assert cmd.resume == {INTERRUPT_ID: {"decisions": [{"type": "approve"}, {"type": "approve"}]}}
+
+
+def test_local_per_call_decisions_pass_through_unreplicated():
+    """A per-call decision list (len != 1) is already aligned — never replicated."""
+    intr = SimpleNamespace(id=INTERRUPT_ID, value={"action_requests": [{"name": "x"}, {"name": "y"}]})
+    payload = {"decisions": [{"type": "approve"}, {"type": "reject"}]}
+    cmd = _build_subagent_resume_command(_local_runnable(), intr, payload)
+    assert cmd.resume == {INTERRUPT_ID: payload}
+
+
+def test_remote_blanket_decision_not_replicated():
+    """Remote sub-agents keep the plain single decision — the remote replicates itself."""
+    intr = SimpleNamespace(id=INTERRUPT_ID, value={"action_requests": [{"name": "x"}, {"name": "y"}]})
+    payload = {"decisions": [{"type": "approve"}]}
+    cmd = _build_subagent_resume_command(_remote_runnable(), intr, payload)
+    assert cmd.resume == payload

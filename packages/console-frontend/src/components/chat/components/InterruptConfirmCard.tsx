@@ -30,8 +30,6 @@ interface RiskMetadata {
   matched_pattern: string | null;
   server_slug: string;
   tool_name: string;
-  /** Stable per-call id used to return one decision per action_request. */
-  call_id?: string;
 }
 
 type ActionRequest = { name: string; args?: Record<string, unknown>; description?: string };
@@ -60,9 +58,14 @@ function riskMetaOf(action: ActionRequest | undefined): RiskMetadata | undefined
   return meta?.source === 'risk_score' ? meta : undefined;
 }
 
+/** Stable per-call id the server uses to align decisions (top-level args._call_id). */
+function callIdOf(action: ActionRequest | undefined): string | undefined {
+  return (action?.args || {})._call_id as string | undefined;
+}
+
 /** Attach the action_request's per-call id to a decision (no-op if absent). */
 function withCallId(action: ActionRequest | undefined, decision: Decision): Decision {
-  const callId = riskMetaOf(action)?.call_id;
+  const callId = callIdOf(action);
   return callId ? { ...decision, id: callId } : decision;
 }
 
@@ -272,7 +275,7 @@ function MultiActionCard() {
           const choice = choices[idx];
           return (
             <div
-              key={riskMetaOf(action)?.call_id ?? idx}
+              key={callIdOf(action) ?? idx}
               className="rounded border border-amber-500/20 bg-white/50 dark:bg-gray-900/30 p-3 space-y-2"
             >
               <div className="flex items-start gap-2">

@@ -544,9 +544,9 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
   return blocks;
 }
 
-/** Stable per-call id the server uses to align decisions (args._risk_metadata.call_id). */
+/** Stable per-call id the server uses to align decisions (top-level args._call_id). */
 export function callIdOf(action: any): string | undefined {
-  return action?.args?._risk_metadata?.call_id;
+  return action?.args?._call_id;
 }
 
 /** Read-only detail blocks (tool label, risk, args, content) for ONE action_request. */

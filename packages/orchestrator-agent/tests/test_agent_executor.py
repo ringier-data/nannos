@@ -749,10 +749,10 @@ class TestExtractHitlDecisions:
 
     @staticmethod
     def _ar(name, call_id=None):
-        """Build an action_request dict, optionally carrying a per-call id."""
+        """Build an action_request dict, optionally carrying a top-level per-call id."""
         args: dict = {}
         if call_id is not None:
-            args["_risk_metadata"] = {"source": "risk_score", "call_id": call_id}
+            args["_call_id"] = call_id
         return {"name": name, "args": args}
 
     def test_single_reject_replicated_for_parallel_tool_calls(self, dynamodb_table):

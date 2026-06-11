@@ -663,10 +663,12 @@ export class GoogleChatService {
     const HIDDEN_KEYS = ['reason', '_risk_metadata'];
 
     // Per-call routing for the batched submit: id + matched pattern (for bypass).
+    // ``_call_id`` is top-level and risk-independent (set for static + risk calls);
+    // matched_pattern (for the bypass option) stays under risk metadata.
     const calls = actionRequests.map((a) => {
-      const rm = a?.args?._risk_metadata as { source?: string; call_id?: string; matched_pattern?: string | null } | undefined;
+      const rm = a?.args?._risk_metadata as { source?: string; matched_pattern?: string | null } | undefined;
       const isRisk = rm?.source === 'risk_score';
-      return { id: rm?.call_id, pattern: isRisk ? (rm?.matched_pattern || undefined) : undefined };
+      return { id: a?.args?._call_id, pattern: isRisk ? (rm?.matched_pattern || undefined) : undefined };
     });
     const params = { ...parameters, calls };
     const paramsJson = JSON.stringify(params);

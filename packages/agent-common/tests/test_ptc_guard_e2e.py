@@ -366,7 +366,7 @@ async def test_per_call_decisions_applied_by_id_end_to_end():
     result = await agent.ainvoke({"messages": [HumanMessage("go")]}, config=config)
     action_requests = result["__interrupt__"][0].value["action_requests"]
     call_id_by_path = {
-        ar["args"]["path"]: ar["args"]["_risk_metadata"]["call_id"] for ar in action_requests
+        ar["args"]["path"]: ar["args"]["_call_id"] for ar in action_requests
     }
 
     decisions = [
