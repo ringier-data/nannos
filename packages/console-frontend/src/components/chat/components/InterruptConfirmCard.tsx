@@ -18,10 +18,6 @@ const CONTENT_KEYS = new Set(['content', 'body', 'description']);
 /** Keys that are internal / not useful for display. */
 const HIDDEN_KEYS = new Set(['reason', '_risk_metadata']);
 
-/** Standard rejection message sent to the agent. */
-const REJECT_MESSAGE =
-  'The user explicitly rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.';
-
 /** Risk metadata attached by the dynamic risk scoring middleware. */
 interface RiskMetadata {
   source: 'risk_score';
@@ -172,7 +168,7 @@ function SingleActionCard() {
 
       <div className="flex gap-2 justify-end flex-wrap">
         {allowed.has('reject') && (
-          <Button variant="outline" size="sm" onClick={() => send({ type: 'reject', message: REJECT_MESSAGE })}>
+          <Button variant="outline" size="sm" onClick={() => send({ type: 'reject' })}>
             Reject
           </Button>
         )}
@@ -250,8 +246,10 @@ function MultiActionCard() {
   const submit = (perIdx: (idx: number) => 'approve' | 'reject') => {
     const decisions: Decision[] = actions.map((action, idx) => {
       const type = perIdx(idx);
-      const base: Decision =
-        type === 'reject' ? { type, message: messages[idx]?.trim() || REJECT_MESSAGE } : { type };
+      // Plain reject → no message; the server supplies the default. Only attach a
+      // message when the user typed a per-call reason.
+      const note = messages[idx]?.trim();
+      const base: Decision = type === 'reject' && note ? { type, message: note } : { type };
       return withCallId(action, base);
     });
     sendSilentMessage('', [{ decisions }]);

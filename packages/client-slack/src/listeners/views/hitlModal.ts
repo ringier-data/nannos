@@ -100,8 +100,7 @@ export function registerHitlModalHandler(app: App, makeDeps: () => HandlerDepend
         if (c?.id) decision.id = c.id; // echo call id → server aligns by id
         if (selected === 'reject') {
           decision.type = 'reject';
-          decision.message =
-            'The user rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry unless the user explicitly asks.';
+          // No message → the server supplies the default rejection text.
         } else if (selected === 'approve_bypass_tool') {
           decision.type = 'approve';
           decision.bypass = true;

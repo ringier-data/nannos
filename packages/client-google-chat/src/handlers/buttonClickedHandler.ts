@@ -6,7 +6,6 @@ import { handleIncomingMessage, NormalizedMessage } from './messageHandler.js';
 import { HandlerDependencies } from "./types.js";
 import { GoogleChatService } from '../services/googleChatService.js';
 
-
 export interface ButtonClickedPayload {
   cardId: string,
   action: string,
@@ -119,7 +118,8 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
     decisions = { decisions: [{ type: 'approve', bypass: true, bypass_pattern: matchedPattern }] };
   } else {
     confirmText = '❌ Rejected';
-    decisions = { decisions: [{ type: 'reject', message: 'The user explicitly rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.' }] };
+    // No message → the server supplies the default rejection text.
+    decisions = { decisions: [{ type: 'reject' }] };
   }
 
   await deps.chatService.updateMessage({
@@ -145,9 +145,6 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
   await handleIncomingMessage(syntheticMessage, deps);
 }
 
-const REJECT_MESSAGE =
-  'The user rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.';
-
 /**
  * Handle the multi-action HITL card: "Approve all"/"Reject all" send a blanket
  * decision (server replicates), "Submit decisions" reads the per-call radios from
@@ -166,7 +163,8 @@ async function handleHitlMultiCardClick(payload: ButtonClickedPayload, deps: Han
     decisions = { decisions: [{ type: 'approve' }] };
   } else if (payload.action === 'reject') {
     confirmText = '❌ Rejected all';
-    decisions = { decisions: [{ type: 'reject', message: REJECT_MESSAGE }] };
+    // No message → the server supplies the default rejection text.
+    decisions = { decisions: [{ type: 'reject' }] };
   } else {
     // submit_multi — one decision per call, in action_request order, by id.
     const calls = Array.isArray(params.calls) ? params.calls : [];
@@ -176,7 +174,7 @@ async function handleHitlMultiCardClick(payload: ButtonClickedPayload, deps: Han
       if (c?.id) decision.id = c.id; // echo call id → server aligns by id
       if (selected === 'reject') {
         decision.type = 'reject';
-        decision.message = REJECT_MESSAGE;
+        // No message → the server supplies the default rejection text.
       } else if (selected === 'approve_bypass_tool') {
         decision.type = 'approve';
         decision.bypass = true;

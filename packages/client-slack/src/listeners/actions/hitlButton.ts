@@ -48,8 +48,9 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         ts: messageTs,
       });
 
-      // Send reject decision to orchestrator via handleIncomingMessage
-      const decisions = { decisions: [{ type: 'reject', message: 'The user explicitly rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.' }] };
+      // Send reject decision to orchestrator via handleIncomingMessage.
+      // No message → the server supplies the default rejection text.
+      const decisions = { decisions: [{ type: 'reject' }] };
       const syntheticMessage: NormalizedMessage = {
         userId,
         teamId: (body as any).team?.id || '',
