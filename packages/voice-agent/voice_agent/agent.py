@@ -71,7 +71,9 @@ def build_gemini_client() -> genai.Client:
     gcp_location = os.getenv("GCP_LOCATION", "us-central1")
 
     if not gcp_key:
-        raise RuntimeError("GCP_KEY is not set — add the service account JSON blob to .env")
+        raise RuntimeError(
+            "GCP_KEY is not set — add the service account JSON blob to .env"
+        )
     if not gcp_project:
         raise RuntimeError("GCP_PROJECT_ID is not set — add it to .env")
 
@@ -83,7 +85,9 @@ def build_gemini_client() -> genai.Client:
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RuntimeError(f"Failed to parse GCP_KEY as service account JSON: {exc}") from exc
+        raise RuntimeError(
+            f"Failed to parse GCP_KEY as service account JSON: {exc}"
+        ) from exc
 
     logger.info(
         "Building Gemini Vertex AI client (project=%s, location=%s)",
@@ -136,9 +140,28 @@ _WRITE_TOOL_INSTRUCTION = (
 # Keywords that indicate a tool has write/mutate side-effects (fallback only).
 _WRITE_KEYWORDS = frozenset(
     {
-        "create", "update", "delete", "remove", "post", "write", "send", "push",
-        "modify", "edit", "close", "merge", "publish", "commit", "open", "add",
-        "insert", "patch", "put", "submit", "deploy", "release",
+        "create",
+        "update",
+        "delete",
+        "remove",
+        "post",
+        "write",
+        "send",
+        "push",
+        "modify",
+        "edit",
+        "close",
+        "merge",
+        "publish",
+        "commit",
+        "open",
+        "add",
+        "insert",
+        "patch",
+        "put",
+        "submit",
+        "deploy",
+        "release",
     }
 )
 
@@ -158,7 +181,7 @@ _WRITE_RISK_THRESHOLD: float = 0.4
 _TOOL_RISK_CACHE: dict[str, float] = {}
 
 # Lightweight flash model used only for tool classification (separate from the Live session model).
-_RISK_SCORER_MODEL: str = os.getenv("GEMINI_RISK_SCORER_MODEL", "gemini-3-flash-preview")
+_RISK_SCORER_MODEL: str = os.getenv("GEMINI_RISK_SCORER_MODEL", "gemini-2.5-flash")
 
 _RISK_SCORING_SYSTEM_PROMPT = """\
 You are a security analyst evaluating the risk level of AI agent tool calls.
@@ -181,7 +204,9 @@ async def _llm_score_tool_risk(
     input_schema: dict,
 ) -> float:
     """Use Gemini Flash to score a tool's write risk. Returns 0.0–1.0."""
-    schema_str = json.dumps(input_schema, indent=2) if input_schema else "No schema available"
+    schema_str = (
+        json.dumps(input_schema, indent=2) if input_schema else "No schema available"
+    )
     user_prompt = (
         f"Tool name: {name}\n"
         f"Description: {description or 'No description available'}\n"
@@ -217,7 +242,11 @@ async def _score_tool_risk(
         score = await _llm_score_tool_risk(client, name, description, input_schema)
         logger.debug("Tool %r LLM risk score: %.2f", name, score)
     except Exception:
-        logger.warning("LLM risk scoring failed for %r, using keyword fallback", name, exc_info=True)
+        logger.warning(
+            "LLM risk scoring failed for %r, using keyword fallback",
+            name,
+            exc_info=True,
+        )
         score = 0.9 if _is_write_tool(name, description) else 0.1
 
     _TOOL_RISK_CACHE[name] = score
@@ -292,7 +321,10 @@ class GeminiLiveAgent:
         self.mcp_status: asyncio.Future[bool] | None = None
 
     async def _init_mcp_tools(
-        self, mcp_session: ClientSession, event_out: asyncio.Queue[dict], client: genai.Client
+        self,
+        mcp_session: ClientSession,
+        event_out: asyncio.Queue[dict],
+        client: genai.Client,
     ) -> list[types.FunctionDeclaration]:
         """Discover tools from an already-initialised MCP session.
 
@@ -318,11 +350,17 @@ class GeminiLiveAgent:
         for tool in tools_result.tools:
             # If a tool filter was specified, skip tools not in the list.
             if self.mcp_tool_filter and tool.name not in self.mcp_tool_filter:
-                logger.debug("MCP tool %r skipped (not in filter %s)", tool.name, self.mcp_tool_filter)
+                logger.debug(
+                    "MCP tool %r skipped (not in filter %s)",
+                    tool.name,
+                    self.mcp_tool_filter,
+                )
                 continue
             raw_schema = dict(tool.inputSchema or {})
             logger.debug("MCP tool schema for %r: %s", tool.name, raw_schema)
-            risk_score = await _score_tool_risk(client, tool.name, tool.description or "", raw_schema)
+            risk_score = await _score_tool_risk(
+                client, tool.name, tool.description or "", raw_schema
+            )
             is_risky = risk_score >= _WRITE_RISK_THRESHOLD
             declarations.append(
                 types.FunctionDeclaration(
@@ -349,12 +387,16 @@ class GeminiLiveAgent:
                     if pending is None:
                         # First call — gate it.
                         _awaiting_confirmation[_name] = args
-                        logger.info("Risky tool %r intercepted — requesting confirmation", _name)
+                        logger.info(
+                            "Risky tool %r intercepted — requesting confirmation", _name
+                        )
                         return confirmation_msg
                     if args != pending:
                         # Different args — treat as a new attempt, re-gate.
                         _awaiting_confirmation[_name] = args
-                        logger.info("Risky tool %r re-intercepted with different args", _name)
+                        logger.info(
+                            "Risky tool %r re-intercepted with different args", _name
+                        )
                         return confirmation_msg
                     # Same args — user confirmed; execute and clear the gate.
                     del _awaiting_confirmation[_name]
@@ -380,7 +422,9 @@ class GeminiLiveAgent:
                                     await event_out.put(
                                         {
                                             "type": "mcp_auth_failed",
-                                            "message": data.get("message", "Tool requires authorization"),
+                                            "message": data.get(
+                                                "message", "Tool requires authorization"
+                                            ),
                                             "authorize_url": authorize_url,
                                         }
                                     )
@@ -398,7 +442,12 @@ class GeminiLiveAgent:
                 return "\n".join(texts) if texts else str(result.content)
 
             self.tool_map[tool.name] = traceable(name=tool.name, run_type="tool")(_exec)
-            logger.info("MCP tool registered: %s (write=%s, risk=%.2f)", tool.name, is_risky, risk_score)
+            logger.info(
+                "MCP tool registered: %s (write=%s, risk=%.2f)",
+                tool.name,
+                is_risky,
+                risk_score,
+            )
 
         return declarations
 
@@ -431,9 +480,17 @@ class GeminiLiveAgent:
                 ) as (read, write, _):
                     async with ClientSession(read, write) as mcp_session:
                         await mcp_session.initialize()
-                        declarations = await self._init_mcp_tools(mcp_session, event_out, client)
-                        gemini_tools = [types.Tool(function_declarations=declarations)] if declarations else None
-                        config = build_live_config(self.voice_name, self.system_prompt, tools=gemini_tools)
+                        declarations = await self._init_mcp_tools(
+                            mcp_session, event_out, client
+                        )
+                        gemini_tools = (
+                            [types.Tool(function_declarations=declarations)]
+                            if declarations
+                            else None
+                        )
+                        config = build_live_config(
+                            self.voice_name, self.system_prompt, tools=gemini_tools
+                        )
                         logger.info(
                             "MCP gateway connected (url=%s), %d tools registered",
                             self.mcp_gateway_url,
@@ -441,8 +498,12 @@ class GeminiLiveAgent:
                         )
                         if not self.mcp_status.done():
                             self.mcp_status.set_result(True)
-                        async with client.aio.live.connect(model=self.model_id, config=config) as session:
-                            await self._run_session(session, audio_in, event_out, self.tool_map)
+                        async with client.aio.live.connect(
+                            model=self.model_id, config=config
+                        ) as session:
+                            await self._run_session(
+                                session, audio_in, event_out, self.tool_map
+                            )
                 return
             except Exception as exc:
                 logger.warning(
@@ -454,7 +515,9 @@ class GeminiLiveAgent:
                     self.mcp_status.set_result(False)
                 await event_out.put({"type": "mcp_auth_failed", "message": str(exc)})
 
-        async with client.aio.live.connect(model=self.model_id, config=self._config) as session:
+        async with client.aio.live.connect(
+            model=self.model_id, config=self._config
+        ) as session:
             await self._run_session(session, audio_in, event_out, self.tool_map)
 
     async def _run_session(
@@ -500,7 +563,9 @@ class GeminiLiveAgent:
                         logger.debug("send_loop: forwarded %d chunks", chunks_sent)
                     if t_first_audio_sent is None:
                         t_first_audio_sent = time.perf_counter()
-                    await session.send_realtime_input(media=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                    await session.send_realtime_input(
+                        media=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -549,7 +614,9 @@ class GeminiLiveAgent:
                                         response={"result": result},
                                     )
                                 )
-                            await session.send_tool_response(function_responses=fn_responses)
+                            await session.send_tool_response(
+                                function_responses=fn_responses
+                            )
                             continue
 
                         sc = response.server_content
@@ -566,21 +633,41 @@ class GeminiLiveAgent:
                         if sc.model_turn:
                             for part in sc.model_turn.parts:
                                 if part.inline_data and part.inline_data.data:
-                                    if not first_response_logged and t_first_audio_sent is not None:
-                                        lat_ms = (time.perf_counter() - t_first_audio_sent) * 1000
-                                        logger.info("[LATENCY] Gemini first audio: %.0f ms", lat_ms)
+                                    if (
+                                        not first_response_logged
+                                        and t_first_audio_sent is not None
+                                    ):
+                                        lat_ms = (
+                                            time.perf_counter() - t_first_audio_sent
+                                        ) * 1000
+                                        logger.info(
+                                            "[LATENCY] Gemini first audio: %.0f ms",
+                                            lat_ms,
+                                        )
                                         first_response_logged = True
-                                    audio_b64 = base64.b64encode(part.inline_data.data).decode("ascii")
-                                    _event_logger.debug(json.dumps({"type": "audio_chunk"}))
-                                    await event_out.put({"type": "audio_chunk", "audio": audio_b64})
+                                    audio_b64 = base64.b64encode(
+                                        part.inline_data.data
+                                    ).decode("ascii")
+                                    _event_logger.debug(
+                                        json.dumps({"type": "audio_chunk"})
+                                    )
+                                    await event_out.put(
+                                        {"type": "audio_chunk", "audio": audio_b64}
+                                    )
 
                         if sc.input_transcription and sc.input_transcription.text:
-                            ev = {"type": "input_transcript", "text": sc.input_transcription.text}
+                            ev = {
+                                "type": "input_transcript",
+                                "text": sc.input_transcription.text,
+                            }
                             _event_logger.debug(json.dumps(ev))
                             await event_out.put(ev)
 
                         if sc.output_transcription and sc.output_transcription.text:
-                            ev = {"type": "output_transcript", "text": sc.output_transcription.text}
+                            ev = {
+                                "type": "output_transcript",
+                                "text": sc.output_transcription.text,
+                            }
                             _event_logger.debug(json.dumps(ev))
                             await event_out.put(ev)
 
@@ -594,7 +681,9 @@ class GeminiLiveAgent:
                             break  # restart session.receive() for next turn
                     else:
                         # for completed without break → session genuinely closed.
-                        logger.warning("receive_loop: session closed after %d turns", turn)
+                        logger.warning(
+                            "receive_loop: session closed after %d turns", turn
+                        )
                         break
 
             except asyncio.CancelledError:
