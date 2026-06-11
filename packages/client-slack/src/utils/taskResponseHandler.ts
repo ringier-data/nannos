@@ -2,6 +2,7 @@ import { WebClient } from '@slack/web-api';
 import { Logger } from './logger.js';
 import _ from 'lodash';
 import { Artifact, DataPart, FileWithBytes, FileWithUri, Task } from '@a2a-js/sdk';
+import type { ThinkingStepsStreamer } from './thinkingStepsStreamer.js';
 
 const logger = Logger.getLogger('taskResponseHandler');
 
@@ -338,6 +339,171 @@ export async function handleTask(params: HandleTaskResponseParams): Promise<{ me
 }
 
 /**
+ * Finalize a task whose answer was streamed via a {@link ThinkingStepsStreamer}.
+ *
+ * Mirrors {@link handleTask}'s text-extraction logic, but instead of posting a
+ * fresh message it (a) streams the answer text if it wasn't already streamed
+ * chunk-by-chunk from artifact-update events, (b) appends file-URI links as
+ * trailing markdown, (c) stops the stream, and (d) uploads byte file artifacts.
+ *
+ * `handleTask` stays as-is for the non-streaming paths (startup recovery,
+ * async webhook completion).
+ */
+export async function finalizeStreamedTask(params: {
+  task: Task;
+  streamer: ThinkingStepsStreamer;
+  slackClient: WebClient;
+  messageContext: SlackMessageContext;
+}): Promise<{ messageTs: string | undefined }> {
+  const { task, streamer, slackClient, messageContext } = params;
+  const { channelId, threadTs, messageTs, statusMessageTs } = messageContext;
+
+  if (!isInterruptedOrTerminated(task.status.state)) {
+    logger.info({ taskId: task.id }, `Task state still processing, not finalizing stream: ${task.status.state}`);
+    return { messageTs: undefined };
+  }
+
+  const parts = processArtifacts(task.artifacts);
+
+  // Resolve the authoritative answer text (same precedence as handleTask):
+  // interrupted → status.message; terminal → artifact text; fallback status.message.
+  let message = '';
+  if (isInterruptedState(task.status.state) && task.status?.message?.parts) {
+    for (const part of task.status.message.parts) {
+      if (part.kind === 'text') message += (part as { kind: 'text'; text: string }).text;
+    }
+  }
+  if (!message && parts.textParts.length > 0) {
+    message = parts.textParts.join('');
+  }
+  if (!message && task.status?.message?.parts) {
+    for (const part of task.status.message.parts) {
+      if (part.kind === 'text') message += (part as { kind: 'text'; text: string }).text;
+    }
+  }
+  message = message.trim();
+
+  // The terminal status/artifact text is the AUTHORITATIVE full answer (the
+  // server's `final_answer_source: "fallback"` contract). Hand it to the
+  // streamer as a snapshot: it appends only what the live artifact-append
+  // stream didn't already show — nothing in the common case (deduping the
+  // body), or the missing suffix if an intermediate SSE frame was dropped.
+  if (message) {
+    await streamer.appendAnswer(message, true);
+  }
+
+  // Footer: linked filenames rather than bare URLs.
+  const fileLinks = parts.filesWithUri.map((f) => `• <${f.uri}|${f.name || 'file'}>`);
+  const trailingMarkdown = fileLinks.length > 0 ? `\n\n*Attached files:*\n${fileLinks.join('\n')}` : undefined;
+
+  // Settle the (collapsed) plan disclosure to a finished label on success —
+  // otherwise it stays "Working" after completion.
+  const planTitle = isTerminatedState(task.status.state) ? 'Thinking' : undefined;
+  await streamer.finish({ trailingMarkdown, planTitle });
+
+  // File (byte) artifacts upload as separate Slack files, as before.
+  await uploadFileArtifacts(slackClient, channelId, threadTs, parts.filesWithBytes);
+
+  // Prefer the final-answer message for feedback/reactions; fall back to the
+  // thinking widget if there was no separate answer message.
+  return { messageTs: streamer.answerTs || streamer.ts || statusMessageTs || messageTs };
+}
+
+/** rich_text block wrapping one line of plain text (for a task-card's details). */
+function decisionRichText(text: string): any {
+  return {
+    type: 'rich_text',
+    elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: text.substring(0, 2000) }] }],
+  };
+}
+
+/**
+ * Replace a HITL approval widget (its own message) with a concise decision
+ * summary after the user decides. Tries a compact collapsible `task_card`
+ * (title = the decision, details = specifics); falls back to a plain section if
+ * task cards aren't supported in a non-streamed message.
+ */
+export async function replaceInterruptWithDecision(
+  slackClient: WebClient,
+  channelId: string,
+  ts: string,
+  title: string,
+  detail?: string
+): Promise<void> {
+  const fallbackText = detail ? `${title} — ${detail}` : title;
+  try {
+    await slackClient.chat.update({
+      channel: channelId,
+      ts,
+      text: fallbackText,
+      blocks: [
+        {
+          type: 'task_card',
+          task_id: 'hitl_decision',
+          title: title.substring(0, 256),
+          status: 'complete',
+          ...(detail ? { details: decisionRichText(detail) } : {}),
+        },
+      ],
+    });
+    return;
+  } catch (err) {
+    logger.debug({ err }, `task_card decision summary unsupported, using a section`);
+  }
+  await slackClient.chat
+    .update({
+      channel: channelId,
+      ts,
+      text: fallbackText,
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `*${title}*${detail ? ` — ${detail}` : ''}` } }],
+    })
+    .catch((err) => logger.debug({ err }, `Failed to post decision summary`));
+}
+
+
+/**
+ * Record a HITL decision. Preferred: append a decision task card to the OPEN
+ * thinking-steps stream (so the outcome shows inside that one widget) and remove
+ * the standalone approval message. If there's no open stream (or appending fails
+ * — e.g. it expired), fall back to turning the approval message itself into the
+ * decision summary.
+ */
+export async function recordDecision(
+  slackClient: WebClient,
+  channelId: string,
+  approvalMessageTs: string,
+  streamTs: string | undefined,
+  title: string,
+  detail: string | undefined,
+  approved: boolean
+): Promise<void> {
+  if (streamTs) {
+    try {
+      await slackClient.chat.appendStream({
+        channel: channelId,
+        ts: streamTs,
+        chunks: [
+          {
+            type: 'task_update',
+            // Unique per interrupt so multiple HITL decisions don't overwrite each other.
+            id: `hitl_decision:${approvalMessageTs}`,
+            title: title.substring(0, 256),
+            status: approved ? 'complete' : 'error',
+            ...(detail ? { details: detail.substring(0, 2000) } : {}),
+          },
+        ],
+      } as any);
+      // Decision now lives in the thinking widget — drop the standalone approval message.
+      await slackClient.chat.delete({ channel: channelId, ts: approvalMessageTs }).catch(() => {});
+      return;
+    } catch (err) {
+      logger.debug({ err }, `could not append decision to stream ${streamTs}; using standalone card`);
+    }
+  }
+  await replaceInterruptWithDecision(slackClient, channelId, approvalMessageTs, title, detail);
+}
+
+/**
  * Handle error case - update reactions and post error message
  */
 export async function handleError(
@@ -382,6 +548,8 @@ export interface HitlInterruptWidgetData {
   threadTs: string;
   actionRequests?: any[];
   reviewConfigs?: Array<{ action_name: string; allowed_decisions: string[] }>;
+  planMessageTs?: string; // Existing plan-widget ts, carried through the HITL resume
+  streamMessageTs?: string; // Open thinking-steps stream ts, carried through the HITL resume
 }
 
 export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
@@ -406,6 +574,13 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
   const riskMeta = toolArgs._risk_metadata as { source?: string; score?: number; threshold?: number; matched_pattern?: string | null } | undefined;
   const isRiskScored = riskMeta?.source === 'risk_score';
 
+  // Concise "what was decided" summary for the post-decision card details.
+  const argSummary = metaEntries
+    .map(([, v]) => String(v))
+    .join(' ')
+    .substring(0, 200);
+  const decisionSummary = `${toolLabel}${argSummary ? ` ${argSummary}` : ''}`;
+
   // Button payload includes routing info + matched pattern for bypass
   const payload = {
     taskId: data.taskId,
@@ -414,6 +589,9 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
     channelId: data.channelId,
     threadTs: data.threadTs,
     allowedDecisions,
+    summary: decisionSummary,
+    ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
+    ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
     ...(isRiskScored && riskMeta?.matched_pattern ? { matchedPattern: riskMeta.matched_pattern } : {}),
   };
   const encodedData = Buffer.from(JSON.stringify(payload)).toString('base64');
@@ -426,11 +604,7 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
   if (approveAllowed) {
     actionElements.push({
       type: 'button',
-      text: {
-        type: 'plain_text',
-        text: '✅ Approve',
-        emoji: true,
-      },
+      text: { type: 'plain_text', text: 'Approve' },
       action_id: 'hitl_approve',
       value: encodedData,
       style: 'primary',
@@ -440,11 +614,7 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
   if (editAllowed) {
     actionElements.push({
       type: 'button',
-      text: {
-        type: 'plain_text',
-        text: '✏️ Request Changes',
-        emoji: true,
-      },
+      text: { type: 'plain_text', text: 'Request changes' },
       action_id: 'hitl_request_changes',
       value: encodedData,
     });
@@ -455,77 +625,60 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
     if (riskMeta!.matched_pattern) {
       actionElements.push({
         type: 'button',
-        text: {
-          type: 'plain_text',
-          text: '🔓 Allow Pattern',
-          emoji: true,
-        },
+        text: { type: 'plain_text', text: 'Allow pattern' },
         action_id: 'hitl_approve_bypass_pattern',
         value: encodedData,
+        // Bypass permanently widens auto-approval → confirm (Slack: require
+        // explicit confirmation for high-impact/irreversible actions).
+        confirm: confirmDialog(
+          'Allow this pattern?',
+          `Future calls matching \`${riskMeta!.matched_pattern}\` will run without asking. You can change this later.`,
+          'Allow pattern'
+        ),
       });
     }
     actionElements.push({
       type: 'button',
-      text: {
-        type: 'plain_text',
-        text: '🔓 Always Allow',
-        emoji: true,
-      },
+      text: { type: 'plain_text', text: 'Always allow' },
       action_id: 'hitl_approve_bypass_tool',
       value: encodedData,
+      confirm: confirmDialog(
+        'Always allow this tool?',
+        `Future "${toolLabel}" calls will run without asking. You can change this later.`,
+        'Always allow'
+      ),
     });
   }
 
   actionElements.push({
     type: 'button',
-    text: {
-      type: 'plain_text',
-      text: '❌ Reject',
-      emoji: true,
-    },
+    text: { type: 'plain_text', text: 'Reject' },
     action_id: 'hitl_reject',
     value: encodedData,
+    style: 'danger',
   });
 
-  const blocks: any[] = [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `⚠️ *Approval Required — ${toolLabel}*\n\n${data.reason.substring(0, 2000)}`,
-      },
+  // Header section + args laid out as two-column fields.
+  const headerSection: any = {
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: `*Approval required — ${toolLabel}*\n${data.reason.substring(0, 2000)}`,
     },
-  ];
-
-  // Show risk score indicator for risk-scored tools
-  if (isRiskScored && riskMeta) {
-    const pct = Math.round((riskMeta.score ?? 0) * 100);
-    const riskLabel = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
-    let riskText = `🛡️ *Risk:* ${riskLabel} (${pct}%)`;
-    if (riskMeta.matched_pattern) {
-      riskText += ` — matched: \`${riskMeta.matched_pattern}\``;
-    }
-    blocks.push({
-      type: 'context',
-      elements: [{ type: 'mrkdwn', text: riskText }],
-    });
-  }
-
-  // Show metadata fields (name, skill_name, visibility, etc.)
+  };
   if (metaEntries.length > 0) {
-    const metaText = metaEntries
-      .map(([k, v]) => `*${k}:* ${String(v).substring(0, 200)}`)
-      .join('\n');
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: metaText.substring(0, 3000),
-      },
-    });
+    headerSection.fields = metaEntries
+      .slice(0, 10)
+      .map(([k, v]) => ({ type: 'mrkdwn', text: `*${k}:*\n${String(v).substring(0, 400)}` }));
+  }
+  const blocks: any[] = [headerSection];
+
+  // Risk indicator (context line) for risk-scored tools.
+  if (isRiskScored && riskMeta) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: riskContextText(riskMeta) }] });
   }
 
-  // Show proposed content preview (truncated)
+  // Proposed content preview (truncated).
   if (proposedContent) {
     blocks.push({
       type: 'section',
@@ -536,10 +689,7 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
     });
   }
 
-  blocks.push({
-    type: 'actions',
-    elements: actionElements,
-  });
+  blocks.push({ type: 'actions', elements: actionElements });
 
   return blocks;
 }
@@ -549,8 +699,36 @@ export function callIdOf(action: any): string | undefined {
   return action?.args?._call_id;
 }
 
-/** Read-only detail blocks (tool label, risk, args, content) for ONE action_request. */
-function buildActionDetailBlocks(action: any, indexLabel?: string): any[] {
+/**
+ * Native "Are you sure?" confirmation dialog for high-impact buttons (bypass /
+ * approve-all). Slack pops this before the action fires. Reserved for genuinely
+ * consequential clicks to avoid confirmation fatigue.
+ */
+function confirmDialog(title: string, text: string, confirmLabel: string): any {
+  return {
+    title: { type: 'plain_text', text: title.substring(0, 100) },
+    text: { type: 'plain_text', text: text.substring(0, 300) },
+    confirm: { type: 'plain_text', text: confirmLabel.substring(0, 30) },
+    deny: { type: 'plain_text', text: 'Cancel' },
+    style: 'danger',
+  };
+}
+
+/** Single source of truth for the risk-context line (label + score + pattern). */
+function riskContextText(riskMeta: { score?: number; matched_pattern?: string | null }): string {
+  const pct = Math.round((riskMeta.score ?? 0) * 100);
+  const label = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
+  let text = `Risk: *${label}* (${pct}%)`;
+  if (riskMeta.matched_pattern) text += `  ·  matched \`${riskMeta.matched_pattern}\``;
+  return text;
+}
+
+/**
+ * Read-only detail blocks for ONE action_request: a section whose `fields` lay
+ * the args out in two columns, a context line for risk, and a code block for any
+ * proposed content. No per-action index prefix — dividers delimit actions.
+ */
+function buildActionDetailBlocks(action: any): any[] {
   const args = action?.args || {};
   const toolLabel = String(action?.name || 'unknown').replace(/_/g, ' ');
   const CONTENT_KEYS = ['content', 'body', 'description'];
@@ -562,25 +740,19 @@ function buildActionDetailBlocks(action: any, indexLabel?: string): any[] {
   const isRiskScored = riskMeta?.source === 'risk_score';
   const reason = String((args.description ?? args.reason) || '');
 
-  const blocks: any[] = [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*${indexLabel ? indexLabel + ' · ' : ''}${toolLabel}*${reason ? `\n${reason.substring(0, 1000)}` : ''}`,
-      },
-    },
-  ];
-  if (isRiskScored && riskMeta) {
-    const pct = Math.round((riskMeta.score ?? 0) * 100);
-    const riskLabel = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
-    let riskText = `🛡️ *Risk:* ${riskLabel} (${pct}%)`;
-    if (riskMeta.matched_pattern) riskText += ` — matched: \`${riskMeta.matched_pattern}\``;
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: riskText }] });
-  }
+  const section: any = {
+    type: 'section',
+    text: { type: 'mrkdwn', text: `*${toolLabel}*${reason ? `\n${reason.substring(0, 1000)}` : ''}` },
+  };
+  // Args as compact two-column key/value fields (Slack caps at 10).
   if (metaEntries.length > 0) {
-    const metaText = metaEntries.map(([k, v]) => `*${k}:* ${String(v).substring(0, 200)}`).join('\n');
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: metaText.substring(0, 3000) } });
+    section.fields = metaEntries
+      .slice(0, 10)
+      .map(([k, v]) => ({ type: 'mrkdwn', text: `*${k}:*\n${String(v).substring(0, 400)}` }));
+  }
+  const blocks: any[] = [section];
+  if (isRiskScored && riskMeta) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: riskContextText(riskMeta) }] });
   }
   if (proposedContent) {
     blocks.push({
@@ -602,21 +774,14 @@ export function buildMultiHitlInterruptWidget(data: HitlInterruptWidgetData): an
   const blocks: any[] = [
     {
       type: 'section',
-      text: { type: 'mrkdwn', text: `⚠️ *${actions.length} actions need your approval*` },
+      text: { type: 'mrkdwn', text: `*${actions.length} actions need your approval*` },
     },
   ];
-  actions.forEach((action, i) => {
+  actions.forEach((action) => {
     blocks.push({ type: 'divider' });
-    blocks.push(...buildActionDetailBlocks(action, `${i + 1}/${actions.length}`));
+    blocks.push(...buildActionDetailBlocks(action));
   });
 
-  const base = {
-    taskId: data.taskId,
-    contextId: data.contextId,
-    channelId: data.channelId,
-    threadTs: data.threadTs,
-  };
-  const blanketValue = Buffer.from(JSON.stringify(base)).toString('base64');
   // Compact per-call routing for the modal — kept small so it fits in Slack's
   // button-value limit without a server-side store. `detail` summarizes the
   // distinguishing args (e.g. `path: /memories/`) so the modal rows are
@@ -640,15 +805,43 @@ export function buildMultiHitlInterruptWidget(data: HitlInterruptWidgetData): an
       pattern: isRiskScored ? (riskMeta?.matched_pattern || undefined) : undefined,
     };
   });
+  // One-line-per-action summary for the post-decision card details.
+  const decisionSummary = calls
+    .map((c) => `${c.name}${c.detail ? ` — ${c.detail}` : ''}`)
+    .join('\n')
+    .substring(0, 500);
+
+  const base = {
+    taskId: data.taskId,
+    contextId: data.contextId,
+    channelId: data.channelId,
+    threadTs: data.threadTs,
+    summary: decisionSummary,
+    ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
+    ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
+  };
+  const blanketValue = Buffer.from(JSON.stringify(base)).toString('base64');
   const reviewValue = Buffer.from(JSON.stringify({ ...base, calls })).toString('base64');
 
   blocks.push({ type: 'divider' });
   blocks.push({
     type: 'actions',
     elements: [
-      { type: 'button', text: { type: 'plain_text', text: '✅ Approve all', emoji: true }, action_id: 'hitl_approve', value: blanketValue, style: 'primary' },
-      { type: 'button', text: { type: 'plain_text', text: '❌ Reject all', emoji: true }, action_id: 'hitl_reject', value: blanketValue },
-      { type: 'button', text: { type: 'plain_text', text: '⚖️ Review & decide', emoji: true }, action_id: 'hitl_review_multi', value: reviewValue },
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: 'Approve all' },
+        action_id: 'hitl_approve',
+        value: blanketValue,
+        style: 'primary',
+        // Approving multiple tools in one click is high-impact → confirm.
+        confirm: confirmDialog(
+          `Approve all ${actions.length} actions?`,
+          `All ${actions.length} pending tool calls will run. Use "Review & decide" to approve them individually.`,
+          'Approve all'
+        ),
+      },
+      { type: 'button', text: { type: 'plain_text', text: 'Reject all' }, action_id: 'hitl_reject', value: blanketValue, style: 'danger' },
+      { type: 'button', text: { type: 'plain_text', text: 'Review & decide' }, action_id: 'hitl_review_multi', value: reviewValue },
     ],
   });
   return blocks;
