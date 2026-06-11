@@ -61,6 +61,7 @@ from ..middleware import (
     UserPreferencesMiddleware,
 )
 from ..middleware.error_classification_middleware import ErrorClassificationMiddleware
+from ..middleware.final_response_strip_middleware import FinalResponseTextStripMiddleware
 from ..middleware.playbook_middleware import PlaybookInjectionMiddleware
 from ..models.config import AgentSettings, GraphRuntimeContext
 from ..models.schemas import FinalResponseSchema
@@ -578,6 +579,11 @@ class GraphFactory:
             self._retry_middleware,
             self._a2a_middleware,
             self._todo_middleware,
+            # Innermost: strip duplicate plain-text content from AIMessages that
+            # carry a FinalResponseSchema tool call, so every outer middleware and
+            # the checkpointer see the cleaned message (prevents the model from
+            # imitating its own text+tool-call pattern on later turns).
+            FinalResponseTextStripMiddleware(),
         ]
         return middleware_stack
 
@@ -610,7 +616,12 @@ class GraphFactory:
                 StructuredTool.from_function(
                     func=lambda **kwargs: FinalResponseSchema(**kwargs),
                     name="FinalResponseSchema",
-                    description="ALWAYS use this tool to format your final response to the user.",
+                    description=(
+                        "ALWAYS use this tool to format your final response to the user. "
+                        "Put the ENTIRE answer in the 'message' field and emit NO plain-text "
+                        "content alongside this call — any text outside the tool call is "
+                        "discarded and wastes tokens."
+                    ),
                     args_schema=FinalResponseSchema,
                     return_direct=True,
                 )

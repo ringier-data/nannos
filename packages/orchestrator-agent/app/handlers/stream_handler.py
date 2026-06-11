@@ -386,10 +386,19 @@ class StreamHandler:
                 message = parsed.message
             except Exception as e:
                 logger.error(f"Failed to parse structured_response: {e}", exc_info=True)
-                # Fallback to completed with error message
+                # Salvage the raw 'message' field: when another field (e.g.
+                # task_state) fails validation this is the only remaining copy
+                # of the answer — FinalResponseTextStripMiddleware has already
+                # removed any plain-text duplicate from the AIMessage.
+                if isinstance(structured_response, dict):
+                    salvaged = structured_response.get("message")
+                else:
+                    salvaged = getattr(structured_response, "message", None)
+                if not (isinstance(salvaged, str) and salvaged.strip()):
+                    salvaged = "Task processing completed with validation errors."
                 return AgentStreamResponse(
                     state=TaskState.TASK_STATE_COMPLETED,
-                    content="Task processing completed with validation errors.",
+                    content=salvaged,
                     metadata={"parse_error": str(e)},
                 )
 
