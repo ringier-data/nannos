@@ -593,10 +593,7 @@ class GeminiLiveAgent:
             fn = dispatch_map.get(name)
             if fn is not None:
                 try:
-                    if asyncio.iscoroutinefunction(fn):
-                        result = await fn(args)
-                    else:
-                        result = fn(**args)
+                    result = await fn(args)
                 except Exception:
                     logger.exception("Tool %r raised an exception", name)
                     result = f"Tool error: {name} raised an exception"
