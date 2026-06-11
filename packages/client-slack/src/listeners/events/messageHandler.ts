@@ -12,10 +12,10 @@ import { A2AClientService, A2ASlackBasedRequest } from '../../services/a2aClient
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, ContextRecord } from '../../storage/types.js';
-import { handleTask, handleError, postMessage } from '../../utils/taskResponseHandler.js';
+import { handleError, postMessage, finalizeStreamedTask, isInterruptedOrTerminated } from '../../utils/taskResponseHandler.js';
+import { ThinkingStepsStreamer, type WorkPlanTodo } from '../../utils/thinkingStepsStreamer.js';
 import { FeedbackService } from '../../services/feedbackService.js';
 import _ from 'lodash';
-import { getSpinnerVerb } from '../../utils/spinnerVerbs.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +38,8 @@ export interface NormalizedMessage {
   source: MessageSource;
   appId?: string; // Slack App ID (api_app_id from body) for multi-bot token routing
   client: WebClient;
+  planMessageTs?: string; // Existing plan-widget ts to keep updating across a HITL resume
+  resumeStreamTs?: string; // Open thinking-steps stream ts to continue across a HITL resume
 }
 
 /**
@@ -495,25 +497,37 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
   let statusMessageTs: string | undefined;
   let feedbackRequestData: { sub_agents?: string[] } | null = null;
   let interruptWidgetPosted = false;
+  // Declared at function scope so the finally cleanup can read the final task
+  // state to decide whether the stream was sealed.
+  let accumulatedTask: Task | null = null;
+  // One streamed "Thinking Steps" message per turn (chat.startStream/appendStream/
+  // stopStream). Replaces the legacy "post Working… → repeatedly chat.update →
+  // delete → repost final" flow. Degrades to plain status messages if the
+  // workspace lacks streaming support.
+  const streamer = new ThinkingStepsStreamer(client, {
+    channelId,
+    threadTs,
+    teamId,
+    userId,
+    // Plan-block disclosure label (the spinner verb is rendered on the seeded
+    // placeholder card inside the streamer). No emoji — native icons indicate state.
+    initialTitle: 'Working',
+    // Carried across a HITL resume so the one plan widget updates in place.
+    planMessageTs: msg.planMessageTs,
+    // Carried across a HITL resume so the thinking-steps continue in the same
+    // (still-open) streamed message instead of a new one.
+    resumeStreamTs: msg.resumeStreamTs,
+  });
   try {
     logger.info(`${source} from user ${userId} in channel ${channelId}`);
 
-    // Post an immediate "Working..." message so the user sees responsiveness
-    // before the A2A server sends its first status-update event.
-    const statusMessages = {
-      thinking: `🧠 ${getSpinnerVerb() || 'Working'}...`,
-      activity: '',
-      todos: '',
-    };
+    // Start the stream immediately so the user sees responsiveness before the
+    // A2A server sends its first status-update event.
     try {
-      const immediateStatus = await client.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: statusMessages.thinking,
-      });
-      statusMessageTs = immediateStatus.ts;
+      await streamer.start();
+      statusMessageTs = streamer.ts;
     } catch (err) {
-      logger.debug(`Failed to post immediate status message: ${err}`);
+      logger.debug(`Failed to start thinking-steps stream: ${err}`);
     }
 
     // Resolve <@USERID> mentions to @DisplayName (no-op for DMs without mentions)
@@ -725,7 +739,6 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     logger.info('Sending message via streaming');
 
-    let accumulatedTask: Task | null = null;
     try {
       for await (const event of a2aClientService.sendMessageStream(a2aRequest, accessToken)) {
         logger.debug(`Stream event: ${_.get(event, 'kind')}`);
@@ -736,6 +749,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           const task = event as Task;
           accumulatedTask = task;
 
+          statusMessageTs = streamer.ts ?? statusMessageTs;
           await inFlightTaskStore.save({
             taskId: accumulatedTask.id,
             visitorId: inFlightTaskStore.buildVisitorId(teamId, userId),
@@ -797,12 +811,15 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               }
 
               if (interruptMessage) {
-                // Generic HITL interrupt — show approval widget for any tool
+                // Generic HITL interrupt — show approval widget for any tool.
+                // The widget is its OWN message (below the sealed timeline), so
+                // on a decision it can be cleanly replaced with a decision summary
+                // (a streamed message containing task cards can't be chat.updated).
                 interruptWidgetPosted = true;
                 const { buildHitlInterruptWidget, buildMultiHitlInterruptWidget } = await import('../../utils/taskResponseHandler.js');
 
+                let hitlWidget: any[] | undefined;
                 try {
-                  const toolNames = actionRequests.map((ar: any) => ar?.name).filter(Boolean);
                   const firstAction = actionRequests[0];
                   const toolName = firstAction?.name || 'unknown';
                   const interruptReason = (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || interruptMessage;
@@ -817,24 +834,40 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                     threadTs,
                     actionRequests,
                     reviewConfigs,
+                    // Carry the plan widget ts so the resume updates it in place.
+                    planMessageTs: streamer.planTs,
+                    // Carry the open thinking-steps stream ts so the resume
+                    // continues the same widget rather than opening a new one.
+                    streamMessageTs: streamer.ts,
                   };
-                  const hitlWidget = actionRequests.length > 1
+                  hitlWidget = actionRequests.length > 1
                     ? buildMultiHitlInterruptWidget(widgetData)
                     : buildHitlInterruptWidget(widgetData);
-
                   logger.info(
-                    { taskId: accumulatedTask?.id, toolNames },
-                    `Posting HITL interrupt widget to Slack`
+                    { taskId: accumulatedTask?.id, toolNames: actionRequests.map((ar: any) => ar?.name).filter(Boolean) },
+                    `Posting HITL interrupt widget as its own message`
                   );
+                } catch (widgetErr) {
+                  logger.error(widgetErr, `Failed to build HITL interrupt widget, falling back to text: ${widgetErr}`);
+                  hitlWidget = undefined;
+                }
 
+                // PAUSE the streamed timeline (don't stop it): complete the
+                // in-progress steps and relabel the plan, but leave the stream
+                // open so the resume turn continues the SAME widget. The
+                // input-required task state keeps the finally cleanup from
+                // discarding it.
+                await streamer.pause('Awaiting your approval');
+
+                // Post the approval widget as its own message below the timeline.
+                if (hitlWidget) {
                   await client.chat.postMessage({
                     channel: channelId,
                     thread_ts: threadTs,
-                    text: `⚠️ Approval Required`,
+                    text: 'Approval required',
                     blocks: hitlWidget,
                   });
-                } catch (widgetErr) {
-                  logger.error(widgetErr, `Failed to post HITL interrupt widget, falling back to text: ${widgetErr}`);
+                } else {
                   await postMessage(client, channelId, threadTs, interruptMessage);
                 }
 
@@ -846,27 +879,23 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
             }
           }
 
+          // Sub-agent that produced this update (used to attribute thinking/activity cards)
+          const updateSource = event.status.message?.metadata?.source as string | undefined;
+
           if (event.status.message?.extensions?.includes('urn:nannos:a2a:work-plan:1.0')) {
+            // todos → plan block: one status-tracked task card per todo.
             const workPlan = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
-              todos: Array<{
-                name: string; // Required: task description
-                state: 'submitted' | 'working' | 'completed' | 'failed'; // Required: current state
-                source?: string; // Optional: agent that owns this todo
-                target?: string; // Optional: resource ID being operated on
-              }>;
+              todos: WorkPlanTodo[];
             };
-            statusMessages.todos = workPlan.todos
-              .map(
-                (x) =>
-                  `• ${x.state === 'completed' ? '✅' : x.state === 'working' ? '⏳' : x.state === 'failed' ? '❌' : '🔜'} ${x.name}${x.source ? ` (agent ${x.source})` : ''}${x.target ? ` [${x.target}]` : ''}`
-              )
-              .join('\n');
+            await streamer.applyWorkPlan(workPlan?.todos ?? []);
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:activity-log:1.0')) {
-            statusMessages.activity = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+            // activity-log → a completed task card for the discrete action.
+            const activityText = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+            await streamer.applyActivity(activityText, updateSource);
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:intermediate-output:1.0')) {
-            logger.debug(
-              `Received status update as intermediate-output. Not updating status message details. This is thinking`
-            );
+            // intermediate-output → collapsible "💭 reasoning" card (kept out of the answer body).
+            const thinkingText = event.status.message.parts.find((x) => x.kind === 'text')?.text || '';
+            await streamer.appendThinking(thinkingText, updateSource);
           } else if (event.status.message?.extensions?.includes('urn:nannos:a2a:feedback-request:1.0')) {
             // Store feedback request data to send as ephemeral after final response
             const feedbackData = event.status.message.parts.find((x) => x.kind === 'data')?.data as {
@@ -880,22 +909,49 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               `Received status update without recognized extensions (${event.status.message?.extensions}). Not updating status message details.`
             );
           }
-          
-          const newStatustMessage = `${statusMessages.thinking}${statusMessages.activity ? ` [${statusMessages.activity}]` : ''}${statusMessages.todos ? `\n${statusMessages.todos}` : ''}`;
-          if (statusMessageTs) {
-            await client.chat.update({
-              channel: channelId,
-              ts: statusMessageTs,
-              markdown_text: newStatustMessage,
-            });
-          }
         } else if (event.kind === 'artifact-update') {
-          if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
-          accumulatedTask.artifacts.push(event.artifact);
-          logger.debug(
-            { taskId: accumulatedTask?.id, accumulatedTask },
-            `Building artifact update. Total artifacts now: ${accumulatedTask.artifacts.length}`
-          );
+          // The orchestrator streams BOTH sub-agent thinking and the final answer
+          // as artifact-update events, distinguished by the artifact's extensions:
+          //   - intermediate-output ext  → sub-agent reasoning  → collapsible card
+          //   - no extension             → the final answer     → visible body
+          const artifactExtensions = event.artifact.extensions || [];
+          const isIntermediate = artifactExtensions.includes('urn:nannos:a2a:intermediate-output:1.0');
+          const text = (event.artifact.parts || [])
+            .filter((p) => p.kind === 'text')
+            .map((p) => (p as { kind: 'text'; text: string }).text)
+            .join('');
+          const agentName = event.artifact.metadata?.agent_name as string | undefined;
+
+          if (isIntermediate) {
+            // Sub-agent thinking → "💭 reasoning" card; kept OUT of the answer body
+            // and OUT of accumulatedTask.artifacts so it never leaks into the final text.
+            if (text) await streamer.appendThinking(text, agentName);
+          } else {
+            // Respect A2A artifact-append semantics: `append: true` chunks extend
+            // the artifact with the same id (a delta); `append: false`/absent is a
+            // create or full-snapshot that REPLACES it. Keeping one logical
+            // artifact per id stops a re-sent full answer from inflating the
+            // accumulated text. The body is updated with only the not-yet-shown
+            // portion (appendAnswer's snapshot diff).
+            const isAppend = event.append === true;
+            if (!accumulatedTask.artifacts) accumulatedTask.artifacts = [];
+            const existing = accumulatedTask.artifacts.find((a) => a.artifactId === event.artifact.artifactId);
+            if (existing && isAppend) {
+              existing.parts.push(...event.artifact.parts);
+            } else if (existing) {
+              existing.parts = event.artifact.parts;
+            } else {
+              accumulatedTask.artifacts.push(event.artifact);
+            }
+            logger.debug(
+              { taskId: accumulatedTask?.id, append: isAppend },
+              `Building artifact update. Total artifacts now: ${accumulatedTask.artifacts.length}`
+            );
+            // Stream the final answer into the visible body as it arrives. A
+            // create/snapshot chunk (append=false) is deduped against what we've
+            // already shown; a delta (append=true) is appended verbatim.
+            if (text) await streamer.appendAnswer(text, !isAppend);
+          }
         } else {
           logger.debug({ taskId: accumulatedTask?.id }, `Unknown stream event: ${_.get(event, 'kind')}`);
         }
@@ -922,11 +978,14 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     // ---- Handle the response ----
     // Skip if we already posted a custom interrupt widget (e.g. bug report)
     if (interruptWidgetPosted) {
-      logger.info({ taskId: accumulatedTask?.id }, `Skipping handleTask — interrupt widget already posted`);
+      logger.info({ taskId: accumulatedTask?.id }, `Skipping finalize — interrupt widget already posted`);
       return;
     }
-    const result = await handleTask({
+    // Finalize the streamed message: stream any not-yet-streamed answer text,
+    // append file links, stop the stream, and upload byte artifacts.
+    const result = await finalizeStreamedTask({
       task: accumulatedTask,
+      streamer,
       slackClient: client,
       messageContext: {
         channelId,
@@ -1035,16 +1094,14 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     logger.error(error, `Error handling ${source}: ${error}`);
     await handleError(client, channelId, threadTs, messageTs);
   } finally {
-    // Clean up thinking message if it still exists (e.g. if A2A server didn't send any status updates or final response)
-    if (statusMessageTs) {
-      try {
-        await client.chat.delete({
-          channel: channelId,
-          ts: statusMessageTs,
-        });
-      } catch (err) {
-        logger.trace(err, `Failed to delete thinking message: ${err}`);
-      }
+    // The stream is sealed only once the task reaches an interrupted or terminal
+    // state (HITL seal or finalize). If it never did — early return for
+    // auth/debug/empty input, no task received, or a dropped/errored stream while
+    // still "working" — discard the dangling "Working…" stream so no empty
+    // thinking-steps message is left behind. Inferred from the task state rather
+    // than a manual flag.
+    if (!isInterruptedOrTerminated(accumulatedTask?.status?.state)) {
+      await streamer.discard();
     }
   }
 }

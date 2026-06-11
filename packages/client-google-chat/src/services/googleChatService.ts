@@ -6,6 +6,35 @@ import { FileWithBytes } from '@a2a-js/sdk';
 
 const logger = Logger.getLogger('GoogleChatService');
 
+/** Arg keys rendered as a content preview, and those hidden from the HITL card entirely. */
+const HITL_CONTENT_KEYS = ['content', 'body', 'description'];
+const HITL_HIDDEN_KEYS = ['reason', '_risk_metadata'];
+
+type RiskMeta = { source?: string; score?: number; threshold?: number; matched_pattern?: string | null };
+
+/** Split a tool call's args into the displayable content preview, metadata rows, and risk info. */
+function extractCallDisplay(args: Record<string, any>): {
+  proposedContent: string;
+  metaEntries: [string, unknown][];
+  riskMeta: RiskMeta | undefined;
+  isRiskScored: boolean;
+} {
+  const contentKey = HITL_CONTENT_KEYS.find((k) => k in args);
+  const proposedContent = contentKey ? String(args[contentKey] || '') : '';
+  const metaEntries = Object.entries(args).filter(([k]) => !HITL_CONTENT_KEYS.includes(k) && !HITL_HIDDEN_KEYS.includes(k));
+  const riskMeta = args._risk_metadata as RiskMeta | undefined;
+  return { proposedContent, metaEntries, riskMeta, isRiskScored: riskMeta?.source === 'risk_score' };
+}
+
+/** Format the risk badge line for a risk-scored call, e.g. "🛡️ Risk: High (82%) — matched: <code>…</code>". */
+function riskBadge(riskMeta: RiskMeta): string {
+  const pct = Math.round((riskMeta.score ?? 0) * 100);
+  const riskLabel = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
+  let riskText = `🛡️ <b>Risk:</b> ${riskLabel} (${pct}%)`;
+  if (riskMeta.matched_pattern) riskText += ` — matched: <code>${riskMeta.matched_pattern}</code>`;
+  return riskText;
+}
+
 /**
  * Options for sending a message to Google Chat
  */
@@ -475,20 +504,10 @@ export class GoogleChatService {
     const editAllowed = allowedDecisions.includes('edit');
     const approveAllowed = allowedDecisions.includes('approve');
 
-    // Extract proposed args for display
-    const CONTENT_KEYS = ['content', 'body', 'description'];
-    const HIDDEN_KEYS = ['reason', '_risk_metadata'];
+    // Extract proposed args + risk metadata for display and bypass buttons.
     const firstAction = actionRequests?.[0];
     const toolArgs = firstAction?.args || {};
-    const contentKey = CONTENT_KEYS.find((k: string) => k in toolArgs);
-    const proposedContent = contentKey ? String(toolArgs[contentKey] || '') : '';
-    const metaEntries = Object.entries(toolArgs).filter(
-      ([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k)
-    );
-
-    // Extract risk metadata for bypass buttons
-    const riskMeta = toolArgs._risk_metadata as { source?: string; score?: number; threshold?: number; matched_pattern?: string | null } | undefined;
-    const isRiskScored = riskMeta?.source === 'risk_score';
+    const { proposedContent, metaEntries, riskMeta, isRiskScored } = extractCallDisplay(toolArgs);
 
     const buttons: any[] = [
       {
@@ -595,15 +614,7 @@ export class GoogleChatService {
                 ? [
                     {
                       textParagraph: {
-                        text: (() => {
-                          const pct = Math.round((riskMeta.score ?? 0) * 100);
-                          const riskLabel = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
-                          let riskText = `🛡️ <b>Risk:</b> ${riskLabel} (${pct}%)`;
-                          if (riskMeta.matched_pattern) {
-                            riskText += ` — matched: <code>${riskMeta.matched_pattern}</code>`;
-                          }
-                          return riskText;
-                        })(),
+                        text: riskBadge(riskMeta),
                       },
                     } as any,
                   ]
@@ -659,8 +670,6 @@ export class GoogleChatService {
     actionRequests: any[],
   ): chat_v1.Schema$CardWithId {
     const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
-    const CONTENT_KEYS = ['content', 'body', 'description'];
-    const HIDDEN_KEYS = ['reason', '_risk_metadata'];
 
     // Per-call routing for the batched submit: id + matched pattern (for bypass).
     // ``_call_id`` is top-level and risk-independent (set for static + risk calls);
@@ -678,22 +687,14 @@ export class GoogleChatService {
       const args = action?.args || {};
       const toolLabel = String(action?.name || 'unknown').replace(/_/g, ' ');
       const reason = String((args.description ?? args.reason) || '');
-      const riskMeta = args._risk_metadata as { source?: string; score?: number; matched_pattern?: string | null } | undefined;
-      const isRiskScored = riskMeta?.source === 'risk_score';
-      const contentKey = CONTENT_KEYS.find((k: string) => k in args);
-      const proposedContent = contentKey ? String(args[contentKey] || '') : '';
-      const metaEntries = Object.entries(args).filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k));
+      const { proposedContent, metaEntries, riskMeta, isRiskScored } = extractCallDisplay(args);
 
       if (i > 0) widgets.push({ divider: {} });
       widgets.push({
         textParagraph: { text: `<b>${i + 1}. ${toolLabel}</b>${reason ? `\n${reason.substring(0, 1000)}` : ''}` },
       });
       if (isRiskScored && riskMeta) {
-        const pct = Math.round((riskMeta.score ?? 0) * 100);
-        const riskLabel = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
-        let riskText = `🛡️ <b>Risk:</b> ${riskLabel} (${pct}%)`;
-        if (riskMeta.matched_pattern) riskText += ` — matched: <code>${riskMeta.matched_pattern}</code>`;
-        widgets.push({ textParagraph: { text: riskText } });
+        widgets.push({ textParagraph: { text: riskBadge(riskMeta) } });
       }
       if (metaEntries.length > 0) {
         widgets.push({

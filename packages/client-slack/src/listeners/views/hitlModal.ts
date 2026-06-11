@@ -1,6 +1,7 @@
 import { App } from '@slack/bolt';
 import { Logger } from '../../utils/logger.js';
 import { handleIncomingMessage, HandlerDependencies, NormalizedMessage } from '../events/messageHandler.js';
+import { recordDecision } from '../../utils/taskResponseHandler.js';
 
 /**
  * Register handler for HITL "Request Changes" modal submission.
@@ -53,13 +54,22 @@ export function registerHitlModalHandler(app: App, makeDeps: () => HandlerDepend
         dataParts: [decisions],
         source: 'direct_message',
         client,
+        planMessageTs: privateMetadata.planMessageTs,
+        resumeStreamTs: privateMetadata.streamMessageTs,
       };
 
-      // Remove the interactive widget (orchestrator will post the outcome)
-      await client.chat.delete({
-        channel: channelId,
-        ts: messageTs,
-      });
+      // Record the decision — into the open thinking stream if possible.
+      if (channelId && messageTs) {
+        await recordDecision(
+          client,
+          channelId,
+          messageTs,
+          privateMetadata.streamMessageTs,
+          'Changes requested',
+          privateMetadata.summary || toolName,
+          false
+        );
+      }
 
       // Fire the message to the orchestrator
       handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {
@@ -127,10 +137,24 @@ export function registerHitlModalHandler(app: App, makeDeps: () => HandlerDepend
         dataParts: [{ decisions }],
         source: 'direct_message',
         client,
+        planMessageTs: pm.planMessageTs,
+        resumeStreamTs: pm.streamMessageTs,
       };
 
+      // Record per-call decisions: one line per call showing approve/reject +
+      // the tool and its args, folded into the open thinking stream if possible.
       if (channelId && messageTs) {
-        await client.chat.delete({ channel: channelId, ts: messageTs }).catch(() => {});
+        const summary = decisions
+          .map((d, idx) => {
+            const c = callList[idx] || {};
+            const name = c.name || 'tool';
+            const detail = c.detail ? ` — ${c.detail}` : '';
+            const bypass = d.bypass_all ? ' (always allow)' : d.bypass_pattern ? ' (pattern allowed)' : '';
+            return `${d.type === 'reject' ? '🚫' : '✅'} ${name}${detail}${bypass}`;
+          })
+          .join('\n');
+        const anyApproved = decisions.some((d) => d.type !== 'reject');
+        await recordDecision(client, channelId, messageTs, pm.streamMessageTs, 'Decisions', summary, anyApproved);
       }
 
       handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {

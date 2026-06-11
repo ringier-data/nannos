@@ -1,6 +1,7 @@
 import { App } from '@slack/bolt';
 import { Logger } from '../../utils/logger.js';
 import { handleIncomingMessage, HandlerDependencies, NormalizedMessage } from '../events/messageHandler.js';
+import { recordDecision } from '../../utils/taskResponseHandler.js';
 
 /**
  * Register handlers for generic HITL interrupt widget interactions.
@@ -42,11 +43,9 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
 
       logger.info(`HITL rejected by user ${userId} for task ${taskId} tool ${toolName}`);
 
-      // Remove the interactive widget (orchestrator will post the outcome)
-      await client.chat.delete({
-        channel: channelId,
-        ts: messageTs,
-      });
+      // Strip the buttons from the interrupt block (keep the trace); the resume
+      // posts the outcome.
+      await recordDecision(client, channelId, messageTs, decodedValue.streamMessageTs, 'Rejected', decodedValue.summary || decodedValue.toolName, false);
 
       // Send reject decision to orchestrator via handleIncomingMessage.
       // No message → the server supplies the default rejection text.
@@ -61,6 +60,8 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         dataParts: [decisions],
         source: 'direct_message',
         client,
+        planMessageTs: decodedValue.planMessageTs,
+        resumeStreamTs: decodedValue.streamMessageTs,
       };
 
       handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {
@@ -96,11 +97,8 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
 
       logger.info(`HITL approved by user ${userId} for task ${taskId} tool ${toolName}`);
 
-      // Remove the interactive widget
-      await client.chat.delete({
-        channel: channelId,
-        ts: messageTs,
-      });
+      // Strip the buttons from the interrupt block (keep the trace)
+      await recordDecision(client, channelId, messageTs, decodedValue.streamMessageTs, 'Approved', decodedValue.summary || decodedValue.toolName, true);
 
       // Send approve decision to orchestrator
       const decisions = { decisions: [{ type: 'approve' }] };
@@ -114,6 +112,8 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         dataParts: [decisions],
         source: 'direct_message',
         client,
+        planMessageTs: decodedValue.planMessageTs,
+        resumeStreamTs: decodedValue.streamMessageTs,
       };
 
       handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {
@@ -149,10 +149,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
 
       logger.info(`HITL approve+bypass_tool by user ${userId} for task ${taskId} tool ${toolName}`);
 
-      await client.chat.delete({
-        channel: channelId,
-        ts: messageTs,
-      });
+      await recordDecision(client, channelId, messageTs, decodedValue.streamMessageTs, 'Approved', `${decodedValue.summary || decodedValue.toolName} — always allow`, true);
 
       const decisions = { decisions: [{ type: 'approve', bypass: true, bypass_all: true }] };
       const syntheticMessage: NormalizedMessage = {
@@ -165,6 +162,8 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         dataParts: [decisions],
         source: 'direct_message',
         client,
+        planMessageTs: decodedValue.planMessageTs,
+        resumeStreamTs: decodedValue.streamMessageTs,
       };
 
       handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {
@@ -200,10 +199,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
 
       logger.info(`HITL approve+bypass_pattern by user ${userId} for task ${taskId} tool ${toolName}`);
 
-      await client.chat.delete({
-        channel: channelId,
-        ts: messageTs,
-      });
+      await recordDecision(client, channelId, messageTs, decodedValue.streamMessageTs, 'Approved', `${decodedValue.summary || decodedValue.toolName} — pattern allowed`, true);
 
       const decisions = { decisions: [{ type: 'approve', bypass: true, bypass_pattern: decodedValue.matchedPattern }] };
       const syntheticMessage: NormalizedMessage = {
@@ -216,6 +212,8 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         dataParts: [decisions],
         source: 'direct_message',
         client,
+        planMessageTs: decodedValue.planMessageTs,
+        resumeStreamTs: decodedValue.streamMessageTs,
       };
 
       handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {
@@ -258,6 +256,9 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         channelId,
         threadTs,
         messageTs,
+        planMessageTs: decodedValue.planMessageTs,
+        streamMessageTs: decodedValue.streamMessageTs,
+        summary: decodedValue.summary,
       });
 
       const toolLabel = (toolName || 'unknown').replace(/_/g, ' ');
@@ -316,6 +317,8 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
           blocks,
         },
       });
+      // Leave the widget intact while the modal is open; it's replaced with a
+      // decision summary on submit (and stays usable if the modal is cancelled).
     } catch (error) {
       logger.error(error, `Failed to open HITL request changes modal: ${error}`);
     }
@@ -385,7 +388,16 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         channelId,
         threadTs,
         messageTs,
-        calls: callList.map((c: any) => ({ id: c?.id, pattern: c?.pattern })),
+        planMessageTs: decoded.planMessageTs,
+        streamMessageTs: decoded.streamMessageTs,
+        // Keep name + detail so the post-decision summary can show what was
+        // approved/rejected (kept compact — well under Slack's 3000-char limit).
+        calls: callList.map((c: any) => ({
+          id: c?.id,
+          name: c?.name,
+          detail: typeof c?.detail === 'string' ? c.detail.substring(0, 120) : undefined,
+          pattern: c?.pattern,
+        })),
       });
 
       await client.views.open({
@@ -400,6 +412,8 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
           blocks,
         },
       });
+      // Leave the widget intact while the modal is open; it's replaced with a
+      // decision summary on submit (and stays usable if the modal is cancelled).
     } catch (error) {
       logger.error(error, `Failed to open multi-action HITL modal: ${error}`);
     }
