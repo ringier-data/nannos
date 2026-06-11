@@ -252,3 +252,71 @@ class TestRiskScoringExclusions:
         result, scored = await self._run("task")
         assert result is None
         assert "task" not in scored
+
+
+class TestPerCallIdStamping:
+    """Every interrupted call must carry a top-level ``args._call_id`` — static guards
+    and risk-scored alike — so the resume path aligns decisions by id (not position).
+    """
+
+    @staticmethod
+    def _capture_interrupt(monkeypatch):
+        """Patch the middleware's ``interrupt`` to capture the HITLRequest and approve."""
+        captured: dict = {}
+
+        def fake_interrupt(request):
+            captured["request"] = request
+            return {"decisions": [{"type": "approve"} for _ in request["action_requests"]]}
+
+        monkeypatch.setattr("agent_common.middleware.conditional_hitl.interrupt", fake_interrupt)
+        return captured
+
+    async def test_static_guard_stamps_top_level_call_id(self, monkeypatch):
+        captured = self._capture_interrupt(monkeypatch)
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={"danger": {"allowed_decisions": ["approve", "reject"]}})
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "danger", "args": {"x": 1}, "id": "tc-static", "type": "tool_call"}],
+        )
+        runtime = types.SimpleNamespace(context=None)
+
+        await mw.aafter_model({"messages": [ai]}, runtime)
+
+        ar = captured["request"]["action_requests"][0]
+        assert ar["args"]["_call_id"] == "tc-static"
+        # Static guards carry no risk metadata.
+        assert "_risk_metadata" not in ar["args"]
+
+    async def test_risk_scored_stamps_top_level_call_id_not_in_risk_metadata(self, monkeypatch):
+        captured = self._capture_interrupt(monkeypatch)
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            return 0.99, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "wipe", "args": {"path": "/"}, "id": "tc-risk", "type": "tool_call"}],
+        )
+        runtime = types.SimpleNamespace(
+            context=types.SimpleNamespace(tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[])
+        )
+
+        await mw.aafter_model({"messages": [ai]}, runtime)
+
+        ar = captured["request"]["action_requests"][0]
+        assert ar["args"]["_call_id"] == "tc-risk"
+        # call_id lives top-level now, not smuggled inside the risk blob.
+        assert "call_id" not in ar["args"]["_risk_metadata"]
+
+    async def test_sync_static_guard_stamps_top_level_call_id(self, monkeypatch):
+        captured = self._capture_interrupt(monkeypatch)
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={"danger": {"allowed_decisions": ["approve", "reject"]}})
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "danger", "args": {"x": 1}, "id": "tc-sync", "type": "tool_call"}],
+        )
+
+        mw.after_model({"messages": [ai]}, types.SimpleNamespace(context=None))
+
+        assert captured["request"]["action_requests"][0]["args"]["_call_id"] == "tc-sync"

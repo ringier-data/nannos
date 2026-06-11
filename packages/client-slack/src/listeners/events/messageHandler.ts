@@ -799,14 +799,16 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               if (interruptMessage) {
                 // Generic HITL interrupt — show approval widget for any tool
                 interruptWidgetPosted = true;
-                const { buildHitlInterruptWidget } = await import('../../utils/taskResponseHandler.js');
+                const { buildHitlInterruptWidget, buildMultiHitlInterruptWidget } = await import('../../utils/taskResponseHandler.js');
 
                 try {
                   const toolNames = actionRequests.map((ar: any) => ar?.name).filter(Boolean);
                   const firstAction = actionRequests[0];
                   const toolName = firstAction?.name || 'unknown';
                   const interruptReason = (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || interruptMessage;
-                  const hitlWidget = buildHitlInterruptWidget({
+                  // Multiple pending calls → multi-action widget (every call shown,
+                  // per-call decisions). Single call → the rich one-click widget.
+                  const widgetData = {
                     taskId: accumulatedTask.id,
                     contextId: accumulatedTask.contextId || '',
                     toolName,
@@ -815,7 +817,10 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
                     threadTs,
                     actionRequests,
                     reviewConfigs,
-                  });
+                  };
+                  const hitlWidget = actionRequests.length > 1
+                    ? buildMultiHitlInterruptWidget(widgetData)
+                    : buildHitlInterruptWidget(widgetData);
 
                   logger.info(
                     { taskId: accumulatedTask?.id, toolNames },

@@ -79,5 +79,74 @@ export function registerHitlModalHandler(app: App, makeDeps: () => HandlerDepend
     }
   });
 
+  /**
+   * Register handler for the multi-action HITL modal. Collects one Approve/Reject
+   * decision per pending call and submits them as a single batched DataPart, echoing
+   * each call's id so the server aligns decisions by id (no unseen-call approvals).
+   */
+  app.view('hitl_multi_submit', async ({ ack, body, view, client }) => {
+    await ack();
+
+    const userId = body.user.id;
+    let pm: any;
+    try {
+      pm = JSON.parse(view.private_metadata);
+      const { channelId, threadTs, messageTs, calls } = pm;
+      const callList: any[] = Array.isArray(calls) ? calls : [];
+
+      const decisions = callList.map((c: any, idx: number) => {
+        const selected = view.state?.values?.[`call_${idx}`]?.[`decision_${idx}`]?.selected_option?.value || 'approve';
+        const decision: Record<string, unknown> = {};
+        if (c?.id) decision.id = c.id; // echo call id → server aligns by id
+        if (selected === 'reject') {
+          decision.type = 'reject';
+          // No message → the server supplies the default rejection text.
+        } else if (selected === 'approve_bypass_tool') {
+          decision.type = 'approve';
+          decision.bypass = true;
+          decision.bypass_all = true;
+        } else if (selected === 'approve_bypass_pattern') {
+          decision.type = 'approve';
+          decision.bypass = true;
+          decision.bypass_pattern = c?.pattern;
+        } else {
+          decision.type = 'approve';
+        }
+        return decision;
+      });
+
+      logger.info(`HITL multi-decision submitted by user ${userId}: ${decisions.length} decision(s)`);
+
+      const syntheticMessage: NormalizedMessage = {
+        userId,
+        teamId: body.team?.id || '',
+        channelId,
+        messageTs: messageTs || Date.now().toString(),
+        threadTs,
+        rawText: '',
+        dataParts: [{ decisions }],
+        source: 'direct_message',
+        client,
+      };
+
+      if (channelId && messageTs) {
+        await client.chat.delete({ channel: channelId, ts: messageTs }).catch(() => {});
+      }
+
+      handleIncomingMessage(syntheticMessage, makeDeps()).catch((err) => {
+        logger.error(err, `Failed to send HITL multi-decisions to orchestrator: ${err}`);
+      });
+    } catch (error) {
+      logger.error(error, `Failed to process HITL multi-modal submission: ${error}`);
+      if (pm?.channelId && pm?.threadTs) {
+        await client.chat.postMessage({
+          channel: pm.channelId,
+          thread_ts: pm.threadTs,
+          text: `❌ Failed to process decisions: ${error instanceof Error ? error.message : 'unknown error'}`,
+        });
+      }
+    }
+  });
+
   logger.info('Registered HITL modal handler');
 }

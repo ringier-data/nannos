@@ -439,7 +439,11 @@ async function processHumanInTheLoopEvent(
 
   try {
     const interruptReason = (firstAction?.args?.description as string) || (firstAction?.args?.reason as string) || interruptMessage;
-    const hitlCard = chatService.buildHitlCard(config, toolName, interruptReason, { taskId: accumulatedTask.id, toolName }, allowedDecisions, actionRequests);
+    // Multiple pending calls → multi-action card (every call shown, per-call
+    // decisions). Single call → the rich one-click card.
+    const hitlCard = actionRequests.length > 1
+      ? chatService.buildMultiHitlCard(config, { taskId: accumulatedTask.id }, actionRequests)
+      : chatService.buildHitlCard(config, toolName, interruptReason, { taskId: accumulatedTask.id, toolName }, allowedDecisions, actionRequests);
 
     logger.info({ taskId: accumulatedTask?.id, toolNames }, `Posting HITL interrupt card to Google Chat`);
 

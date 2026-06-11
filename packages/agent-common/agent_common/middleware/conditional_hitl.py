@@ -170,6 +170,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             if self._should_interrupt(tool_call):
                 config = self.interrupt_on[tool_call["name"]]
                 action_request, review_config = self._create_action_and_config(tool_call, config, state, runtime)
+                # Stamp the per-call id (see aafter_model) so multi-action interrupts
+                # raised on the sync path align decisions by id too.
+                action_request["args"] = {**action_request.get("args", {}), "_call_id": tool_call["id"]}
                 action_requests.append(action_request)
                 review_configs.append(review_config)
                 interrupt_indices.append(idx)
@@ -265,6 +268,11 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             if self._should_interrupt(tool_call):
                 config = self.interrupt_on[tool_name]
                 action_request, review_config = self._create_action_and_config(tool_call, config, state, runtime)
+                # Stamp the stable per-call id on EVERY interrupted call (here a static
+                # guard, no risk metadata) so the client can return one decision per
+                # action_request and the resume path aligns them by id. Display-only:
+                # ``args`` is never passed to the tool (approve replays the original call).
+                action_request["args"] = {**action_request.get("args", {}), "_call_id": tool_call["id"]}
                 action_requests.append(action_request)
                 review_configs.append(review_config)
                 interrupt_indices.append(idx)
@@ -320,9 +328,13 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             if matched_pattern:
                 description += f" — {matched_pattern}"
 
-            # Include structured risk metadata in args for frontend rendering
+            # Include structured risk metadata in args for frontend rendering.
+            # ``_call_id`` is a top-level, risk-independent per-call id (set for every
+            # interrupted call — static or risk-scored) the client echoes so the resume
+            # path aligns decisions by id (see executor._build_interrupt_resume_map).
             enriched_args: dict[str, Any] = {
                 **args,
+                "_call_id": tool_call["id"],
                 "_risk_metadata": {
                     "source": "risk_score",
                     "score": score,

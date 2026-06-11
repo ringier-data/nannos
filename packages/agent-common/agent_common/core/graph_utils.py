@@ -719,6 +719,12 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 if not pending:
                     return result
 
+                # Decisions arrive already aligned 1:1 with `pending`. The orchestrator's
+                # resume path (executor._build_interrupt_resume_map) replicates the single
+                # blanket UI decision to this interrupt's action_request count and keys the
+                # resume by interrupt id, so each interrupt() returns exactly its own
+                # decisions — no cross-eval bleed from LangGraph's multi-interrupt resume.
+                # Any count mismatch here is therefore a genuine bug, not a resume artefact.
                 decisions = interrupt(self._build_ptc_hitl_request(pending))["decisions"]
                 if (n := len(decisions)) != (m := len(pending)):
                     msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
@@ -748,6 +754,12 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         for p in pending:
             enriched_args = {
                 **p.args,
+                # Top-level, risk-independent per-call id the client echoes so the
+                # resume path aligns decisions by id (see
+                # executor._build_interrupt_resume_map) instead of positionally —
+                # the latter is fragile to model replay reordering. ``call_key`` is
+                # deterministic on tool+args.
+                "_call_id": p.call_key,
                 "_risk_metadata": {
                     "source": "risk_score",
                     "score": p.score,
@@ -792,7 +804,18 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             ConditionalHumanInTheLoopMiddleware,
         )
 
-        for p, decision in zip(pending, decisions, strict=True):
+        # Match each decision to its pending call by id when the client returned
+        # per-call decisions. ``Promise.all``-style eval calls register concurrently,
+        # so the re-run's ``pending`` order can differ from the order the decisions
+        # were collected/displayed in — a positional zip would then apply a decision
+        # to the WRONG call (e.g. approve `/memories` lands on `/`). ``call_id`` equals
+        # ``call_key`` (deterministic on tool+args), so by-id matching is order-
+        # independent. Fall back to positional zip for legacy decisions without ids.
+        by_id = {d["id"]: d for d in decisions if isinstance(d, dict) and "id" in d}
+        use_by_id = bool(by_id) and all(p.call_key in by_id for p in pending)
+
+        for i, p in enumerate(pending):
+            decision = by_id[p.call_key] if use_by_id else decisions[i]
             dtype = decision.get("type")
             if dtype == "approve":
                 turn.decisions[p.call_key] = "approve"

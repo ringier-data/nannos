@@ -411,3 +411,55 @@ async def test_low_score_caches_result_when_turn_active():
         assert turn.results[call_key] == "read:/data/a"
     finally:
         ptc_guard.end_ptc_turn("t4")
+
+
+def test_apply_ptc_decisions_matches_by_id_not_position():
+    """Per-call decisions are matched to pending by call_id, not by position.
+
+    Repro for the observed swap: with ``Promise.all`` the eval's calls register
+    concurrently, so the re-run's ``pending`` order can differ from the order the
+    decisions were collected/displayed in. Here ``pending`` is [root, memories] but
+    the decisions (aligned to the first-run order) are [memories=approve, root=reject].
+    A positional zip would approve root and reject memories (the bug); by-id matching
+    must approve memories and reject root.
+    """
+    from agent_common.core.graph_utils import _PTCToleranceCodeInterpreterMiddleware
+
+    root = ptc_guard._call_key("ls", {"path": "/"})
+    mem = ptc_guard._call_key("ls", {"path": "/memories/"})
+
+    pending = [
+        types.SimpleNamespace(call_key=root, tool_name="ls", server_slug="_self"),
+        types.SimpleNamespace(call_key=mem, tool_name="ls", server_slug="_self"),
+    ]
+    # Client approved /memories and rejected / — decisions carry their call ids and
+    # are deliberately ordered opposite to `pending`.
+    decisions = [
+        {"id": mem, "type": "approve"},
+        {"id": root, "type": "reject"},
+    ]
+    turn = types.SimpleNamespace(decisions={})
+
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(turn, pending, decisions, context=None)
+
+    assert turn.decisions[mem] == "approve"
+    assert turn.decisions[root] == "reject"
+
+
+def test_apply_ptc_decisions_positional_fallback_without_ids():
+    """Legacy decisions (no ids) fall back to positional application."""
+    from agent_common.core.graph_utils import _PTCToleranceCodeInterpreterMiddleware
+
+    a = ptc_guard._call_key("ls", {"path": "/a"})
+    b = ptc_guard._call_key("ls", {"path": "/b"})
+    pending = [
+        types.SimpleNamespace(call_key=a, tool_name="ls", server_slug="_self"),
+        types.SimpleNamespace(call_key=b, tool_name="ls", server_slug="_self"),
+    ]
+    decisions = [{"type": "approve"}, {"type": "reject"}]
+    turn = types.SimpleNamespace(decisions={})
+
+    _PTCToleranceCodeInterpreterMiddleware._apply_ptc_decisions(turn, pending, decisions, context=None)
+
+    assert turn.decisions[a] == "approve"
+    assert turn.decisions[b] == "reject"

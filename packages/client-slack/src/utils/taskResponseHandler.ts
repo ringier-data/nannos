@@ -543,3 +543,113 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
 
   return blocks;
 }
+
+/** Stable per-call id the server uses to align decisions (top-level args._call_id). */
+export function callIdOf(action: any): string | undefined {
+  return action?.args?._call_id;
+}
+
+/** Read-only detail blocks (tool label, risk, args, content) for ONE action_request. */
+function buildActionDetailBlocks(action: any, indexLabel?: string): any[] {
+  const args = action?.args || {};
+  const toolLabel = String(action?.name || 'unknown').replace(/_/g, ' ');
+  const CONTENT_KEYS = ['content', 'body', 'description'];
+  const HIDDEN_KEYS = ['reason', '_risk_metadata'];
+  const contentKey = CONTENT_KEYS.find((k) => k in args);
+  const proposedContent = contentKey ? String(args[contentKey] || '') : '';
+  const metaEntries = Object.entries(args).filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k));
+  const riskMeta = args._risk_metadata as { source?: string; score?: number; matched_pattern?: string | null } | undefined;
+  const isRiskScored = riskMeta?.source === 'risk_score';
+  const reason = String((args.description ?? args.reason) || '');
+
+  const blocks: any[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${indexLabel ? indexLabel + ' · ' : ''}${toolLabel}*${reason ? `\n${reason.substring(0, 1000)}` : ''}`,
+      },
+    },
+  ];
+  if (isRiskScored && riskMeta) {
+    const pct = Math.round((riskMeta.score ?? 0) * 100);
+    const riskLabel = pct >= 90 ? 'Critical' : pct >= 80 ? 'High' : pct >= 60 ? 'Medium' : 'Low';
+    let riskText = `🛡️ *Risk:* ${riskLabel} (${pct}%)`;
+    if (riskMeta.matched_pattern) riskText += ` — matched: \`${riskMeta.matched_pattern}\``;
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: riskText }] });
+  }
+  if (metaEntries.length > 0) {
+    const metaText = metaEntries.map(([k, v]) => `*${k}:* ${String(v).substring(0, 200)}`).join('\n');
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: metaText.substring(0, 3000) } });
+  }
+  if (proposedContent) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Proposed content:*\n\`\`\`${proposedContent.substring(0, 1500)}\`\`\`` },
+    });
+  }
+  return blocks;
+}
+
+/**
+ * Multi-action HITL widget for interrupts carrying more than one action_request
+ * (e.g. parallel tool calls). Shows the full detail of EVERY call (so nothing is
+ * approved unseen), with a blanket Approve all / Reject all and a "Review & decide"
+ * button that opens a modal collecting one decision per call (batched submit).
+ */
+export function buildMultiHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
+  const actions = data.actionRequests ?? [];
+  const blocks: any[] = [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `⚠️ *${actions.length} actions need your approval*` },
+    },
+  ];
+  actions.forEach((action, i) => {
+    blocks.push({ type: 'divider' });
+    blocks.push(...buildActionDetailBlocks(action, `${i + 1}/${actions.length}`));
+  });
+
+  const base = {
+    taskId: data.taskId,
+    contextId: data.contextId,
+    channelId: data.channelId,
+    threadTs: data.threadTs,
+  };
+  const blanketValue = Buffer.from(JSON.stringify(base)).toString('base64');
+  // Compact per-call routing for the modal — kept small so it fits in Slack's
+  // button-value limit without a server-side store. `detail` summarizes the
+  // distinguishing args (e.g. `path: /memories/`) so the modal rows are
+  // distinguishable; risk/pattern drive the per-call bypass options.
+  const CONTENT_KEYS = ['content', 'body', 'description'];
+  const HIDDEN_KEYS = ['reason', '_risk_metadata'];
+  const calls = actions.map((a) => {
+    const args = a?.args || {};
+    const riskMeta = args._risk_metadata as { source?: string; matched_pattern?: string | null } | undefined;
+    const isRiskScored = riskMeta?.source === 'risk_score';
+    const argSummary = Object.entries(args)
+      .filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k))
+      .map(([k, v]) => `${k}: ${String(v)}`)
+      .join(', ');
+    const detail = (argSummary || String((args.description ?? args.reason) || '')).substring(0, 180);
+    return {
+      id: callIdOf(a),
+      name: a?.name || 'unknown',
+      detail,
+      risk: isRiskScored,
+      pattern: isRiskScored ? (riskMeta?.matched_pattern || undefined) : undefined,
+    };
+  });
+  const reviewValue = Buffer.from(JSON.stringify({ ...base, calls })).toString('base64');
+
+  blocks.push({ type: 'divider' });
+  blocks.push({
+    type: 'actions',
+    elements: [
+      { type: 'button', text: { type: 'plain_text', text: '✅ Approve all', emoji: true }, action_id: 'hitl_approve', value: blanketValue, style: 'primary' },
+      { type: 'button', text: { type: 'plain_text', text: '❌ Reject all', emoji: true }, action_id: 'hitl_reject', value: blanketValue },
+      { type: 'button', text: { type: 'plain_text', text: '⚖️ Review & decide', emoji: true }, action_id: 'hitl_review_multi', value: reviewValue },
+    ],
+  });
+  return blocks;
+}

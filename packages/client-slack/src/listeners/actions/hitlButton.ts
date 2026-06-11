@@ -48,8 +48,9 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         ts: messageTs,
       });
 
-      // Send reject decision to orchestrator via handleIncomingMessage
-      const decisions = { decisions: [{ type: 'reject', message: 'The user explicitly rejected this tool call via the human-in-the-loop approval. The tool was NOT executed. Do not retry or attempt workarounds unless the user explicitly asks.' }] };
+      // Send reject decision to orchestrator via handleIncomingMessage.
+      // No message → the server supplies the default rejection text.
+      const decisions = { decisions: [{ type: 'reject' }] };
       const syntheticMessage: NormalizedMessage = {
         userId,
         teamId: (body as any).team?.id || '',
@@ -317,6 +318,90 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
       });
     } catch (error) {
       logger.error(error, `Failed to open HITL request changes modal: ${error}`);
+    }
+  });
+
+  /**
+   * Handle "Review & decide" button (multi-action interrupts) — open a modal with
+   * one Approve/Reject radio per pending call so the user decides each individually.
+   * Submitted as a batch by the hitl_multi_submit view handler.
+   */
+  app.action('hitl_review_multi', async ({ ack, body, client }) => {
+    await ack();
+    const logger = Logger.getLogger('hitlButton');
+
+    const userId = body.user?.id;
+    const action = (body as any).actions?.[0];
+    const actionValue = action?.value || '';
+    const triggerId = (body as any).trigger_id;
+    const messageTs = (body as any).message?.ts;
+
+    if (!actionValue || !userId || !triggerId) {
+      logger.warn(`Missing required values in hitl_review_multi action`);
+      return;
+    }
+
+    try {
+      const decoded = JSON.parse(Buffer.from(actionValue, 'base64').toString());
+      const { taskId, contextId, channelId, threadTs, calls } = decoded;
+      const callList: any[] = Array.isArray(calls) ? calls : [];
+
+      const blocks: any[] = [];
+      callList.forEach((c: any, idx: number) => {
+        const label = String(c?.name || 'tool').replace(/_/g, ' ');
+        if (idx > 0) blocks.push({ type: 'divider' });
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `*${idx + 1}. ${label}*${c?.detail ? `\n${String(c.detail)}` : ''}` },
+        });
+        const approveOption = { text: { type: 'plain_text', text: 'Approve' }, value: 'approve' };
+        const options: any[] = [approveOption];
+        // Bypass variants — only for risk-scored tools, mirroring the single-action card.
+        if (c?.risk) {
+          options.push({ text: { type: 'plain_text', text: 'Approve · always allow this tool' }, value: 'approve_bypass_tool' });
+          if (c?.pattern) {
+            options.push({ text: { type: 'plain_text', text: 'Approve · allow this pattern' }, value: 'approve_bypass_pattern' });
+          }
+        }
+        options.push({ text: { type: 'plain_text', text: 'Reject' }, value: 'reject' });
+        blocks.push({
+          type: 'input',
+          block_id: `call_${idx}`,
+          label: { type: 'plain_text', text: 'Decision', emoji: true },
+          element: {
+            type: 'radio_buttons',
+            action_id: `decision_${idx}`,
+            initial_option: approveOption,
+            options,
+          },
+        });
+      });
+
+      // Only routing data + per-call id/pattern in private_metadata (kept well under
+      // Slack's 3000-char limit); display content already shown in-channel.
+      const privateMetadata = JSON.stringify({
+        taskId,
+        contextId,
+        channelId,
+        threadTs,
+        messageTs,
+        calls: callList.map((c: any) => ({ id: c?.id, pattern: c?.pattern })),
+      });
+
+      await client.views.open({
+        trigger_id: triggerId,
+        view: {
+          type: 'modal',
+          callback_id: 'hitl_multi_submit',
+          private_metadata: privateMetadata,
+          title: { type: 'plain_text', text: 'Review actions', emoji: true },
+          submit: { type: 'plain_text', text: 'Submit', emoji: true },
+          close: { type: 'plain_text', text: 'Cancel', emoji: true },
+          blocks,
+        },
+      });
+    } catch (error) {
+      logger.error(error, `Failed to open multi-action HITL modal: ${error}`);
     }
   });
 
