@@ -335,11 +335,11 @@ class VoiceAgent(BaseAgent):
         """Pre-warm a Gemini session while Twilio is ringing the callee.
 
         Fired by ``_stream_phone_call`` *before* ``make_outbound_call()`` is called,
-        using a temporary prewarm_key.  The MCP handshake + Gemini WebSocket
-        connection run concurrently with the Twilio REST call, so the session is
-        ready (or nearly ready) by the time the callee answers.  After
-        ``make_outbound_call()`` returns the real call_sid, the caller re-keys
-        both ``_active_sessions`` and ``_prewarm_tasks`` to that call_sid.
+        using a temporary prewarm_key.  Blocks until MCP tools are initialised and
+        the Gemini Live WebSocket is open so the session is fully ready the instant
+        the callee answers.  After ``make_outbound_call()`` returns the real
+        call_sid, the caller re-keys both ``_active_sessions`` and
+        ``_prewarm_tasks`` to that call_sid.
         """
         await self._create_audio_session(
             session_key=session_key,
@@ -349,6 +349,18 @@ class VoiceAgent(BaseAgent):
             access_token=access_token,
             phone_number=phone_number,
         )
+
+        session = self._active_sessions.get(session_key)
+        if not session:
+            return
+        agent = session["agent"]
+
+        # agent.run() was just scheduled as a task — yield once so it can start
+        # executing and set agent.mcp_status to a Future before we await it.
+        await asyncio.sleep(0)
+
+        if agent.mcp_status is not None:
+            await asyncio.shield(agent.mcp_status)
 
     async def _start_audio_session(
         self,
