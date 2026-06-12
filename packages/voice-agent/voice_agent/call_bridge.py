@@ -51,6 +51,26 @@ _PENDING_CALLS: dict[str, OutboundCallRequest] = {}
 # twilio_stream's finally block in twilio_transport.py.
 _CALL_FUTURES: dict[str, asyncio.Future] = {}
 
+# Maps call_sid → asyncio.Future that resolves when the callee answers
+# (i.e. when Twilio sends the "start" Media Stream event).
+# Used to split the timeout into a ringing phase and a call-duration phase.
+_CALL_ANSWERED: dict[str, asyncio.Future] = {}
+
+
+def build_effective_prompt(base_prompt: str, context_messages: list[str]) -> str:
+    """Merge context_messages into base_prompt as system context."""
+    base_prompt += (
+        " IMPORTANT: Keep responses short and conversational."
+        " Do NOT use markdown, lists, or special characters."
+        " Ignore any phone number in the prompt, and start by introducing yourself and the meaning of your call."
+    )
+
+    if not context_messages:
+        return base_prompt
+    context_str = "\n".join(context_messages)
+    logger.info("Merged %d context messages into system prompt", len(context_messages))
+    return f"{base_prompt}\n\nContext:\n{context_str}"
+
 
 def make_outbound_call(to_number: str, public_url: str) -> str:
     """Use the Twilio Programmable Voice REST API to dial ``to_number``.
