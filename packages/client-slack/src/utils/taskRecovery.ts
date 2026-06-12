@@ -1,6 +1,6 @@
 import { WebClient } from '@slack/web-api';
 import { Logger } from './logger.js';
-import type { IInFlightTaskStore, InFlightTask, IContextStore } from '../storage/types.js';
+import type { IInFlightTaskStore, InFlightTask, IContextStore, IBotInstallationStore } from '../storage/types.js';
 import { A2AClientService } from '../services/a2aClientService.js';
 import { UserAuthService } from '../services/userAuthService.js';
 import { handleTask } from './taskResponseHandler.js';
@@ -12,17 +12,33 @@ const logger = Logger.getLogger('taskRecovery');
  */
 async function recoverTask(
   task: InFlightTask,
-  slackClient: WebClient,
+  botInstallationStore: IBotInstallationStore,
+  fallbackBotToken: string | undefined,
   a2aClientService: A2AClientService,
   userAuthService: UserAuthService,
   contextStore: IContextStore,
   inFlightTaskStore: IInFlightTaskStore
 ): Promise<boolean> {
-  const { taskId, userId, teamId, channelId, threadTs, messageTs, statusMessageTs, contextKey } = task;
+  const { taskId, userId, teamId, channelId, threadTs, messageTs, statusMessageTs, contextKey, appId } = task;
 
   logger.info(`Recovering orphaned task ${taskId} for user ${userId}`);
 
   try {
+    // Resolve the bot token for the app/workspace this task belongs to —
+    // tokens are per-installation, so a shared client cannot be used here.
+    const bot = appId
+      ? await botInstallationStore.getByAppId(appId)
+      : (await botInstallationStore.getByTeamId(teamId))[0];
+    const botToken = bot?.botToken ?? fallbackBotToken;
+
+    if (!botToken) {
+      logger.warn(`Cannot recover task ${taskId}: no bot token found for appId=${appId} teamId=${teamId}`);
+      await inFlightTaskStore.delete(taskId);
+      return false;
+    }
+
+    const slackClient = new WebClient(botToken);
+
     // Get user's access token for orchestrator audience (token exchange)
     const accessToken = await userAuthService.getOrchestratorToken(userId, teamId);
 
@@ -78,8 +94,9 @@ export async function recoverOrphanedTasks(
   inFlightTaskStore: IInFlightTaskStore,
   a2aClientService: A2AClientService,
   userAuthService: UserAuthService,
-  slackClient: WebClient,
+  botInstallationStore: IBotInstallationStore,
   contextStore: IContextStore,
+  fallbackBotToken?: string,
   minAgeMs: number = 10 * 60 * 1000 // Default: 10 minutes
 ): Promise<{ recovered: number; failed: number; inProgress: number }> {
   logger.info('Starting orphaned task recovery...');
@@ -102,7 +119,8 @@ export async function recoverOrphanedTasks(
       try {
         const result = await recoverTask(
           task,
-          slackClient,
+          botInstallationStore,
+          fallbackBotToken,
           a2aClientService,
           userAuthService,
           contextStore,

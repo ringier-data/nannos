@@ -315,8 +315,9 @@ export async function startSlackApp(config: Config) {
           storage.inFlightTask,
           a2aClientService,
           userAuthService,
-          app.client,
+          storage.botInstallation,
           storage.context,
+          seedBotToken,
           RECOVERY_MIN_AGE_MS
         );
       } catch (error) {
