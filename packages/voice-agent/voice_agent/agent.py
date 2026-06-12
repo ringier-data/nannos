@@ -172,6 +172,10 @@ def _is_write_tool(name: str, description: str) -> bool:
     return any(kw in text.split() for kw in _WRITE_KEYWORDS)
 
 
+# Results larger than this are stored in memory and replaced with a stub so they
+# don't inflate the model's context window.
+_LARGE_RESULT_THRESHOLD: int = 15 * 1024  # 15 KB
+
 # ── Tool risk scoring ─────────────────────────────────────────────────────────
 
 # Risk score threshold: >= this value → treat tool as write/mutate (require confirmation).
@@ -281,6 +285,10 @@ def build_live_config(
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         tools=tool_list,
+        context_window_compression=types.ContextWindowCompressionConfig(
+            trigger_tokens=128000,
+            sliding_window=types.SlidingWindow(target_tokens=32000),
+        ),
     )
 
 
@@ -346,6 +354,11 @@ class GeminiLiveAgent:
         # a call with different args re-triggers the gate from scratch,
         # preventing a retry with different arguments from slipping through.
         _awaiting_confirmation: dict[str, dict] = {}
+
+        # Per-session store for large tool results.
+        # _result_counter wrapped in a list so _exec closures can increment it.
+        _stored_results: dict[str, str] = {}
+        _result_counter = [0]
 
         for tool in tools_result.tools:
             # If a tool filter was specified, skip tools not in the list.
@@ -439,7 +452,25 @@ class GeminiLiveAgent:
                             pass
                     return f"Tool error: {result.content}"
                 texts = [c.text for c in result.content if hasattr(c, "text")]
-                return "\n".join(texts) if texts else str(result.content)
+                full_text = "\n".join(texts) if texts else str(result.content)
+                if len(full_text) > _LARGE_RESULT_THRESHOLD:
+                    result_id = f"result_{_result_counter[0]}"
+                    _result_counter[0] += 1
+                    _stored_results[result_id] = full_text
+                    size_kb = len(full_text) / 1024
+                    line_count = full_text.count("\n") + 1
+                    preview = full_text[:200].replace("\n", " ")
+                    logger.info(
+                        "Large result from %r stored as %s (%.0fKB, %d lines)",
+                        _name, result_id, size_kb, line_count,
+                    )
+                    return (
+                        f"Result too large to include directly ({size_kb:.0f}KB, {line_count} lines). "
+                        f"Stored as {result_id}. Preview: {preview!r}. "
+                        f"Use search_stored_result(result_id='{result_id}', pattern='...') to search, "
+                        f"or read_stored_result_range(result_id='{result_id}', start_line=1, end_line=50) to read."
+                    )
+                return full_text
 
             self.tool_map[tool.name] = traceable(name=tool.name, run_type="tool")(_exec)
             logger.info(
@@ -448,6 +479,77 @@ class GeminiLiveAgent:
                 is_risky,
                 risk_score,
             )
+
+        # ── Local result-storage tools ────────────────────────────────────────
+        # These are registered as FunctionDeclarations alongside the MCP tools
+        # but are handled entirely in-process — no MCP round-trip, no risk scoring.
+
+        async def search_stored_result(args: dict) -> str:
+            result_id = args.get("result_id", "")
+            pattern = args.get("pattern", "")
+            text = _stored_results.get(result_id)
+            if text is None:
+                return f"No stored result with id '{result_id}'."
+            lines = text.splitlines()
+            matches = [(i + 1, line) for i, line in enumerate(lines) if pattern.lower() in line.lower()]
+            if not matches:
+                return f"No lines matching '{pattern}' in {result_id} ({len(lines)} lines total)."
+            shown = matches[:50]
+            result_lines = [f"L{n}: {line}" for n, line in shown]
+            suffix = f"\n… ({len(matches) - 50} more matches not shown)" if len(matches) > 50 else ""
+            return "\n".join(result_lines) + suffix
+
+        async def read_stored_result_range(args: dict) -> str:
+            result_id = args.get("result_id", "")
+            start_line = int(args.get("start_line", 1))
+            end_line = int(args.get("end_line", 50))
+            text = _stored_results.get(result_id)
+            if text is None:
+                return f"No stored result with id '{result_id}'."
+            lines = text.splitlines()
+            total = len(lines)
+            start = max(0, start_line - 1)
+            end = min(total, end_line)
+            chunk = "\n".join(f"L{start + i + 1}: {line}" for i, line in enumerate(lines[start:end]))
+            return f"Lines {start_line}–{end} of {total} total:\n{chunk}"
+
+        declarations.append(
+            types.FunctionDeclaration(
+                name="search_stored_result",
+                description=(
+                    "Search a large tool result that was too big to return directly. "
+                    "Returns up to 50 matching lines with line numbers."
+                ),
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "result_id": {"type": "string", "description": "ID returned in the stub, e.g. result_0"},
+                        "pattern": {"type": "string", "description": "Case-insensitive text to search for"},
+                    },
+                    "required": ["result_id", "pattern"],
+                },
+            )
+        )
+        declarations.append(
+            types.FunctionDeclaration(
+                name="read_stored_result_range",
+                description=(
+                    "Read a line range from a large tool result that was too big to return directly."
+                ),
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "result_id": {"type": "string", "description": "ID returned in the stub, e.g. result_0"},
+                        "start_line": {"type": "integer", "description": "First line to read (1-indexed)"},
+                        "end_line": {"type": "integer", "description": "Last line to read inclusive (1-indexed)"},
+                    },
+                    "required": ["result_id", "start_line", "end_line"],
+                },
+            )
+        )
+        self.tool_map["search_stored_result"] = search_stored_result
+        self.tool_map["read_stored_result_range"] = read_stored_result_range
+        logger.info("Local result-storage tools registered (search_stored_result, read_stored_result_range)")
 
         return declarations
 

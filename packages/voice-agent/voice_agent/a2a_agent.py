@@ -70,8 +70,14 @@ from a2a.types import Message, Task, TaskState
 from langsmith import traceable
 from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent.base import BaseAgent
-from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token, set_request_user_sub
-from ringier_a2a_sdk.middleware.credential_injector import BaseCredentialInjector, TokenExchangeCredentialInjector
+from ringier_a2a_sdk.cost_tracking.logger import (
+    set_request_access_token,
+    set_request_user_sub,
+)
+from ringier_a2a_sdk.middleware.credential_injector import (
+    BaseCredentialInjector,
+    TokenExchangeCredentialInjector,
+)
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 from ringier_a2a_sdk.oauth.client import OidcOAuth2Client
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
@@ -83,9 +89,9 @@ from voice_agent.call_bridge import (
     _CALL_FUTURES,
     _PENDING_CALLS,
     OutboundCallRequest,
+    build_effective_prompt,
     make_outbound_call,
     send_sms,
-    build_effective_prompt
 )
 
 _CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
@@ -258,11 +264,15 @@ class VoiceAgent(BaseAgent):
                 )
                 return
 
-            async for event in self._handle_phone_call(call_request, user_config, context_messages):
+            async for event in self._handle_phone_call(
+                call_request, user_config, context_messages
+            ):
                 yield event
         except Exception as e:
             logger.exception(f"Unexpected error in voice agent: {session_key}")
-            yield AgentStreamResponse(state=TaskState.failed, content=f"Error: {str(e)}")
+            yield AgentStreamResponse(
+                state=TaskState.failed, content=f"Error: {str(e)}"
+            )
 
     async def _create_audio_session(
         self,
@@ -282,7 +292,7 @@ class VoiceAgent(BaseAgent):
         if session_key in self._active_sessions:
             return
 
-        prompt = (system_prompt or DEFAULT_SYSTEM_PROMPT)
+        prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
 
         voice = voice_name or "Kore"
 
@@ -294,7 +304,9 @@ class VoiceAgent(BaseAgent):
                 mcp_headers = await self._credential_injector.get_headers()
                 logger.info("Token exchanged for MCP access (session=%s)", session_key)
             except Exception as exc:
-                logger.warning("Token exchange failed (%s) — continuing without MCP headers", exc)
+                logger.warning(
+                    "Token exchange failed (%s) — continuing without MCP headers", exc
+                )
 
         audio_in: asyncio.Queue[bytes | str | None] = asyncio.Queue()
         event_out: asyncio.Queue[dict] = asyncio.Queue()
@@ -381,20 +393,32 @@ class VoiceAgent(BaseAgent):
         # ── Attach to pre-warmed session if available ─────────────────────────
         if session_key in self._active_sessions:
             voice_name = self._active_sessions[session_key]["agent"].voice_name
-            logger.info("Attaching to pre-warmed Gemini session: %s (voice=%s)", session_key, voice_name)
+            logger.info(
+                "Attaching to pre-warmed Gemini session: %s (voice=%s)",
+                session_key,
+                voice_name,
+            )
         else:
             # Pre-warm task may still be connecting (callee answered very quickly)
             prewarm_task = self._prewarm_tasks.pop(session_key, None)
             if prewarm_task is not None and not prewarm_task.done():
-                logger.info("Pre-warm still in progress for %s — waiting up to 5 s", session_key)
+                logger.info(
+                    "Pre-warm still in progress for %s — waiting up to 5 s", session_key
+                )
                 try:
                     await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=5.0)
                 except (asyncio.TimeoutError, Exception) as exc:
-                    logger.warning("Pre-warm wait failed (%s) — falling back to full setup", exc)
+                    logger.warning(
+                        "Pre-warm wait failed (%s) — falling back to full setup", exc
+                    )
 
             if session_key in self._active_sessions:
                 voice_name = self._active_sessions[session_key]["agent"].voice_name
-                logger.info("Attached to pre-warmed session after wait: %s (voice=%s)", session_key, voice_name)
+                logger.info(
+                    "Attached to pre-warmed session after wait: %s (voice=%s)",
+                    session_key,
+                    voice_name,
+                )
             else:
                 # ── Cold start (inbound calls, browser WebSocket, pre-warm failed) ──
                 await self._create_audio_session(
@@ -432,7 +456,9 @@ class VoiceAgent(BaseAgent):
 
                 if event_type == "audio_chunk":
                     yield AgentStreamResponse(
-                        state=TaskState.working, content="", metadata={"type": "audio_chunk", "audio": event["audio"]}
+                        state=TaskState.working,
+                        content="",
+                        metadata={"type": "audio_chunk", "audio": event["audio"]},
                     )
                 elif event_type == "output_transcript":
                     yield AgentStreamResponse(
@@ -448,15 +474,21 @@ class VoiceAgent(BaseAgent):
                     )
                 elif event_type == "turn_complete":
                     yield AgentStreamResponse(
-                        state=TaskState.working, content="Turn complete", metadata={"type": "turn_complete"}
+                        state=TaskState.working,
+                        content="Turn complete",
+                        metadata={"type": "turn_complete"},
                     )
                 elif event_type == "interrupted":
                     yield AgentStreamResponse(
-                        state=TaskState.working, content="Interrupted", metadata={"type": "interrupted"}
+                        state=TaskState.working,
+                        content="Interrupted",
+                        metadata={"type": "interrupted"},
                     )
                 elif event_type == "mcp_auth_failed":
                     authorize_url = event.get("authorize_url", "")
-                    caller_number = self._active_sessions.get(session_key, {}).get("phone_number")
+                    caller_number = self._active_sessions.get(session_key, {}).get(
+                        "phone_number"
+                    )
                     logger.warning(
                         "MCP auth failed for session %s: %s (authorize_url=%s)",
                         session_key,
@@ -467,19 +499,29 @@ class VoiceAgent(BaseAgent):
                         sms_body = f"Your AI assistant needs authorization to use a tool. Please visit: {authorize_url}"
                         try:
                             loop = asyncio.get_event_loop()
-                            await loop.run_in_executor(None, send_sms, caller_number, sms_body)
-                            logger.info("MCP auth URL SMS sent (session=%s)", session_key)
+                            await loop.run_in_executor(
+                                None, send_sms, caller_number, sms_body
+                            )
+                            logger.info(
+                                "MCP auth URL SMS sent (session=%s)", session_key
+                            )
                         except Exception as sms_exc:
                             logger.warning("Failed to send MCP auth SMS: %s", sms_exc)
                     yield AgentStreamResponse(
                         state=TaskState.working,
                         content="Tool authorization required — SMS sent with instructions.",
-                        metadata={"type": "mcp_auth_failed", "authorize_url": authorize_url},
+                        metadata={
+                            "type": "mcp_auth_failed",
+                            "authorize_url": authorize_url,
+                        },
                     )
                 elif event_type == "error":
                     error_msg = event.get("message", "Unknown error")
                     logger.error(f"Gemini error: {error_msg}")
-                    yield AgentStreamResponse(state=TaskState.failed, content=f"Voice processing error: {error_msg}")
+                    yield AgentStreamResponse(
+                        state=TaskState.failed,
+                        content=f"Voice processing error: {error_msg}",
+                    )
                     await self._end_session(session_key)
                     return
         except asyncio.CancelledError:
@@ -489,12 +531,17 @@ class VoiceAgent(BaseAgent):
         except Exception as e:
             logger.exception(f"Unexpected error in audio session {session_key}")
             await self._end_session(session_key)
-            yield AgentStreamResponse(state=TaskState.failed, content=f"Error: {str(e)}")
+            yield AgentStreamResponse(
+                state=TaskState.failed, content=f"Error: {str(e)}"
+            )
 
     # ── Phone-call orchestration ──────────────────────────────────────────────
 
     async def _handle_phone_call(
-        self, call_request: VoiceCallRequest, user_config: UserConfig, context_messages: list[str] | None = None
+        self,
+        call_request: VoiceCallRequest,
+        user_config: UserConfig,
+        context_messages: list[str] | None = None,
     ) -> AsyncIterable[AgentStreamResponse]:
         """Validate inputs, fetch sub-agent config, and initiate the phone call.
 
@@ -557,7 +604,9 @@ class VoiceAgent(BaseAgent):
 
         if not system_prompt:
             system_prompt = DEFAULT_SYSTEM_PROMPT
-            logger.info("No system_prompt source found — will use DEFAULT_SYSTEM_PROMPT.")
+            logger.info(
+                "No system_prompt source found — will use DEFAULT_SYSTEM_PROMPT."
+            )
 
         # ── Resolve phone number ──────────────────────────────────────────────
         # Security: only the authenticated user's own phone number is allowed.
@@ -586,19 +635,27 @@ class VoiceAgent(BaseAgent):
             system_prompt=system_prompt,
             voice_name=voice_name,
             mcp_tools=mcp_tools,
-            access_token=user_config.access_token.get_secret_value() if user_config.access_token else None,
+            access_token=user_config.access_token.get_secret_value()
+            if user_config.access_token
+            else None,
             context_messages=context_messages or [],
         ):
             yield event
 
-    async def _fetch_sub_agent_config(self, sub_agent_id: int, user_config: UserConfig) -> dict | None:
+    async def _fetch_sub_agent_config(
+        self, sub_agent_id: int, user_config: UserConfig
+    ) -> dict | None:
         """Fetch sub-agent config from agent-console backend.
 
         Returns a dict with keys ``name``, ``system_prompt``, ``voice_name``,
         ``mcp_tools`` on success, or a dict with defaults on HTTP failure.
         Returns ``None`` when no access token is available (caller must fail).
         """
-        token: str | None = user_config.access_token.get_secret_value() if user_config.access_token else None
+        token: str | None = (
+            user_config.access_token.get_secret_value()
+            if user_config.access_token
+            else None
+        )
 
         # Local-dev bypass: if no token came in via the request, fall back to a
         # static dev token set in the environment (e.g. obtained via `start-dev.sh`).
@@ -671,7 +728,9 @@ class VoiceAgent(BaseAgent):
           7. Await the future — resolved by twilio_stream's finally block.
           8. Yield ``completed`` with the formatted transcript.
         """
-        public_url: str = os.environ.get("PUBLIC_URL") or os.environ.get("VOICE_AGENT_BASE_URL", "")
+        public_url: str = os.environ.get("PUBLIC_URL") or os.environ.get(
+            "VOICE_AGENT_BASE_URL", ""
+        )
         connect_timeout: int = int(os.getenv("CALL_CONNECT_TIMEOUT_SECONDS", "60"))
         duration_timeout: int = int(os.getenv("CALL_DURATION_TIMEOUT_SECONDS", "3600"))
 
@@ -698,7 +757,9 @@ class VoiceAgent(BaseAgent):
             metadata={"type": "call_initiating", "phone_number": phone_number},
         )
 
-        effective_prompt = build_effective_prompt(system_prompt or DEFAULT_SYSTEM_PROMPT, context_messages)
+        effective_prompt = build_effective_prompt(
+            system_prompt or DEFAULT_SYSTEM_PROMPT, context_messages
+        )
 
         # Pre-warm the Gemini session and wait for it to be fully ready before
         # placing the call.  Any latency here (token exchange, WebSocket connect,
@@ -718,12 +779,17 @@ class VoiceAgent(BaseAgent):
             )
         )
         self._prewarm_tasks[prewarm_key] = prewarm_task
-        logger.info("Pre-warming Gemini session before dialling (prewarm_key=%s)", prewarm_key)
+        logger.info(
+            "Pre-warming Gemini session before dialling (prewarm_key=%s)", prewarm_key
+        )
 
         try:
-            await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=10.0)
+            await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=60.0)
         except (asyncio.TimeoutError, Exception) as exc:
-            logger.warning("Pre-warm did not complete before call: %s — will cold-start on answer", exc)
+            logger.warning(
+                "Pre-warm did not complete before call: %s — will cold-start on answer",
+                exc,
+            )
 
         # MCP status check — prewarm has had its full time budget so
         # mcp_status should already be resolved or close to it.
@@ -733,7 +799,9 @@ class VoiceAgent(BaseAgent):
             agent = session["agent"]
             if agent.mcp_status is not None:
                 try:
-                    mcp_ok = await asyncio.wait_for(asyncio.shield(agent.mcp_status), timeout=15.0)
+                    mcp_ok = await asyncio.wait_for(
+                        asyncio.shield(agent.mcp_status), timeout=15.0
+                    )
                     mcp_auth_failed = not mcp_ok
                     logger.info("MCP status: %s", "ok" if mcp_ok else "failed")
                 except (asyncio.TimeoutError, Exception) as exc:
@@ -760,7 +828,9 @@ class VoiceAgent(BaseAgent):
         # Initiate the call — Gemini session is ready for when the callee answers.
         try:
             loop = asyncio.get_event_loop()
-            call_sid: str = await loop.run_in_executor(None, make_outbound_call, phone_number, public_url)
+            call_sid: str = await loop.run_in_executor(
+                None, make_outbound_call, phone_number, public_url
+            )
         except Exception as exc:
             logger.error("Failed to initiate Twilio call: %s", exc)
             self._prewarm_tasks.pop(prewarm_key, None)
@@ -801,7 +871,9 @@ class VoiceAgent(BaseAgent):
 
         logger.info(
             "Call %s initiated (connect_timeout=%ds, duration_timeout=%ds)",
-            call_sid, connect_timeout, duration_timeout,
+            call_sid,
+            connect_timeout,
+            duration_timeout,
         )
         yield AgentStreamResponse(
             state=TaskState.working,
@@ -811,7 +883,9 @@ class VoiceAgent(BaseAgent):
 
         # Phase 1 — wait for the callee to answer.
         try:
-            await asyncio.wait_for(asyncio.shield(answered_future), timeout=connect_timeout)
+            await asyncio.wait_for(
+                asyncio.shield(answered_future), timeout=connect_timeout
+            )
             logger.info("Call %s answered", call_sid)
             yield AgentStreamResponse(
                 state=TaskState.working,
@@ -830,8 +904,12 @@ class VoiceAgent(BaseAgent):
         except Exception as exc:
             _CALL_ANSWERED.pop(call_sid, None)
             _CALL_FUTURES.pop(call_sid, None)
-            logger.exception("Unexpected error waiting for call %s to be answered", call_sid)
-            yield AgentStreamResponse(state=TaskState.failed, content=f"Call error: {exc}")
+            logger.exception(
+                "Unexpected error waiting for call %s to be answered", call_sid
+            )
+            yield AgentStreamResponse(
+                state=TaskState.failed, content=f"Call error: {exc}"
+            )
             return
 
         # Phase 2 — wait for the call to end.
@@ -839,7 +917,9 @@ class VoiceAgent(BaseAgent):
             result: dict = await asyncio.wait_for(future, timeout=duration_timeout)
         except asyncio.TimeoutError:
             _CALL_FUTURES.pop(call_sid, None)
-            logger.warning("Call %s exceeded max duration of %ds", call_sid, duration_timeout)
+            logger.warning(
+                "Call %s exceeded max duration of %ds", call_sid, duration_timeout
+            )
             yield AgentStreamResponse(
                 state=TaskState.failed,
                 content=f"Call exceeded maximum duration of {duration_timeout}s.",
@@ -848,18 +928,25 @@ class VoiceAgent(BaseAgent):
         except Exception as exc:
             _CALL_FUTURES.pop(call_sid, None)
             logger.exception("Unexpected error waiting for call %s", call_sid)
-            yield AgentStreamResponse(state=TaskState.failed, content=f"Call error: {exc}")
+            yield AgentStreamResponse(
+                state=TaskState.failed, content=f"Call error: {exc}"
+            )
             return
 
         # Format the transcript for the caller
         transcript: list[dict] = result.get("transcript", [])
         if transcript:
-            lines = "\n".join(f"{'Caller' if t['role'] == 'user' else 'Agent'}: {t['text']}" for t in transcript)
+            lines = "\n".join(
+                f"{'Caller' if t['role'] == 'user' else 'Agent'}: {t['text']}"
+                for t in transcript
+            )
             content = f"Call completed.\n\nTranscript:\n{lines}"
         else:
             content = "Call completed — no transcript recorded."
 
-        logger.info("Call %s finished with %d transcript entries", call_sid, len(transcript))
+        logger.info(
+            "Call %s finished with %d transcript entries", call_sid, len(transcript)
+        )
         yield AgentStreamResponse(state=TaskState.completed, content=content)
 
     async def _end_session(self, session_key: str):
