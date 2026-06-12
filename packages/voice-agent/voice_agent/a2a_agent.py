@@ -724,7 +724,7 @@ class VoiceAgent(BaseAgent):
         # _prewarm_audio_session creates the agent and starts agent.run(), which
         # sets mcp_status as soon as the MCP handshake succeeds or fails.
         try:
-            await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=10.0)
+            await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=60.0)
         except (asyncio.TimeoutError, Exception) as exc:
             logger.warning("Pre-warm did not complete before call: %s — will cold-start on answer", exc)
 
