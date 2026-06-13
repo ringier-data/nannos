@@ -18,7 +18,11 @@ from langchain_mcp_adapters.callbacks import Callbacks
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
-from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_errors import (
+    format_mcp_error,
+    guarded_streamable_http,
+    is_retryable_mcp_error,
+)
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 
 from ..models.config import AgentSettings
@@ -247,9 +251,20 @@ class ToolDiscoveryService:
         last_error = None
         delay = initial_delay
 
+        # Best-effort: pull the URL for this server connection so log enrichment
+        # can name it. The client stores connections keyed by server slug.
+        server_url: str | None = None
+        try:
+            conn = getattr(client, "connections", {}).get(server_name)
+            if conn is not None:
+                server_url = getattr(conn, "url", None)
+        except Exception:
+            server_url = None
+
         for attempt in range(max_retries):
             try:
-                server_tools = await client.get_tools(server_name=server_name)
+                async with guarded_streamable_http(url=server_url, server_slug=server_name):
+                    server_tools = await client.get_tools(server_name=server_name)
                 # Tag tools with server_name metadata
                 for tool in server_tools:
                     if tool.metadata is None:
