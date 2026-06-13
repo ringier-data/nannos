@@ -48,6 +48,9 @@ export interface Config {
     url: string;
     audience: string;
   };
+  readonly installationSecret: {
+    ssmPrefix: string;
+  };
   readonly adminGroup: string;
   readonly v2CookieSecret: string;
   readonly sessionTtlSeconds: number;
@@ -119,7 +122,7 @@ export async function getConfigFromEnv(): Promise<Config> {
     throw new Error('Please provide OIDC_ISSUER_URL');
   }
 
-  // Validate that we have either direct OIDC client secret or SSM key
+  // Validate that we have either direct OIDC client secret or SSM reference
   const hasOidcClientSecret = process.env.OIDC_CLIENT_SECRET || process.env.OIDC_CLIENT_SECRET_SSM_KEY;
   if (!hasOidcClientSecret) {
     throw new Error('Please provide OIDC_CLIENT_SECRET or OIDC_CLIENT_SECRET_SSM_KEY');
@@ -214,6 +217,11 @@ export async function getConfigFromEnv(): Promise<Config> {
           audience: process.env.OIDC_CONSOLE_BACKEND_AUDIENCE || 'agent-console',
         }
       : undefined,
+    installationSecret: {
+      ssmPrefix:
+        process.env.INSTALLATION_SECRET_SSM_PREFIX ||
+        `/nannos/${environment}/client-slack/installation-secrets`,
+    },
     adminGroup: process.env.ADMIN_GROUP!,
     v2CookieSecret: process.env.V2_COOKIE_SECRET!,
     sessionTtlSeconds: Number(process.env.SESSION_TTL_SECONDS) || 86400,
