@@ -44,9 +44,21 @@ _MODEL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "Gemini 3.1 Pro (Preview)",
         "Google's advanced model for complex reasoning, supports multimodal input including audio and video, supports thinking mode",
     ),
+    "gpt-5.4-mini": (
+        "GPT-5.4 Mini",
+        "Next-generation reasoning with improved instruction following and coding capabilities",
+    ),
+    "gpt-5.4-nano": (
+        "GPT-5.4 Nano",
+        "Ultra-lightweight next-gen model for high-throughput, low-latency tasks",
+    ),
     "gemini-3-flash-preview": (
         "Gemini 3 Flash (Preview)",
         "Google's fast and efficient model, supports multimodal input including audio and video, supports thinking mode",
+    ),
+    "gemini-3.1-flash-lite-preview": (
+        "Gemini 3.1 Flash Lite (Preview)",
+        "Google's lightweight and cost-efficient model, supports multimodal input, supports thinking mode",
     ),
 }
 

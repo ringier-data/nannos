@@ -31,14 +31,21 @@ logger = logging.getLogger(__name__)
 _MODEL_METADATA: dict[str, dict] = {
     "gpt-4o": {"label": "GPT-4o", "provider": "Azure OpenAI", "supports_thinking": False},
     "gpt-4o-mini": {"label": "GPT-4o Mini", "provider": "Azure OpenAI", "supports_thinking": False},
+    "gpt-5.4-mini": {"label": "GPT-5.4 Mini", "provider": "Azure OpenAI", "supports_thinking": False},
+    "gpt-5.4-nano": {"label": "GPT-5.4 Nano", "provider": "Azure OpenAI", "supports_thinking": False},
     "claude-sonnet-4.5": {"label": "Claude Sonnet 4.5", "provider": "AWS Bedrock", "supports_thinking": True},
     "claude-sonnet-4.6": {"label": "Claude Sonnet 4.6", "provider": "AWS Bedrock", "supports_thinking": True},
     "claude-haiku-4-5": {"label": "Claude Haiku 4.5", "provider": "AWS Bedrock", "supports_thinking": True},
-    "gemini-3-pro-preview": {
-        "label": "Gemini 3 Pro Preview",
+    "gemini-3.1-pro-preview": {
+        "label": "Gemini 3.1 Pro Preview",
         "provider": "Google Vertex AI",
         "supports_thinking": True,
-        "thinking_levels": ["low", "high"],
+        "thinking_levels": ["low", "medium", "high"],
+    },
+    "gemini-3.1-flash-lite-preview": {
+        "label": "Gemini 3.1 Flash Lite Preview",
+        "provider": "Google Vertex AI",
+        "supports_thinking": True,
     },
     "gemini-3-flash-preview": {
         "label": "Gemini 3 Flash Preview",
@@ -71,6 +78,24 @@ _AZURE_MODELS: dict[str, dict] = {
         "backend": "azure_openai",
         "display_name": "GPT-4o Mini",
         "description": "Cost-effective option for simpler tasks, faster responses, good for routine operations",
+    },
+    "gpt-5.4-mini": {
+        "api_version": "2025-01-01-preview",
+        "deployment": "gpt-5.4-mini",
+        "model_name": "gpt-5.4-mini",
+        "input_modes": ["text", "image"],
+        "backend": "azure_openai",
+        "display_name": "GPT-5.4 Mini",
+        "description": "Next-generation reasoning with improved instruction following and coding capabilities",
+    },
+    "gpt-5.4-nano": {
+        "api_version": "2025-01-01-preview",
+        "deployment": "gpt-5.4-nano",
+        "model_name": "gpt-5.4-nano",
+        "input_modes": ["text", "image"],
+        "backend": "azure_openai",
+        "display_name": "GPT-5.4 Nano",
+        "description": "Ultra-lightweight next-gen model for high-throughput, low-latency tasks",
     },
 }
 
@@ -114,6 +139,13 @@ _GEMINI_MODELS: dict[str, dict] = {
         "location": "global",
         "display_name": "Gemini 3 Flash (Preview)",
         "description": "Google's fast and efficient model, supports multimodal input including audio and video, supports thinking mode",
+    },
+    "gemini-3.1-flash-lite-preview": {
+        "model_id": "gemini-3.1-flash-lite-preview",
+        "input_modes": ["text", "image", "audio", "video", "file"],
+        "backend": "google",
+        "display_name": "Gemini 3.1 Flash Lite (Preview)",
+        "description": "Google's lightweight and cost-efficient model, supports multimodal input, supports thinking mode",
     },
 }
 
@@ -453,7 +485,7 @@ def create_model(
     Returns:
         BaseChatModel: The created model instance
     """
-    if model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
+    if model_type in ("gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"):
         # Lazy import for Gemini provider
         from google.oauth2 import service_account
         from langchain_google_genai import ChatGoogleGenerativeAI

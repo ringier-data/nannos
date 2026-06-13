@@ -818,6 +818,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         # Bedrock API payload.
         _RESPONSE_FORMAT_TOOL_NAMES = {"SubAgentResponseSchema"}
 
+        # Gemini built-in tool capability names (passed through unmodified)
+        _GEMINI_BUILTIN_TOOL_KEYS = {"google_search", "code_execution", "url_context"}
+
         # 1. Add original tools from the request first (e.g., write_todos, task)
         # These are tools that create_deep_agent provides by default
         # The "task" tool gets enhanced with A2A agent descriptions and enum
@@ -834,6 +837,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     tool_dicts.append(tool_dict)
                     seen_names.add(tool.name)
             elif isinstance(tool, dict):
+                # Gemini built-in tools use a different format: {"google_search": {}}
+                # Pass them through unmodified — langchain handles them in bind_tools
+                if tool.keys() & _GEMINI_BUILTIN_TOOL_KEYS:
+                    tool_dicts.append(tool)
+                    continue
                 name = tool.get("function", {}).get("name") or tool.get("name")
                 if name and name not in seen_names and name not in _RESPONSE_FORMAT_TOOL_NAMES:
                     # Validate and clean schema
@@ -1333,7 +1341,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             f"DynamicToolDispatchMiddleware.wrap_model_call"
             f"{'(skip_injection)' if self.skip_tool_injection else ''}: "
             f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_sub}: "
-            f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
+            f"{[t.get('function', {}).get('name') or next(iter(t.keys()), '?') for t in tool_dicts]}"
         )
 
         # Enhance the system prompt so the LLM sees all runtime-discovered agents
@@ -1417,7 +1425,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     f"DynamicToolDispatchMiddleware.awrap_model_call: "
                     f"Binding {len(tool_dicts)} tools as dicts for user {user_context.user_sub} "
                     f"(cleanup={level.value}): "
-                    f"{[t.get('function', {}).get('name', '?') for t in tool_dicts]}"
+                    f"{[t.get('function', {}).get('name') or next(iter(t.keys()), '?') for t in tool_dicts]}"
                 )
 
                 result = await handler(
