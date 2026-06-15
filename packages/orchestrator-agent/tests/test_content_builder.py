@@ -1,7 +1,7 @@
 """Unit tests for content builder module."""
 
 import pytest
-from a2a.types import FilePart, FileWithUri, Part, TextPart
+from a2a.types import Part
 
 from app.core.content_builder import (
     _describe_file,
@@ -119,8 +119,7 @@ class TestProcessFilePart:
     @pytest.mark.asyncio
     async def test_process_file_with_uri_returns_tuple(self):
         """Test processing FilePart with URI returns (description, ContentBlock)."""
-        file_data = FileWithUri(uri="s3://bucket/photo.jpg", mimeType="image/jpeg", name="photo.jpg")
-        part = Part(root=FilePart(file=file_data))
+        part = Part(url="s3://bucket/photo.jpg", media_type="image/jpeg", filename="photo.jpg")
 
         result = await _process_file_part(part)
 
@@ -140,8 +139,7 @@ class TestProcessFilePart:
     @pytest.mark.asyncio
     async def test_process_audio_file(self):
         """Test processing audio FilePart returns AudioContentBlock."""
-        file_data = FileWithUri(uri="s3://bucket/audio.mp3", mimeType="audio/mpeg", name="audio.mp3")
-        part = Part(root=FilePart(file=file_data))
+        part = Part(url="s3://bucket/audio.mp3", media_type="audio/mpeg", filename="audio.mp3")
 
         result = await _process_file_part(part)
 
@@ -155,8 +153,7 @@ class TestProcessFilePart:
     @pytest.mark.asyncio
     async def test_process_video_file(self):
         """Test processing video FilePart returns VideoContentBlock."""
-        file_data = FileWithUri(uri="s3://bucket/clip.mp4", mimeType="video/mp4", name="clip.mp4")
-        part = Part(root=FilePart(file=file_data))
+        part = Part(url="s3://bucket/clip.mp4", media_type="video/mp4", filename="clip.mp4")
 
         result = await _process_file_part(part)
 
@@ -170,8 +167,7 @@ class TestProcessFilePart:
     @pytest.mark.asyncio
     async def test_process_pdf_file_uses_file_block(self):
         """Test processing PDF FilePart returns FileContentBlock."""
-        file_data = FileWithUri(uri="s3://bucket/doc.pdf", mimeType="application/pdf", name="doc.pdf")
-        part = Part(root=FilePart(file=file_data))
+        part = Part(url="s3://bucket/doc.pdf", media_type="application/pdf", filename="doc.pdf")
 
         result = await _process_file_part(part)
 
@@ -185,8 +181,7 @@ class TestProcessFilePart:
     @pytest.mark.asyncio
     async def test_process_file_without_mime_type(self):
         """Test processing FilePart without MIME type (guessed from name)."""
-        file_data = FileWithUri(uri="s3://bucket/document.pdf", name="document.pdf")
-        part = Part(root=FilePart(file=file_data))
+        part = Part(url="s3://bucket/document.pdf", filename="document.pdf")
 
         result = await _process_file_part(part)
 
@@ -199,7 +194,7 @@ class TestProcessFilePart:
     @pytest.mark.asyncio
     async def test_process_non_file_part(self):
         """Test processing non-FilePart returns None."""
-        text_part = Part(root=TextPart(text="Hello"))
+        text_part = Part(text="Hello")
 
         result = await _process_file_part(text_part)
 
@@ -209,8 +204,7 @@ class TestProcessFilePart:
     async def test_process_file_with_https_uri_unchanged(self):
         """Test that non-S3 URIs (https://) are left unchanged."""
         https_url = "https://example.com/myfile.pdf"
-        file_data = FileWithUri(uri=https_url, mimeType="application/pdf", name="myfile.pdf")
-        part = Part(root=FilePart(file=file_data))
+        part = Part(url=https_url, media_type="application/pdf", filename="myfile.pdf")
 
         result = await _process_file_part(part)
 
@@ -229,8 +223,8 @@ class TestBuildTextContent:
     async def test_build_from_text_parts_only(self):
         """Test building content from text parts only — no file blocks."""
         parts = [
-            Part(root=TextPart(text="Hello, world!")),
-            Part(root=TextPart(text="How are you?")),
+            Part(text="Hello, world!"),
+            Part(text="How are you?"),
         ]
 
         text, file_blocks = await build_text_content(parts)
@@ -241,12 +235,12 @@ class TestBuildTextContent:
     @pytest.mark.asyncio
     async def test_build_from_mixed_parts(self):
         """Test building content from mixed text and file parts."""
-        file_data = FileWithUri(uri="s3://bucket/doc.pdf", mimeType="application/pdf", name="doc.pdf")
+        file_data = Part(url="s3://bucket/doc.pdf", media_type="application/pdf", filename="doc.pdf")
 
         parts = [
-            Part(root=TextPart(text="Please review this document:")),
-            Part(root=FilePart(file=file_data)),
-            Part(root=TextPart(text="Let me know your thoughts.")),
+            Part(text="Please review this document:"),
+            file_data,
+            Part(text="Let me know your thoughts."),
         ]
 
         text, file_blocks = await build_text_content(parts)
@@ -269,7 +263,7 @@ class TestBuildTextContent:
     async def test_build_with_user_prefix(self):
         """Test building content with user prefix for multi-user attribution."""
         parts = [
-            Part(root=TextPart(text="Hello from Slack!")),
+            Part(text="Hello from Slack!"),
         ]
 
         text, file_blocks = await build_text_content(parts, user_prefix="John Doe <@johndoe>")
@@ -289,12 +283,12 @@ class TestBuildTextContent:
     @pytest.mark.asyncio
     async def test_build_with_only_files(self):
         """Test building content with only file parts."""
-        file1 = FileWithUri(uri="s3://bucket/a.jpg", mimeType="image/jpeg", name="a.jpg")
-        file2 = FileWithUri(uri="s3://bucket/b.pdf", mimeType="application/pdf", name="b.pdf")
+        file1 = Part(url="s3://bucket/a.jpg", media_type="image/jpeg", filename="a.jpg")
+        file2 = Part(url="s3://bucket/b.pdf", media_type="application/pdf", filename="b.pdf")
 
         parts = [
-            Part(root=FilePart(file=file1)),
-            Part(root=FilePart(file=file2)),
+            file1,
+            file2,
         ]
 
         text, file_blocks = await build_text_content(parts)
@@ -328,7 +322,7 @@ class TestBuildTextContent:
     async def test_build_skips_unsupported_parts(self, caplog):
         """Test that unsupported part types are skipped with debug log."""
         parts = [
-            Part(root=TextPart(text="Valid text")),
+            Part(text="Valid text"),
         ]
 
         text, file_blocks = await build_text_content(parts)
@@ -342,12 +336,12 @@ class TestContentBuilderIntegration:
     @pytest.mark.asyncio
     async def test_realistic_slack_message_with_attachments(self):
         """Test realistic scenario: Slack message with file attachments."""
-        file_data = FileWithUri(uri="s3://documents/report-2024.pdf", mimeType="application/pdf", name="Q4 Report.pdf")
+        file_data = Part(url="s3://documents/report-2024.pdf", media_type="application/pdf", filename="Q4 Report.pdf")
 
         parts = [
-            Part(root=TextPart(text="Hi team, please review the quarterly report.")),
-            Part(root=FilePart(file=file_data)),
-            Part(root=TextPart(text="Let's discuss in tomorrow's meeting.")),
+            Part(text="Hi team, please review the quarterly report."),
+            file_data,
+            Part(text="Let's discuss in tomorrow's meeting."),
         ]
 
         text, file_blocks = await build_text_content(parts, user_prefix="Alice Smith <@alice>")
@@ -372,14 +366,14 @@ class TestContentBuilderIntegration:
     @pytest.mark.asyncio
     async def test_multiple_images_from_design_review(self):
         """Test realistic scenario: Design review with multiple images."""
-        img1 = FileWithUri(uri="s3://designs/mockup-v1.png", mimeType="image/png", name="mockup-v1.png")
-        img2 = FileWithUri(uri="s3://designs/mockup-v2.png", mimeType="image/png", name="mockup-v2.png")
+        img1 = Part(url="s3://designs/mockup-v1.png", media_type="image/png", filename="mockup-v1.png")
+        img2 = Part(url="s3://designs/mockup-v2.png", media_type="image/png", filename="mockup-v2.png")
 
         parts = [
-            Part(root=TextPart(text="Here are two design options:")),
-            Part(root=FilePart(file=img1)),
-            Part(root=FilePart(file=img2)),
-            Part(root=TextPart(text="Which one looks better?")),
+            Part(text="Here are two design options:"),
+            img1,
+            img2,
+            Part(text="Which one looks better?"),
         ]
 
         text, file_blocks = await build_text_content(parts)
@@ -403,17 +397,17 @@ class TestContentBuilderIntegration:
     @pytest.mark.asyncio
     async def test_mixed_media_types(self):
         """Test scenario with image, audio, video, and document."""
-        img = FileWithUri(uri="s3://files/photo.jpg", mimeType="image/jpeg", name="photo.jpg")
-        audio = FileWithUri(uri="s3://files/song.mp3", mimeType="audio/mpeg", name="song.mp3")
-        video = FileWithUri(uri="s3://files/clip.mp4", mimeType="video/mp4", name="clip.mp4")
-        doc = FileWithUri(uri="s3://files/readme.txt", mimeType="text/plain", name="readme.txt")
+        img = Part(url="s3://files/photo.jpg", media_type="image/jpeg", filename="photo.jpg")
+        audio = Part(url="s3://files/song.mp3", media_type="audio/mpeg", filename="song.mp3")
+        video = Part(url="s3://files/clip.mp4", media_type="video/mp4", filename="clip.mp4")
+        doc = Part(url="s3://files/readme.txt", media_type="text/plain", filename="readme.txt")
 
         parts = [
-            Part(root=TextPart(text="Multimedia upload")),
-            Part(root=FilePart(file=img)),
-            Part(root=FilePart(file=audio)),
-            Part(root=FilePart(file=video)),
-            Part(root=FilePart(file=doc)),
+            Part(text="Multimedia upload"),
+            img,
+            audio,
+            video,
+            doc,
         ]
 
         text, file_blocks = await build_text_content(parts)

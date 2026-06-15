@@ -168,14 +168,14 @@ class BaseAgent(CostTrackingMixin, ABC):
             # seeing the stream end silently.
             logger.warning(f"Agent execution cancelled in {self.__class__.__name__}")
             yield AgentStreamResponse(
-                state=TaskState.canceled,
+                state=TaskState.TASK_STATE_CANCELED,
                 content="The agent execution was cancelled.",
             )
             return
         except Exception as e:
             logger.error(f"Error in {self.__class__.__name__}.stream: {e}", exc_info=True)
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content=f"An error occurred while processing your request: {str(e)}",
                 metadata={"error": str(e)},
             )

@@ -14,6 +14,7 @@ import os
 import re
 from abc import abstractmethod
 from collections.abc import AsyncIterable
+from typing import Literal
 
 from a2a.types import Message, Task, TaskState
 from deepagents import create_deep_agent
@@ -56,7 +57,7 @@ def _get_default_recursion_limit() -> int:
 class FinalResponseSchema(BaseModel):
     """Schema for final response from LangGraph agents."""
 
-    task_state: TaskState = Field(
+    task_state: Literal["completed", "failed", "input_required", "working"] = Field(
         ...,
         description="The final state of the task: 'completed', 'failed', 'input_required', or 'working'",
     )
@@ -830,7 +831,7 @@ class LangGraphAgent(BaseAgent):
 
                 # Provide user-friendly error message
                 yield AgentStreamResponse(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     content=(
                         f"I'm unable to connect to my tooling services at the moment. {error_detail}\n\n"
                         "This is likely a temporary issue. Please try again in a few moments. "
@@ -882,7 +883,7 @@ class LangGraphAgent(BaseAgent):
             chunk_count = 0
             final_user_content = []
             final_response_message = None
-            task_state = TaskState.completed
+            task_state = TaskState.TASK_STATE_COMPLETED
             stream_buffer = StreamBuffer()
             response_streamer = StructuredResponseStreamer("FinalResponseSchema")
             # Track per-message JSON detection to suppress FinalResponseSchema text output
@@ -909,7 +910,7 @@ class LangGraphAgent(BaseAgent):
                                 stream_buffer.append(delta)
                                 for chunk in stream_buffer.flush_ready():
                                     yield AgentStreamResponse(
-                                        state=TaskState.working,
+                                        state=TaskState.TASK_STATE_WORKING,
                                         content=chunk,
                                         metadata={"streaming_chunk": True},
                                     )
@@ -932,7 +933,7 @@ class LangGraphAgent(BaseAgent):
                                     stream_buffer.append(thinking_text)
                                     for chunk in stream_buffer.flush_ready():
                                         yield AgentStreamResponse(
-                                            state=TaskState.working,
+                                            state=TaskState.TASK_STATE_WORKING,
                                             content=chunk,
                                             metadata={
                                                 "streaming_chunk": True,
@@ -953,7 +954,7 @@ class LangGraphAgent(BaseAgent):
                                 stream_buffer.append(text)
                                 for chunk in stream_buffer.flush_ready():
                                     yield AgentStreamResponse(
-                                        state=TaskState.working,
+                                        state=TaskState.TASK_STATE_WORKING,
                                         content=chunk,
                                         metadata={"streaming_chunk": True},
                                     )
@@ -989,7 +990,7 @@ class LangGraphAgent(BaseAgent):
                             ]
                             logger.debug(f"Todo snapshot from {node_name}: {len(snapshot)} items")
                             yield AgentStreamResponse(
-                                state=TaskState.working,
+                                state=TaskState.TASK_STATE_WORKING,
                                 content="",
                                 metadata={"work_plan": True, "todos": snapshot},
                             )
@@ -1008,13 +1009,13 @@ class LangGraphAgent(BaseAgent):
 
                                             # Map string state to TaskState enum
                                             if state_str == "input_required":
-                                                task_state = TaskState.input_required
+                                                task_state = TaskState.TASK_STATE_INPUT_REQUIRED
                                             elif state_str == "failed":
-                                                task_state = TaskState.failed
+                                                task_state = TaskState.TASK_STATE_FAILED
                                             elif state_str == "working":
-                                                task_state = TaskState.working
+                                                task_state = TaskState.TASK_STATE_WORKING
                                             else:
-                                                task_state = TaskState.completed
+                                                task_state = TaskState.TASK_STATE_COMPLETED
 
                                             # Extract the message field
                                             final_response_message = args.get("message")
@@ -1045,7 +1046,7 @@ class LangGraphAgent(BaseAgent):
             remaining = stream_buffer.flush_all()
             if remaining:
                 yield AgentStreamResponse(
-                    state=TaskState.working,
+                    state=TaskState.TASK_STATE_WORKING,
                     content=remaining,
                     metadata={"streaming_chunk": True},
                 )
@@ -1058,7 +1059,7 @@ class LangGraphAgent(BaseAgent):
             # Check for interrupts
             if final_state.interrupts:
                 yield AgentStreamResponse(
-                    state=TaskState.input_required,
+                    state=TaskState.TASK_STATE_INPUT_REQUIRED,
                     content="Process interrupted. Additional input required.",
                 )
                 return
@@ -1080,13 +1081,13 @@ class LangGraphAgent(BaseAgent):
 
                     if final_response_message:
                         if state_str == "input_required":
-                            task_state = TaskState.input_required
+                            task_state = TaskState.TASK_STATE_INPUT_REQUIRED
                         elif state_str == "failed":
-                            task_state = TaskState.failed
+                            task_state = TaskState.TASK_STATE_FAILED
                         elif state_str == "working":
-                            task_state = TaskState.working
+                            task_state = TaskState.TASK_STATE_WORKING
                         else:
-                            task_state = TaskState.completed
+                            task_state = TaskState.TASK_STATE_COMPLETED
                         logger.info(
                             f"FinalResponseSchema from structured_response: state={task_state}, "
                             f"message_length={len(final_response_message)}"
@@ -1103,18 +1104,18 @@ class LangGraphAgent(BaseAgent):
                                     args = tool_call.get("args", {})
                                     state_str = args.get("task_state", "completed")
                                     if state_str == "input_required":
-                                        task_state = TaskState.input_required
+                                        task_state = TaskState.TASK_STATE_INPUT_REQUIRED
                                     elif state_str == "failed":
-                                        task_state = TaskState.failed
+                                        task_state = TaskState.TASK_STATE_FAILED
                                     elif state_str == "working":
-                                        task_state = TaskState.working
+                                        task_state = TaskState.TASK_STATE_WORKING
                                     else:
-                                        task_state = TaskState.completed
+                                        task_state = TaskState.TASK_STATE_COMPLETED
                                     final_response_message = args.get("message")
                                     logger.info(f"FinalResponseSchema found in final state: state={task_state}")
                                     break
 
-                        if task_state != TaskState.completed or msg.tool_calls:
+                        if task_state != TaskState.TASK_STATE_COMPLETED or msg.tool_calls:
                             break
 
             # Priority 3: Try parsing accumulated text as FinalResponseSchema JSON (safety net)
@@ -1128,13 +1129,13 @@ class LangGraphAgent(BaseAgent):
                         final_response_message = parsed["message"]
                         state_str = parsed.get("task_state", "completed")
                         if state_str == "input_required":
-                            task_state = TaskState.input_required
+                            task_state = TaskState.TASK_STATE_INPUT_REQUIRED
                         elif state_str == "failed":
-                            task_state = TaskState.failed
+                            task_state = TaskState.TASK_STATE_FAILED
                         elif state_str == "working":
-                            task_state = TaskState.working
+                            task_state = TaskState.TASK_STATE_WORKING
                         else:
-                            task_state = TaskState.completed
+                            task_state = TaskState.TASK_STATE_COMPLETED
                         logger.info(
                             f"FinalResponseSchema parsed from text content: state={task_state}, "
                             f"message_length={len(final_response_message)}"
@@ -1163,7 +1164,7 @@ class LangGraphAgent(BaseAgent):
             # checkpoint with a fresh step counter.
             logger.error(f"Recursion limit reached during stream processing: {e}", exc_info=True)
             yield AgentStreamResponse(
-                state=TaskState.input_required,
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
                 content="I've been working on this task for a while and need to take a break. "
                 "I've made some progress, but the task requires more steps than I can complete in one go. "
                 "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",

@@ -239,7 +239,7 @@ async def twilio_stream(websocket: WebSocket) -> None:
             # (which now requires a phone number and would fail here).
             init_config = json.loads(init_query) if init_query.strip().startswith("{") else {}
             async for response in _voice_agent._start_audio_session(init_config, session_key):
-                if response.state == TaskState.failed:
+                if response.state == TaskState.TASK_STATE_FAILED:
                     logger.error(f"A2A agent failed: {response.content}")
                     break
 

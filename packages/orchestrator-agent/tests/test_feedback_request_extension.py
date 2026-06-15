@@ -1,5 +1,7 @@
 """Tests for A2A extension helpers (Phase 2) — feedback request extension."""
 
+from google.protobuf.json_format import MessageToDict
+
 from app.core.a2a_extensions import (
     ALL_EXTENSIONS,
     FEEDBACK_REQUEST_EXTENSION,
@@ -22,8 +24,8 @@ def test_new_feedback_request_message_basic():
     assert msg.context_id == "ctx-1"
     assert msg.task_id == "task-1"
     assert len(msg.parts) == 1
-    data_part = msg.parts[0].root
-    assert data_part.data == {"sub_agents": []}
+    data_part = MessageToDict(msg.parts[0].data)
+    assert data_part == {"sub_agents": []}
 
 
 def test_new_feedback_request_message_with_sub_agents():
@@ -33,8 +35,8 @@ def test_new_feedback_request_message_with_sub_agents():
         sub_agents_involved=["search-agent", "writer-agent"],
     )
 
-    data_part = msg.parts[0].root
-    assert data_part.data["sub_agents"] == ["search-agent", "writer-agent"]
+    data_part = MessageToDict(msg.parts[0].data)
+    assert data_part["sub_agents"] == ["search-agent", "writer-agent"]
 
 
 def test_new_feedback_request_message_unique_ids():

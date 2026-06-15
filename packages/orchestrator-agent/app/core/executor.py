@@ -7,6 +7,10 @@ from typing import Any, Literal
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
+from a2a.helpers import (
+    new_task_from_user_message,
+    new_text_message,
+)
 from a2a.types import (
     InternalError,
     InvalidParamsError,
@@ -16,13 +20,7 @@ from a2a.types import (
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
-    TextPart,
 )
-from a2a.utils import (
-    new_agent_text_message,
-    new_task,
-)
-from a2a.utils.errors import ServerError
 from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.models.base import ModelType
 from pydantic import SecretStr
@@ -108,7 +106,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         )
         if not user:
             logger.error(f"[REGISTRY] User with sub {sub} not found in registry")
-            raise ServerError(error=InvalidParamsError())
+            raise InvalidParamsError()
         return user
 
     @staticmethod
@@ -120,16 +118,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         Returns:
             A dict like {"decisions": [{"type": "approve"}]}
         """
-        from a2a.types import DataPart
+        from google.protobuf.json_format import MessageToDict
 
         if context.message and context.message.parts:
             for part in context.message.parts:
-                inner = part.root if hasattr(part, "root") else part
-                if isinstance(inner, DataPart) and isinstance(inner.data, dict):
-                    if "decisions" in inner.data:
-                        return inner.data
+                if part.WhichOneof("content") == "data":
+                    data = MessageToDict(part.data)
+                    if isinstance(data, dict) and "decisions" in data:
+                        return data
 
-        logger.warning("[HITL] No DataPart with decisions found, defaulting to reject")
+        logger.warning("[HITL] No data part with decisions found, defaulting to reject")
         return {"decisions": [{"type": "reject"}]}
 
     @staticmethod
@@ -317,14 +315,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
 
         error = self._validate_request(context)
         if error:
-            raise ServerError(error=InvalidParamsError())
+            raise InvalidParamsError()
 
         query = context.get_user_input()
         task = context.current_task
         logger.debug(f"Starting execution for query: {query}")
         logger.debug(f"Current task: {task}")
         if not task:
-            task = new_task(context.message)  # type: ignore
+            task = new_task_from_user_message(context.message)  # type: ignore
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
@@ -355,20 +353,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             f"[STEERING] Rejected steering for context_id={context_id}: "
                             f"caller channel_id does not match stream assistant_id"
                         )
-                        raise ServerError(error=InvalidParamsError())
+                        raise InvalidParamsError()
                 elif active.scope == "personal":
                     if active.owner_sub and caller_sub != active.owner_sub:
                         logger.warning(
                             f"[STEERING] Rejected steering for context_id={context_id}: "
                             f"caller_sub={caller_sub} does not match stream owner"
                         )
-                        raise ServerError(error=InvalidParamsError())
+                        raise InvalidParamsError()
                 if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
                     logger.warning(
                         f"[STEERING] Queue full for context_id={context_id} "
                         f"(depth={active.message_queue.qsize()}), rejecting"
                     )
-                    raise ServerError(error=InvalidParamsError())
+                    raise InvalidParamsError()
                 logger.info(
                     f"[STEERING] Active stream found for context_id={context_id}, "
                     f"queuing message for running orchestrator (queue depth: {active.message_queue.qsize() + 1})"
@@ -391,7 +389,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                             state=task.status.state,
                             message=task.status.message,
                         ),
-                        final=False,
                     )
                 )
                 return
@@ -415,10 +412,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 sub_agent_config_hash = context.call_context.state.get("sub_agent_config_hash")
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
-                raise ServerError(error=InvalidParamsError()) from e
+                raise InvalidParamsError() from e
         else:
             logger.error("[ZERO-TRUST] No user_token found in call_context - authentication may have failed")
-            raise ServerError(error=InvalidParamsError())
+            raise InvalidParamsError()
 
         # Set the access token for cost tracking (ContextVar)
         set_request_access_token(user_token)
@@ -461,13 +458,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 f"Reason: {status.lock_reason}"
             )
             await updater.update_status(
-                TaskState.failed,
-                new_agent_text_message(
-                    "Service temporarily unavailable: Monthly token budget has been exceeded. "
-                    "Please contact an administrator to increase the budget or wait until next month.",
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_FAILED,
+                new_text_message("Service temporarily unavailable: Monthly token budget has been exceeded. "
+                    "Please contact an administrator to increase the budget or wait until next month.", context_id=task.context_id, task_id=task.id),
             )
             return
 
@@ -613,7 +606,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             if requested_extensions is not None and ACTIVITY_LOG_EXTENSION in requested_extensions:
                 logger.debug("Agent execution started. Emitting initial activity log message.")
                 await updater.update_status(
-                    TaskState.working,
+                    TaskState.TASK_STATE_WORKING,
                     new_activity_log_message(
                         "Agent execution started.",
                         task.context_id,
@@ -637,7 +630,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     # Buffer the terminal completed item so we can check for unconsumed
                     # steering messages before emitting it to the SSE stream.
                     # Other terminal states are emitted immediately.
-                    if item.state == TaskState.completed:
+                    if item.state == TaskState.TASK_STATE_COMPLETED:
                         deferred_terminal_item = item
                         continue
 
@@ -673,7 +666,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # Check for steering messages that arrived after the last abefore_model
                 if (
                     deferred_terminal_item is not None
-                    and deferred_terminal_item.state == TaskState.completed
+                    and deferred_terminal_item.state == TaskState.TASK_STATE_COMPLETED
                     and steering_reinvocations < MAX_STEERING_REINVOCATIONS
                 ):
                     unconsumed = get_orchestrator_pending_messages(context_id)
@@ -701,14 +694,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # delegation instead of surfacing nothing.
                 if (
                     deferred_terminal_item is not None
-                    and deferred_terminal_item.state == TaskState.completed
+                    and deferred_terminal_item.state == TaskState.TASK_STATE_COMPLETED
                     and delegation_reinvocations < MAX_DELEGATION_REINVOCATIONS
                 ):
                     phantom_state = graph.get_state(config)  # type: ignore
                     phantom_values = phantom_state.values if hasattr(phantom_state, "values") else {}
                     if StreamHandler.is_phantom_subagent_completion(phantom_values):
                         delegation_reinvocations += 1
-                        message_parts = [Part(root=TextPart(text=_DELEGATION_NUDGE))]
+                        message_parts = [Part(text=_DELEGATION_NUDGE)]
                         resume_value = None  # fresh corrective turn, not a resume
                         logger.warning(
                             "[DELEGATION] include_subagent_output=true but no sub-agent ran this turn — "
@@ -721,7 +714,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # Emit feedback request for complex tasks before terminal event
                 if (
                     deferred_terminal_item is not None
-                    and deferred_terminal_item.state in (TaskState.completed, TaskState.failed, TaskState.canceled)
+                    and deferred_terminal_item.state in (TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED)
                     and requested_extensions is not None
                     and FEEDBACK_REQUEST_EXTENSION in requested_extensions
                 ):
@@ -743,7 +736,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                                     sub_agents_set.add(meta["agent_name"])
                             sub_agents = list(sub_agents_set)
                             await updater.update_status(
-                                TaskState.working,
+                                TaskState.TASK_STATE_WORKING,
                                 new_feedback_request_message(
                                     context_id=task.context_id,
                                     task_id=task.id,
@@ -785,12 +778,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             try:
                 await asyncio.shield(
                     updater.update_status(
-                        TaskState.canceled,
-                        new_agent_text_message(
-                            "Agent execution was cancelled.",
-                            task.context_id,
-                            task.id,
-                        ),
+                        TaskState.TASK_STATE_CANCELED,
+                        new_text_message("Agent execution was cancelled.", context_id=task.context_id, task_id=task.id),
                     )
                 )
             except (asyncio.CancelledError, Exception):
@@ -798,7 +787,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             raise
         except Exception as e:
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}", exc_info=True)
-            raise ServerError(error=InternalError()) from e
+            raise InternalError() from e
         finally:
             # Persist any bypass rules that were approved during this turn.
             # Best-effort: failures are logged but don't affect the response.
@@ -880,7 +869,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             source = metadata.get("source")
             logger.info(f"[ACTIVITY_LOG] Emitting status update: source={source}, content: {content[:50]}")
             await updater.update_status(
-                TaskState.working,
+                TaskState.TASK_STATE_WORKING,
                 new_activity_log_message(
                     content,
                     task.context_id,
@@ -897,7 +886,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             todos = metadata.get("todos", [])
             logger.info(f"[WORK_PLAN] Emitting work plan with {len(todos)} todos")
             await updater.update_status(
-                TaskState.working,
+                TaskState.TASK_STATE_WORKING,
                 new_work_plan_message(
                     todos,
                     task.context_id,
@@ -912,7 +901,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # until the next status-update event arrives (SSE buffering in the Python client)
         # Streaming chunks will appear with slight delay until next natural status update
         # (which happens frequently during LLM token streaming)
-        if state == TaskState.working and metadata.get("streaming_chunk"):
+        if state == TaskState.TASK_STATE_WORKING and metadata.get("streaming_chunk"):
             # Intermediate-output chunks (sub-agent thoughts, orchestrator reasoning) go into
             # a SEPARATE artifact stream so they don't mix with the main response artifact.
             # Main response chunks use streaming_artifact_id; thoughts use a "-thought" suffix.
@@ -950,7 +939,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             if metadata.get("agent_name"):
                 artifact_metadata["agent_name"] = metadata["agent_name"]
             await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
+                [Part(text=content)],
                 artifact_id=effective_artifact_id,
                 append=append,
                 last_chunk=False,
@@ -968,43 +957,31 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             return True, first_intermediate_chunk_sent  # Mark main artifact created
 
         # Handle different A2A task states
-        if state == TaskState.working and not is_final:
+        if state == TaskState.TASK_STATE_WORKING and not is_final:
             # Status update or intermediate progress
             logger.info(f"Emitting status update: {content}")
             await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_WORKING,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
                 metadata=metadata or None,
             )
 
-        elif state == TaskState.working and is_final:
+        elif state == TaskState.TASK_STATE_WORKING and is_final:
             # Working state with no pending interrupts - still working
             await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_WORKING,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
                 metadata=metadata or None,
             )
 
-        elif state == TaskState.failed:
+        elif state == TaskState.TASK_STATE_FAILED:
             # Handle failure state (terminal state - stream will close)
             await updater.update_status(
-                TaskState.failed,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_FAILED,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
             )
 
-        elif state == TaskState.input_required:
+        elif state == TaskState.TASK_STATE_INPUT_REQUIRED:
             # User input required - leave task in input_required state
             action_requests = item.action_requests
             if action_requests and _ext_active(HUMAN_IN_THE_LOOP_EXTENSION):
@@ -1030,14 +1007,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # (clients need the structured message); we only seal the stream.
                 if first_chunk_sent:
                     await updater.add_artifact(
-                        [Part(root=TextPart(text=""))],
+                        [Part(text="")],
                         artifact_id=streaming_artifact_id,
                         append=True,
                         last_chunk=True,
                         metadata={},
                     )
                 await updater.update_status(
-                    TaskState.input_required,
+                    TaskState.TASK_STATE_INPUT_REQUIRED,
                     msg,
                 )
             else:
@@ -1053,16 +1030,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # messages. The `final_answer_source: "fallback"` metadata flag
                 # signals well-behaved clients to dedupe against the artifact.
                 final_answer = content if content else "Additional input is required to continue."
-                msg = new_agent_text_message(
-                    final_answer,
-                    task.context_id,
-                    task.id,
-                )
+                msg = new_text_message(final_answer, context_id=task.context_id, task_id=task.id)
                 if item.interrupt_reason:
                     msg.metadata = {"interrupt_reason": item.interrupt_reason}
                 await self._close_streaming_artifact_and_respond(
                     updater,
-                    TaskState.input_required,
+                    TaskState.TASK_STATE_INPUT_REQUIRED,
                     msg,
                     streaming_artifact_id=streaming_artifact_id,
                     first_chunk_sent=first_chunk_sent,
@@ -1071,7 +1044,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     base_metadata=metadata,
                 )
 
-        elif state == TaskState.auth_required:
+        elif state == TaskState.TASK_STATE_AUTH_REQUIRED:
             # Authentication required - leave task in auth_required state.
             #
             # CONTRACT FOR CLIENTS: Mirror the `completed` path — the terminal
@@ -1084,12 +1057,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             final_answer = content if content else "Authentication is required to continue."
             await self._close_streaming_artifact_and_respond(
                 updater,
-                TaskState.auth_required,
-                new_agent_text_message(
-                    final_answer,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_AUTH_REQUIRED,
+                new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
                 streamed_chars=streamed_chars,
@@ -1097,7 +1066,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 base_metadata=metadata,
             )
 
-        elif state == TaskState.completed and is_final:
+        elif state == TaskState.TASK_STATE_COMPLETED and is_final:
             # Task completed successfully.
             #
             # CONTRACT FOR CLIENTS: The terminal `completed` status ALWAYS carries the
@@ -1118,12 +1087,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # when it duplicates already-streamed artifact text.
             await self._close_streaming_artifact_and_respond(
                 updater,
-                TaskState.completed,
-                new_agent_text_message(
-                    final_answer,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_COMPLETED,
+                new_text_message(final_answer, context_id=task.context_id, task_id=task.id),
                 streaming_artifact_id=streaming_artifact_id,
                 first_chunk_sent=first_chunk_sent,
                 streamed_chars=streamed_chars,
@@ -1131,22 +1096,18 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 base_metadata=metadata,
             )
 
-        elif state == TaskState.completed and not is_final:
+        elif state == TaskState.TASK_STATE_COMPLETED and not is_final:
             logger.info(f"Contradictory completed non-final state, treating as input_required: {content}")
             # User input required - leave task in input_required state
             await updater.update_status(
-                TaskState.input_required,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_INPUT_REQUIRED,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
             )
         else:
             # Unknown state - log warning and treat as completed
             logger.warning(f"Unknown task state: {state}, treating as completed")
             await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
+                [Part(text=content)],
                 name="orchestrator_result",
             )
             await updater.complete()
@@ -1182,7 +1143,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         status_metadata = dict(base_metadata) if base_metadata else {}
         if first_chunk_sent:
             await updater.add_artifact(
-                [Part(root=TextPart(text=""))],
+                [Part(text="")],
                 artifact_id=streaming_artifact_id,
                 append=True,
                 last_chunk=True,
@@ -1243,13 +1204,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 task_id=task_id,
                 context_id=context_id,
                 status=TaskStatus(
-                    state=TaskState.canceled,
-                    message=new_agent_text_message(
-                        "Agent execution was cancelled.",
-                        context_id,
-                        task_id,
-                    ),
+                    state=TaskState.TASK_STATE_CANCELED,
+                    message=new_text_message("Agent execution was cancelled.", context_id=context_id, task_id=task_id),
                 ),
-                final=True,
             )
         )

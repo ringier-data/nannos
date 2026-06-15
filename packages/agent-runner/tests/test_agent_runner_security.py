@@ -11,7 +11,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from a2a.types import Message, Part, Role, TextPart
+from a2a.types import Message, Part, Role
 
 
 @pytest.fixture
@@ -225,7 +225,7 @@ class TestWatchConditionNotMet:
 
         responses = []
         async for response in agent_runner._stream_impl(
-            [Message(role=Role.user, parts=[Part(root=TextPart(text="any query"))], message_id="msg-1")],
+            [Message(role=Role.ROLE_USER, parts=[Part(text="any query")], message_id="msg-1")],
             user_config,
             task,
         ):
@@ -273,7 +273,7 @@ class TestWatchConditionNotMet:
 
         responses = []
         async for response in agent_runner._stream_impl(
-            [Message(role=Role.user, parts=[Part(root=TextPart(text=""))], message_id="msg-2")],
+            [Message(role=Role.ROLE_USER, parts=[Part(text="")], message_id="msg-2")],
             user_config,
             task,
         ):

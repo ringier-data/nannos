@@ -93,12 +93,19 @@ spec:
             port: 10001
           initialDelaySeconds: 60
           periodSeconds: 60
+          # Default timeout is 1s; the single-event-loop server can be slower
+          # than that under CPU throttling or memory pressure, which would
+          # restart an otherwise healthy pod.
+          timeoutSeconds: 5
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /.well-known/agent-card.json
             port: 10001
           initialDelaySeconds: 10
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service

@@ -145,14 +145,14 @@ class StreamHandler:
         DEFENSIVE DESIGN: Treats agents as "blocked" if they:
         - Require auth (requires_auth=True)
         - Require input (requires_input=True)
-        - Failed (state=TaskState.failed)
-        - Still working (state=TaskState.working or is_complete=False)
+        - Failed (state=TaskState.TASK_STATE_FAILED)
+        - Still working (state=TaskState.TASK_STATE_WORKING or is_complete=False)
 
         This prevents the orchestrator from claiming completion when sub-agents
         haven't reached a terminal success state.
 
         Note: ToolMessage status='error' is now detected earlier in A2ATaskTrackingMiddleware
-        and converted to state='TaskState.failed' in the a2a_tracking data.
+        and converted to state='TaskState.TASK_STATE_FAILED' in the a2a_tracking data.
 
         Args:
             recently_called: Set of agent names called in current turn
@@ -241,7 +241,7 @@ class StreamHandler:
 
         # Check for failed state
         state = tracking_data.get("state", "")
-        is_failed = ("failed" in str(state).lower()) or (state == "TaskState.failed")
+        is_failed = ("failed" in str(state).lower()) or (state == "TaskState.TASK_STATE_FAILED")
 
         if is_failed:
             # Extract failure message from the last tool message
@@ -253,7 +253,7 @@ class StreamHandler:
                 content = "The agent failed to complete the task."
 
             return AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content=f"{agent_name} failed: {content}",
                 metadata={"agent_name": agent_name, "tracking_data": tracking_data},
             )
@@ -267,7 +267,7 @@ class StreamHandler:
                 content = "Additional input required to complete the task."
 
             return AgentStreamResponse(
-                state=TaskState.input_required,
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
                 content=content,
                 interrupt_reason="subagent_input_required",
                 metadata={"agent_name": agent_name, "tracking_data": tracking_data},
@@ -275,7 +275,7 @@ class StreamHandler:
 
         # Should not reach here, but return input_required as safe default
         return AgentStreamResponse(
-            state=TaskState.input_required,
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
             content="Additional input required to complete the task.",
             interrupt_reason="subagent_input_required",
             metadata={"agent_name": agent_name, "tracking_data": tracking_data},
@@ -310,7 +310,7 @@ class StreamHandler:
             )
 
         return AgentStreamResponse(
-            state=TaskState.auth_required,
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
             content=auth_content,
             interrupt_reason="auth_required",
             metadata={"auth_url": auth_url, "error_code": error_code, "requires_auth": True, **metadata},
@@ -381,14 +381,14 @@ class StreamHandler:
                     # Try to convert to dict and parse
                     parsed = FinalResponseSchema.model_validate(structured_response.__dict__)
 
-                # Extract validated fields
-                task_state = parsed.task_state
+                # Extract validated fields (map the short name to the protobuf TaskState enum)
+                task_state = parsed.a2a_state
                 message = parsed.message
             except Exception as e:
                 logger.error(f"Failed to parse structured_response: {e}", exc_info=True)
                 # Fallback to completed with error message
                 return AgentStreamResponse(
-                    state=TaskState.completed,
+                    state=TaskState.TASK_STATE_COMPLETED,
                     content="Task processing completed with validation errors.",
                     metadata={"parse_error": str(e)},
                 )
@@ -507,18 +507,18 @@ class StreamHandler:
             metadata = {}
             # Build appropriate response based on task_state
             # Note: If LLM explicitly chose input_required/failed/working, respect that decision
-            if task_state == TaskState.input_required:
+            if task_state == TaskState.TASK_STATE_INPUT_REQUIRED:
                 return AgentStreamResponse(
-                    state=TaskState.input_required,
+                    state=TaskState.TASK_STATE_INPUT_REQUIRED,
                     content=message,
                     interrupt_reason="input_required",
                     metadata=metadata,
                 )
-            elif task_state == TaskState.failed:
-                return AgentStreamResponse(state=TaskState.failed, content=message, metadata=metadata)
-            elif task_state == TaskState.working:
-                return AgentStreamResponse(state=TaskState.working, content=message, metadata=metadata)
-            elif task_state == TaskState.completed:
+            elif task_state == TaskState.TASK_STATE_FAILED:
+                return AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=message, metadata=metadata)
+            elif task_state == TaskState.TASK_STATE_WORKING:
+                return AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content=message, metadata=metadata)
+            elif task_state == TaskState.TASK_STATE_COMPLETED:
                 # SAFETY CHECK: LLM says "completed", but verify if ALL sub-agents are actually blocked
                 # This prevents hallucination where LLM thinks task is done but all agents need intervention
                 #
@@ -569,12 +569,12 @@ class StreamHandler:
 
                 # No override needed - return LLM's completed response
                 return AgentStreamResponse(
-                    state=TaskState.completed, content=message, metadata=metadata if metadata else None
+                    state=TaskState.TASK_STATE_COMPLETED, content=message, metadata=metadata if metadata else None
                 )
             else:
                 # Unknown state - default to completed
                 return AgentStreamResponse(
-                    state=TaskState.completed, content=message, metadata=metadata if metadata else None
+                    state=TaskState.TASK_STATE_COMPLETED, content=message, metadata=metadata if metadata else None
                 )
 
         # FALLBACK: No structured_response (unexpected) - default to completed
@@ -587,7 +587,7 @@ class StreamHandler:
         else:
             content = "Task completed successfully"
 
-        return AgentStreamResponse(state=TaskState.completed, content=content)
+        return AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
 
     @staticmethod
     def build_working_response(content: str, metadata: Optional[Dict[str, Any]] = None) -> AgentStreamResponse:
@@ -600,7 +600,7 @@ class StreamHandler:
         Returns:
             AgentStreamResponse with working state
         """
-        return AgentStreamResponse(state=TaskState.working, content=content, metadata=metadata)
+        return AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content=content, metadata=metadata)
 
     @staticmethod
     def build_completed_response(content: str, metadata: Optional[Dict[str, Any]] = None) -> AgentStreamResponse:
@@ -613,7 +613,7 @@ class StreamHandler:
         Returns:
             AgentStreamResponse with completed state
         """
-        return AgentStreamResponse(state=TaskState.completed, content=content, metadata=metadata)
+        return AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content, metadata=metadata)
 
     @staticmethod
     def build_failed_response(content: str, metadata: Optional[Dict[str, Any]] = None) -> AgentStreamResponse:
@@ -626,7 +626,7 @@ class StreamHandler:
         Returns:
             AgentStreamResponse with failed state
         """
-        return AgentStreamResponse(state=TaskState.failed, content=content, metadata=metadata)
+        return AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=content, metadata=metadata)
 
     @staticmethod
     def build_input_required_response(
@@ -647,7 +647,7 @@ class StreamHandler:
             response_metadata.update(metadata)
 
         return AgentStreamResponse(
-            state=TaskState.input_required,
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
             content=content,
             interrupt_reason="input_required",
             metadata=response_metadata,

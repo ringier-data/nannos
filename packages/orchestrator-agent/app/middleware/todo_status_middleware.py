@@ -88,7 +88,7 @@ class TodoStatusMiddleware(AgentMiddleware[TodoStatusState, ContextT]):
         try:
             result = stream_writer(("todo_status", {"todos": snapshot}))
             if inspect.iscoroutine(result):
-                await result  # type: ignore
+                await result
             logger.debug("[TODO MIDDLEWARE] Emitted todo snapshot (%d items)", len(snapshot))
         except Exception as e:
             logger.warning(f"[TODO MIDDLEWARE] Failed to emit snapshot: {e}")

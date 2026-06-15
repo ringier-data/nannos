@@ -61,7 +61,7 @@ class TestActivityLogExtensionFiltering:
     async def test_suppressed_when_no_extensions_header(self, executor, updater, task):
         """No X-A2A-Extensions header → activity log suppressed."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Calling tool X",
             metadata={"activity_log": True, "source": "orchestrator"},
         )
@@ -79,7 +79,7 @@ class TestActivityLogExtensionFiltering:
     async def test_suppressed_when_other_extensions_requested(self, executor, updater, task):
         """Client requested other extensions but not activity-log → suppressed."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Calling tool X",
             metadata={"activity_log": True},
         )
@@ -97,7 +97,7 @@ class TestActivityLogExtensionFiltering:
     async def test_emitted_when_extension_active(self, executor, updater, task):
         """Client requested activity-log extension → event emitted."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Calling tool X",
             metadata={"activity_log": True, "source": "orchestrator"},
         )
@@ -110,7 +110,7 @@ class TestActivityLogExtensionFiltering:
         )
         updater.update_status.assert_awaited_once()
         call_args = updater.update_status.call_args
-        assert call_args[0][0] == TaskState.working
+        assert call_args[0][0] == TaskState.TASK_STATE_WORKING
         msg = call_args[0][1]
         assert ACTIVITY_LOG_EXTENSION in msg.extensions
         assert result[0] is False  # first_chunk_sent unchanged
@@ -119,7 +119,7 @@ class TestActivityLogExtensionFiltering:
     async def test_preserves_first_chunk_sent_flag(self, executor, updater, task):
         """Activity log must not alter first_chunk_sent regardless of current value."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Calling tool Y",
             metadata={"activity_log": True},
         )
@@ -146,7 +146,7 @@ class TestWorkPlanExtensionFiltering:
     async def test_suppressed_when_no_extensions_header(self, executor, updater, task):
         """No header → work plan suppressed."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="",
             metadata={"work_plan": True, "todos": [TodoItem(name="step 1", state="submitted")]},
         )
@@ -164,7 +164,7 @@ class TestWorkPlanExtensionFiltering:
     async def test_suppressed_when_other_extensions_requested(self, executor, updater, task):
         """Client requested other extensions but not work-plan → suppressed."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="",
             metadata={"work_plan": True, "todos": []},
         )
@@ -181,7 +181,7 @@ class TestWorkPlanExtensionFiltering:
     async def test_emitted_when_extension_active(self, executor, updater, task):
         """Client requested work-plan extension → event emitted."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="",
             metadata={"work_plan": True, "todos": [TodoItem(name="step 1", state="submitted")]},
         )
@@ -210,7 +210,7 @@ class TestIntermediateOutputExtensionFiltering:
     async def test_suppressed_when_no_extensions_header(self, executor, updater, task):
         """No header → intermediate output suppressed entirely (the Slack bug fix)."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Let me think about this...",
             metadata={
                 "streaming_chunk": True,
@@ -233,7 +233,7 @@ class TestIntermediateOutputExtensionFiltering:
     async def test_suppressed_when_other_extensions_requested(self, executor, updater, task):
         """Client requested other extensions but not intermediate-output → suppressed."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Reasoning text",
             metadata={
                 "streaming_chunk": True,
@@ -256,7 +256,7 @@ class TestIntermediateOutputExtensionFiltering:
     async def test_emitted_when_extension_active(self, executor, updater, task):
         """Client requested intermediate-output extension → artifact emitted with extension tag."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Sub-agent thinking...",
             metadata={
                 "streaming_chunk": True,
@@ -284,7 +284,7 @@ class TestIntermediateOutputExtensionFiltering:
     async def test_does_not_set_first_chunk_sent(self, executor, updater, task):
         """Even when emitted, intermediate output must not claim first_chunk_sent."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="thinking...",
             metadata={
                 "streaming_chunk": True,
@@ -307,7 +307,7 @@ class TestIntermediateOutputExtensionFiltering:
     async def test_preserves_first_chunk_sent_true(self, executor, updater, task):
         """If first_chunk_sent was already True, intermediate output preserves it."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="more thinking...",
             metadata={
                 "streaming_chunk": True,
@@ -339,7 +339,7 @@ class TestMainStreamingChunks:
     async def test_emitted_when_no_extensions_header(self, executor, updater, task):
         """Main content chunks are always emitted even without extensions header."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Here is the answer...",
             metadata={"streaming_chunk": True},
         )
@@ -361,7 +361,7 @@ class TestMainStreamingChunks:
     async def test_emitted_when_all_extensions_active(self, executor, updater, task):
         """Main content chunks are always emitted when all extensions active."""
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Answer text",
             metadata={"streaming_chunk": True},
         )
@@ -397,7 +397,7 @@ class TestSlackScenario:
         # 1. Activity log → suppressed
         await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="Delegating to research agent",
                 metadata={"activity_log": True, "source": "orchestrator"},
             ),
@@ -410,7 +410,7 @@ class TestSlackScenario:
         # 2. Work plan → suppressed
         await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="",
                 metadata={"work_plan": True, "todos": [TodoItem(name="research", state="working")]},
             ),
@@ -423,7 +423,7 @@ class TestSlackScenario:
         # 3. Intermediate output (sub-agent reasoning) → suppressed
         await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="Let me analyze the data...",
                 metadata={
                     "streaming_chunk": True,
@@ -441,7 +441,7 @@ class TestSlackScenario:
         # 4. Orchestrator thinking → suppressed
         await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="I need to consider...",
                 metadata={
                     "streaming_chunk": True,
@@ -463,7 +463,7 @@ class TestSlackScenario:
         # 5. Main content chunk → emitted
         result = await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="Based on my analysis, here is the answer.",
                 metadata={"streaming_chunk": True},
             ),
@@ -497,7 +497,7 @@ class TestConsoleScenario:
         # 1. Activity log → emitted
         await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="Delegating to research agent",
                 metadata={"activity_log": True, "source": "orchestrator"},
             ),
@@ -511,7 +511,7 @@ class TestConsoleScenario:
         # 2. Work plan → emitted
         await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="",
                 metadata={"work_plan": True, "todos": [TodoItem(name="research", state="working")]},
             ),
@@ -525,7 +525,7 @@ class TestConsoleScenario:
         # 3. Intermediate output → emitted as thought artifact
         await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="Analyzing...",
                 metadata={
                     "streaming_chunk": True,
@@ -547,7 +547,7 @@ class TestConsoleScenario:
         # 4. Main content → emitted as main artifact
         result = await executor._handle_stream_item(
             AgentStreamResponse(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 content="Here is the answer.",
                 metadata={"streaming_chunk": True},
             ),

@@ -236,7 +236,7 @@ class VoiceAgent(BaseAgent):
         try:
             if not config:
                 yield AgentStreamResponse(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     content=(
                         "Voice agent requires a structured JSON payload (DataPart) with at least "
                         "'phone_number'. Plain text input is not supported."
@@ -250,7 +250,7 @@ class VoiceAgent(BaseAgent):
                 call_request = VoiceCallRequest(**config)
             except Exception as validation_err:
                 yield AgentStreamResponse(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     content=f"Invalid payload: {validation_err}\nExpected schema:\n{JSON_SCHEMA}",
                 )
                 return
@@ -259,7 +259,7 @@ class VoiceAgent(BaseAgent):
                 yield event
         except Exception as e:
             logger.exception(f"Unexpected error in voice agent: {session_key}")
-            yield AgentStreamResponse(state=TaskState.failed, content=f"Error: {str(e)}")
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=f"Error: {str(e)}")
 
     async def _create_audio_session(
         self,
@@ -392,7 +392,7 @@ class VoiceAgent(BaseAgent):
         voice_name = self._active_sessions[session_key]["agent"].voice_name
         event_out = self._active_sessions[session_key]["event_out"]
         yield AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Voice session initialized",
             metadata={"session_id": session_key, "voice_name": voice_name},
         )
@@ -408,27 +408,27 @@ class VoiceAgent(BaseAgent):
 
                 if event_type == "audio_chunk":
                     yield AgentStreamResponse(
-                        state=TaskState.working, content="", metadata={"type": "audio_chunk", "audio": event["audio"]}
+                        state=TaskState.TASK_STATE_WORKING, content="", metadata={"type": "audio_chunk", "audio": event["audio"]}
                     )
                 elif event_type == "output_transcript":
                     yield AgentStreamResponse(
-                        state=TaskState.working,
+                        state=TaskState.TASK_STATE_WORKING,
                         content=event.get("text", ""),
                         metadata={"type": "transcript", "role": "assistant"},
                     )
                 elif event_type == "input_transcript":
                     yield AgentStreamResponse(
-                        state=TaskState.working,
+                        state=TaskState.TASK_STATE_WORKING,
                         content=event.get("text", ""),
                         metadata={"type": "transcript", "role": "user"},
                     )
                 elif event_type == "turn_complete":
                     yield AgentStreamResponse(
-                        state=TaskState.working, content="Turn complete", metadata={"type": "turn_complete"}
+                        state=TaskState.TASK_STATE_WORKING, content="Turn complete", metadata={"type": "turn_complete"}
                     )
                 elif event_type == "interrupted":
                     yield AgentStreamResponse(
-                        state=TaskState.working, content="Interrupted", metadata={"type": "interrupted"}
+                        state=TaskState.TASK_STATE_WORKING, content="Interrupted", metadata={"type": "interrupted"}
                     )
                 elif event_type == "mcp_auth_failed":
                     authorize_url = event.get("authorize_url", "")
@@ -448,14 +448,14 @@ class VoiceAgent(BaseAgent):
                         except Exception as sms_exc:
                             logger.warning("Failed to send MCP auth SMS: %s", sms_exc)
                     yield AgentStreamResponse(
-                        state=TaskState.working,
+                        state=TaskState.TASK_STATE_WORKING,
                         content="Tool authorization required — SMS sent with instructions.",
                         metadata={"type": "mcp_auth_failed", "authorize_url": authorize_url},
                     )
                 elif event_type == "error":
                     error_msg = event.get("message", "Unknown error")
                     logger.error(f"Gemini error: {error_msg}")
-                    yield AgentStreamResponse(state=TaskState.failed, content=f"Voice processing error: {error_msg}")
+                    yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=f"Voice processing error: {error_msg}")
                     await self._end_session(session_key)
                     return
         except asyncio.CancelledError:
@@ -465,7 +465,7 @@ class VoiceAgent(BaseAgent):
         except Exception as e:
             logger.exception(f"Unexpected error in audio session {session_key}")
             await self._end_session(session_key)
-            yield AgentStreamResponse(state=TaskState.failed, content=f"Error: {str(e)}")
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=f"Error: {str(e)}")
 
     # ── Phone-call orchestration ──────────────────────────────────────────────
 
@@ -505,7 +505,7 @@ class VoiceAgent(BaseAgent):
             agent_config = await self._fetch_sub_agent_config(sub_agent_id, user_config)
             if agent_config is None:
                 yield AgentStreamResponse(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     content=f"Cannot fetch sub-agent {sub_agent_id} config: "
                     "no access token available. Ensure the caller provides a Bearer token.",
                 )
@@ -516,7 +516,7 @@ class VoiceAgent(BaseAgent):
                 voice_name = voice_name or agent_config.get("voice_name")
                 mcp_tools = agent_config.get("mcp_tools") or []
                 yield AgentStreamResponse(
-                    state=TaskState.working,
+                    state=TaskState.TASK_STATE_WORKING,
                     content=f"Loaded sub-agent '{agent_config.get('name', sub_agent_id)}' config.",
                 )
 
@@ -550,7 +550,7 @@ class VoiceAgent(BaseAgent):
 
         if not phone_number:
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content=(
                     "No phone number is configured for your account. "
                     "Please ask the user for their phone number and store it "
@@ -659,7 +659,7 @@ class VoiceAgent(BaseAgent):
                 public_url,
             )
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content="Call failed: PUBLIC_URL is not set to a publicly reachable URL. "
                 "Twilio needs to reach this server to connect the call. "
                 "Set PUBLIC_URL to your ngrok or production URL and restart.",
@@ -667,7 +667,7 @@ class VoiceAgent(BaseAgent):
             return
 
         yield AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content=f"Initiating call to {phone_number}...",
             metadata={"type": "call_initiating", "phone_number": phone_number},
         )
@@ -679,7 +679,7 @@ class VoiceAgent(BaseAgent):
         except Exception as exc:
             logger.error("Failed to initiate Twilio call: %s", exc)
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content=f"Call initiation failed: {exc}",
             )
             return
@@ -736,7 +736,7 @@ class VoiceAgent(BaseAgent):
                 await loop.run_in_executor(None, send_sms, phone_number, sms_body)
                 logger.info("MCP auth failure SMS sent (call_sid=%s)", call_sid)
                 yield AgentStreamResponse(
-                    state=TaskState.working,
+                    state=TaskState.TASK_STATE_WORKING,
                     content="SMS sent to caller with tool authorization instructions.",
                     metadata={"type": "mcp_auth_sms_sent"},
                 )
@@ -763,7 +763,7 @@ class VoiceAgent(BaseAgent):
             timeout,
         )
         yield AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content=f"Call ringing (call_sid={call_sid}). Waiting for the call to complete...",
             metadata={"type": "call_ringing", "call_sid": call_sid},
         )
@@ -775,14 +775,14 @@ class VoiceAgent(BaseAgent):
             _CALL_FUTURES.pop(call_sid, None)
             logger.warning("Call %s timed out after %ds", call_sid, timeout)
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content=f"Call timed out after {timeout}s without completion.",
             )
             return
         except Exception as exc:
             _CALL_FUTURES.pop(call_sid, None)
             logger.exception("Unexpected error waiting for call %s", call_sid)
-            yield AgentStreamResponse(state=TaskState.failed, content=f"Call error: {exc}")
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=f"Call error: {exc}")
             return
 
         # Format the transcript for the caller
@@ -794,7 +794,7 @@ class VoiceAgent(BaseAgent):
             content = "Call completed — no transcript recorded."
 
         logger.info("Call %s finished with %d transcript entries", call_sid, len(transcript))
-        yield AgentStreamResponse(state=TaskState.completed, content=content)
+        yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
 
     async def _end_session(self, session_key: str):
         # Cancel any pending pre-warm task that never got picked up

@@ -9,14 +9,14 @@ This is SEPARATE from A2A server-to-server authentication:
 - SmartTokenInterceptor: Handles Orchestrator → Sub-Agent auth (A2A layer)
 - These models: Handle Sub-Agent → Third-Party Service auth (in-task layer)
 
-The A2A protocol provides TaskState.auth_required and DataPart for structured
+The A2A protocol provides TaskState.TASK_STATE_AUTH_REQUIRED and DataPart for structured
 data, but doesn't define the schema for auth payloads. These models establish
 a reusable convention that can be adopted across A2A implementations.
 
 Example Flow:
 1. Orchestrator calls JIRA Agent (A2A auth via SmartTokenInterceptor)
 2. JIRA Agent needs GitHub OAuth to fetch PR data (in-task auth)
-3. JIRA Agent returns TaskState.auth_required with AuthPayload in DataPart
+3. JIRA Agent returns TaskState.TASK_STATE_AUTH_REQUIRED with AuthPayload in DataPart
 4. Orchestrator parses AuthPayload and prompts user for GitHub auth
 5. User completes OAuth, orchestrator retries with credentials
 """
@@ -101,7 +101,7 @@ class AuthPayload(BaseModel):
     Complete authentication payload following CIBA-inspired patterns.
 
     This is the top-level model that gets embedded in A2A Task responses
-    when TaskState.auth_required. It provides all information needed for
+    when TaskState.TASK_STATE_AUTH_REQUIRED. It provides all information needed for
     the client to present auth options and complete the flow.
 
     The payload should be sent in a DataPart within the Task's status message.

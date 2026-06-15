@@ -500,7 +500,7 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
             ]
             if self.sub_agent_id:
                 tags.append(f"sub_agent:{self.sub_agent_id}")
-            config = RunnableConfig(tags=tags)  # type: ignore
+            config = RunnableConfig(tags=tags)
             logger.info(f"[COST TRACKING] Invoking model with tags: {tags}")
             response = await model.ainvoke([analysis_message], config=config)
         else:

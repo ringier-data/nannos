@@ -10,7 +10,9 @@ events without relying on ad-hoc metadata boolean flags.
 
 import uuid
 
-from a2a.types import DataPart, Message, Part, Role, TextPart
+from a2a.types import Message, Part, Role
+from google.protobuf.json_format import ParseDict
+from google.protobuf.struct_pb2 import Value
 from ringier_a2a_sdk.models import TodoItem
 
 # ---------------------------------------------------------------------------
@@ -86,13 +88,13 @@ def new_activity_log_message(
         metadata["source"] = source
 
     return Message(
-        role=Role.agent,
-        parts=[Part(root=TextPart(text=text))],
+        role=Role.ROLE_AGENT,
+        parts=[Part(text=text)],
         message_id=str(uuid.uuid4()),
-        context_id=context_id,
-        task_id=task_id,
+        context_id=context_id or "",
+        task_id=task_id or "",
         extensions=[ACTIVITY_LOG_EXTENSION],
-        metadata=metadata or None,
+        metadata=metadata,
     )
 
 
@@ -108,18 +110,16 @@ def new_work_plan_message(
       - extensions=[WORK_PLAN_EXTENSION] for client classification
     """
     return Message(
-        role=Role.agent,
+        role=Role.ROLE_AGENT,
         parts=[
             Part(
-                root=DataPart(
-                    data={"todos": [t.model_dump(exclude_none=True) for t in todos]},
-                    metadata={"media_type": "application/json"},
-                )
+                data=ParseDict({"todos": [t.model_dump(exclude_none=True) for t in todos]}, Value()),
+                metadata={"media_type": "application/json"},
             )
         ],
         message_id=str(uuid.uuid4()),
-        context_id=context_id,
-        task_id=task_id,
+        context_id=context_id or "",
+        task_id=task_id or "",
         extensions=[WORK_PLAN_EXTENSION],
     )
 
@@ -139,18 +139,16 @@ def new_feedback_request_message(
       - extensions=[FEEDBACK_REQUEST_EXTENSION] for client classification
     """
     return Message(
-        role=Role.agent,
+        role=Role.ROLE_AGENT,
         parts=[
             Part(
-                root=DataPart(
-                    data={"sub_agents": sub_agents_involved or []},
-                    metadata={"media_type": "application/json"},
-                )
+                data=ParseDict({"sub_agents": sub_agents_involved or []}, Value()),
+                metadata={"media_type": "application/json"},
             )
         ],
         message_id=str(uuid.uuid4()),
-        context_id=context_id,
-        task_id=task_id,
+        context_id=context_id or "",
+        task_id=task_id or "",
         extensions=[FEEDBACK_REQUEST_EXTENSION],
     )
 
@@ -172,21 +170,22 @@ def new_hitl_interrupt_message(
     Clients respond with a DataPart containing {"decisions": [...]}.
     """
     return Message(
-        role=Role.agent,
+        role=Role.ROLE_AGENT,
         parts=[
-            Part(root=TextPart(text=description)),
+            Part(text=description),
             Part(
-                root=DataPart(
-                    data={
+                data=ParseDict(
+                    {
                         "action_requests": action_requests,
                         "review_configs": review_configs,
                     },
-                    metadata={"media_type": "application/json"},
-                )
+                    Value(),
+                ),
+                metadata={"media_type": "application/json"},
             ),
         ],
         message_id=str(uuid.uuid4()),
-        context_id=context_id,
-        task_id=task_id,
+        context_id=context_id or "",
+        task_id=task_id or "",
         extensions=[HUMAN_IN_THE_LOOP_EXTENSION],
     )

@@ -14,21 +14,30 @@ import click
 import httpx
 import uvicorn
 import yaml
-from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import (
+    add_a2a_routes_to_fastapi,
+    create_agent_card_routes,
+    create_jsonrpc_routes,
+)
 from a2a.server.tasks import (
     BasePushNotificationSender,
+    DatabaseTaskStore,
     InMemoryPushNotificationConfigStore,
-    InMemoryTaskStore,
+    TaskStore,
 )
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentExtension,
+    AgentInterface,
     AgentSkill,
     OpenIdConnectSecurityScheme,
+    SecurityRequirement,
     SecurityScheme,
+    StringList,
 )
+from fastapi import FastAPI
 from agent_common.core.model_factory import MODEL_CONFIG, get_available_models_metadata, get_default_model
 from agent_common.core.sandbox_pool import SandboxPool
 from agent_common.core.tool_risk_cache import ToolRiskCache
@@ -53,6 +62,7 @@ from app.core.agent import OrchestratorDeepAgent
 from app.core.budget_guard import init_budget_guard
 from app.core.executor import OrchestratorDeepAgentExecutor
 from app.core.risk_score_api_client import HttpRiskScoreAPIClient
+from app.core.task_store import create_task_store
 from app.models.config import AgentSettings
 
 logger = configure_logger("main")
@@ -66,8 +76,12 @@ class MissingAPIKeyError(Exception):
     """Exception for missing API key."""
 
 
-def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
-    """Factory to create lifespan with access to agent_executor."""
+def create_lifespan(
+    agent_executor: OrchestratorDeepAgentExecutor,
+    task_store: TaskStore,
+    task_store_engine=None,
+):
+    """Factory to create lifespan with access to agent_executor and the task store."""
 
     @asynccontextmanager
     async def lifespan(app):
@@ -97,6 +111,12 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
         logger.info("Setting up document store database schema...")
         await agent_executor.agent._graph_factory.ensure_store_setup()
         logger.info("Document store ready")
+
+        # Initialize the task store at startup (creates the tasks table if missing)
+        # so database problems surface here rather than on the first request.
+        if isinstance(task_store, DatabaseTaskStore):
+            await task_store.initialize()
+            logger.info("PostgreSQL task store ready")
 
         # Initialize sandbox pool if provider is configured
         sandbox_pool = None
@@ -187,6 +207,10 @@ def create_lifespan(agent_executor: OrchestratorDeepAgentExecutor):
         await agent_executor.agent.close()
         logger.info("Agent resources cleaned up")
 
+        # Dispose task store engine (no-op for the in-memory fallback)
+        if task_store_engine is not None:
+            await task_store_engine.dispose()
+
         logger.info("Application shutdown complete")
 
     return lifespan
@@ -243,14 +267,15 @@ def create_app():
     oidc_issuer = os.getenv("OIDC_ISSUER")
     if oidc_issuer:
         oidc_oidc = OpenIdConnectSecurityScheme(
-            type="openIdConnect",
             open_id_connect_url=f"{oidc_issuer}/.well-known/openid-configuration",
         )
-        security_schemes = {"orchestrator": SecurityScheme(root=oidc_oidc)}
-        security = [{"orchestrator": ["openid", "profile", "email"]}]
+        security_schemes = {"orchestrator": SecurityScheme(open_id_connect_security_scheme=oidc_oidc)}
+        security_requirements = [
+            SecurityRequirement(schemes={"orchestrator": StringList(list=["openid", "profile", "email"])})
+        ]
     else:
         security_schemes = {}
-        security = []
+        security_requirements = []
         logger.warning("OIDC_ISSUER not set – running without authentication (local dev mode)")
 
     # Support both local dev and production deployment
@@ -261,15 +286,14 @@ def create_app():
     agent_card = AgentCard(
         name="Orchestrator Agent",
         description="Intelligent orchestrator that plans and coordinates complex tasks by discovering and delegating to specialized sub-agents.",
-        url=agent_base_url,
+        supported_interfaces=[AgentInterface(url=agent_base_url, protocol_binding="JSONRPC")],
         version="1.0.0",
         default_input_modes=OrchestratorDeepAgent.SUPPORTED_CONTENT_TYPES,
         default_output_modes=OrchestratorDeepAgent.SUPPORTED_CONTENT_TYPES,
         capabilities=capabilities,
         skills=[skill],
         security_schemes=security_schemes,
-        security=security,
-        supports_authenticated_extended_card=False,
+        security_requirements=security_requirements,
     )
 
     # Initialize cost logger for tracking LLM usage
@@ -277,22 +301,30 @@ def create_app():
     cost_logger = CostLogger(backend_url=backend_url, access_token_provider=get_request_access_token)
     logger.info(f"Cost logger initialized with backend: {backend_url}")
 
-    # TODO: do we need a persistent task store?
     httpx_client = httpx.AsyncClient()
     push_config_store = InMemoryPushNotificationConfigStore()
     push_sender = BasePushNotificationSender(httpx_client=httpx_client, config_store=push_config_store)
     agent_executor = OrchestratorDeepAgentExecutor(cost_logger=cost_logger)
+    task_store, task_store_engine = create_task_store()
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
-        task_store=InMemoryTaskStore(),
+        task_store=task_store,
+        agent_card=agent_card,
         push_config_store=push_config_store,
         push_sender=push_sender,
         request_context_builder=AuthRequestContextBuilder(),
     )
-    server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
+
+    # Build the FastAPI app and mount A2A routes (A2A v1.0+ replaces A2AFastAPIApplication).
+    # FastAPI is retained because the orchestrator serves a custom /models endpoint.
+    app = FastAPI(lifespan=create_lifespan(agent_executor, task_store, task_store_engine))
+    add_a2a_routes_to_fastapi(
+        app,
+        agent_card_routes=create_agent_card_routes(agent_card),
+        jsonrpc_routes=create_jsonrpc_routes(request_handler, "/"),
+    )
 
     # Add authentication middleware stack (EXECUTION ORDER: bottom to top for requests)
-    app = server.build(lifespan=create_lifespan(agent_executor))
 
     if oidc_issuer:
         # UserContextFromRequestStateMiddleware runs AFTER JWT validation (transfers user to A2A context)

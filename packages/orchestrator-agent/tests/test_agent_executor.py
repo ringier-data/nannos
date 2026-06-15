@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from a2a.server.agent_execution import RequestContext
 from a2a.server.events import EventQueue
-from a2a.types import Message, TaskState
+from a2a.types import Message, Part, Role, TaskState
+from google.protobuf.json_format import ParseDict
+from google.protobuf.struct_pb2 import Value
 
 from app.core.executor import OrchestratorDeepAgentExecutor
 
@@ -21,20 +23,18 @@ class TestOrchestratorDeepAgentExecutor:
 
     async def test_execute_with_valid_request(self, dynamodb_table):
         """Test execute with valid request context."""
-        from a2a.types import Part, TextPart
-
         executor = OrchestratorDeepAgentExecutor()
 
-        # Mock context
+        # Mock context — use a real A2A Message so new_task_from_user_message works
+        # (A2A v1.0+ protobuf Task can't embed a Mock message).
         context = Mock(spec=RequestContext)
         context.get_user_input = Mock(return_value="test query")
         context.current_task = None
-        context.message = Mock(spec=Message)
-        context.message.role = "user"
-        context.message.parts = [Part(root=TextPart(text="test query"))]
-        context.message.metadata = None
-        context.message.task_id = None
-        context.message.context_id = None
+        context.message = Message(
+            role=Role.ROLE_USER,
+            parts=[Part(text="test query")],
+            message_id="msg-1",
+        )
         context.call_context = Mock()
         context.call_context.state = {"user_sub": "test-user"}
 
@@ -54,12 +54,12 @@ class TestOrchestratorDeepAgentExecutor:
 
             mock_graph.return_value = (mock_compiled_graph, "config-sig")
 
-            # Execute - should not raise
+            # Execute - may raise an A2A error due to mock limitations.
+            # A2A v1.0+ raises InvalidParamsError/InternalError directly (no ServerError wrapper).
             try:
                 await executor.execute(context, event_queue)
             except Exception as e:
-                # Expected to raise ServerError due to mock limitations
-                assert "ServerError" in str(type(e))
+                assert type(e).__name__ in ("InternalError", "InvalidParamsError", "ServerError")
 
     def test_validate_request_returns_false(self, dynamodb_table):
         """Test that _validate_request always returns False."""
@@ -84,8 +84,8 @@ class TestOrchestratorDeepAgentExecutor:
         # Verify a canceled event was enqueued
         event_queue.enqueue_event.assert_called_once()
         event = event_queue.enqueue_event.call_args[0][0]
-        assert event.status.state == TaskState.canceled
-        assert event.final is True
+        # A2A v1.0+ removed TaskStatusUpdateEvent.final; the terminal CANCELED state is the signal.
+        assert event.status.state == TaskState.TASK_STATE_CANCELED
 
 
 class TestAgentExecutorStreamHandling:
@@ -108,7 +108,7 @@ class TestAgentExecutorStreamHandling:
 
         # Create working state item
         item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Processing...",
         )
 
@@ -119,7 +119,7 @@ class TestAgentExecutorStreamHandling:
         # Verify update_status was called
         updater.update_status.assert_called_once()
         call_args = updater.update_status.call_args
-        assert call_args[0][0] == TaskState.working
+        assert call_args[0][0] == TaskState.TASK_STATE_WORKING
 
     async def test_handle_stream_item_completed_state(self, dynamodb_table):
         """Test handling completed state stream items."""
@@ -140,7 +140,7 @@ class TestAgentExecutorStreamHandling:
 
         # Create completed state item
         item = AgentStreamResponse(
-            state=TaskState.completed,
+            state=TaskState.TASK_STATE_COMPLETED,
             content="Task completed successfully",
         )
 
@@ -175,7 +175,7 @@ class TestAgentExecutorStreamHandling:
 
         # Completed item after streaming (first_chunk_sent=True)
         item = AgentStreamResponse(
-            state=TaskState.completed,
+            state=TaskState.TASK_STATE_COMPLETED,
             content="Full response content",
         )
 
@@ -196,16 +196,16 @@ class TestAgentExecutorStreamHandling:
         assert artifact_call[1]["append"] is True
         # Check the text part is empty
         parts = artifact_call[0][0]
-        assert parts[0].root.text == ""
+        assert parts[0].text == ""
 
         # Completion status MUST carry the authoritative final answer as a fallback
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.completed
+        assert status_call[0][0] == TaskState.TASK_STATE_COMPLETED
         # Second positional arg is the message carrying the final answer text
         assert len(status_call[0]) == 2
         final_msg = status_call[0][1]
-        text_parts = [p.root.text for p in final_msg.parts if hasattr(p.root, "text")]
+        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "Full response content" in "".join(text_parts)
         # Metadata flag signals well-behaved clients to dedupe against the artifact stream
         assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
@@ -229,7 +229,7 @@ class TestAgentExecutorStreamHandling:
         task.context_id = "ctx-123"
         task.id = "task-456"
 
-        item = AgentStreamResponse(state=TaskState.completed, content="")
+        item = AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="")
 
         await executor._handle_stream_item(
             item,
@@ -241,9 +241,9 @@ class TestAgentExecutorStreamHandling:
         )
 
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.completed
+        assert status_call[0][0] == TaskState.TASK_STATE_COMPLETED
         final_msg = status_call[0][1]
-        text_parts = [p.root.text for p in final_msg.parts if hasattr(p.root, "text")]
+        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "".join(text_parts).strip() != ""
 
     async def test_handle_stream_item_streaming_first_chunk_creates_artifact(self, dynamodb_table):
@@ -267,7 +267,7 @@ class TestAgentExecutorStreamHandling:
 
         # First chunk: nothing sent yet → must create (append=False)
         first_item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="Hello! ",
             metadata={"streaming_chunk": True},
         )
@@ -287,7 +287,7 @@ class TestAgentExecutorStreamHandling:
 
         # Subsequent chunk: artifact already exists → append=True
         second_item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="How can I help?",
             metadata={"streaming_chunk": True},
         )
@@ -326,7 +326,7 @@ class TestAgentExecutorStreamHandling:
         # First intermediate chunk → create (append=False) on "-thought" artifact;
         # main first_chunk_sent must NOT be flipped (only intermediate flag flips).
         intermediate_item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="thinking...",
             metadata={"streaming_chunk": True, "intermediate_output": True},
         )
@@ -348,7 +348,7 @@ class TestAgentExecutorStreamHandling:
 
         # First MAIN chunk afterwards → must still be a create on the main artifact
         main_item = AgentStreamResponse(
-            state=TaskState.working,
+            state=TaskState.TASK_STATE_WORKING,
             content="The answer",
             metadata={"streaming_chunk": True},
         )
@@ -384,7 +384,7 @@ class TestAgentExecutorStreamHandling:
 
         # Create failed state item
         item = AgentStreamResponse(
-            state=TaskState.failed,
+            state=TaskState.TASK_STATE_FAILED,
             content="An error occurred during execution",
         )
 
@@ -393,7 +393,7 @@ class TestAgentExecutorStreamHandling:
         # Verify update_status was called
         updater.update_status.assert_called_once()
         call_args = updater.update_status.call_args
-        assert call_args[0][0] == TaskState.failed
+        assert call_args[0][0] == TaskState.TASK_STATE_FAILED
 
     async def test_handle_stream_item_auth_required_state(self, dynamodb_table):
         """Test handling auth_required state stream items."""
@@ -422,7 +422,7 @@ class TestAgentExecutorStreamHandling:
         # Verify update_status was called
         updater.update_status.assert_called_once()
         call_args = updater.update_status.call_args
-        assert call_args[0][0] == TaskState.auth_required
+        assert call_args[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
 
     async def test_handle_stream_item_input_required_carries_final_message(self, dynamodb_table):
         """Generic (non-HITL) input_required terminal status MUST carry the
@@ -443,7 +443,7 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         item = AgentStreamResponse(
-            state=TaskState.input_required,
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
             content="Hi — I'm here. What would you like to do?",
         )
 
@@ -459,9 +459,9 @@ class TestAgentExecutorStreamHandling:
         updater.add_artifact.assert_not_called()
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.input_required
+        assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.root.text for p in final_msg.parts if hasattr(p.root, "text")]
+        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "Hi — I'm here. What would you like to do?" in "".join(text_parts)
         # Terminal frame must be flushed deterministically.
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
@@ -487,7 +487,7 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         item = AgentStreamResponse(
-            state=TaskState.input_required,
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
             content="Which project should I file the ticket under?",
         )
 
@@ -508,14 +508,14 @@ class TestAgentExecutorStreamHandling:
         assert artifact_call[1]["append"] is True
         assert artifact_call[1]["artifact_id"] == "artifact-IR"
         parts = artifact_call[0][0]
-        assert parts[0].root.text == ""
+        assert parts[0].text == ""
 
         # Terminal status carries the final message + fallback metadata + final=True
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.input_required
+        assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.root.text for p in final_msg.parts if hasattr(p.root, "text")]
+        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "Which project should I file the ticket under?" in "".join(text_parts)
         assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
@@ -540,7 +540,7 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         item = AgentStreamResponse(
-            state=TaskState.auth_required,
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
             content="Please sign in to Jira to continue.",
         )
 
@@ -555,9 +555,9 @@ class TestAgentExecutorStreamHandling:
         updater.add_artifact.assert_not_called()
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.auth_required
+        assert status_call[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.root.text for p in final_msg.parts if hasattr(p.root, "text")]
+        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "Please sign in to Jira to continue." in "".join(text_parts)
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
         # stream termination is inferred from the terminal task state, not an explicit flag.
@@ -582,7 +582,7 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         item = AgentStreamResponse(
-            state=TaskState.auth_required,
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
             content="Please re-authenticate with Google to continue.",
         )
 
@@ -602,13 +602,13 @@ class TestAgentExecutorStreamHandling:
         assert artifact_call[1]["append"] is True
         assert artifact_call[1]["artifact_id"] == "artifact-AR"
         parts = artifact_call[0][0]
-        assert parts[0].root.text == ""
+        assert parts[0].text == ""
 
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.auth_required
+        assert status_call[0][0] == TaskState.TASK_STATE_AUTH_REQUIRED
         final_msg = status_call[0][1]
-        text_parts = [p.root.text for p in final_msg.parts if hasattr(p.root, "text")]
+        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "Please re-authenticate with Google to continue." in "".join(text_parts)
         assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
         # A2A spec (#1308) removes `final` from TaskStatusUpdateEvent as redundant —
@@ -633,7 +633,7 @@ class TestAgentExecutorStreamHandling:
         task.id = "task-456"
 
         item = AgentStreamResponse(
-            state=TaskState.input_required,
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
             content="Approve creating Jira ticket?",
             action_requests=[{"name": "create_jira_ticket", "args": {"summary": "x"}}],
         )
@@ -651,7 +651,7 @@ class TestAgentExecutorStreamHandling:
         updater.add_artifact.assert_not_called()
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
-        assert status_call[0][0] == TaskState.input_required
+        assert status_call[0][0] == TaskState.TASK_STATE_INPUT_REQUIRED
         # HITL branch passes only (state, msg) positionally and no metadata kwarg
         assert "metadata" not in status_call[1] or status_call[1].get("metadata") is None
         assert "final" not in status_call[1] or status_call[1].get("final") is not True
@@ -721,13 +721,11 @@ class TestExtractHitlDecisions:
     """Tests for _extract_hitl_decisions and decision replication for parallel tool calls."""
 
     def test_extract_single_decision_from_data_part(self, dynamodb_table):
-        """Test extracting a single decision from DataPart."""
-        from a2a.types import DataPart
-
+        """Test extracting a single decision from a data Part."""
         context = Mock(spec=RequestContext)
         context.message = Mock(spec=Message)
         context.message.parts = [
-            Mock(root=DataPart(data={"decisions": [{"type": "reject", "message": "No"}]}))
+            Part(data=ParseDict({"decisions": [{"type": "reject", "message": "No"}]}, Value()))
         ]
 
         result = OrchestratorDeepAgentExecutor._extract_hitl_decisions(context)

@@ -43,7 +43,9 @@ logger = logging.getLogger(__name__)
 
 
 class StructuredResponse(BaseModel):
-    task_state: TaskState = Field(
+    # A2A v1.0+ TaskState is a protobuf int enum (not a Pydantic/LLM-tool field type),
+    # so the model picks a short string name; consumers compare it directly.
+    task_state: Literal["completed", "working", "input_required", "failed"] = Field(
         ...,
         description="The state of the task. In case approval or input is required, the state should be 'input_required'.",
     )
@@ -51,15 +53,16 @@ class StructuredResponse(BaseModel):
 
     @model_validator(mode="before")
     def validate_state(cls, values):
-        # input_required -> input-required
+        # Accept a "state" alias and the A2A hyphenated form; normalize to the
+        # underscored short name the field/consumers expect (e.g. "input-required" -> "input_required").
         if "state" in values:
             state = values.pop("state")
         elif "task_state" in values:
-            state = values.pop("task_state")
+            state = values.get("task_state")
         else:
             return values
         if isinstance(state, str):
-            values["task_state"] = state.replace("_", "-")
+            values["task_state"] = state.replace("-", "_").lower()
         return values
 
 
@@ -391,7 +394,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             conversation_id=context_id,
         )
 
-    def classify(self, message: str) -> Literal[TaskState.input_required, TaskState.completed, TaskState.failed]:
+    def classify(self, message: str) -> Literal[TaskState.TASK_STATE_INPUT_REQUIRED, TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED]:
         # Simple classification logic (to be replaced with actual logic)
         if (
             "need more info" in message.lower()
@@ -400,11 +403,11 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             or "before i proceed" in message.lower()
             or "in order to proceed" in message.lower()
         ):
-            return TaskState.input_required
+            return TaskState.TASK_STATE_INPUT_REQUIRED
         elif "Failed to create ticket" in message:
-            return TaskState.failed
+            return TaskState.TASK_STATE_FAILED
         else:
-            return TaskState.completed
+            return TaskState.TASK_STATE_COMPLETED
 
     async def ainvoke(self, input_data: dict[str, Any], *, config: Optional[dict[str, Any]] = None) -> StreamEvent:
         """Async invoke with automatic cost tracking flush.

@@ -9,11 +9,13 @@ executor, and the agent-common client runnable.  Do **not** duplicate this
 logic elsewhere.
 """
 
+import base64
 import json
 from collections.abc import Sequence
 from typing import Any, Literal, overload
 
-from a2a.types import DataPart, FilePart, FileWithBytes, FileWithUri, Part, TextPart
+from a2a.types import Part
+from google.protobuf.json_format import MessageToDict
 from langchain_core.messages import (
     AudioContentBlock,
     ContentBlock,
@@ -23,6 +25,11 @@ from langchain_core.messages import (
     TextContentBlock,
     VideoContentBlock,
 )
+
+# The Part "content" oneof: exactly one of these fields is populated. Annotating the
+# WhichOneof result with this alias gives the IDE a precise type (protobuf ships no
+# stubs, so the raw return is inferred as Any) and enables branch exhaustiveness.
+PartKind = Literal["text", "raw", "url", "data"]
 
 
 @overload
@@ -42,11 +49,11 @@ def a2a_parts_to_content(
 
     Args:
         parts: Sequence of A2A Part objects.
-        text_only: When ``True``, extract only textual content (``TextPart``
-            and JSON-serialised ``DataPart``) and return a plain string.
-            When ``False`` (default), perform full multi-modal conversion
-            including ``FilePart`` and return a list of typed LangChain
-            ``ContentBlock`` dicts.
+        text_only: When ``True``, extract only textual content (parts with a
+            ``text`` field, plus JSON-serialised ``data`` parts) and return a
+            plain string.  When ``False`` (default), perform full multi-modal
+            conversion including file parts (``url``/``raw``) and return a list
+            of typed LangChain ``ContentBlock`` dicts.
 
     Returns:
         When ``text_only=True``: concatenated text string (empty if no text).
@@ -58,32 +65,34 @@ def a2a_parts_to_content(
     if text_only:
         texts: list[str] = []
         for part in parts:
-            inner = part.root if hasattr(part, "root") else part
-            if isinstance(inner, TextPart):
-                texts.append(inner.text)
-            elif isinstance(inner, DataPart):
-                texts.append(json.dumps(inner.data))
+            kind: PartKind | None = part.WhichOneof("content")
+            if kind == "text":
+                texts.append(part.text)
+            elif kind == "data":
+                texts.append(json.dumps(MessageToDict(part.data)))
         return "\n".join(texts) if texts else ""
 
     # ── Full multi-modal conversion ──────────────────────────────────
+    # In A2A v1.0+ a Part is a flat protobuf message whose populated content
+    # field (text / raw / url / data) is a oneof named "content"; file metadata
+    # is carried alongside in ``media_type`` and ``filename``.
     blocks: list[ContentBlock] = []
     for part in parts:
-        inner = part.root if hasattr(part, "root") else part
+        kind: PartKind | None = part.WhichOneof("content")
 
-        if isinstance(inner, TextPart):
-            blocks.append(TextContentBlock(type="text", text=inner.text))
+        if kind == "text":
+            blocks.append(TextContentBlock(type="text", text=part.text))
             continue
 
-        if isinstance(inner, FilePart):
+        if kind in ("url", "raw"):
             source_kwargs: dict[str, Any] = {}
-            if isinstance(inner.file, FileWithUri):
-                source_kwargs["url"] = inner.file.uri
-            elif isinstance(inner.file, FileWithBytes):
-                source_kwargs["base64"] = inner.file.bytes
+            if kind == "url":
+                source_kwargs["url"] = part.url
             else:
-                continue  # Unrecognised file variant
+                # ``raw`` holds the file bytes directly; LangChain expects base64 text.
+                source_kwargs["base64"] = base64.b64encode(part.raw).decode()
 
-            mime_type = inner.file.mime_type
+            mime_type = part.media_type
 
             # Map to the most specific LangChain content-block type
             if mime_type and mime_type.startswith("image/"):
@@ -102,27 +111,16 @@ def a2a_parts_to_content(
                 )
             continue
 
-        if isinstance(inner, DataPart):
+        if kind == "data":
             # TODO: we assume is always application/json, but could be any structured data —
-            #       consider allowing explicit mime_type in DataPart
-            
-            # Try to JSON-serialise the data to ensure it's valid JSON; if this fails, fall back to a text block
-            try:
-                json.dumps(inner.data)
-            except (TypeError, ValueError):
-                blocks.append(
-                    TextContentBlock(
-                        type="text",
-                        text=str(inner.data),
-                    )
-                )
-                continue
+            #       consider allowing explicit media_type for data parts
+            data = MessageToDict(part.data)
             blocks.append(
                 NonStandardContentBlock(
                     type="non_standard",
                     value={
                         "media_type": "application/json",
-                        "data": inner.data,
+                        "data": data,
                     },
                 )
             )

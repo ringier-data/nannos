@@ -5,7 +5,7 @@ description = "Internal execution service for scheduled automated sub-agent jobs
 requires-python = ">=3.12"
 dependencies = [
     # A2A server
-    "a2a-sdk[http-server]>=0.3.25,<1.0.0",
+    "a2a-sdk[http-server]>=1.1.0,<2.0.0",
     "click>=8.1.8",
     # HTTP server
     "uvicorn>=0.38.0",

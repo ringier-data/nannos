@@ -17,7 +17,7 @@ class TestAgent(BaseAgent):
         pass
 
     async def _stream_impl(self, messages, user_config, task):
-        yield AgentStreamResponse(content="test", state=TaskState.completed)
+        yield AgentStreamResponse(content="test", state=TaskState.TASK_STATE_COMPLETED)
 
 
 class TestCostTrackingMixin:

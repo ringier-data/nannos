@@ -343,7 +343,7 @@ def build_runtime_context(
                     if config.model_name:
                         # Validate and use the specified model
                         if is_valid_model(config.model_name):
-                            subagent_model_type = config.model_name  # type: ignore
+                            subagent_model_type = config.model_name
                             logger.info(f"Sub-agent '{config.name}' using custom model: {config.model_name}")
                         else:
                             logger.warning(
@@ -402,7 +402,7 @@ def build_runtime_context(
                     # content) instead of surfacing the auth requirement. Adding it here (as an
                     # extra_middleware → prepended outermost, so it intercepts the ToolException
                     # before ToolRetryMiddleware) fires a resumable interrupt that the dispatch
-                    # layer re-surfaces and the orchestrator maps to TaskState.auth_required.
+                    # layer re-surfaces and the orchestrator maps to TaskState.TASK_STATE_AUTH_REQUIRED.
                     subagent_extra_middlewares: list[Any] = [AuthErrorDetectionMiddleware()]
                     gp_inject_all_tools = None
                     if config.name == "general-purpose":

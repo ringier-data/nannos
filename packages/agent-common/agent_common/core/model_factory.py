@@ -21,7 +21,6 @@ import os
 from langchain_core.language_models import BaseChatModel
 
 from agent_common.models.base import ModelType, ThinkingLevel, get_resolved_default_model
-from agent_common.core.phased_timeout import with_phased_stream_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -496,11 +495,7 @@ def create_model(
             f"location={gcp_location}, thinking_level={gemini_thinking_level}"
         )
 
-        # Async client (grpc-aio): wrap with the two-phase streaming stall timeout so a
-        # half-open stream is detected in seconds. Gemini's own `timeout` defaults to
-        # None (no deadline), so without this a stalled stream could hang indefinitely.
-        gemini_cls = with_phased_stream_timeout(ChatGoogleGenerativeAI)
-        return gemini_cls(
+        return ChatGoogleGenerativeAI(
             model=model_id,
             credentials=credentials,
             project=gcp_project,
@@ -532,26 +527,8 @@ def create_model(
             temperature = 0.0
 
         # Configure boto3 client with timeouts and retry logic from environment variables
-        # to handle long-running Claude requests.
-        #
-        # read_timeout is botocore's socket read timeout. Its meaning depends on whether
-        # the caller streams, so we key the default on `streaming`:
-        #
-        #   * Streaming calls (orchestrator + sub-agents, incl. extended thinking — whose
-        #     reasoning deltas also stream incrementally) emit a chunk every few seconds,
-        #     so read_timeout applies *between* chunks. A short timeout fails fast on a
-        #     genuine stall and recovers via the adaptive retry. This is the sole recovery
-        #     lever: langchain-aws still runs the sync converse_stream in a threadpool (no
-        #     async client yet — see langchain-aws#663), so nothing can free a stalled
-        #     connection sooner than this timeout.
-        #   * Non-streaming .invoke() callers (e.g. file_analyzer) need read_timeout to
-        #     cover the WHOLE response, so they keep the generous default.
-        #
-        # This is also why Bedrock does NOT get the two-phase stall timeout the async
-        # providers use (see phased_timeout): cancelling a coroutine can't stop the
-        # threadpool socket read, so read_timeout is the only lever.
-        default_read_timeout = "60" if streaming else "300"
-        read_timeout = int(os.getenv("BEDROCK_READ_TIMEOUT", default_read_timeout))
+        # to handle long-running Claude requests
+        read_timeout = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))  # Default: 5 minutes
         connect_timeout = int(os.getenv("BEDROCK_CONNECT_TIMEOUT", "10"))  # Default: 10 seconds
         max_attempts = int(os.getenv("BEDROCK_MAX_RETRY_ATTEMPTS", "3"))  # Default: 3 retries
         retry_mode = os.getenv("BEDROCK_RETRY_MODE", "adaptive")  # Default: adaptive
@@ -611,11 +588,7 @@ def create_model(
 
         logger.info(f"Creating local OpenAI-compatible model: base_url={base_url}, model={model_name}")
 
-        # Async client (openai SDK on httpx): wrap with the two-phase streaming stall
-        # timeout so a half-open stream is bounded by the tight inter-chunk gap rather
-        # than the openai SDK's 600s default read timeout.
-        local_cls = with_phased_stream_timeout(ChatOpenAI)
-        return local_cls(
+        return ChatOpenAI(
             base_url=base_url,
             model=model_name,
             api_key=api_key,
@@ -646,11 +619,7 @@ def create_model(
             f"Creating Azure OpenAI model: deployment={deployment}, model={model_name}, api_version={api_version}"
         )
 
-        # Async client (openai SDK on httpx): wrap with the two-phase streaming stall
-        # timeout so a half-open stream is bounded by the tight inter-chunk gap rather
-        # than the openai SDK's 600s default read timeout.
-        azure_cls = with_phased_stream_timeout(AzureChatOpenAI)
-        return azure_cls(
+        return AzureChatOpenAI(
             azure_deployment=deployment,
             api_version=api_version,
             temperature=0.7,

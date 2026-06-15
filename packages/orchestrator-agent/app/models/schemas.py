@@ -8,8 +8,20 @@ the A2A task status when the graph execution completes. The model considers:
 3. Whether user input or authentication is needed
 """
 
+from typing import Literal
+
 from a2a.types import TaskState
 from pydantic import BaseModel, Field, field_validator
+
+# A2A v1.0+ TaskState is a protobuf int enum and can't be a Pydantic/LLM-tool field
+# type, so the schema exposes a short string the model picks; ``a2a_state`` maps it back.
+_TASK_STATE_BY_NAME: dict[str, int] = {
+    "completed": TaskState.TASK_STATE_COMPLETED,
+    "working": TaskState.TASK_STATE_WORKING,
+    "input_required": TaskState.TASK_STATE_INPUT_REQUIRED,
+    "failed": TaskState.TASK_STATE_FAILED,
+}
+_TASK_STATE_TO_NAME: dict[int, str] = {v: k for k, v in _TASK_STATE_BY_NAME.items()}
 
 
 class FinalResponseSchema(BaseModel):
@@ -24,7 +36,7 @@ class FinalResponseSchema(BaseModel):
     to signal when tasks are still ongoing, need input, or have failed.
     """
 
-    task_state: TaskState = Field(
+    task_state: Literal["completed", "working", "input_required", "failed"] = Field(
         description=(
             "The A2A task state for this response. Choose based on:\n"
             "- completed: All todos done, user request fully satisfied, no further action needed\n"
@@ -79,30 +91,23 @@ class FinalResponseSchema(BaseModel):
     @field_validator("task_state", mode="before")
     @classmethod
     def normalize_task_state(cls, v):
-        """Normalize task_state to TaskState enum, handling both hyphenated strings and enum values.
+        """Normalize task_state to one of the short string names.
 
-        The A2A protocol uses hyphenated format (e.g., 'input-required') but Python enum
-        attributes use underscores (e.g., TaskState.input_required).
-
-        Args:
-            v: Raw value (string or TaskState enum)
-
-        Returns:
-            TaskState enum value
+        Accepts the A2A hyphenated form ('input-required'), a protobuf TaskState int
+        value, or the short name directly, and returns the short name the field expects.
         """
-        # Already a TaskState enum
-        if isinstance(v, TaskState):
-            return v
-
-        # String format - normalize hyphen to underscore
+        # Protobuf TaskState enum value (int)
+        if isinstance(v, int) and not isinstance(v, bool) and v in _TASK_STATE_TO_NAME:
+            return _TASK_STATE_TO_NAME[v]
+        # String form — normalize hyphens and strip any TASK_STATE_ prefix
         if isinstance(v, str):
-            # Convert hyphenated format to underscored (e.g., "input-required" -> "input_required")
-            normalized = v.replace("-", "_")
-            try:
-                return TaskState[normalized]
-            except KeyError:
-                # If not found, try getting by value (in case it's already the enum value string)
-                for state in TaskState:
-                    if state.value == v:
-                        return state
+            normalized = v.replace("-", "_").lower()
+            if normalized.startswith("task_state_"):
+                normalized = normalized[len("task_state_") :]
+            return normalized
         return v  # Let Pydantic handle invalid cases
+
+    @property
+    def a2a_state(self) -> int:
+        """The protobuf ``TaskState`` enum value corresponding to ``task_state``."""
+        return _TASK_STATE_BY_NAME[self.task_state]

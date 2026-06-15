@@ -15,7 +15,7 @@ import asyncio
 import logging
 import mimetypes
 
-from a2a.types import FilePart, Part, TextPart
+from a2a.types import Part
 from langchain_core.messages import (
     AudioContentBlock,
     ContentBlock,
@@ -106,17 +106,12 @@ async def _process_file_part(part: Part) -> tuple[str, ContentBlock] | None:
     Returns:
         Tuple of (text_description, content_block), or None if not processable
     """
-    if not isinstance(part.root, FilePart):
+    # A2A v1.0+: a file Part carries its content via the `url` or `raw` oneof field.
+    # We only forward URL-referenced files (raw inline bytes are not handled here).
+    if part.WhichOneof("content") != "url":
         return None
 
-    file_data = part.root.file
-
-    # Check if it has a URI (FileWithUri)
-    if not hasattr(file_data, "uri"):
-        logger.warning("FilePart does not have a URI, skipping")
-        return None
-
-    uri: str = file_data.uri  # type: ignore[union-attr]
+    uri: str = part.url
     original_uri = uri  # Store original for logging
     # if uri is a s3 URI, we will generate a pre-signed URL for sub-agents to access the file
     if uri.startswith(("s3://", "file://")):
@@ -129,8 +124,8 @@ async def _process_file_part(part: Part) -> tuple[str, ContentBlock] | None:
             logger.warning(f"Failed to generate presigned URL for {original_uri}: {e}")
             # Continue with original S3 URI if presigned URL generation fails
 
-    mime_type = getattr(file_data, "mimeType", None)
-    name = getattr(file_data, "name", None)
+    mime_type = part.media_type or None
+    name = part.filename or None
 
     # Try to guess MIME type if not provided
     if not mime_type:
@@ -202,7 +197,7 @@ async def build_text_content(
     # Collect file parts with their indices for concurrent processing
     file_part_tasks: list[tuple[int, Part]] = []
     for idx, part in enumerate(parts):
-        if isinstance(part.root, FilePart):
+        if part.WhichOneof("content") in ("url", "raw"):
             file_part_tasks.append((idx, part))
 
     # Process all file parts concurrently if any exist
@@ -216,15 +211,16 @@ async def build_text_content(
 
     # Build final content in order, using pre-computed file results
     for idx, part in enumerate(parts):
-        if isinstance(part.root, TextPart):
-            content_parts.append(part.root.text)
-        elif isinstance(part.root, FilePart):
+        kind = part.WhichOneof("content")
+        if kind == "text":
+            content_parts.append(part.text)
+        elif kind in ("url", "raw"):
             if idx in file_results:
                 description, content_block = file_results[idx]
                 content_parts.append(description)
                 file_blocks.append(content_block)
         else:
-            # Other part types (DataPart, etc.) - log and skip for now
-            logger.debug(f"Skipping unsupported part type: {type(part.root)}")
+            # Other part types (data, etc.) - log and skip for now
+            logger.debug(f"Skipping unsupported part kind: {kind}")
 
     return "\n".join(content_parts), file_blocks

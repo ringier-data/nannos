@@ -65,7 +65,7 @@ class AgentStreamResponse(BaseAgentStreamResponse):
             auth_content = f"{message}\n\nPlease complete the required authentication and try again."
 
         return cls(
-            state=TaskState.auth_required,
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
             content=auth_content,
             interrupt_reason="auth_required",
             metadata={"auth_url": auth_url, "error_code": error_code, "requires_auth": True, **metadata},

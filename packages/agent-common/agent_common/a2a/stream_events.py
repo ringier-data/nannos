@@ -38,9 +38,14 @@ from a2a.types import TaskState
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+# A2A v1.0+ TaskState is a protobuf int enum (values are plain ints at runtime).
+# This alias keeps fields/collections semantically typed without depending on
+# protobuf stubs (which the SDK does not ship). Mirrors ringier_a2a_sdk.models.
+TaskStateValue = int
+
 # Terminal states where the task is done (success or failure).
-TERMINAL_STATES: frozenset[TaskState] = frozenset(
-    {TaskState.completed, TaskState.failed, TaskState.canceled, TaskState.rejected}
+TERMINAL_STATES: frozenset[TaskStateValue] = frozenset(
+    {TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED, TaskState.TASK_STATE_REJECTED}
 )
 
 # ---------------------------------------------------------------------------
@@ -75,7 +80,7 @@ class TaskResponseData(BaseModel):
     type: Literal["task"] = "task"
     task_id: str = ""
     context_id: str = ""
-    state: TaskState = TaskState.working
+    state: TaskStateValue = TaskState.TASK_STATE_WORKING
     messages: list[BaseMessage] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -87,12 +92,12 @@ class TaskResponseData(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def requires_input(self) -> bool:
-        return self.state == TaskState.input_required
+        return self.state == TaskState.TASK_STATE_INPUT_REQUIRED
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def requires_auth(self) -> bool:
-        return self.state == TaskState.auth_required
+        return self.state == TaskState.TASK_STATE_AUTH_REQUIRED
 
 
 # ---------------------------------------------------------------------------

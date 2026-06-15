@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from a2a.types import Message as A2AMessage
 from a2a.types import Part as A2APart
-from a2a.types import TextPart
+from a2a.types import Role
 
 from ringier_a2a_sdk.server.executor import (
     MAX_STEERING_QUEUE_DEPTH,
@@ -17,8 +17,8 @@ from ringier_a2a_sdk.server.executor import (
 
 def _make_a2a_message(text: str = "hello", context_id: str = "ctx-1") -> A2AMessage:
     return A2AMessage(
-        role="user",
-        parts=[A2APart(root=TextPart(text=text))],
+        role=Role.ROLE_USER,
+        parts=[A2APart(text=text)],
         message_id="msg-test",
         context_id=context_id,
     )
@@ -74,7 +74,7 @@ class TestSteeringQueueBehavior:
         info.message_queue.put_nowait(msg)
 
         retrieved = info.message_queue.get_nowait()
-        assert retrieved.parts[0].root.text == "follow up"
+        assert retrieved.parts[0].text == "follow up"
 
     @pytest.mark.asyncio
     async def test_queue_depth_limit(self):

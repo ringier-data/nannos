@@ -21,6 +21,7 @@ import uuid as _uuid
 from typing import Any, Optional
 
 from a2a.types import Message as A2AMessage
+from a2a.types import Role as A2ARole
 from agent_common.a2a.client_runnable import A2AClientRunnable as _ClientRunnable
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
@@ -516,7 +517,7 @@ class GraphFactory:
 
                     # Forward all parts (text, files, data) — don't strip non-text content
                     steering_msg = A2AMessage(
-                        role="user",
+                        role=A2ARole.ROLE_USER,
                         parts=msg.parts,
                         message_id=str(_uuid.uuid4()),
                         context_id=dispatch.subagent_context_id,

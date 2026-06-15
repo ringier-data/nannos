@@ -17,6 +17,10 @@ from typing import Any
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
+from a2a.helpers import (
+    new_task_from_user_message,
+    new_text_message,
+)
 from a2a.types import (
     InternalError,
     InvalidParamsError,
@@ -25,13 +29,7 @@ from a2a.types import (
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
-    TextPart,
 )
-from a2a.utils import (
-    new_agent_text_message,
-    new_task,
-)
-from a2a.utils.errors import ServerError
 
 from ..models import UserConfig
 
@@ -113,7 +111,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             event_queue: Event queue for task updates
 
         Raises:
-            ServerError: If validation fails or execution errors occur
+            InvalidParamsError / InternalError: If validation fails or execution errors occur
         """
         # Note: Authentication is enforced at the middleware layer
         # All requests reaching this method have already been authenticated
@@ -121,17 +119,17 @@ class BaseAgentExecutor(AgentExecutor, ABC):
 
         error = self._validate_request(context)
         if error:
-            raise ServerError(error=InvalidParamsError())
+            raise InvalidParamsError()
 
         message = context.message
         if not message:
             logger.error("No message found in request context")
-            raise ServerError(error=InvalidParamsError())
+            raise InvalidParamsError()
         task = context.current_task
         logger.debug(f"Starting execution for query: {context.get_user_input()}")
         logger.debug(f"Current task: {task}")
         if not task:
-            task = new_task(context.message)  # type: ignore
+            task = new_task_from_user_message(context.message)  # type: ignore
             await event_queue.enqueue_event(task)
 
         context_id = task.context_id
@@ -152,10 +150,10 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 phone_number = context.call_context.state.get("phone_number")
             except KeyError as e:
                 logger.error(f"[ZERO-TRUST] Missing expected user context key: {e}")
-                raise ServerError(error=InvalidParamsError()) from e
+                raise InvalidParamsError() from e
         else:
             logger.error("[ZERO-TRUST] No user context found in call_context - authentication may have failed")
-            raise ServerError(error=InvalidParamsError())
+            raise InvalidParamsError()
 
         logger.debug(f"[ZERO-TRUST] Executing with verified user_sub: {user_sub}, sub_agent_id: {sub_agent_id}")
 
@@ -169,13 +167,13 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                         f"[STEERING] Rejected steering for context_id={context_id}: "
                         f"caller_sub={user_sub} does not match stream owner"
                     )
-                    raise ServerError(error=InvalidParamsError())
+                    raise InvalidParamsError()
                 if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
                     logger.warning(
                         f"[STEERING] Queue full for context_id={context_id} "
                         f"(depth={active.message_queue.qsize()}), rejecting"
                     )
-                    raise ServerError(error=InvalidParamsError())
+                    raise InvalidParamsError()
                 logger.info(
                     f"[STEERING] Active stream found for context_id={context_id}, "
                     f"queuing message for running agent (queue depth: {active.message_queue.qsize() + 1})"
@@ -194,7 +192,6 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                             state=task.status.state,
                             message=task.status.message,
                         ),
-                        final=False,
                     )
                 )
                 return
@@ -247,7 +244,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                     # steering messages before emitting it.  Other terminal states
                     # (failed, input_required, auth_required) are emitted immediately
                     # since re-invocation only makes sense after successful completion.
-                    if item.state == TaskState.completed:
+                    if item.state == TaskState.TASK_STATE_COMPLETED:
                         deferred_terminal_item = item
                         continue
                     first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
@@ -257,7 +254,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 # Check for steering messages that arrived after the last abefore_model
                 if (
                     deferred_terminal_item is not None
-                    and deferred_terminal_item.state == TaskState.completed
+                    and deferred_terminal_item.state == TaskState.TASK_STATE_COMPLETED
                     and steering_reinvocations < MAX_STEERING_REINVOCATIONS
                 ):
                     try:
@@ -289,12 +286,8 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             try:
                 await asyncio.shield(
                     updater.update_status(
-                        TaskState.canceled,
-                        new_agent_text_message(
-                            "Agent execution was cancelled.",
-                            task.context_id,
-                            task.id,
-                        ),
+                        TaskState.TASK_STATE_CANCELED,
+                        new_text_message("Agent execution was cancelled.", context_id=task.context_id, task_id=task.id),
                     )
                 )
             except (asyncio.CancelledError, Exception):
@@ -303,25 +296,21 @@ class BaseAgentExecutor(AgentExecutor, ABC):
         except Exception as e:
             logger.error(f"An error occurred while streaming the response: {e.__class__.__name__}: {e}")
 
-            # CRITICAL: Emit TaskState.failed before raising the exception
+            # CRITICAL: Emit TaskState.TASK_STATE_FAILED before raising the exception
             # This ensures the orchestrator receives a proper failure status instead of
             # seeing the stream end abruptly with a "working" state
             error_message = f"Agent execution failed: {e.__class__.__name__}: {e}"
             try:
                 await updater.update_status(
-                    TaskState.failed,
-                    new_agent_text_message(
-                        error_message,
-                        task.context_id,
-                        task.id,
-                    ),
+                    TaskState.TASK_STATE_FAILED,
+                    new_text_message(error_message, context_id=task.context_id, task_id=task.id),
                 )
-                logger.info(f"Emitted TaskState.failed to orchestrator: {error_message}")
+                logger.info(f"Emitted TaskState.TASK_STATE_FAILED to orchestrator: {error_message}")
             except Exception as emit_error:
                 # If we can't emit the failure status, log but don't mask the original error
-                logger.error(f"Failed to emit TaskState.failed: {emit_error}")
+                logger.error(f"Failed to emit TaskState.TASK_STATE_FAILED: {emit_error}")
 
-            raise ServerError(error=InternalError()) from e
+            raise InternalError() from e
         finally:
             # Log unconsumed steering messages before cleanup.
             # These arrive between the last abefore_model call and stream
@@ -374,7 +363,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
         metadata = item.metadata or {}
 
         # --- Streaming content chunks → artifact-append ---
-        if state == TaskState.working and metadata.get("streaming_chunk"):
+        if state == TaskState.TASK_STATE_WORKING and metadata.get("streaming_chunk"):
             is_intermediate = metadata.get("intermediate_output", False)
 
             # Intermediate-output chunks (thinking/reasoning) go into a SEPARATE
@@ -393,7 +382,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 append = first_chunk_sent
 
             await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
+                [Part(text=content)],
                 artifact_id=effective_artifact_id,
                 append=append,  # False for first chunk, True for subsequent
                 last_chunk=False,
@@ -405,60 +394,44 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             return (True, first_intermediate_chunk_sent)  # Mark main chunk sent
 
         # Handle different A2A task states
-        if state == TaskState.working:
+        if state == TaskState.TASK_STATE_WORKING:
             # Status update or intermediate progress
             logger.info(f"Emitting status update: {content}")
             await updater.update_status(
-                TaskState.working,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_WORKING,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
                 metadata=metadata or None,
             )
 
-        elif state == TaskState.failed:
+        elif state == TaskState.TASK_STATE_FAILED:
             # Handle failure state (terminal state - stream will close)
             await updater.update_status(
-                TaskState.failed,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_FAILED,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
             )
 
-        elif state == TaskState.input_required:
+        elif state == TaskState.TASK_STATE_INPUT_REQUIRED:
             # User input required - leave task in input_required state
             await updater.update_status(
-                TaskState.input_required,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_INPUT_REQUIRED,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
             )
 
-        elif state == TaskState.auth_required:
+        elif state == TaskState.TASK_STATE_AUTH_REQUIRED:
             # Authentication required - leave task in auth_required state
             await updater.update_status(
-                TaskState.auth_required,
-                new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                ),
+                TaskState.TASK_STATE_AUTH_REQUIRED,
+                new_text_message(content, context_id=task.context_id, task_id=task.id),
             )
 
-        elif state == TaskState.completed:
+        elif state == TaskState.TASK_STATE_COMPLETED:
             # Task completed successfully
             # If we've been streaming chunks, don't create a new artifact - content already streamed
             # Just complete the task; the streaming artifact contains all the content
             if not first_chunk_sent:
                 # Only create artifact if we haven't been streaming
                 await updater.add_artifact(
-                    [Part(root=TextPart(text=content))],
+                    [Part(text=content)],
                     name="agent_result",
                 )
             # Always include final content in completion message so downstream
@@ -466,11 +439,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             # task.status.message even when content was streamed via artifacts.
             # TODO: is this duplication necessary, or can we rely on the artifact content alone for completed tasks?
             await updater.complete(
-                message=new_agent_text_message(
-                    content,
-                    task.context_id,
-                    task.id,
-                )
+                message=new_text_message(content, context_id=task.context_id, task_id=task.id)
                 if content
                 else None,
             )
@@ -479,7 +448,7 @@ class BaseAgentExecutor(AgentExecutor, ABC):
             # Unknown state - log warning and treat as completed
             logger.warning(f"Unknown task state: {state}, treating as completed")
             await updater.add_artifact(
-                [Part(root=TextPart(text=content))],
+                [Part(text=content)],
                 name="agent_result",
             )
             await updater.complete()
@@ -518,13 +487,8 @@ class BaseAgentExecutor(AgentExecutor, ABC):
                 task_id=task_id,
                 context_id=context_id,
                 status=TaskStatus(
-                    state=TaskState.canceled,
-                    message=new_agent_text_message(
-                        "Agent execution was cancelled.",
-                        context_id,
-                        task_id,
-                    ),
+                    state=TaskState.TASK_STATE_CANCELED,
+                    message=new_text_message("Agent execution was cancelled.", context_id=context_id, task_id=task_id),
                 ),
-                final=True,
             )
         )

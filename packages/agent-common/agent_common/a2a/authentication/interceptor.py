@@ -30,7 +30,8 @@ Security Considerations:
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
-from a2a.client.middleware import ClientCallContext, ClientCallInterceptor
+from a2a.client.client import ClientCallContext
+from a2a.client.interceptors import AfterArgs, BeforeArgs, ClientCallInterceptor
 from a2a.types import AgentCard
 
 if TYPE_CHECKING:
@@ -110,52 +111,38 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             ValueError: If no supported scheme found
         """
         for scheme_name, scheme in (agent_card.security_schemes or {}).items():
-            # Check for OpenID Connect
-            if scheme.root.type == "openIdConnect":
-                return ("oidc", scheme_name, scheme.root)
+            # A2A v1.0+: SecurityScheme is a protobuf oneof; OIDC is one variant.
+            if scheme.HasField("open_id_connect_security_scheme"):
+                return ("oidc", scheme_name, scheme.open_id_connect_security_scheme)
 
         raise ValueError(f"Agent {agent_card.name} does not have a supported security scheme (OIDC).")
 
-    async def intercept(
-        self,
-        method_name: str,
-        request_payload: dict[str, Any],
-        http_kwargs: dict[str, Any],
-        agent_card: AgentCard | None,
-        context: ClientCallContext | None,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def before(self, args: BeforeArgs) -> None:
         """
         Intelligently add authentication based on agent card security config.
+
+        A2A v1.0+ interceptor contract: instead of returning modified payloads,
+        we mutate ``args.context.service_parameters`` to inject request headers
+        (the transport applies these to the outbound HTTP request).
 
         Process:
         1. Check if agent_card has security configured
         2. Detect auth scheme (OIDC)
-        3. OIDC: Exchange user token for target-specific token and pass to sub-agent
+        3. OIDC: Exchange user token for target-specific token and inject header
         4. If authentication fails: don't add auth header (request will likely fail)
-
-        Args:
-            method_name: A2A RPC method
-            request_payload: JSON-RPC request payload
-            http_kwargs: httpx request kwargs
-            agent_card: Target agent metadata (examined for security config)
-            context: Request context
-
-        Returns:
-            Tuple of (modified_request_payload, modified_http_kwargs)
         """
-        # Ensure headers dict exists
-        if "headers" not in http_kwargs:
-            http_kwargs["headers"] = {}
+        agent_card = args.agent_card
 
         # No agent card means we can't determine auth requirements
         if not agent_card:
             logger.warning("No AgentCard provided, headers won't include auth")
-            return request_payload, http_kwargs
+            return
 
-        # No security schemes means no authentication required
-        if agent_card.security_schemes is None or len(agent_card.security_schemes) == 0:
+        # No security schemes means no authentication required.
+        # (security_schemes is a proto map — use truthiness, not HasField.)
+        if not agent_card.security_schemes:
             logger.info(f"Agent {agent_card.name} has no security schemes, sending request without authentication.")
-            return request_payload, http_kwargs
+            return
 
         # Detect authentication scheme
         try:
@@ -163,25 +150,35 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         except ValueError as e:
             logger.warning(
                 f"{e} "
-                f"Available schemes: {list((agent_card.security_schemes or {}).keys())}. "
+                f"Available schemes: {list(agent_card.security_schemes.keys())}. "
                 "Proceeding without auth header."
             )
-            return request_payload, http_kwargs
+            return
 
         # Handle OIDC authentication (pass user token directly)
         if auth_type == "oidc":
-            return await self._handle_oidc_auth(agent_card, scheme_name, scheme_obj, request_payload, http_kwargs)
+            await self._handle_oidc_auth(args, agent_card, scheme_name, scheme_obj)
 
-        return request_payload, http_kwargs
+    async def after(self, args: AfterArgs) -> None:
+        """No-op: this interceptor only injects request headers in ``before``."""
+        return
+
+    @staticmethod
+    def _set_header(args: BeforeArgs, name: str, value: str) -> None:
+        """Inject a request header via the call context's service parameters."""
+        if args.context is None:
+            args.context = ClientCallContext()
+        if args.context.service_parameters is None:
+            args.context.service_parameters = {}
+        args.context.service_parameters[name] = value
 
     async def _handle_oidc_auth(
         self,
+        args: BeforeArgs,
         agent_card: AgentCard,
         scheme_name: str,
         scheme_obj: Any,
-        request_payload: dict[str, Any],
-        http_kwargs: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> None:
         """
         Handle OIDC authentication by exchanging user token for target-specific token.
 
@@ -191,15 +188,13 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
         This provides scope-based isolation while maintaining dynamic provisioning.
 
+        Injects the resulting bearer token into ``args.context.service_parameters``.
+
         Args:
+            args: The interceptor BeforeArgs (mutated to carry auth headers)
             agent_card: Target agent card
             scheme_name: Security scheme name (agent's client ID)
             scheme_obj: OpenID Connect scheme object
-            request_payload: JSON-RPC request payload
-            http_kwargs: httpx request kwargs
-
-        Returns:
-            Tuple of (request_payload, modified_http_kwargs)
         """
         # Verify issuer matches configuration
         if not scheme_obj.open_id_connect_url.startswith(self.oidc_issuer):
@@ -207,7 +202,7 @@ class SmartTokenInterceptor(ClientCallInterceptor):
                 f"Agent {agent_card.name} uses different OIDC issuer: {scheme_obj.open_id_connect_url} "
                 f"(expected: {self.oidc_issuer}). Proceeding without auth header."
             )
-            return request_payload, http_kwargs
+            return
 
         # Determine target client ID based on agent requirements
         # agent-creator needs console access, others use reduced-scope orchestrator token
@@ -241,12 +236,12 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
             exchanged_token = self._exchanged_tokens[target_client_id]
 
-            # Add token to headers
-            http_kwargs["headers"]["Authorization"] = f"Bearer {exchanged_token}"
+            # Inject token as a request header via the call context
+            self._set_header(args, "Authorization", f"Bearer {exchanged_token}")
 
             # Add sub_agent_id as HTTP header for cost tracking
             if self.sub_agent_id:
-                http_kwargs["headers"]["X-Sub-Agent-Id"] = str(self.sub_agent_id)
+                self._set_header(args, "X-Sub-Agent-Id", str(self.sub_agent_id))
                 logger.debug(f"Added X-Sub-Agent-Id header: {self.sub_agent_id}")
 
             # Note: User context is already in token claims (sub, email, name, groups)
@@ -260,8 +255,6 @@ class SmartTokenInterceptor(ClientCallInterceptor):
                 "Request will be sent without authentication and will likely fail.",
                 exc_info=True,
             )
-
-        return request_payload, http_kwargs
 
     def clear_cache(self):
         """Clear the token cache in the OAuth2 client."""

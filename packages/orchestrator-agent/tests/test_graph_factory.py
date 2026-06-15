@@ -163,7 +163,7 @@ class TestMiddlewareStack:
 
         assert not any(isinstance(m, BedrockPromptCachingMiddleware) for m in stack)
         # One fewer middleware than the Bedrock case (cache middleware skipped)
-        assert len(stack) == 13
+        assert len(stack) == 15
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")

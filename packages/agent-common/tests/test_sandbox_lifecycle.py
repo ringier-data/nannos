@@ -79,6 +79,11 @@ async def test_sandbox_acquired_and_released_on_success():
         yield  # noqa: make it an async generator
 
     mock_agent.astream = mock_astream
+    # _astream_impl awaits the graph's aget_state for checkpoint state retrieval and a
+    # post-stream interrupt check; return a clean (no-interrupt) state snapshot.
+    mock_agent.aget_state = AsyncMock(
+        return_value=MagicMock(values={"messages": []}, interrupts=[], next=(), tasks=[])
+    )
 
     # Cache state that sandbox path needs
     runnable._cached_tools = []

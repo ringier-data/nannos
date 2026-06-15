@@ -10,9 +10,9 @@ class TestAgentStreamResponse:
 
     def test_basic_creation(self):
         """Test creating a basic response."""
-        response = AgentStreamResponse(state=TaskState.working, content="Processing request")
+        response = AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Processing request")
 
-        assert response.state == TaskState.working
+        assert response.state == TaskState.TASK_STATE_WORKING
         assert response.content == "Processing request"
         assert response.interrupt_reason is None
         assert response.pending_nodes is None
@@ -21,7 +21,7 @@ class TestAgentStreamResponse:
     def test_with_interrupt_reason(self):
         """Test response with interrupt reason."""
         response = AgentStreamResponse(
-            state=TaskState.input_required,
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
             content="Please provide input",
             interrupt_reason="graph_interrupted",
             pending_nodes=["node1", "node2"],
@@ -33,7 +33,7 @@ class TestAgentStreamResponse:
     def test_with_metadata(self):
         """Test response with metadata."""
         response = AgentStreamResponse(
-            state=TaskState.completed, content="Task complete", metadata={"task_id": "123", "duration": 5.2}
+            state=TaskState.TASK_STATE_COMPLETED, content="Task complete", metadata={"task_id": "123", "duration": 5.2}
         )
 
         assert response.metadata == {"task_id": "123", "duration": 5.2}
@@ -47,7 +47,7 @@ class TestAgentStreamResponse:
             tool="test_tool",
         )
 
-        assert response.state == TaskState.auth_required
+        assert response.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert "Authentication needed" in response.content
         assert "https://auth.example.com" in response.content
         assert response.interrupt_reason == "auth_required"
@@ -61,15 +61,15 @@ class TestAgentStreamResponse:
         """Test auth_required factory method without URL."""
         response = AgentStreamResponse.auth_required(message="Authentication needed", error_code="need-credentials")
 
-        assert response.state == TaskState.auth_required
+        assert response.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert "Authentication needed" in response.content
         assert "complete the required authentication" in response.content
         assert "visit the following URL" not in response.content
 
     def test_enum_values_preserved(self):
         """Test that enum values are preserved (not converted to strings)."""
-        response = AgentStreamResponse(state=TaskState.working, content="Test")
+        response = AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Test")
 
         # Should be actual enum, not string
-        assert isinstance(response.state, TaskState)
-        assert response.state == TaskState.working
+        assert isinstance(response.state, int)  # A2A v1.0+ TaskState is a protobuf int enum
+        assert response.state == TaskState.TASK_STATE_WORKING

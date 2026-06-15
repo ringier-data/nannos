@@ -141,7 +141,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
     Interrupt Value Format::
 
         {
-            "task_state": TaskState.auth_required,
+            "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
             "tool": "tool_name",
             "message": "Authentication required message",
             "auth_url": "https://oauth.example.com/authorize",
@@ -149,7 +149,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
             "timestamp": 1234567890.123
         }
 
-    This value is interpreted by the agent_executor to set TaskState.auth_required.
+    This value is interpreted by the agent_executor to set TaskState.TASK_STATE_AUTH_REQUIRED.
     """
 
     state_schema = AuthErrorState
@@ -366,7 +366,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                 if auth_metadata:
                     # Use interrupt() to pause graph execution with auth requirement
                     auth_requirement = {
-                        "task_state": TaskState.auth_required,
+                        "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
                         "tool": tool_name,
                         "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                         "message": auth_metadata.get("auth_message", "Authentication required"),
@@ -414,7 +414,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
                         if auth_metadata:
                             # Use interrupt() to pause graph execution with auth requirement
                             auth_requirement = {
-                                "task_state": TaskState.auth_required,
+                                "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
                                 "tool": tool_name,
                                 "subagent": auth_metadata.get("subagent"),  # May be None for non-A2A tools
                                 "message": auth_metadata.get("auth_message", "Authentication required"),
@@ -439,7 +439,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
             if auth_metadata:
                 # Use interrupt() to pause graph execution with auth requirement
                 auth_requirement = {
-                    "task_state": TaskState.auth_required,
+                    "task_state": TaskState.TASK_STATE_AUTH_REQUIRED,
                     "tool": tool_name,
                     "message": auth_metadata.get("auth_message", "Authentication required"),
                     "auth_url": auth_metadata.get("auth_url", ""),

@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from a2a.types import Message, Part, Role, Task, TaskState, TextPart
+from a2a.types import Message, Part, Role, Task, TaskState
 from langchain_core.messages import AIMessage, AIMessageChunk
 from pydantic import SecretStr
 
@@ -35,8 +35,8 @@ def _make_task(**kwargs):
 
 def _make_message(text: str = "hi") -> Message:
     return Message(
-        role=Role.user,
-        parts=[Part(root=TextPart(text=text))],
+        role=Role.ROLE_USER,
+        parts=[Part(text=text)],
         message_id="msg-test",
     )
 
@@ -114,7 +114,7 @@ class TestStreamImplGraphNone:
         agent._ensure_mcp_tools_loaded = AsyncMock()
         responses = await _collect(agent)
         assert len(responses) == 1
-        assert responses[0].state == TaskState.failed
+        assert responses[0].state == TaskState.TASK_STATE_FAILED
         # Updated assertion to match new error message format
         assert "unable to connect" in responses[0].content.lower()
 
@@ -157,7 +157,7 @@ class TestStreamImplRegularTextStreaming:
 
         assert len(streaming) >= 1
         assert len(final) == 1
-        assert final[0].state == TaskState.completed
+        assert final[0].state == TaskState.TASK_STATE_COMPLETED
         assert final[0].content == "Done"
 
     @pytest.mark.asyncio
@@ -232,7 +232,7 @@ class TestStreamImplFinalResponseSchema:
         responses = await _collect(agent)
 
         final = responses[-1]
-        assert final.state == TaskState.failed
+        assert final.state == TaskState.TASK_STATE_FAILED
         assert final.content == "Something went wrong"
 
     @pytest.mark.asyncio
@@ -313,7 +313,7 @@ class TestStreamImplFinalResponseSchema:
         responses = await _collect(agent)
 
         final = responses[-1]
-        assert final.state == TaskState.input_required
+        assert final.state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert final.content == "Need more info"
 
     @pytest.mark.asyncio
@@ -350,7 +350,7 @@ class TestStreamImplFinalResponseSchema:
         responses = await _collect(agent)
 
         final = responses[-1]
-        assert final.state == TaskState.completed
+        assert final.state == TaskState.TASK_STATE_COMPLETED
         assert final.content == "Extracted from state"
 
 
@@ -424,7 +424,7 @@ class TestStreamImplInterrupts:
         responses = await _collect(agent)
 
         assert len(responses) == 1
-        assert responses[0].state == TaskState.input_required
+        assert responses[0].state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert "interrupted" in responses[0].content.lower()
 
 
@@ -451,7 +451,7 @@ class TestStreamImplContentFallback:
         responses = await _collect(agent)
 
         final = responses[-1]
-        assert final.state == TaskState.completed
+        assert final.state == TaskState.TASK_STATE_COMPLETED
         assert final.content == "Here is the answer."
 
     @pytest.mark.asyncio
@@ -474,7 +474,7 @@ class TestStreamImplContentFallback:
         responses = await _collect(agent)
 
         final = responses[-1]
-        assert final.state == TaskState.completed
+        assert final.state == TaskState.TASK_STATE_COMPLETED
         assert "processed successfully" in final.content.lower()
 
 
@@ -502,7 +502,7 @@ class TestStreamImplErrorHandling:
             responses.append(resp)
 
         assert len(responses) == 1
-        assert responses[0].state == TaskState.failed
+        assert responses[0].state == TaskState.TASK_STATE_FAILED
         assert "boom" in responses[0].content
 
     @pytest.mark.asyncio

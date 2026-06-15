@@ -87,7 +87,7 @@ class TestA2ATaskTrackingMiddlewareBeforeModel:
                     "task_id": "task-456",
                     "context_id": "ctx-789",
                     "is_complete": False,
-                    "state": "TaskState.failed",
+                    "state": "TaskState.TASK_STATE_FAILED",
                 }
             },
         )

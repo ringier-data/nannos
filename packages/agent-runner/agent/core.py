@@ -129,13 +129,7 @@ def _create_checkpointer() -> DynamoDBSaver | MemorySaver:
 
 def _extract_text_from_message(message: Message) -> str:
     """Extract text content from an A2A Message's parts."""
-    texts = []
-    for part in message.parts or []:
-        if hasattr(part, "root") and hasattr(part.root, "text"):
-            texts.append(part.root.text)
-        elif hasattr(part, "text"):
-            texts.append(part.text)
-    return "\n".join(texts).strip()
+    return a2a_parts_to_content(message.parts or [], text_only=True).strip()
 
 
 def _a2a_messages_to_human_messages(messages: list[Message]) -> list[HumanMessage]:
@@ -441,7 +435,7 @@ class AgentRunner(BaseAgent):
         Yields:
             AgentStreamResponse with JSON-encoded result metadata.
         """
-        yield AgentStreamResponse(state=TaskState.working, content="Executing scheduled job...")
+        yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Executing scheduled job...")
 
         # Extract scheduler-specific metadata from the message
         message_meta = _extract_message_metadata(task)
@@ -473,7 +467,7 @@ class AgentRunner(BaseAgent):
                     "user_sub": user_config.user_sub,
                 }
                 yield AgentStreamResponse(
-                    state=TaskState.completed,
+                    state=TaskState.TASK_STATE_COMPLETED,
                     content=json.dumps(result_meta, default=str),
                 )
                 return
@@ -515,7 +509,7 @@ class AgentRunner(BaseAgent):
                     "user_sub": user_config.user_sub,
                 }
                 yield AgentStreamResponse(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     content=json.dumps(result_meta, default=str),
                 )
                 return
@@ -527,7 +521,7 @@ class AgentRunner(BaseAgent):
             "user_sub": user_config.user_sub,
         }
         yield AgentStreamResponse(
-            state=TaskState.completed,
+            state=TaskState.TASK_STATE_COMPLETED,
             content=json.dumps(result_meta, default=str),
         )
 

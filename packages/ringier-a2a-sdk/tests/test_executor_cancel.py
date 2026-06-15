@@ -2,6 +2,7 @@
 
 import pytest
 from a2a.server.agent_execution import RequestContext
+from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
 from a2a.types import TaskState
 
@@ -30,6 +31,7 @@ async def test_cancel_emits_canceled_event(executor):
     """cancel() should enqueue a TaskStatusUpdateEvent with state=canceled."""
     queue = EventQueue()
     context = RequestContext(
+        call_context=ServerCallContext(),
         request=None,
         task_id="task-123",
         context_id="ctx-456",
@@ -44,10 +46,10 @@ async def test_cancel_emits_canceled_event(executor):
 
     assert len(events) == 1
     event = events[0]
-    assert event.status.state == TaskState.canceled
+    # A2A v1.0+ removed TaskStatusUpdateEvent.final; the terminal CANCELED state is the signal.
+    assert event.status.state == TaskState.TASK_STATE_CANCELED
     assert event.task_id == "task-123"
     assert event.context_id == "ctx-456"
-    assert event.final is True
 
 
 @pytest.mark.asyncio
@@ -55,6 +57,7 @@ async def test_cancel_does_not_raise(executor):
     """cancel() should not raise UnsupportedOperationError anymore."""
     queue = EventQueue()
     context = RequestContext(
+        call_context=ServerCallContext(),
         request=None,
         task_id="task-1",
         context_id="ctx-1",

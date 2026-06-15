@@ -317,7 +317,7 @@ class OrchestratorDeepAgent:
         except AgentFrameworkAuthError as e:
             logger.error(f"Authorization error while initializing: {e}")
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content="Authorization error. Please check your credentials and try again.",
             )
             return
@@ -470,7 +470,7 @@ class OrchestratorDeepAgent:
                             ):
                                 emitted_updates.add(tool_name)
                                 yield AgentStreamResponse(
-                                    state=TaskState.working,
+                                    state=TaskState.TASK_STATE_WORKING,
                                     content=f"Using {tool_name}\u2026",
                                     metadata={"activity_log": True},
                                 )
@@ -483,7 +483,7 @@ class OrchestratorDeepAgent:
                                     # answer. Surface as an orchestrator thinking block,
                                     # not as visible response content.
                                     yield AgentStreamResponse(
-                                        state=TaskState.working,
+                                        state=TaskState.TASK_STATE_WORKING,
                                         content=delta,
                                         metadata={
                                             "streaming_chunk": True,
@@ -495,7 +495,7 @@ class OrchestratorDeepAgent:
                                     stream_buffer.append(delta)
                                     for chunk in stream_buffer.flush_ready():
                                         yield AgentStreamResponse(
-                                            state=TaskState.working,
+                                            state=TaskState.TASK_STATE_WORKING,
                                             content=chunk,
                                             metadata={"streaming_chunk": True},
                                         )
@@ -506,7 +506,7 @@ class OrchestratorDeepAgent:
                         token_text, thinking_blocks = extract_text_from_content(msg_chunk.content)
                         for tb in thinking_blocks:
                             yield AgentStreamResponse(
-                                state=TaskState.working,
+                                state=TaskState.TASK_STATE_WORKING,
                                 content=tb["thinking"],
                                 metadata={
                                     "streaming_chunk": True,
@@ -524,7 +524,7 @@ class OrchestratorDeepAgent:
                                     # delegating) — route to the orchestrator
                                     # thinking block, not the visible response.
                                     yield AgentStreamResponse(
-                                        state=TaskState.working,
+                                        state=TaskState.TASK_STATE_WORKING,
                                         content=filtered,
                                         metadata={
                                             "streaming_chunk": True,
@@ -536,7 +536,7 @@ class OrchestratorDeepAgent:
                                     stream_buffer.append(filtered)
                                     for chunk in stream_buffer.flush_ready():
                                         yield AgentStreamResponse(
-                                            state=TaskState.working,
+                                            state=TaskState.TASK_STATE_WORKING,
                                             content=chunk,
                                             metadata={"streaming_chunk": True},
                                         )
@@ -560,7 +560,7 @@ class OrchestratorDeepAgent:
 
                             # Yield immediately to client using A2A protocol state
                             yield AgentStreamResponse(
-                                state=TaskState.working,
+                                state=TaskState.TASK_STATE_WORKING,
                                 content=status_msg,
                             )
                         continue  # Process next event
@@ -571,7 +571,7 @@ class OrchestratorDeepAgent:
                         if todos:
                             logger.info(f"[ORCHESTRATOR] Work plan: {len(todos)} items")
                             yield AgentStreamResponse(
-                                state=TaskState.working,
+                                state=TaskState.TASK_STATE_WORKING,
                                 content="",
                                 metadata={"work_plan": True, "todos": todos},
                             )
@@ -586,7 +586,7 @@ class OrchestratorDeepAgent:
                             if source:
                                 metadata["source"] = source
                             yield AgentStreamResponse(
-                                state=TaskState.working,
+                                state=TaskState.TASK_STATE_WORKING,
                                 content=status_msg,
                                 metadata=metadata,
                             )
@@ -601,7 +601,7 @@ class OrchestratorDeepAgent:
                         subagent_name = event_data.get("agent_name", "sub-agent")
                         if chunk_content:
                             yield AgentStreamResponse(
-                                state=TaskState.working,
+                                state=TaskState.TASK_STATE_WORKING,
                                 content=chunk_content,
                                 metadata={
                                     "streaming_chunk": True,
@@ -615,7 +615,7 @@ class OrchestratorDeepAgent:
             remaining = stream_buffer.flush_all()
             if remaining:
                 yield AgentStreamResponse(
-                    state=TaskState.working,
+                    state=TaskState.TASK_STATE_WORKING,
                     content=remaining,
                     metadata={"streaming_chunk": True},
                 )
@@ -638,8 +638,8 @@ class OrchestratorDeepAgent:
             # Check for general interrupt conditions (pending nodes without specific interrupts)
             # Note: Specific interrupt handling is done in agent_executor for proper A2A task state management
             if hasattr(final_state, "interrupts") and final_state.interrupts:
-                task_state = final_state.interrupts[-1].value.get("task_state", TaskState.input_required)
-                if task_state == TaskState.auth_required:
+                task_state = final_state.interrupts[-1].value.get("task_state", TaskState.TASK_STATE_INPUT_REQUIRED)
+                if task_state == TaskState.TASK_STATE_AUTH_REQUIRED:
                     logger.debug(
                         f"[ORCHESTRATOR] Found auth_required interrupt in final state: {final_state.interrupts[-1].value}"
                     )
@@ -671,7 +671,7 @@ class OrchestratorDeepAgent:
                             description = bug_action.get("description", "")
                             content = f"Reason: {reason}\n\n{description}" if reason else description
                             yield AgentStreamResponse(
-                                state=TaskState.input_required,
+                                state=TaskState.TASK_STATE_INPUT_REQUIRED,
                                 content=content or "Bug report requires your confirmation.",
                                 interrupt_reason=reason,
                                 pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
@@ -682,7 +682,7 @@ class OrchestratorDeepAgent:
                             # Generic HITL interrupt for other tools
                             description = action_requests[0].get("description", "") if action_requests else ""
                             yield AgentStreamResponse(
-                                state=TaskState.input_required,
+                                state=TaskState.TASK_STATE_INPUT_REQUIRED,
                                 content=description or "Tool execution requires approval.",
                                 pending_nodes=list(final_state.next) if hasattr(final_state, "next") else None,
                                 action_requests=action_requests,
@@ -703,7 +703,7 @@ class OrchestratorDeepAgent:
                 logger.warning(f"graph in final state but no interrupt: {final_state}")
                 # If there are pending nodes, the graph was likely interrupted
                 yield AgentStreamResponse(
-                    state=TaskState.input_required,
+                    state=TaskState.TASK_STATE_INPUT_REQUIRED,
                     content="Process interrupted. Human intervention required.",
                     interrupt_reason="graph_interrupted",
                     pending_nodes=list(final_state.next),
@@ -721,7 +721,7 @@ class OrchestratorDeepAgent:
             else:
                 logger.debug("No final state or values found")
                 yield AgentStreamResponse(
-                    state=TaskState.failed,
+                    state=TaskState.TASK_STATE_FAILED,
                     content="We are unable to process your request at the moment. Please try again.",
                 )
 
@@ -732,7 +732,7 @@ class OrchestratorDeepAgent:
             # the checkpoint with a fresh step counter.
             logger.error(f"Recursion limit reached during stream processing: {e}", exc_info=True)
             yield AgentStreamResponse(
-                state=TaskState.input_required,
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
                 content="I've been working on this task for a while and need to take a break. "
                 "I've made some progress, but the task requires more steps than I can complete in one go. "
                 "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",
@@ -746,7 +746,7 @@ class OrchestratorDeepAgent:
             logger.error(f"Exception during stream processing: {e}", exc_info=True)
             # Return as failed
             yield AgentStreamResponse(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 content="An unexpected error occurred while processing your request. Please try again.",
             )
 

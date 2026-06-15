@@ -165,7 +165,7 @@ class BaseA2ARunnable(ABC):
                     "is_complete": result.is_complete,
                     "requires_auth": result.requires_auth,
                     "requires_input": result.requires_input,
-                    "state": result.state.value if result.state else None,
+                    "state": TaskState.Name(result.state) if result.state else None,
                     **{k: v for k, v in result.metadata.items() if v is not None},
                 }.items()
                 if v is not None
@@ -184,7 +184,7 @@ class BaseA2ARunnable(ABC):
         *,
         task_id: Optional[str] = None,
         context_id: Optional[str] = None,
-        state: TaskState = TaskState.completed,
+        state: TaskState = TaskState.TASK_STATE_COMPLETED,
         **extra_metadata: Any,
     ) -> TaskResponseData:
         """Build a structured response in A2A-compatible format.
@@ -237,7 +237,7 @@ class BaseA2ARunnable(ABC):
             message,
             context_id=context_id,
             task_id=task_id,
-            state=TaskState.failed,
+            state=TaskState.TASK_STATE_FAILED,
             **extra_metadata,
         )
 
@@ -263,7 +263,7 @@ class BaseA2ARunnable(ABC):
             message,
             context_id=context_id,
             task_id=task_id,
-            state=TaskState.input_required,
+            state=TaskState.TASK_STATE_INPUT_REQUIRED,
             **extra_metadata,
         )
 
@@ -289,7 +289,7 @@ class BaseA2ARunnable(ABC):
             content,
             context_id=context_id,
             task_id=task_id,
-            state=TaskState.completed,
+            state=TaskState.TASK_STATE_COMPLETED,
             **extra_metadata,
         )
 

@@ -24,16 +24,11 @@ import httpx
 from a2a.client import Client, ClientConfig, ClientFactory
 from a2a.types import (
     AgentCard,
-    DataPart,
-    FilePart,
-    FileWithUri,
+    CancelTaskRequest,
     Message,
+    SendMessageRequest,
     Task,
-    TaskArtifactUpdateEvent,
-    TaskIdParams,
     TaskState,
-    TextPart,
-    TransportProtocol,
 )
 from a2a.types import (
     Part as A2APart,
@@ -41,6 +36,8 @@ from a2a.types import (
 from a2a.types import (
     Role as A2ARole,
 )
+from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.struct_pb2 import Value
 from langchain_core.messages import AIMessage, HumanMessage
 from langsmith.run_helpers import get_current_run_tree
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
@@ -147,7 +144,6 @@ class A2AClientRunnable(BaseA2ARunnable):
 
             client_config = ClientConfig(
                 httpx_client=self._http_client,
-                supported_transports=[TransportProtocol.jsonrpc],
             )
             factory = ClientFactory(client_config)
             interceptors = [self.config.auth_interceptor] if self.config.auth_interceptor else None
@@ -166,15 +162,15 @@ class A2AClientRunnable(BaseA2ARunnable):
         auth_methods = []
 
         # Extract information from task status message
-        if task_status.message and task_status.message.parts:
+        if task_status.HasField("message") and task_status.message.parts:
             message_text = self._extract_text_from_parts(task_status.message.parts)
 
             # Try to parse structured auth info from message metadata
             try:
                 for part in task_status.message.parts:
-                    if part.root.kind == "data" and isinstance(part.root.data, dict):
-                        logger.info(f"Parsing structured auth data: {part.root.data}")
-                        auth_data = part.root.data
+                    if part.WhichOneof("content") == "data":
+                        auth_data = MessageToDict(part.data)
+                        logger.info(f"Parsing structured auth data: {auth_data}")
                         service_name = auth_data.get("service", "unknown_service")
 
                         # Extract authentication methods
@@ -213,7 +209,7 @@ class A2AClientRunnable(BaseA2ARunnable):
         auth_payload = AuthPayload(
             requires_auth=True,
             auth_requirement=service_auth_requirement,
-            correlation_id=task_status.message.message_id if task_status.message else None,
+            correlation_id=task_status.message.message_id if task_status.HasField("message") else None,
         )
 
         return {
@@ -230,29 +226,38 @@ class A2AClientRunnable(BaseA2ARunnable):
         }
 
     async def _handle_task_response(self, task: Task) -> TaskResponseData:
-        """
-        Process task response using clean A2A protocol compliance.
+        """Process a full Task snapshot into a ``TaskResponseData``."""
+        return await self._task_response(task.id, task.context_id, task.status, task.artifacts)
 
-        Uses A2A SDK types directly and follows protocol specification.
-        Returns TaskResponseData for type-safe downstream consumption.
+    async def _task_response(
+        self,
+        task_id: str,
+        context_id: str,
+        status: Any,
+        artifacts: Optional[Sequence[Any]] = None,
+    ) -> TaskResponseData:
+        """
+        Build a ``TaskResponseData`` from A2A task lifecycle fields.
+
+        Works from either a full ``Task`` (task snapshot) or a
+        ``TaskStatusUpdateEvent`` (carrying only ``TaskStatus`` + ids), since
+        A2A v1.0+ delivers these as separate ``StreamResponse`` payloads.
         """
         # Application-specific metadata (separate from A2A protocol)
         app_metadata: dict[str, Any] = {}
 
-        # Handle different task states following A2A protocol
-        if task.status.state == TaskState.auth_required:
-            auth_payload = self._parse_auth_payload(task.status)
-            app_metadata.update(auth_payload)
+        if status.state == TaskState.TASK_STATE_AUTH_REQUIRED:
+            app_metadata.update(self._parse_auth_payload(status))
 
         # Create synthetic message for LangChain compatibility
-        content = self._create_synthetic_message_content(task, app_metadata)
+        content = self._synthetic_content(status, artifacts, app_metadata)
         messages = [AIMessage(content=content)]
         logger.debug(f"Added synthetic message: {content}")
 
         return TaskResponseData(
-            task_id=task.id,
-            context_id=task.context_id,
-            state=task.status.state,
+            task_id=task_id,
+            context_id=context_id,
+            state=status.state,
             messages=messages,
             metadata=app_metadata if app_metadata else {},
         )
@@ -261,18 +266,27 @@ class A2AClientRunnable(BaseA2ARunnable):
     def _extract_parts(parts: Sequence[A2APart]) -> list[Dict[str, Any]]:
         """Extract A2A parts into plain dicts.
 
-        Works with both ``Message.parts`` and ``Artifact.parts`` since
-        both are ``list[Part]`` (TextPart | FilePart | DataPart).
+        Works with both ``Message.parts`` and ``Artifact.parts``. In A2A v1.0+
+        a ``Part`` is a flat protobuf message; the populated ``content`` oneof
+        field (text / raw / url / data) determines the kind.
         """
         parts_data: list[Dict[str, Any]] = []
         for part in parts:
-            inner = part.root
-            if inner.kind == "text":
-                parts_data.append({"type": "text", "content": inner.text, "metadata": inner.metadata or {}})
-            elif inner.kind == "file":
-                parts_data.append({"type": "file", "file": inner.file, "metadata": inner.metadata or {}})
-            elif inner.kind == "data":
-                parts_data.append({"type": "data", "content": inner.data, "metadata": inner.metadata or {}})
+            kind = part.WhichOneof("content")
+            metadata = MessageToDict(part.metadata) if part.HasField("metadata") else {}
+            if kind == "text":
+                parts_data.append({"type": "text", "content": part.text, "metadata": metadata})
+            elif kind in ("url", "raw"):
+                parts_data.append(
+                    {
+                        "type": "file",
+                        "file": part.url if kind == "url" else part.raw,
+                        "media_type": part.media_type,
+                        "metadata": metadata,
+                    }
+                )
+            elif kind == "data":
+                parts_data.append({"type": "data", "content": MessageToDict(part.data), "metadata": metadata})
         return parts_data
 
     def _extract_artifacts_data(self, task: Task) -> list[Dict[str, Any]]:
@@ -289,7 +303,7 @@ class A2AClientRunnable(BaseA2ARunnable):
             for artifact in task.artifacts
         ]
 
-    def _create_synthetic_message_content(self, task: Task, app_metadata: Dict[str, Any]) -> str:
+    def _synthetic_content(self, status: Any, artifacts: Optional[Sequence[Any]], app_metadata: Dict[str, Any]) -> str:
         """Create synthetic message content following A2A protocol.
 
         For failed/incomplete tasks, explicitly indicates the state to ensure
@@ -297,26 +311,28 @@ class A2AClientRunnable(BaseA2ARunnable):
 
         DEFENSIVE DESIGN: Treats non-terminal states (working, input_required, etc.)
         as incomplete to prevent the orchestrator from incorrectly assuming success.
+
+        Operates on a ``TaskStatus`` (+ optional artifacts) so it works for both
+        full-Task and status-update stream payloads.
         """
         content = "Task processed"
 
-        # A2A protocol: task.status.message contains human-readable details
-        if task.status.message and task.status.message.parts:
-            content = self._extract_text_from_parts(task.status.message.parts)
-        elif task.status.state == TaskState.auth_required:
+        # A2A protocol: status.message contains human-readable details
+        if status.HasField("message") and status.message.parts:
+            content = self._extract_text_from_parts(status.message.parts)
+        elif status.state == TaskState.TASK_STATE_AUTH_REQUIRED:
             content = app_metadata.get("instructions", "Authentication required")
-        elif task.artifacts:
+        elif artifacts:
             # Use first artifact content if available (A2A protocol)
-            first_artifact = task.artifacts[0]
+            first_artifact = artifacts[0]
             if first_artifact.parts:
                 first_part = first_artifact.parts[0]
-                inner_part = first_part.root
-                if inner_part.kind == "text":
-                    content = inner_part.text or "Task completed"
+                if first_part.WhichOneof("content") == "text":
+                    content = first_part.text or "Task completed"
 
         # CRITICAL: For non-successful states, explicitly indicate the issue
         # This ensures the LLM understands the task did not complete successfully
-        if task.status.state == TaskState.failed:
+        if status.state == TaskState.TASK_STATE_FAILED:
             # If content doesn't already indicate failure, prepend error marker
             lower_content = content.lower()
             if "failed" not in lower_content and "error" not in lower_content:
@@ -324,13 +340,13 @@ class A2AClientRunnable(BaseA2ARunnable):
             else:
                 # Content already mentions failure, but ensure it's prominent
                 content = f"Task execution failed: {content}"
-        elif task.status.state == TaskState.working:
+        elif status.state == TaskState.TASK_STATE_WORKING:
             # Agent is still processing - this should NOT be treated as completion
             content = f"INCOMPLETE: Agent is still working - {content}"
-        elif task.status.state not in TERMINAL_STATES:
+        elif status.state not in TERMINAL_STATES:
             # Any other non-terminal state (input_required, auth_required, etc.)
             # Prepend state information for clarity
-            state_name = task.status.state.value if hasattr(task.status.state, "value") else str(task.status.state)
+            state_name = TaskState.Name(status.state)
             content = f"Agent status: {state_name} - {content}"
 
         return content
@@ -349,7 +365,7 @@ class A2AClientRunnable(BaseA2ARunnable):
             messages=[AIMessage(content=text)] if text else [],
             metadata={
                 "message_id": message.message_id,
-                "role": str(message.role),
+                "role": A2ARole.Name(message.role),
                 "parts": self._extract_parts(message.parts),
             },
         )
@@ -382,7 +398,7 @@ class A2AClientRunnable(BaseA2ARunnable):
             if isinstance(last_event, TaskUpdate):
                 state = last_event.data.state
 
-                if state not in TERMINAL_STATES and state not in (TaskState.input_required, TaskState.auth_required):
+                if state not in TERMINAL_STATES and state not in (TaskState.TASK_STATE_INPUT_REQUIRED, TaskState.TASK_STATE_AUTH_REQUIRED):
                     logger.warning(
                         f"A2A stream ended with non-terminal state: {state}. "
                         "Sub-agent may have crashed or disconnected. Treating as failure."
@@ -470,27 +486,25 @@ class A2AClientRunnable(BaseA2ARunnable):
                         block_type = block.get("type", "")
 
                         if block_type == "text":
-                            # Text block -> TextPart
+                            # Text block -> text Part
                             text = block.get("text", "")
                             if text:
-                                all_parts.append(A2APart(root=TextPart(text=text, metadata=message_metadata)))
+                                all_parts.append(A2APart(text=text, metadata=message_metadata))
 
                         elif block_type == "non_standard":
-                            # JSON block (non_standard) -> DataPart
+                            # JSON block (non_standard) -> data Part
                             value = block.get("value", {})
                             if isinstance(value, dict) and value.get("media_type") == "application/json":
                                 json_data = value.get("data", {})
                                 all_parts.append(
                                     A2APart(
-                                        root=DataPart(
-                                            data=json_data,
-                                            metadata={"media_type": "application/json", **message_metadata},
-                                        )
+                                        data=ParseDict(json_data, Value()),
+                                        metadata={"media_type": "application/json", **message_metadata},
                                     )
                                 )
 
                         elif block_type in ("image", "audio", "video", "file"):
-                            # File block -> FilePart
+                            # File block -> file Part
                             file_part = self._content_block_to_file_part(block)
                             if file_part:
                                 all_parts.append(file_part)
@@ -502,33 +516,34 @@ class A2AClientRunnable(BaseA2ARunnable):
                     human_message.content if isinstance(human_message.content, str) else str(human_message.content)
                 )
                 if content:
-                    all_parts.append(A2APart(root=TextPart(text=content, metadata=message_metadata)))
+                    all_parts.append(A2APart(text=content, metadata=message_metadata))
 
         return Message(
-            role=A2ARole.user,
+            role=A2ARole.ROLE_USER,
             parts=all_parts,
             message_id=str(uuid.uuid4()),
-            context_id=context_id,
-            task_id=task_id,
+            context_id=context_id or "",
+            task_id=task_id or "",
             metadata=message_metadata,
         )
 
     @staticmethod
     def _content_block_to_file_part(block: dict) -> Optional[A2APart]:
-        """Convert a LangChain content block dict to an A2A FilePart.
+        """Convert a LangChain content block dict to an A2A file Part.
 
         Args:
             block: Dict with keys like 'type', 'url', 'mime_type'
 
         Returns:
-            A2A Part wrapping a FilePart, or None if URL is missing
+            A2A file Part (``url`` + ``media_type``), or None if URL is missing
         """
         url = block.get("url", "")
         if not url:
             return None
         mime_type = block.get("mime_type")
-        file_data = FileWithUri(uri=url, mimeType=mime_type)
-        return A2APart(root=FilePart(file=file_data))
+        if mime_type:
+            return A2APart(url=url, media_type=mime_type)
+        return A2APart(url=url)
 
     # NOTE: _wrap_message_with_metadata is inherited from BaseA2ARunnable
 
@@ -548,7 +563,7 @@ class A2AClientRunnable(BaseA2ARunnable):
             f"(context_id={message.context_id}, task_id={message.task_id})"
         )
         try:
-            async for _ in client.send_message(message):
+            async for _ in client.send_message(SendMessageRequest(message=message)):
                 pass  # drain ack events
         except Exception:
             logger.warning(
@@ -567,7 +582,7 @@ class A2AClientRunnable(BaseA2ARunnable):
         try:
             client = await self._get_client()
             logger.info(f"Sending cancel_task to {self.name} (task_id={task_id})")
-            await client.cancel_task(TaskIdParams(id=task_id))
+            await client.cancel_task(CancelTaskRequest(id=task_id))
             logger.info(f"cancel_task acknowledged by {self.name} (task_id={task_id})")
         except Exception:
             logger.warning(
@@ -624,11 +639,17 @@ class A2AClientRunnable(BaseA2ARunnable):
             MAX_MESSAGES = 1000  # Prevent infinite message loops
 
             logger.info("[STREAMING] A2A client starting to iterate over client.send_message() stream")
+            request = SendMessageRequest(message=a2a_message)
+            # In A2A v1.0+ the client yields StreamResponse objects whose `payload`
+            # oneof is one of {task, message, status_update, artifact_update}.
+            # status_update events carry only TaskStatus + ids, so we track the
+            # most recent full Task to supply artifacts to status-derived responses.
+            latest_task: Optional[Task] = None
             try:
-                async for item in client.send_message(a2a_message):
+                async for chunk in client.send_message(request):
                     message_count += 1
-                    item_type = type(item).__name__
-                    logger.info(f"[STREAMING] A2A stream item #{message_count}: {item_type}")
+                    payload = chunk.WhichOneof("payload")
+                    logger.info(f"[STREAMING] A2A stream item #{message_count}: {payload}")
 
                     # Safety check to prevent infinite loops
                     if message_count > MAX_MESSAGES:
@@ -640,60 +661,57 @@ class A2AClientRunnable(BaseA2ARunnable):
                         break
 
                     # Handle Message responses - yield immediately
-                    if isinstance(item, Message):
+                    if payload == "message":
                         logger.info(f"[STREAMING] A2A client processing Message response #{message_count}")
-                        response = await self._handle_message_response(item)
-                        yield TaskUpdate(
-                            data=response,
-                        )
+                        response = await self._handle_message_response(chunk.message)
+                        yield TaskUpdate(data=response)
                         logger.info("[STREAMING] A2A client yielded TaskUpdate from message")
+                        continue
 
-                    # Handle Task status updates - yield immediately
-                    elif isinstance(item, tuple) and len(item) == 2:
-                        task, update_event = item
+                    # Handle artifact streaming events
+                    if payload == "artifact_update":
+                        ev = chunk.artifact_update
+                        text_parts = [p.text for p in ev.artifact.parts if p.WhichOneof("content") == "text"]
+                        text_content = "".join(text_parts)
+                        if text_content:
+                            logger.info(
+                                f"[STREAMING] A2A client yielding ArtifactUpdate: {len(text_content)} chars, append={ev.append}"
+                            )
+                            yield ArtifactUpdate(
+                                content=text_content,
+                                artifact_id=ev.artifact.artifact_id,
+                                append=ev.append,
+                                last_chunk=ev.last_chunk,
+                                metadata=MessageToDict(ev.artifact.metadata) if ev.artifact.HasField("metadata") else None,
+                            )
+                        continue
 
-                        if not isinstance(task, Task):
-                            logger.debug(f"Ignoring non-Task tuple item: {type(task)}")
-                            continue
-
-                        # Handle artifact streaming events (TaskArtifactUpdateEvent)
-                        if isinstance(update_event, TaskArtifactUpdateEvent):
-                            text_parts = []
-                            for part in update_event.artifact.parts:
-                                if part.root.kind == "text":
-                                    text_parts.append(part.root.text)
-                            text_content = "".join(text_parts)
-                            if text_content:
-                                logger.info(
-                                    f"[STREAMING] A2A client yielding ArtifactUpdate: {len(text_content)} chars, append={update_event.append}"
-                                )
-                                yield ArtifactUpdate(
-                                    content=text_content,
-                                    artifact_id=update_event.artifact.artifact_id,
-                                    append=update_event.append,
-                                    last_chunk=update_event.last_chunk,
-                                    metadata=update_event.artifact.metadata,
-                                )
-                            continue
+                    # Handle full-task snapshots and status updates
+                    if payload in ("task", "status_update"):
+                        if payload == "task":
+                            latest_task = chunk.task
+                            task_id, context_id, status = latest_task.id, latest_task.context_id, latest_task.status
+                            artifacts = latest_task.artifacts
+                            raw_event_metadata: dict[str, Any] = {}
+                        else:
+                            ev = chunk.status_update
+                            task_id, context_id, status = ev.task_id, ev.context_id, ev.status
+                            artifacts = latest_task.artifacts if latest_task else None
+                            # Event-level metadata (e.g. todo_snapshot), separate from TaskStatus.
+                            raw_event_metadata = MessageToDict(ev.metadata) if ev.HasField("metadata") else {}
 
                         task_updates_count += 1
-                        logger.debug(f"Task state: {task.status.state} (update #{task_updates_count})")
-                        task_response = await self._handle_task_response(task)
+                        logger.debug(f"Task state: {status.state} (update #{task_updates_count})")
+                        task_response = await self._task_response(task_id, context_id, status, artifacts)
 
                         # Yield status update with wrapped metadata
                         wrapped_response = self._wrap_message_with_metadata(task_response)
-
-                        # Extract event-level metadata (e.g. todo_snapshot) from
-                        # the TaskStatusUpdateEvent — separate from TaskStatus.
-                        raw_event_metadata = getattr(update_event, "metadata", None) or {}
                         event_metadata = parse_event_metadata(raw_event_metadata)
 
                         # Extract raw status text from A2A protocol (before synthetic wrapping).
-                        # This is the actual human-readable message the sub-agent intended to
-                        # show, without _create_synthetic_message_content() transformations.
                         raw_status_text = ""
-                        if task.status.message and task.status.message.parts:
-                            raw_status_text = self._extract_text_from_parts(task.status.message.parts)
+                        if status.HasField("message") and status.message.parts:
+                            raw_status_text = self._extract_text_from_parts(status.message.parts)
 
                         yield TaskUpdate(
                             data=wrapped_response,
@@ -701,18 +719,18 @@ class A2AClientRunnable(BaseA2ARunnable):
                             status_text=raw_status_text,
                         )
 
-                        logger.info(f"Streamed task update #{task_updates_count}: {task.status.state}")
+                        logger.info(f"Streamed task update #{task_updates_count}: {status.state}")
 
                         # Terminal or intervention states: final yield and stop
-                        if task.status.state in TERMINAL_STATES:
-                            logger.info(f"Task reached terminal state: {task.status.state}")
+                        if status.state in TERMINAL_STATES:
+                            logger.info(f"Task reached terminal state: {status.state}")
                             break
-                        elif task.status.state in [TaskState.auth_required, TaskState.input_required]:
-                            logger.info(f"Task requires intervention: {task.status.state}")
+                        elif status.state in (TaskState.TASK_STATE_AUTH_REQUIRED, TaskState.TASK_STATE_INPUT_REQUIRED):
+                            logger.info(f"Task requires intervention: {status.state}")
                             break
+                        continue
 
-                    else:
-                        logger.debug(f"Ignoring unknown item type: {type(item)}")
+                    logger.debug(f"Ignoring unknown stream payload: {payload}")
 
                 logger.info(f"[STREAMING] A2A client stream complete - received {message_count} items total")
 

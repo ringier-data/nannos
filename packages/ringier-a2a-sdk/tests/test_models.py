@@ -12,24 +12,24 @@ class TestAgentStreamResponse:
 
     def test_create_working_response(self):
         """Test creating a working state response."""
-        response = AgentStreamResponse(state=TaskState.working, content="Processing your request...")
+        response = AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Processing your request...")
 
-        assert response.state == TaskState.working
+        assert response.state == TaskState.TASK_STATE_WORKING
         assert response.content == "Processing your request..."
         assert response.metadata is None
 
     def test_create_completed_response(self):
         """Test creating a completed state response."""
-        response = AgentStreamResponse(state=TaskState.completed, content="Task completed successfully")
+        response = AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Task completed successfully")
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Task completed successfully"
 
     def test_create_response_with_metadata(self):
         """Test creating response with metadata."""
         metadata = {"task_id": "task-123", "context_id": "ctx-456", "execution_time": 2.5}
 
-        response = AgentStreamResponse(state=TaskState.completed, content="Done", metadata=metadata)
+        response = AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done", metadata=metadata)
 
         assert response.metadata == metadata
         assert response.metadata["task_id"] == "task-123"
@@ -47,10 +47,10 @@ class TestAgentStreamResponse:
 
     def test_response_serialization(self):
         """Test response can be serialized to dict."""
-        response = AgentStreamResponse(state=TaskState.working, content="Test", metadata={"key": "value"})
+        response = AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Test", metadata={"key": "value"})
 
         data = response.model_dump()
-        assert data["state"] == TaskState.working
+        assert data["state"] == TaskState.TASK_STATE_WORKING
         assert data["content"] == "Test"
         assert data["metadata"]["key"] == "value"
 

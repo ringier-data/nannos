@@ -11,7 +11,7 @@ import logging
 import uuid
 
 import pytest
-from a2a.types import Part, TaskState, TextPart
+from a2a.types import Part, TaskState
 from agent_common.models.base import ModelType, ThinkingLevel
 from langsmith import testing as t
 
@@ -39,7 +39,7 @@ async def collect_stream(agent, prompt: str, user_config: UserConfig, config: di
     """Stream a prompt and collect all responses + concatenated content."""
     responses: list[AgentStreamResponse] = []
     full_text = ""
-    parts = [Part(root=TextPart(text=prompt))]
+    parts = [Part(text=prompt)]
 
     async for item in agent.stream(parts, user_config, config=config):
         responses.append(item)
@@ -87,10 +87,10 @@ async def test_model_streams_tokens(
 
     # All streaming chunks should be in working state
     for chunk in streaming_chunks:
-        assert chunk.state == TaskState.working
+        assert chunk.state == TaskState.TASK_STATE_WORKING
 
     # Final response should be completed
-    terminal = [r for r in responses if r.state == TaskState.completed]
+    terminal = [r for r in responses if r.state == TaskState.TASK_STATE_COMPLETED]
     assert len(terminal) >= 1, "Expected a completed response at the end"
 
     # Concatenated content should be non-empty
@@ -142,7 +142,7 @@ async def test_thinking_model_streaming(
 
     # Should reach completed state
     states = [r.state for r in responses]
-    assert TaskState.completed in states, f"Expected completed state, got: {set(states)}"
+    assert TaskState.TASK_STATE_COMPLETED in states, f"Expected completed state, got: {set(states)}"
 
     # Result should contain the correct answer
     assert "555" in full_text, f"Expected '555' in response, got: {full_text[:200]}"
@@ -188,8 +188,8 @@ async def test_static_tools_available(
 
     # Should complete successfully (not fail)
     states = [r.state for r in responses]
-    assert TaskState.completed in states, f"Expected completed, got: {set(states)}"
-    assert TaskState.failed not in states, f"Tool call failed: {full_text[:300]}"
+    assert TaskState.TASK_STATE_COMPLETED in states, f"Expected completed, got: {set(states)}"
+    assert TaskState.TASK_STATE_FAILED not in states, f"Tool call failed: {full_text[:300]}"
 
     # Response should mention time
     text_lower = full_text.lower()
@@ -256,7 +256,7 @@ async def test_multiturn_context_preservation(
 
     # Should complete
     states = [r.state for r in responses2]
-    assert TaskState.completed in states
+    assert TaskState.TASK_STATE_COMPLETED in states
 
     # Should recall the name
     assert "Aloysius" in full_text2, f"Expected 'Aloysius' in turn 2, got: {full_text2[:300]}"
@@ -293,10 +293,10 @@ async def test_failed_state_not_on_simple_prompt(
         config,
     )
 
-    failed_responses = [r for r in responses if r.state == TaskState.failed]
+    failed_responses = [r for r in responses if r.state == TaskState.TASK_STATE_FAILED]
     assert len(failed_responses) == 0, f"Simple prompt should not fail: {[r.content for r in failed_responses]}"
 
-    completed = [r for r in responses if r.state == TaskState.completed]
+    completed = [r for r in responses if r.state == TaskState.TASK_STATE_COMPLETED]
     assert len(completed) >= 1, "Should reach completed state"
 
     t.log_outputs({"full_text": full_text, "response_count": len(responses)})

@@ -12,7 +12,7 @@ import logging
 import uuid
 
 import pytest
-from a2a.types import Part, TaskState, TextPart
+from a2a.types import Part, TaskState
 from agent_common.models.base import ModelType
 from langsmith import testing as t
 
@@ -39,7 +39,7 @@ async def collect_stream(agent, prompt: str, user_config: UserConfig, config: di
     """Stream a prompt and return (responses, full_text)."""
     responses: list[AgentStreamResponse] = []
     full_text = ""
-    parts = [Part(root=TextPart(text=prompt))]
+    parts = [Part(text=prompt)]
     async for item in agent.stream(parts, user_config, config=config):
         responses.append(item)
         if item.content:
@@ -153,8 +153,8 @@ async def test_concurrent_streams_isolated(
     responses_b, text_b = results[1]
 
     # Both should complete
-    assert any(r.state == TaskState.completed for r in responses_a), "Stream A should complete"
-    assert any(r.state == TaskState.completed for r in responses_b), "Stream B should complete"
+    assert any(r.state == TaskState.TASK_STATE_COMPLETED for r in responses_a), "Stream A should complete"
+    assert any(r.state == TaskState.TASK_STATE_COMPLETED for r in responses_b), "Stream B should complete"
 
     # Both should have content
     assert len(text_a.strip()) > 0, "Stream A should produce content"
@@ -243,11 +243,11 @@ async def test_short_prompt_completes(
     assert len(responses) >= 1, "Should produce at least one response"
 
     # Should not fail
-    failed = [r for r in responses if r.state == TaskState.failed]
+    failed = [r for r in responses if r.state == TaskState.TASK_STATE_FAILED]
     assert len(failed) == 0, f"'Hi' should not fail: {[r.content for r in failed]}"
 
     # Should eventually complete
-    completed = [r for r in responses if r.state == TaskState.completed]
+    completed = [r for r in responses if r.state == TaskState.TASK_STATE_COMPLETED]
     assert len(completed) >= 1, "Should reach completed state"
 
     t.log_outputs({"full_text": full_text, "response_count": len(responses)})

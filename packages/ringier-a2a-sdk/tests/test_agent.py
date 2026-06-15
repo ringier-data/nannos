@@ -1,7 +1,7 @@
 """Tests for agent base classes."""
 
 import pytest
-from a2a.types import Message, Part, Role, TaskState, TextPart
+from a2a.types import Message, Part, Role, TaskState
 from pydantic import SecretStr
 
 from ringier_a2a_sdk.agent import BaseAgent
@@ -10,8 +10,8 @@ from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 
 def _make_message(text: str) -> Message:
     return Message(
-        role=Role.user,
-        parts=[Part(root=TextPart(text=text))],
+        role=Role.ROLE_USER,
+        parts=[Part(text=text)],
         message_id="msg-test",
     )
 
@@ -42,9 +42,9 @@ class TestBaseAgent:
                 self.closed = True
 
             async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
-                yield AgentStreamResponse(state=TaskState.working, content="Processing...")
-                text = messages[0].parts[0].root.text if messages and messages[0].parts else ""
-                yield AgentStreamResponse(state=TaskState.completed, content=f"Result for: {text}")
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Processing...")
+                text = messages[0].parts[0].text if messages and messages[0].parts else ""
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=f"Result for: {text}")
 
         # Create instance
         agent = ConcreteAgent()
@@ -65,9 +65,9 @@ class TestBaseAgent:
             responses.append(response)
 
         assert len(responses) == 2
-        assert responses[0].state == TaskState.working
+        assert responses[0].state == TaskState.TASK_STATE_WORKING
         assert responses[0].content == "Processing..."
-        assert responses[1].state == TaskState.completed
+        assert responses[1].state == TaskState.TASK_STATE_COMPLETED
         assert "test query" in responses[1].content
 
         # Test close method
@@ -79,7 +79,7 @@ class TestBaseAgent:
 
         class IncompleteAgent(BaseAgent):
             async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
-                yield AgentStreamResponse(state=TaskState.completed, content="Done")
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
 
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
             IncompleteAgent()
@@ -108,7 +108,7 @@ class TestBaseAgent:
                 self.captured_user_sub = get_request_user_sub()
                 self.captured_token = get_request_access_token()
 
-                yield AgentStreamResponse(state=TaskState.completed, content="Done")
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
 
         agent = ConcreteAgent()
 
@@ -154,7 +154,7 @@ class TestBaseAgent:
                 # Use convenience function to get both at once
                 self.captured_credentials = get_request_credentials()
 
-                yield AgentStreamResponse(state=TaskState.completed, content="Done")
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
 
         agent = ConcreteAgent()
 
@@ -200,7 +200,7 @@ class TestBaseAgent:
                 user_sub_after, token_after = get_request_credentials()
 
                 yield AgentStreamResponse(
-                    state=TaskState.completed, content=f"user={user_sub},{token}|after={user_sub_after},{token_after}"
+                    state=TaskState.TASK_STATE_COMPLETED, content=f"user={user_sub},{token}|after={user_sub_after},{token_after}"
                 )
 
         agent = ConcreteAgent()
@@ -263,7 +263,7 @@ class TestBaseAgent:
             async def _stream_impl(self, messages: list[Message], user_config: UserConfig, task):
                 self.captured_credentials = get_request_credentials()
 
-                yield AgentStreamResponse(state=TaskState.completed, content="Done")
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
 
         agent = ConcreteAgent()
 

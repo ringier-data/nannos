@@ -1112,7 +1112,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 relevant_indices = response.relevant_indices
             else:
                 # Fallback for dict response
-                relevant_indices = response.get("relevant_indices", []) if isinstance(response, dict) else []  # type: ignore
+                relevant_indices = response.get("relevant_indices", []) if isinstance(response, dict) else []
             if not isinstance(relevant_indices, list) or not all(isinstance(i, int) for i in relevant_indices):
                 raise ValueError(f"Invalid response format for relevant_indices: {response}")
 
@@ -1867,7 +1867,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                     # instead of the synthetic message from _create_synthetic_message_content(),
                     # which wraps content with "INCOMPLETE:" prefixes and may include
                     # protocol noise like tool_use blocks.
-                    if isinstance(item, TaskUpdate) and item.data.state == TaskState.working:
+                    if isinstance(item, TaskUpdate) and item.data.state == TaskState.TASK_STATE_WORKING:
                         status_text = item.status_text
                         if status_text and status_text != "Task processed":
                             # Skip duplicates and overly long content (likely full responses, not status)

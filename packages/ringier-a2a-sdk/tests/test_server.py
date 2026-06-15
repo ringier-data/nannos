@@ -134,8 +134,8 @@ class TestBaseAgentExecutor:
         mock_agent = Mock()
 
         async def mock_stream(query, user_config, task):
-            yield AgentStreamResponse(state=TaskState.working, content="Processing...")
-            yield AgentStreamResponse(state=TaskState.completed, content="Done")
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Processing...")
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
 
         mock_agent.stream = mock_stream
 
@@ -161,7 +161,7 @@ class TestBaseAgentExecutor:
         mock_event_queue = AsyncMock()
 
         # Mock new_task
-        with patch("ringier_a2a_sdk.server.executor.new_task") as mock_new_task:
+        with patch("ringier_a2a_sdk.server.executor.new_task_from_user_message") as mock_new_task:
             mock_task = Mock()
             mock_task.id = "task-1"
             mock_task.context_id = "ctx-1"
@@ -186,16 +186,16 @@ class TestBaseAgentExecutor:
         mock_task.id = "task-1"
         mock_task.context_id = "ctx-1"
 
-        item = AgentStreamResponse(state=TaskState.working, content="Processing...")
+        item = AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content="Processing...")
 
-        with patch("ringier_a2a_sdk.server.executor.new_agent_text_message") as mock_msg:
+        with patch("ringier_a2a_sdk.server.executor.new_text_message") as mock_msg:
             mock_msg.return_value = Mock()
 
             await executor._handle_stream_item(item, mock_updater, mock_task, "artifact-1")
 
             mock_updater.update_status.assert_called_once()
             call_args = mock_updater.update_status.call_args
-            assert call_args[0][0] == TaskState.working
+            assert call_args[0][0] == TaskState.TASK_STATE_WORKING
 
     @pytest.mark.asyncio
     async def test_handle_stream_item_completed_state(self):
@@ -208,7 +208,7 @@ class TestBaseAgentExecutor:
         mock_task.id = "task-1"
         mock_task.context_id = "ctx-1"
 
-        item = AgentStreamResponse(state=TaskState.completed, content="Result")
+        item = AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Result")
 
         with patch("ringier_a2a_sdk.server.executor.Part") as mock_part:
             mock_part.return_value = Mock()
@@ -229,16 +229,16 @@ class TestBaseAgentExecutor:
         mock_task.id = "task-1"
         mock_task.context_id = "ctx-1"
 
-        item = AgentStreamResponse(state=TaskState.failed, content="Error occurred")
+        item = AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content="Error occurred")
 
-        with patch("ringier_a2a_sdk.server.executor.new_agent_text_message") as mock_msg:
+        with patch("ringier_a2a_sdk.server.executor.new_text_message") as mock_msg:
             mock_msg.return_value = Mock()
 
             await executor._handle_stream_item(item, mock_updater, mock_task, "artifact-1")
 
             mock_updater.update_status.assert_called_once()
             call_args = mock_updater.update_status.call_args
-            assert call_args[0][0] == TaskState.failed
+            assert call_args[0][0] == TaskState.TASK_STATE_FAILED
 
     @pytest.mark.asyncio
     async def test_cancel_emits_canceled_event(self):
@@ -257,5 +257,4 @@ class TestBaseAgentExecutor:
         event = mock_event_queue.enqueue_event.call_args[0][0]
         assert event.task_id == "task-1"
         assert event.context_id == "ctx-1"
-        assert event.status.state == TaskState.canceled
-        assert event.final is True
+        assert event.status.state == TaskState.TASK_STATE_CANCELED

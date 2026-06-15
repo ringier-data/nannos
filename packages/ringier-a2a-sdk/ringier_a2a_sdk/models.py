@@ -3,8 +3,13 @@
 import os
 from typing import Any, Dict, Literal, Optional
 
-from a2a.types import TaskState
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+# A2A v1.0+ TaskState is a protobuf int enum whose values are plain ints at runtime
+# (e.g. a2a.types.TaskState.TASK_STATE_WORKING). The SDK ships no mypy-protobuf stubs,
+# so ``TaskState.ValueType`` isn't visible to static checkers; this alias documents that
+# the int holds a TaskState enum value while staying checker- and Pydantic-friendly.
+TaskStateValue = int
 
 TodoState = Literal["submitted", "working", "completed", "failed"]
 
@@ -41,7 +46,7 @@ class BaseAgentStreamResponse(BaseModel):
         metadata: Optional additional metadata (auth_info, artifacts, etc.)
     """
 
-    state: TaskState = Field(..., description="Current A2A task state")
+    state: TaskStateValue = Field(..., description="Current A2A task state (TaskState enum value)")
     content: str = Field(..., description="Human-readable message or result content")
     metadata: Optional[Dict[str, Any]] = Field(
         default=None, description="Additional metadata (auth_info, artifacts, task_id, context_id, etc.)"

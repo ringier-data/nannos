@@ -149,7 +149,7 @@ class TestDynamicLocalAgentRunnable:
         # Find terminal TaskUpdate
         terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
         result = terminal.data
-        assert result.state == TaskState.completed
+        assert result.state == TaskState.TASK_STATE_COMPLETED
         assert result.is_complete is True
         assert result.requires_input is False
 
@@ -192,7 +192,7 @@ class TestDynamicLocalAgentRunnable:
 
         terminal = [e for e in events if isinstance(e, TaskUpdate)][-1]
         result = terminal.data
-        assert result.state == TaskState.input_required
+        assert result.state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert result.is_complete is False
         assert result.requires_input is True
 
@@ -273,7 +273,7 @@ class TestDynamicLocalAgentRunnable:
 
         terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
         result = terminal.data
-        assert result.state == TaskState.failed
+        assert result.state == TaskState.TASK_STATE_FAILED
         assert result.is_complete is True
 
     @pytest.mark.asyncio
@@ -312,7 +312,7 @@ class TestDynamicLocalAgentRunnable:
 
         terminal = next(e for e in events if isinstance(e, TaskUpdate) and e.data.is_complete)
         result = terminal.data
-        assert result.state == TaskState.completed
+        assert result.state == TaskState.TASK_STATE_COMPLETED
         assert result.is_complete is True
 
 

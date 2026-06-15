@@ -43,23 +43,16 @@ class TestAgentDiscoveryService:
 
         with (
             patch("app.core.discovery.make_a2a_async_runnable") as mock_runnable,
-            patch("app.core.discovery.AgentCard") as mock_agent_card_cls,
             patch("httpx.AsyncClient") as mock_client,
         ):
-            # Mock AgentCard instance
-            mock_agent_card = Mock()
-            mock_agent_card.name = "Test Agent"
-            mock_agent_card.description = "Test description"
-            mock_agent_card.url = "http://test-agent:8000"
-            mock_agent_card.default_input_modes = ["text"]  # Add for multimodal check
-            mock_agent_card_cls.return_value = mock_agent_card
-
-            # Mock HTTP response for agent card
+            # Mock HTTP response for agent card — A2A v1.0+ ProtoJSON card shape
+            # (discovery.py parses it via ParseDict into a real protobuf AgentCard).
             mock_response = Mock()
             mock_response.json.return_value = {
                 "name": "Test Agent",
                 "description": "Test description",
-                "url": "http://test-agent:8000",
+                "supportedInterfaces": [{"url": "http://test-agent:8000", "protocolBinding": "JSONRPC"}],
+                "defaultInputModes": ["text"],
             }
             mock_response.raise_for_status.return_value = None
 

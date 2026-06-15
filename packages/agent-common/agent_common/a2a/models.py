@@ -11,7 +11,7 @@ from typing import Annotated, Any, Dict, Literal, Optional, Union
 
 from a2a.types import Message, Task, TaskState
 from langchain.messages import AIMessage
-from pydantic import BaseModel, Discriminator, Field
+from pydantic import BaseModel, ConfigDict, Discriminator, Field
 from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 
 from agent_common.models.base import ThinkingLevel
@@ -162,6 +162,9 @@ class A2ATaskResponse(BaseModel):
     while adding application-specific metadata separately.
     """
 
+    # A2A v1.0+ types are protobuf messages (not Pydantic) — allow them as fields.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     # Core A2A protocol data - use the SDK types directly
     task: Task = Field(..., description="The A2A Task object from the protocol")
 
@@ -179,21 +182,21 @@ class A2ATaskResponse(BaseModel):
     def is_complete(self) -> bool:
         """Derived property from A2A TaskState."""
         return self.task.status.state in [
-            TaskState.completed,
-            TaskState.failed,
-            TaskState.canceled,
-            TaskState.rejected,
+            TaskState.TASK_STATE_COMPLETED,
+            TaskState.TASK_STATE_FAILED,
+            TaskState.TASK_STATE_CANCELED,
+            TaskState.TASK_STATE_REJECTED,
         ]
 
     @property
     def requires_auth(self) -> bool:
         """Derived property from A2A TaskState."""
-        return self.task.status.state == TaskState.auth_required
+        return self.task.status.state == TaskState.TASK_STATE_AUTH_REQUIRED
 
     @property
     def requires_input(self) -> bool:
         """Derived property from A2A TaskState."""
-        return self.task.status.state == TaskState.input_required
+        return self.task.status.state == TaskState.TASK_STATE_INPUT_REQUIRED
 
     def extract_text_from_status(self) -> str:
         """Extract text content from A2A task status message."""
@@ -206,6 +209,9 @@ class A2AMessageResponse(BaseModel):
     """
     A2A Message response model using proper A2A SDK types.
     """
+
+    # A2A v1.0+ types are protobuf messages (not Pydantic) — allow them as fields.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     message: Message = Field(..., description="The A2A Message object from the protocol")
 

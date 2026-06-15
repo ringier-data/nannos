@@ -3,9 +3,9 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from a2a.types import FilePart, FileWithUri, TextPart
 from a2a.types import Message as A2AMessage
 from a2a.types import Part as A2APart
+from a2a.types import Role
 
 from ringier_a2a_sdk.middleware.steering import SteeringMiddleware
 
@@ -13,8 +13,8 @@ from ringier_a2a_sdk.middleware.steering import SteeringMiddleware
 def _make_a2a_message(text: str, context_id: str = "ctx-1") -> A2AMessage:
     """Create a simple A2A Message for testing."""
     return A2AMessage(
-        role="user",
-        parts=[A2APart(root=TextPart(text=text))],
+        role=Role.ROLE_USER,
+        parts=[A2APart(text=text)],
         message_id="msg-test",
         context_id=context_id,
     )
@@ -70,7 +70,7 @@ class TestSteeringMiddleware:
 
     @pytest.mark.asyncio
     async def test_empty_text_parts_are_skipped(self):
-        msg = A2AMessage(role="user", parts=[], message_id="m1", context_id="ctx-1")
+        msg = A2AMessage(role=Role.ROLE_USER, parts=[], message_id="m1", context_id="ctx-1")
         middleware = SteeringMiddleware(get_pending_messages=lambda ctx: [msg])
 
         with patch("ringier_a2a_sdk.middleware.steering.get_config", return_value=self._make_config()):
@@ -173,10 +173,10 @@ class TestSteeringMiddleware:
     async def test_multimodal_message_injected_as_list_content(self):
         """A message with text + image file should produce a HumanMessage with list content."""
         multimodal_msg = A2AMessage(
-            role="user",
+            role=Role.ROLE_USER,
             parts=[
-                A2APart(root=TextPart(text="describe this")),
-                A2APart(root=FilePart(file=FileWithUri(uri="https://example.com/img.jpg", mime_type="image/jpeg"))),
+                A2APart(text="describe this"),
+                A2APart(url="https://example.com/img.jpg", media_type="image/jpeg"),
             ],
             message_id="m-mm",
             context_id="ctx-1",

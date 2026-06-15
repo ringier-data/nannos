@@ -87,7 +87,7 @@ async def simulate_executor_events(
 
     # Emit initial working status (like executor does)
     await updater.update_status(
-        TaskState.working,
+        TaskState.TASK_STATE_WORKING,
         new_agent_text_message("Agent execution started.", context_id, task_id),
     )
 
@@ -101,7 +101,7 @@ async def simulate_executor_events(
         content = item.content
         metadata = item.metadata or {}
 
-        if state == TaskState.working and metadata.get("streaming_chunk"):
+        if state == TaskState.TASK_STATE_WORKING and metadata.get("streaming_chunk"):
             append = first_chunk_sent
             await updater.add_artifact(
                 [Part(root=TextPart(text=content))],
@@ -112,7 +112,7 @@ async def simulate_executor_events(
             )
             first_chunk_sent = True
 
-        elif state == TaskState.completed:
+        elif state == TaskState.TASK_STATE_COMPLETED:
             if first_chunk_sent:
                 await updater.add_artifact(
                     [Part(root=TextPart(text=""))],
@@ -121,23 +121,23 @@ async def simulate_executor_events(
                     last_chunk=True,
                     metadata={},
                 )
-                await updater.update_status(TaskState.completed, metadata=metadata or None)
+                await updater.update_status(TaskState.TASK_STATE_COMPLETED, metadata=metadata or None)
             else:
                 await updater.update_status(
-                    TaskState.completed,
+                    TaskState.TASK_STATE_COMPLETED,
                     new_agent_text_message(content or "Done", context_id, task_id),
                     metadata=metadata or None,
                 )
 
-        elif state == TaskState.failed:
+        elif state == TaskState.TASK_STATE_FAILED:
             await updater.update_status(
-                TaskState.failed,
+                TaskState.TASK_STATE_FAILED,
                 new_agent_text_message(content or "Error", context_id, task_id),
             )
 
-        elif state == TaskState.working:
+        elif state == TaskState.TASK_STATE_WORKING:
             await updater.update_status(
-                TaskState.working,
+                TaskState.TASK_STATE_WORKING,
                 new_agent_text_message(content, context_id, task_id),
                 metadata=metadata or None,
             )
@@ -199,12 +199,12 @@ async def test_simple_prompt_event_sequence(
     # First event: working status
     first = events[0]
     assert isinstance(first, TaskStatusUpdateEvent)
-    assert first.status.state == TaskState.working
+    assert first.status.state == TaskState.TASK_STATE_WORKING
 
     # Last event: completed status
     last = events[-1]
     assert isinstance(last, TaskStatusUpdateEvent)
-    assert last.status.state == TaskState.completed
+    assert last.status.state == TaskState.TASK_STATE_COMPLETED
 
     # Artifact events in between
     artifact_events = [e for e in events if isinstance(e, TaskArtifactUpdateEvent)]
@@ -262,14 +262,14 @@ async def test_time_tool_invocation_events(
 
     # Basic protocol compliance
     status_events = [e for e in events if isinstance(e, TaskStatusUpdateEvent)]
-    assert any(e.status.state == TaskState.working for e in status_events), "Must have working status"
+    assert any(e.status.state == TaskState.TASK_STATE_WORKING for e in status_events), "Must have working status"
 
     # Should complete (tool errors would cause 'failed')
     terminal_events = [
-        e for e in status_events if e.status.state in (TaskState.completed, TaskState.failed, TaskState.canceled)
+        e for e in status_events if e.status.state in (TaskState.TASK_STATE_COMPLETED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_CANCELED)
     ]
     assert len(terminal_events) >= 1, "Must have at least one terminal status event"
-    assert terminal_events[-1].status.state == TaskState.completed, (
+    assert terminal_events[-1].status.state == TaskState.TASK_STATE_COMPLETED, (
         f"Expected completed, got {terminal_events[-1].status.state}"
     )
 

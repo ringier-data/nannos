@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import Mock, patch
 
 import pytest
-from a2a.types import Message, Task, TaskState
+from a2a.types import Message, Role, Task, TaskState
 from pydantic import SecretStr
 from ringier_a2a_sdk.models import AgentStreamResponse, UserConfig
 
@@ -33,11 +33,13 @@ def _make_task(**overrides) -> Mock:
 
 
 def _make_message_with_data(data: dict) -> Message:
-    """Build an A2A Message containing a DataPart with the given dict."""
-    from a2a.types import DataPart, Part, Role
+    """Build an A2A Message containing a data Part with the given dict."""
+    from a2a.types import Part, Role
+    from google.protobuf.json_format import ParseDict
+    from google.protobuf.struct_pb2 import Value
 
-    part = Part(root=DataPart(data=data))
-    return Message(role=Role.user, parts=[part], messageId="msg-1")
+    part = Part(data=ParseDict(data, Value()))
+    return Message(role=Role.ROLE_USER, parts=[part], message_id="msg-1")
 
 
 # ── VoiceCallRequest Pydantic model tests ──────────────────────────────────
@@ -94,7 +96,7 @@ class TestPhoneNumberResolution:
 
         async def _fake_call(**kwargs):
             assert kwargs["phone_number"] == "+41792222222"
-            yield AgentStreamResponse(state=TaskState.completed, content="Done")
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
 
         mock_call.side_effect = _fake_call
 
@@ -106,7 +108,7 @@ class TestPhoneNumberResolution:
         msg = _make_message_with_data({"system_prompt": "Hello"})
 
         responses = await self._collect_responses(agent, [msg], user_config, task)
-        assert any(r.state == TaskState.completed for r in responses)
+        assert any(r.state == TaskState.TASK_STATE_COMPLETED for r in responses)
 
     async def test_no_phone_fails(self):
         """When phone_number is not set, agent returns failure."""
@@ -116,8 +118,8 @@ class TestPhoneNumberResolution:
         msg = _make_message_with_data({"system_prompt": "Hello"})
 
         responses = await self._collect_responses(agent, [msg], user_config, task)
-        assert any(r.state == TaskState.failed for r in responses)
-        failure = next(r for r in responses if r.state == TaskState.failed)
+        assert any(r.state == TaskState.TASK_STATE_FAILED for r in responses)
+        failure = next(r for r in responses if r.state == TaskState.TASK_STATE_FAILED)
         assert "phone number" in failure.content.lower()
 
     @patch.object(VoiceAgent, "_stream_phone_call")
@@ -127,7 +129,7 @@ class TestPhoneNumberResolution:
         async def _fake_call(**kwargs):
             # Must be the user_config phone, NOT the payload phone
             assert kwargs["phone_number"] == "+41791111111"
-            yield AgentStreamResponse(state=TaskState.completed, content="Done")
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
 
         mock_call.side_effect = _fake_call
 
@@ -143,7 +145,7 @@ class TestPhoneNumberResolution:
         )
 
         responses = await self._collect_responses(agent, [msg], user_config, task)
-        assert any(r.state == TaskState.completed for r in responses)
+        assert any(r.state == TaskState.TASK_STATE_COMPLETED for r in responses)
 
     async def test_empty_payload_fails_gracefully(self):
         """Empty config dict triggers validation error or meaningful failure."""
@@ -151,7 +153,7 @@ class TestPhoneNumberResolution:
         user_config = _make_user_config(phone_number="+41791111111")
         task = _make_task()
         # Message with no DataPart — empty config
-        msg = Message(role="user", parts=[], messageId="msg-1")
+        msg = Message(role=Role.ROLE_USER, parts=[], message_id="msg-1")
 
         responses = await self._collect_responses(agent, [msg], user_config, task)
-        assert any(r.state == TaskState.failed for r in responses)
+        assert any(r.state == TaskState.TASK_STATE_FAILED for r in responses)

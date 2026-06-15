@@ -26,8 +26,12 @@ from contextlib import asynccontextmanager
 
 import httpx
 import uvicorn
-from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import (
+    add_a2a_routes_to_fastapi,
+    create_agent_card_routes,
+    create_jsonrpc_routes,
+)
 from a2a.server.tasks import (
     BasePushNotificationSender,
     InMemoryPushNotificationConfigStore,
@@ -36,11 +40,15 @@ from a2a.server.tasks import (
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentInterface,
     AgentSkill,
     OpenIdConnectSecurityScheme,
+    SecurityRequirement,
     SecurityScheme,
+    StringList,
 )
 from dotenv import load_dotenv
+from fastapi import FastAPI
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
     JWTValidatorMiddleware,
@@ -97,17 +105,17 @@ def create_app():
         ),
     )
 
-    # OIDC security scheme — only advertised when auth is configured
-    security_schemes = None
-    security = None
+    # OIDC security scheme — only advertised when auth is configured.
+    # (protobuf map/repeated fields can't be None, so default to empty.)
+    security_schemes = {}
+    security_requirements = []
     if oidc_issuer:
         oidc_scheme = OpenIdConnectSecurityScheme(
-            type="openIdConnect",
             open_id_connect_url=f"{oidc_issuer}/.well-known/openid-configuration",
             description="OIDC authentication with token exchange (RFC 8693)",
         )
-        security_schemes = {"voice-agent": SecurityScheme(root=oidc_scheme)}
-        security = [{"voice-agent": ["openid"]}]
+        security_schemes = {"voice-agent": SecurityScheme(open_id_connect_security_scheme=oidc_scheme)}
+        security_requirements = [SecurityRequirement(schemes={"voice-agent": StringList(list=["openid"])})]
 
     agent_card = AgentCard(
         name="voice-agent",
@@ -116,15 +124,14 @@ def create_app():
             "Initiates a phone to your configured number, connects the call to Gemini Live Agent, "
             "using the configured system prompt, and returns the full call transcript."
         ),
-        url=agent_base_url,
+        supported_interfaces=[AgentInterface(url=agent_base_url, protocol_binding="JSONRPC")],
         version="1.0.0",
         default_input_modes=["application/json"],
         default_output_modes=["text", "text/plain"],
         capabilities=capabilities,
         skills=[skill],
-        supports_authenticated_extended_card=False,
         security_schemes=security_schemes,
-        security=security,
+        security_requirements=security_requirements,
     )
 
     # ── Request handler + A2A app ─────────────────────────────────────────────
@@ -142,12 +149,17 @@ def create_app():
     request_handler = DefaultRequestHandler(
         agent_executor=BaseAgentExecutor(agent=_voice_agent),
         task_store=InMemoryTaskStore(),
+        agent_card=agent_card,
         push_config_store=push_config_store,
         push_sender=push_sender,
         request_context_builder=AuthRequestContextBuilder(),
     )
-    server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
-    app = server.build(lifespan=lifespan)
+    app = FastAPI(lifespan=lifespan)
+    add_a2a_routes_to_fastapi(
+        app,
+        agent_card_routes=create_agent_card_routes(agent_card),
+        jsonrpc_routes=create_jsonrpc_routes(request_handler, "/"),
+    )
 
     # ── Middleware stack ──────────────────────────────────────────────────────
     # LangSmith tracing — always on when LANGSMITH_API_KEY is available

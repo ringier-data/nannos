@@ -15,7 +15,7 @@ class TestBuildAuthResponse:
             auth_message="Authentication required", auth_url="https://auth.example.com", error_code="AUTH_001"
         )
 
-        assert response.state == TaskState.auth_required
+        assert response.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert response.interrupt_reason == "auth_required"
         assert response.metadata is not None
         assert response.metadata["auth_url"] == "https://auth.example.com"
@@ -28,7 +28,7 @@ class TestBuildAuthResponse:
             auth_message="Authentication required", auth_url="", error_code="AUTH_002"
         )
 
-        assert response.state == TaskState.auth_required
+        assert response.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert response.interrupt_reason == "auth_required"
         assert response.metadata is not None
         assert "auth_url" in response.metadata
@@ -43,7 +43,7 @@ class TestBuildWorkingResponse:
         """Test working response with custom message."""
         response = StreamHandler.build_working_response(content="Processing your request...", metadata={"progress": 50})
 
-        assert response.state == TaskState.working
+        assert response.state == TaskState.TASK_STATE_WORKING
         assert response.content == "Processing your request..."
         assert response.metadata == {"progress": 50}
 
@@ -51,7 +51,7 @@ class TestBuildWorkingResponse:
         """Test working response without metadata."""
         response = StreamHandler.build_working_response(content="Task is being processed")
 
-        assert response.state == TaskState.working
+        assert response.state == TaskState.TASK_STATE_WORKING
         assert response.content == "Task is being processed"
         assert response.metadata is None
 
@@ -65,7 +65,7 @@ class TestBuildCompletedResponse:
             content="Task completed successfully", metadata={"result": "success"}
         )
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Task completed successfully"
         assert response.metadata == {"result": "success"}
 
@@ -77,7 +77,7 @@ class TestBuildFailedResponse:
         """Test failed response building."""
         response = StreamHandler.build_failed_response(content="Task failed with error", metadata={"error_code": 500})
 
-        assert response.state == TaskState.failed
+        assert response.state == TaskState.TASK_STATE_FAILED
         assert response.content == "Task failed with error"
         assert response.metadata == {"error_code": 500}
 
@@ -93,7 +93,7 @@ class TestBuildInputRequiredResponse:
             metadata={"required_fields": ["name", "email"]},
         )
 
-        assert response.state == TaskState.input_required
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert response.content == "Please provide additional information"
         assert response.metadata is not None
         assert response.metadata["input_prompt"] == "Enter your name and email"
@@ -109,7 +109,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Hi! How can I help?"
 
     def test_parse_agent_response_with_empty_messages(self):
@@ -118,7 +118,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Task completed successfully"
 
     def test_parse_agent_response_with_none_messages(self):
@@ -127,7 +127,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Task completed successfully"
 
     def test_parse_agent_response_with_human_message_only(self):
@@ -136,7 +136,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Hello"
 
     def test_parse_agent_response_with_tool_message(self):
@@ -154,7 +154,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Final response"
 
     def test_parse_agent_response_no_auth_in_tracking(self):
@@ -166,7 +166,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Normal response"
 
     def test_parse_agent_response_multiple_ai_messages(self):
@@ -182,7 +182,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Answer 2"
 
     def test_parse_agent_response_with_empty_content(self):
@@ -191,7 +191,7 @@ class TestParseAgentResponse:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == ""
 
 
@@ -202,7 +202,7 @@ class TestStreamHandlerEdgeCases:
         """Test auth response with empty auth_url."""
         response = StreamHandler.build_auth_response(auth_message="Auth needed", auth_url="", error_code="AUTH_004")
 
-        assert response.state == TaskState.auth_required
+        assert response.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert response.metadata is not None
         assert response.metadata["auth_url"] == ""
 
@@ -237,7 +237,7 @@ class TestStreamHandlerEdgeCases:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Response"
 
     def test_parse_agent_response_without_a2a_tracking(self):
@@ -246,7 +246,7 @@ class TestStreamHandlerEdgeCases:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Normal response"
 
 
@@ -526,7 +526,7 @@ class TestParseAgentResponseWithSubagentFiltering:
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should be completed, not input_required, because current turn agent doesn't require input
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
 
     def test_requires_auth_only_checks_current_turn(self):
         """Test that requires_auth only applies to current turn sub-agents."""
@@ -564,7 +564,7 @@ class TestParseAgentResponseWithSubagentFiltering:
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should be completed, not auth_required, because OldAgent wasn't called in current turn
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Processing current request"
 
 
@@ -601,20 +601,20 @@ class TestConservativeOverrideLogic:
                 AIMessage(content="Done - used email"),
             ],
             "structured_response": FinalResponseSchema(
-                task_state=TaskState.completed,
+                task_state=TaskState.TASK_STATE_COMPLETED,
                 message="Email sent successfully as alternative approach",
                 reasoning="Jira blocked but email succeeded",
             ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
-                "EmailAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.completed"},
+                "EmailAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.TASK_STATE_COMPLETED"},
             },
         }
 
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should trust LLM's completed decision (EmailAgent succeeded)
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert "Email sent successfully" in response.content
 
     def test_llm_completed_all_blocked_overrides_to_input_required(self):
@@ -647,7 +647,7 @@ class TestConservativeOverrideLogic:
                 AIMessage(content="All done"),
             ],
             "structured_response": FinalResponseSchema(
-                task_state=TaskState.completed,
+                task_state=TaskState.TASK_STATE_COMPLETED,
                 message="Tasks completed successfully",
                 reasoning="Both completed",  # LLM hallucination
             ),
@@ -660,7 +660,7 @@ class TestConservativeOverrideLogic:
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should override to input_required (safety against hallucination)
-        assert response.state == TaskState.input_required
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert response.interrupt_reason == "subagent_input_required"
         assert response.metadata is not None
         assert response.metadata["agent_name"] in ["JiraAgent", "EmailAgent"]
@@ -694,7 +694,7 @@ class TestConservativeOverrideLogic:
                 AIMessage(content="Done"),
             ],
             "structured_response": FinalResponseSchema(
-                task_state=TaskState.completed, message="Completed", reasoning="Done"
+                task_state=TaskState.TASK_STATE_COMPLETED, message="Completed", reasoning="Done"
             ),
             "a2a_tracking": {
                 "Agent1": {
@@ -710,7 +710,7 @@ class TestConservativeOverrideLogic:
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should override to auth_required (auth has priority)
-        assert response.state == TaskState.auth_required
+        assert response.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert response.metadata is not None
         assert response.metadata["auth_url"] == "https://auth.example.com"
 
@@ -744,20 +744,20 @@ class TestConservativeOverrideLogic:
                 AIMessage(content="Need project for ticket"),
             ],
             "structured_response": FinalResponseSchema(
-                task_state=TaskState.input_required,
+                task_state=TaskState.TASK_STATE_INPUT_REQUIRED,
                 message="Which project should I create the ticket in?",
                 reasoning="Slack succeeded but Jira needs project info",
             ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
-                "SlackAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.completed"},
+                "SlackAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.TASK_STATE_COMPLETED"},
             },
         }
 
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should respect LLM's input_required decision
-        assert response.state == TaskState.input_required
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert "Which project" in response.content
 
     def test_llm_working_state_not_overridden(self):
@@ -782,7 +782,7 @@ class TestConservativeOverrideLogic:
                 AIMessage(content="Still working"),
             ],
             "structured_response": FinalResponseSchema(
-                task_state=TaskState.working,
+                task_state=TaskState.TASK_STATE_WORKING,
                 message="Task is still being processed in the background",
                 reasoning="Async operation in progress",
             ),
@@ -794,7 +794,7 @@ class TestConservativeOverrideLogic:
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should respect LLM's working decision (not override based on blocking)
-        assert response.state == TaskState.working
+        assert response.state == TaskState.TASK_STATE_WORKING
         assert "background" in response.content
 
     def test_no_subagents_this_turn_does_not_override(self):
@@ -830,7 +830,7 @@ class TestConservativeOverrideLogic:
                 AIMessage(content="Hello! How can I help you today?"),
             ],
             "structured_response": FinalResponseSchema(
-                task_state=TaskState.completed,
+                task_state=TaskState.TASK_STATE_COMPLETED,
                 message="Hello! How can I help you today?",
                 reasoning="Greeting response",
             ),
@@ -843,7 +843,7 @@ class TestConservativeOverrideLogic:
         response = StreamHandler.parse_agent_response(final_state)
 
         # Must trust LLM and emit the greeting — no override allowed
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Hello! How can I help you today?"
 
     def test_single_agent_blocked_overrides_when_completed(self):
@@ -868,7 +868,7 @@ class TestConservativeOverrideLogic:
                 AIMessage(content="Done"),
             ],
             "structured_response": FinalResponseSchema(
-                task_state=TaskState.completed, message="Ticket created", reasoning="Task complete"
+                task_state=TaskState.TASK_STATE_COMPLETED, message="Ticket created", reasoning="Task complete"
             ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
@@ -878,7 +878,7 @@ class TestConservativeOverrideLogic:
         response = StreamHandler.parse_agent_response(final_state)
 
         # Should override (only one agent, it's blocked)
-        assert response.state == TaskState.input_required
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert response.metadata is not None
         assert response.metadata["agent_name"] == "JiraAgent"
 
@@ -924,7 +924,7 @@ class TestIncludeSubagentOutput:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         # Should include both intro and tool content separated by a blank line
         assert "Here's the joke the smart-joke-responder created" in response.content
         assert "Why did the model cross the road?" in response.content
@@ -955,7 +955,7 @@ class TestIncludeSubagentOutput:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Here's the joke:"
 
     def test_include_subagent_output_empty_message_no_tool_message_uses_fallback(self):
@@ -986,7 +986,7 @@ class TestIncludeSubagentOutput:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content, "Client must never receive empty completed content"
         # Fallback is short, neutral, and does not leak internal IDs / stack traces
         assert "call_final" not in response.content
@@ -1032,7 +1032,7 @@ class TestIncludeSubagentOutput:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content, "Client must never receive empty completed content"
         assert "call_task" not in response.content
 
@@ -1066,5 +1066,5 @@ class TestIncludeSubagentOutput:
 
         response = StreamHandler.parse_agent_response(final_state)
 
-        assert response.state == TaskState.completed
+        assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == ""

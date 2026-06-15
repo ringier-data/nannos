@@ -14,7 +14,7 @@ import logging
 
 from a2a.server.agent_execution import RequestContext, RequestContextBuilder
 from a2a.server.context import ServerCallContext
-from a2a.types import MessageSendParams, Task
+from a2a.types import SendMessageRequest, Task
 
 from ..middleware.user_context_middleware import current_user_context
 
@@ -38,11 +38,11 @@ class AuthRequestContextBuilder(RequestContextBuilder):
 
     async def build(
         self,
-        params: MessageSendParams | None = None,
+        context: ServerCallContext | None = None,
+        params: SendMessageRequest | None = None,
         task_id: str | None = None,
         context_id: str | None = None,
         task: Task | None = None,
-        context: ServerCallContext | None = None,
     ) -> RequestContext:
         """
         Build RequestContext with verified user information from authentication middleware.

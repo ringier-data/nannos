@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from a2a.types import AgentCard
+from google.protobuf.json_format import ParseDict
 from agent_common.a2a.config import A2AClientConfig
 from agent_common.a2a.factory import make_a2a_async_runnable
 from deepagents import CompiledSubAgent
@@ -112,9 +113,10 @@ class AgentDiscoveryService:
             agent_card_data = response.json()
             logger.debug(f"Agent card data: {agent_card_data}")
 
-            # Create AgentCard from the fetched data
-            agent_card = AgentCard(**agent_card_data)
-            logger.debug(f"Agent card parsed: name={agent_card.name}, url={agent_card.url}")
+            # Create AgentCard from the fetched ProtoJSON (A2A v1.0+ uses protobuf types)
+            agent_card = ParseDict(agent_card_data, AgentCard(), ignore_unknown_fields=True)
+            card_url = agent_card.supported_interfaces[0].url if agent_card.supported_interfaces else ""
+            logger.debug(f"Agent card parsed: name={agent_card.name}, url={card_url}")
 
         # Create the A2A runnable with the proper agent card and authentication
         # Pass sub_agent_id via config for cost tracking attribution
@@ -125,7 +127,7 @@ class AgentDiscoveryService:
             user_token=user_token,
             config=config,
         )
-        logger.debug(f"A2A runnable created successfully for {agent_card.url} with sub_agent_id={sub_agent_id}")
+        logger.debug(f"A2A runnable created successfully for {card_url} with sub_agent_id={sub_agent_id}")
 
         # Create the sub-agent (middleware will be applied by create_deep_agent)
         agent_name = agent_card.name.replace(" ", "")  # Remove spaces for tool name

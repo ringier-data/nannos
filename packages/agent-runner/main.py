@@ -14,8 +14,11 @@ import click
 import httpx
 import uvicorn
 import yaml
-from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import (
+    create_agent_card_routes,
+    create_jsonrpc_routes,
+)
 from a2a.server.tasks import (
     BasePushNotificationSender,
     InMemoryPushNotificationConfigStore,
@@ -24,11 +27,15 @@ from a2a.server.tasks import (
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentInterface,
     AgentSkill,
     OpenIdConnectSecurityScheme,
+    SecurityRequirement,
     SecurityScheme,
+    StringList,
 )
 from dotenv import load_dotenv
+from starlette.applications import Starlette
 from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
@@ -88,7 +95,6 @@ def create_app():
     # Configure OIDC authentication (validates scheduler service JWT)
     oidc_issuer = os.environ["OIDC_ISSUER"]
     oidc_scheme = OpenIdConnectSecurityScheme(
-        type="openIdConnect",
         open_id_connect_url=f"{oidc_issuer}/.well-known/openid-configuration",
         description="OIDC authentication — scheduler service token",
     )
@@ -105,15 +111,14 @@ def create_app():
             "condition evaluation, LangGraph agent execution, and push-notification "
             "delivery of results. Not intended for direct end-user interaction."
         ),
-        url=agent_base_url,
+        supported_interfaces=[AgentInterface(url=agent_base_url, protocol_binding="JSONRPC")],
         version="1.0.0",
         default_input_modes=agent.SUPPORTED_CONTENT_TYPES,
         default_output_modes=agent.SUPPORTED_CONTENT_TYPES,
         capabilities=capabilities,
         skills=[skill],
-        security_schemes={"agent-runner": SecurityScheme(root=oidc_scheme)},
-        security=[{"agent-runner": ["openid"]}],
-        supports_authenticated_extended_card=False,
+        security_schemes={"agent-runner": SecurityScheme(open_id_connect_security_scheme=oidc_scheme)},
+        security_requirements=[SecurityRequirement(schemes={"agent-runner": StringList(list=["openid"])})],
     )
 
     # Create push notification infrastructure so the framework delivers the
@@ -125,20 +130,25 @@ def create_app():
         config_store=push_config_store,
     )
 
-    # Create request handler
+    # Create request handler (A2A v1.0+ requires the agent_card)
     request_handler = DefaultRequestHandler(
         agent_executor=BaseAgentExecutor(agent=agent),
         task_store=InMemoryTaskStore(),
+        agent_card=agent_card,
         push_config_store=push_config_store,
         push_sender=push_sender,
         request_context_builder=AuthRequestContextBuilder(),
     )
 
-    # Create A2A FastAPI application
-    server = A2AFastAPIApplication(agent_card=agent_card, http_handler=request_handler)
-
-    # Build app with lifespan
-    app = server.build(lifespan=lifespan)
+    # Build the Starlette app with A2A routes (A2A v1.0+ replaces A2AFastAPIApplication;
+    # a2a-sdk no longer pulls FastAPI, and the route factories return Starlette routes).
+    app = Starlette(
+        routes=[
+            *create_agent_card_routes(agent_card),
+            *create_jsonrpc_routes(request_handler, "/"),
+        ],
+        lifespan=lifespan,
+    )
 
     # UserContextFromRequestStateMiddleware runs AFTER SubAgentId
     app.add_middleware(UserContextFromRequestStateMiddleware)

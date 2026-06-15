@@ -13,15 +13,18 @@ import httpx
 import pytest
 from a2a.types import (
     AgentCard,
+    AgentInterface,
     Artifact,
     Message,
     Part,
+    StreamResponse,
     Task,
     TaskState,
     TaskStatus,
-    TextPart,
 )
 from a2a.types import Role as A2ARole
+from google.protobuf.json_format import ParseDict
+from google.protobuf.struct_pb2 import Value
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agent_common.a2a.base import SubAgentInput
@@ -38,7 +41,7 @@ def agent_card():
     return AgentCard(
         name="test-agent",
         description="Test agent for unit tests",
-        url="https://test-agent.example.com/a2a",
+        supported_interfaces=[AgentInterface(url="https://test-agent.example.com/a2a", protocol_binding="JSONRPC")],
         version="1.0.0",
         capabilities=AgentCapabilities(streaming=True),
         skills=[AgentSkill(id="test", name="test-skill", description="Test skill", tags=["test"])],
@@ -112,8 +115,8 @@ class TestA2AClientRunnableTextExtraction:
     def test_extract_text_from_text_parts(self, a2a_client_runnable):
         """Test extracting text from TextPart objects."""
         parts = [
-            Part(root=TextPart(text="First part")),
-            Part(root=TextPart(text="Second part")),
+            Part(text="First part"),
+            Part(text="Second part"),
         ]
 
         result = a2a_client_runnable._extract_text_from_parts(parts)
@@ -128,11 +131,9 @@ class TestA2AClientRunnableTextExtraction:
 
     def test_extract_text_from_mixed_parts(self, a2a_client_runnable):
         """Test extracting text from mixed part types."""
-        from a2a.types import DataPart
-
         parts = [
-            Part(root=TextPart(text="Text content")),
-            Part(root=DataPart(data={"key": "value"})),
+            Part(text="Text content"),
+            Part(data=ParseDict({"key": "value"}, Value())),
         ]
 
         result = a2a_client_runnable._extract_text_from_parts(parts)
@@ -150,17 +151,17 @@ class TestA2AClientRunnableSyntheticMessage:
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.completed,
+                state=TaskState.TASK_STATE_COMPLETED,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Task completed successfully"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Task completed successfully")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
             ),
         )
 
-        result = a2a_client_runnable._create_synthetic_message_content(task, {})
+        result = a2a_client_runnable._synthetic_content(task.status, task.artifacts, {})
 
         assert result == "Task completed successfully"
 
@@ -170,17 +171,17 @@ class TestA2AClientRunnableSyntheticMessage:
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Database connection failed"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Database connection failed")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
             ),
         )
 
-        result = a2a_client_runnable._create_synthetic_message_content(task, {})
+        result = a2a_client_runnable._synthetic_content(task.status, task.artifacts, {})
 
         assert "failed" in result.lower()
         assert "Database connection failed" in result
@@ -191,17 +192,17 @@ class TestA2AClientRunnableSyntheticMessage:
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.working,
+                state=TaskState.TASK_STATE_WORKING,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Processing data"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Processing data")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
             ),
         )
 
-        result = a2a_client_runnable._create_synthetic_message_content(task, {})
+        result = a2a_client_runnable._synthetic_content(task.status, task.artifacts, {})
 
         assert "INCOMPLETE" in result
         assert "working" in result.lower()
@@ -212,11 +213,11 @@ class TestA2AClientRunnableSyntheticMessage:
         task = Task(
             id="task-1",
             context_id="ctx-1",
-            status=TaskStatus(state=TaskState.auth_required),
+            status=TaskStatus(state=TaskState.TASK_STATE_AUTH_REQUIRED),
         )
         app_metadata = {"instructions": "Please authenticate with OAuth2"}
 
-        result = a2a_client_runnable._create_synthetic_message_content(task, app_metadata)
+        result = a2a_client_runnable._synthetic_content(task.status, task.artifacts, app_metadata)
 
         assert "Please authenticate with OAuth2" in result
 
@@ -225,17 +226,17 @@ class TestA2AClientRunnableSyntheticMessage:
         task = Task(
             id="task-1",
             context_id="ctx-1",
-            status=TaskStatus(state=TaskState.completed),
+            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
             artifacts=[
                 Artifact(
                     artifact_id="art-1",
                     name="Result",
-                    parts=[Part(root=TextPart(text="Result from artifact"))],
+                    parts=[Part(text="Result from artifact")],
                 )
             ],
         )
 
-        result = a2a_client_runnable._create_synthetic_message_content(task, {})
+        result = a2a_client_runnable._synthetic_content(task.status, task.artifacts, {})
 
         assert result == "Result from artifact"
 
@@ -245,16 +246,14 @@ class TestA2AClientRunnableAuthPayload:
 
     def test_parse_auth_payload_with_structured_data(self, a2a_client_runnable):
         """Test parsing auth payload with structured data."""
-        from a2a.types import DataPart
-
         task_status = TaskStatus(
-            state=TaskState.auth_required,
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
             message=Message(
-                role=A2ARole.agent,
+                role=A2ARole.ROLE_AGENT,
                 parts=[
                     Part(
-                        root=DataPart(
-                            data={
+                        data=ParseDict(
+                            {
                                 "service": "jira",
                                 "auth_methods": [
                                     {
@@ -263,7 +262,8 @@ class TestA2AClientRunnableAuthPayload:
                                         "instructions": "Complete OAuth flow",
                                     }
                                 ],
-                            }
+                            },
+                            Value(),
                         )
                     )
                 ],
@@ -282,16 +282,14 @@ class TestA2AClientRunnableAuthPayload:
 
     def test_parse_auth_payload_with_ciba_method(self, a2a_client_runnable):
         """Test parsing auth payload with CIBA method."""
-        from a2a.types import DataPart
-
         task_status = TaskStatus(
-            state=TaskState.auth_required,
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
             message=Message(
-                role=A2ARole.agent,
+                role=A2ARole.ROLE_AGENT,
                 parts=[
                     Part(
-                        root=DataPart(
-                            data={
+                        data=ParseDict(
+                            {
                                 "service": "enterprise-system",
                                 "auth_methods": [
                                     {
@@ -300,7 +298,8 @@ class TestA2AClientRunnableAuthPayload:
                                         "instructions": "Authenticate via corporate SSO",
                                     }
                                 ],
-                            }
+                            },
+                            Value(),
                         )
                     )
                 ],
@@ -317,10 +316,10 @@ class TestA2AClientRunnableAuthPayload:
     def test_parse_auth_payload_fallback_to_generic(self, a2a_client_runnable):
         """Test parsing auth payload falls back to generic OAuth2."""
         task_status = TaskStatus(
-            state=TaskState.auth_required,
+            state=TaskState.TASK_STATE_AUTH_REQUIRED,
             message=Message(
-                role=A2ARole.agent,
-                parts=[Part(root=TextPart(text="Authentication required"))],
+                role=A2ARole.ROLE_AGENT,
+                parts=[Part(text="Authentication required")],
                 message_id="msg-1",
                 context_id="ctx-1",
             ),
@@ -343,10 +342,10 @@ class TestA2AClientRunnableTaskResponse:
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.completed,
+                state=TaskState.TASK_STATE_COMPLETED,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Task completed"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Task completed")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
@@ -357,7 +356,7 @@ class TestA2AClientRunnableTaskResponse:
 
         assert result.task_id == "task-1"
         assert result.context_id == "ctx-1"
-        assert result.state == TaskState.completed
+        assert result.state == TaskState.TASK_STATE_COMPLETED
         assert result.is_complete is True
         assert result.requires_auth is False
         assert len(result.messages) == 1
@@ -369,12 +368,12 @@ class TestA2AClientRunnableTaskResponse:
         task = Task(
             id="task-1",
             context_id="ctx-1",
-            status=TaskStatus(state=TaskState.auth_required),
+            status=TaskStatus(state=TaskState.TASK_STATE_AUTH_REQUIRED),
         )
 
         result = await a2a_client_runnable._handle_task_response(task)
 
-        assert result.state == TaskState.auth_required
+        assert result.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert result.requires_auth is True
         assert result.is_complete is False
 
@@ -385,10 +384,10 @@ class TestA2AClientRunnableTaskResponse:
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.failed,
+                state=TaskState.TASK_STATE_FAILED,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Operation failed"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Operation failed")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
@@ -397,7 +396,7 @@ class TestA2AClientRunnableTaskResponse:
 
         result = await a2a_client_runnable._handle_task_response(task)
 
-        assert result.state == TaskState.failed
+        assert result.state == TaskState.TASK_STATE_FAILED
         assert result.is_complete is True
         assert "failed" in result.messages[0].content.lower()
 
@@ -414,12 +413,11 @@ class TestA2AClientRunnableMessageCreation:
         result = a2a_client_runnable._from_human_messages_to_a2a([HumanMessage(content=content)], context_id, task_id)
 
         assert isinstance(result, Message)
-        assert result.role == A2ARole.user
+        assert result.role == A2ARole.ROLE_USER
         assert result.context_id == context_id
         assert result.task_id == task_id
         assert len(result.parts) == 1
-        assert isinstance(result.parts[0].root, TextPart)
-        assert result.parts[0].root.text == content
+        assert result.parts[0].text == content
         assert result.message_id  # Generated UUID
 
     def test_create_a2a_message_without_tracking(self, a2a_client_runnable):
@@ -429,8 +427,8 @@ class TestA2AClientRunnableMessageCreation:
         result = a2a_client_runnable._from_human_messages_to_a2a([HumanMessage(content=content)], None, None)
 
         assert isinstance(result, Message)
-        assert result.context_id is None
-        assert result.task_id is None
+        assert result.context_id == ""
+        assert result.task_id == ""
 
 
 class TestA2AClientRunnableStreaming:
@@ -443,10 +441,10 @@ class TestA2AClientRunnableStreaming:
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.completed,
+                state=TaskState.TASK_STATE_COMPLETED,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Task completed"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Task completed")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
@@ -457,7 +455,7 @@ class TestA2AClientRunnableStreaming:
         mock_client = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            yield (completed_task, None)
+            yield StreamResponse(task=completed_task)
 
         mock_client.send_message = mock_stream
 
@@ -468,7 +466,7 @@ class TestA2AClientRunnableStreaming:
 
         assert len(updates) == 1
         assert updates[0].type == "task_update"
-        assert updates[0].data.state == TaskState.completed
+        assert updates[0].data.state == TaskState.TASK_STATE_COMPLETED
         assert updates[0].data.is_complete is True
 
     @pytest.mark.asyncio
@@ -477,13 +475,13 @@ class TestA2AClientRunnableStreaming:
         auth_task = Task(
             id="task-1",
             context_id="ctx-1",
-            status=TaskStatus(state=TaskState.auth_required),
+            status=TaskStatus(state=TaskState.TASK_STATE_AUTH_REQUIRED),
         )
 
         mock_client = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            yield (auth_task, None)
+            yield StreamResponse(task=auth_task)
 
         mock_client.send_message = mock_stream
 
@@ -493,7 +491,7 @@ class TestA2AClientRunnableStreaming:
                 updates.append(update)
 
         assert len(updates) == 1
-        assert updates[0].data.state == TaskState.auth_required
+        assert updates[0].data.state == TaskState.TASK_STATE_AUTH_REQUIRED
         assert updates[0].data.requires_input is False
         assert updates[0].data.requires_auth is True
 
@@ -503,16 +501,16 @@ class TestA2AClientRunnableStreaming:
         working_task = Task(
             id="task-1",
             context_id="ctx-1",
-            status=TaskStatus(state=TaskState.working),
+            status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
         )
         completed_task = Task(
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.completed,
+                state=TaskState.TASK_STATE_COMPLETED,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Done"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Done")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
@@ -522,8 +520,8 @@ class TestA2AClientRunnableStreaming:
         mock_client = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            yield (working_task, None)
-            yield (completed_task, None)
+            yield StreamResponse(task=working_task)
+            yield StreamResponse(task=completed_task)
 
         mock_client.send_message = mock_stream
 
@@ -533,9 +531,9 @@ class TestA2AClientRunnableStreaming:
                 updates.append(update)
 
         assert len(updates) == 2
-        assert updates[0].data.state == TaskState.working
+        assert updates[0].data.state == TaskState.TASK_STATE_WORKING
         assert updates[0].data.is_complete is False
-        assert updates[1].data.state == TaskState.completed
+        assert updates[1].data.state == TaskState.TASK_STATE_COMPLETED
         assert updates[1].data.is_complete is True
 
     @pytest.mark.asyncio
@@ -544,14 +542,14 @@ class TestA2AClientRunnableStreaming:
         completed_task = Task(
             id="task-1",
             context_id="ctx-1",
-            status=TaskStatus(state=TaskState.completed),
+            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
         )
 
         mock_client = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            yield "invalid_item"  # Should be ignored
-            yield (completed_task, None)
+            yield StreamResponse()  # empty payload -> ignored
+            yield StreamResponse(task=completed_task)
 
         mock_client.send_message = mock_stream
 
@@ -575,10 +573,10 @@ class TestA2AClientRunnableInvoke:
             id="task-1",
             context_id="ctx-1",
             status=TaskStatus(
-                state=TaskState.completed,
+                state=TaskState.TASK_STATE_COMPLETED,
                 message=Message(
-                    role=A2ARole.agent,
-                    parts=[Part(root=TextPart(text="Task completed"))],
+                    role=A2ARole.ROLE_AGENT,
+                    parts=[Part(text="Task completed")],
                     message_id="msg-1",
                     context_id="ctx-1",
                 ),
@@ -588,7 +586,7 @@ class TestA2AClientRunnableInvoke:
         mock_client = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            yield (completed_task, None)
+            yield StreamResponse(task=completed_task)
 
         mock_client.send_message = mock_stream
 
@@ -597,7 +595,7 @@ class TestA2AClientRunnableInvoke:
 
         assert isinstance(result, TaskUpdate)
         assert result.data.task_id == "task-1"
-        assert result.data.state == TaskState.completed
+        assert result.data.state == TaskState.TASK_STATE_COMPLETED
         assert result.data.is_complete is True
 
     @pytest.mark.asyncio
@@ -646,13 +644,13 @@ class TestA2AClientRunnableInvoke:
         working_task = Task(
             id="task-1",
             context_id="ctx-1",
-            status=TaskStatus(state=TaskState.working),
+            status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
         )
 
         mock_client = AsyncMock()
 
         async def mock_stream(*args, **kwargs):
-            yield (working_task, None)
+            yield StreamResponse(task=working_task)
             # Stream ends without terminal state
 
         mock_client.send_message = mock_stream
@@ -762,8 +760,8 @@ class TestA2AClientRunnableMessageExtraction:
     def test_extract_parts(self, a2a_client_runnable):
         """Test extracting parts from A2A Part list."""
         parts = [
-            Part(root=TextPart(text="First part", metadata={"type": "greeting"})),
-            Part(root=TextPart(text="Second part")),
+            Part(text="First part", metadata={"type": "greeting"}),
+            Part(text="Second part"),
         ]
 
         result = a2a_client_runnable._extract_parts(parts)
@@ -778,8 +776,8 @@ class TestA2AClientRunnableMessageExtraction:
     async def test_handle_message_response(self, a2a_client_runnable):
         """Test handling message response returns TaskResponseData."""
         message = Message(
-            role=A2ARole.agent,
-            parts=[Part(root=TextPart(text="Response message"))],
+            role=A2ARole.ROLE_AGENT,
+            parts=[Part(text="Response message")],
             message_id="msg-1",
             context_id="ctx-1",
             task_id="task-1",
@@ -792,7 +790,7 @@ class TestA2AClientRunnableMessageExtraction:
         assert len(result.messages) == 1
         assert result.messages[0].content == "Response message"
         assert result.metadata["message_id"] == "msg-1"
-        assert result.metadata["role"] == str(A2ARole.agent)
+        assert result.metadata["role"] == "ROLE_AGENT"
 
 
 class TestA2AClientRunnableTrackingIDExtraction:

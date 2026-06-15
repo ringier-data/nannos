@@ -10,7 +10,7 @@ When implementing new features or refactoring existing code, consider if these i
 - LangGraph for orchestration state machine
 - deepagents SDK (v0.5.7+) for graph primitives and sub-agent dispatch
 - DynamoDB + S3 for checkpoints
-- PostgreSQL + pgvector for document store (semantic indexing)
+- PostgreSQL + pgvector for document store (semantic indexing); the same database backs the A2A task store (`app/core/task_store.py`, in-memory fallback when Postgres is not configured)
 - Pydantic v2 for data validation
 - pytest with pytest-asyncio for testing
 

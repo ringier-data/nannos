@@ -1,7 +1,8 @@
 """Tests for JSON input support in A2A client runnable."""
 
 import pytest
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+from google.protobuf.json_format import MessageToDict
 from langchain_core.messages import HumanMessage
 
 from agent_common.a2a.client_runnable import A2AClientRunnable
@@ -13,7 +14,7 @@ def agent_card_json_capable():
     return AgentCard(
         name="json-agent",
         description="Agent that supports JSON input",
-        url="https://json-agent.example.com/a2a",
+        supported_interfaces=[AgentInterface(url="https://json-agent.example.com/a2a", protocol_binding="JSONRPC")],
         version="1.0.0",
         capabilities=AgentCapabilities(streaming=True),
         skills=[AgentSkill(id="json", name="json-skill", description="JSON skill", tags=["json"])],
@@ -28,7 +29,7 @@ def agent_card_text_only():
     return AgentCard(
         name="text-agent",
         description="Agent that only supports text input",
-        url="https://text-agent.example.com/a2a",
+        supported_interfaces=[AgentInterface(url="https://text-agent.example.com/a2a", protocol_binding="JSONRPC")],
         version="1.0.0",
         capabilities=AgentCapabilities(streaming=True),
         skills=[AgentSkill(id="text", name="text-skill", description="Text skill", tags=["text"])],
@@ -78,10 +79,10 @@ class TestJsonMessageCreation:
         assert message.task_id == task_id
         assert len(message.parts) >= 1
 
-        # First part should be DataPart with JSON
+        # First part should be a data Part with JSON
         first_part = message.parts[0]
-        assert first_part.root.kind == "data"
-        assert first_part.root.data == json_data
+        assert first_part.WhichOneof("content") == "data"
+        assert MessageToDict(first_part.data) == json_data
 
     def test_from_human_message_with_text(self, runnable_json):
         """Should create A2A message with TextPart from plain HumanMessage."""
@@ -103,10 +104,10 @@ class TestJsonMessageCreation:
         assert message.task_id == task_id
         assert len(message.parts) >= 1
 
-        # First part should be TextPart
+        # First part should be a text Part
         first_part = message.parts[0]
-        assert first_part.root.kind == "text"
-        assert first_part.root.text == text_content
+        assert first_part.WhichOneof("content") == "text"
+        assert first_part.text == text_content
 
     def test_from_human_message_has_metadata(self, runnable_json):
         """Should include timestamp and source metadata."""
