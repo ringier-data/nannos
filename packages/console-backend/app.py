@@ -484,6 +484,28 @@ _intermediate_buffers: dict[str, str] = {}
 # ==============================================================================
 
 
+# Map v1.0 protobuf TaskState names -> the legacy short wire strings that the
+# backend's turn-ending / persistence control-flow is keyed against. The frontend
+# handles raw v1.0 states natively (so we no longer rewrite the outbound payload);
+# this is used only to normalize states for internal branching below.
+_LEGACY_STATE: dict[str, str] = {
+    "TASK_STATE_SUBMITTED": "submitted",
+    "TASK_STATE_WORKING": "working",
+    "TASK_STATE_COMPLETED": "completed",
+    "TASK_STATE_FAILED": "failed",
+    "TASK_STATE_CANCELED": "canceled",
+    "TASK_STATE_INPUT_REQUIRED": "input-required",
+    "TASK_STATE_REJECTED": "rejected",
+    "TASK_STATE_AUTH_REQUIRED": "auth-required",
+    "TASK_STATE_UNSPECIFIED": "unknown",
+}
+
+
+def _legacy_state_name(state: Any) -> Any:
+    """Normalize a v1.0 ProtoJSON TaskState name to its legacy short form."""
+    return _LEGACY_STATE.get(state, state) if isinstance(state, str) else state
+
+
 def _extract_a2a_task_id(stream_result: Any) -> str | None:
     """Extract the A2A task_id from a StreamResponse, if present.
 
@@ -634,6 +656,9 @@ async def _process_a2a_response(
     response_data = MessageToDict(event)
     response_data["kind"] = _KIND_BY_PAYLOAD.get(payload, "unknown")
     response_data["id"] = response_id
+    # Emit raw v1.0 ProtoJSON (TASK_STATE_* states, flat parts) to the client — the
+    # frontend handles these natively. States are normalized inline below only where
+    # the backend's own turn-ending / persistence control-flow needs to branch on them.
 
     validation_errors = validate_message(response_data)
     response_data["validation_errors"] = validation_errors
@@ -691,7 +716,7 @@ async def _process_a2a_response(
 
                 # Extract status object early for use in multiple checks below
                 status_obj = response_data.get("status", {})
-                status_state = status_obj.get("state") if isinstance(status_obj, dict) else None
+                status_state = _legacy_state_name(status_obj.get("state")) if isinstance(status_obj, dict) else None
 
                 # Accumulate streaming artifact text for persistence.
                 # Individual chunks are transient (not saved to DB); the assembled
@@ -816,7 +841,7 @@ async def _process_a2a_response(
                 is_bare_completion_signal = (
                     response_data.get("kind") == "status-update"
                     and status_obj
-                    and status_obj.get("state") in ("completed", "failed", "canceled")
+                    and status_state in ("completed", "failed", "canceled")
                     and not status_obj.get("message")
                 )
 

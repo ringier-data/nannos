@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { v7 as uuidv7 } from 'uuid';
 import type { AgentResponseData, SendMessagePayload } from '@/components/chat/types';
+import { getTaskState } from '@/components/chat/utils';
 import { config } from '@/config';
 import {
   getAdminModeFromStorage,
@@ -250,10 +251,10 @@ export function usePlaygroundChat({
     // This ensures we process status updates even if they have role='agent'
     if (data.status) {
       const nestedMsg = data.status.message;
-      const state = data.status.state?.toLowerCase();
+      const state = getTaskState(data.status.state);
       
       // Determine state category first
-      const isTerminalState = state === 'completed' || state === 'failed' || state === 'cancelled' || state === 'input-required';
+      const isTerminalState = state === 'completed' || state === 'failed' || state === 'canceled' || state === 'cancelled' || state === 'input-required';
       const isProgressState = state === 'working' || state === 'running' || state === 'in_progress' || state === 'pending' || state === 'submitted';
       
       // Add message if present and displayable

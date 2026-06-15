@@ -6,7 +6,7 @@ import type { AgentResponseData, Conversation, Message, PendingInterrupt, Settin
 import { ACTIVITY_LOG_EXT, WORK_PLAN_EXT, INTERMEDIATE_OUTPUT_EXT, FEEDBACK_REQUEST_EXT, HITL_EXT } from '../types';
 import { useSocket } from './SocketContext';
 import { useSessionId } from '../hooks/useLocalStorage';
-import { extractPartTexts, generateUUID, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
+import { extractPartTexts, generateUUID, getPartKind, getTaskState, isTaskComplete, shouldDisplayMessageParts } from '../utils';
 import {
   getAdminModeFromStorage,
   getImpersonatedUserIdFromStorage,
@@ -190,7 +190,7 @@ const reconstructTimelineFromMessage = (msg: Record<string, unknown>): TimelineE
   // sub-agent progress messages (e.g. "Initiating call...", "Call ringing...").
   // During live streaming these are accumulated as working steps in the timeline;
   // reconstruct the same behavior from persisted messages.
-  const statusState = (statusObj?.state) as string | undefined;
+  const statusState = getTaskState(statusObj?.state as string | undefined);
   if (kind === 'status-update' && !messageExtensions.includes(ACTIVITY_LOG_EXT) && statusState === 'working') {
     let message = '';
     const parts = msg.parts as Array<{ kind?: string; text?: string }> | undefined;
@@ -634,7 +634,8 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
               let reason = '';
               if (data.status.message?.parts) {
                 for (const part of data.status.message.parts) {
-                  if (part.kind === 'data') {
+                  const partKind = getPartKind(part);
+                  if (partKind === 'data') {
                     const partData = part.data as Record<string, unknown> | undefined;
                     if (partData?.action_requests) {
                       actionRequests = partData.action_requests as typeof actionRequests;
@@ -642,7 +643,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
                     if (partData?.review_configs) {
                       reviewConfigs = partData.review_configs as typeof reviewConfigs;
                     }
-                  } else if (part.kind === 'text') {
+                  } else if (partKind === 'text') {
                     reason = part.text || '';
                   }
                 }
@@ -995,7 +996,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           //   - task kind → timeline only (protocol artifact)
           //   - terminal status-updates and artifacts with content → bubble
           const kind = m.kind as string | undefined;
-          const state = m.state as string | undefined;
+          const state = getTaskState(m.state as string | undefined);
           let rawPayload: Record<string, unknown> | null = null;
           if (typeof m.raw_payload === 'string' && m.raw_payload) {
             try { rawPayload = JSON.parse(m.raw_payload); } catch { /* ignore */ }
@@ -1085,7 +1086,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       // Find the most recent input-required + HITL message, then check whether a later
       // non-input-required status-update exists (which would mean the interrupt was resolved).
       const hitlMsg = [...raw].reverse().find((m: Record<string, unknown>) => {
-        if (m.kind !== 'status-update' || m.state !== 'input-required') return false;
+        if (m.kind !== 'status-update' || getTaskState(m.state as string | undefined) !== 'input-required') return false;
         try {
           const payload = typeof m.raw_payload === 'string' ? JSON.parse(m.raw_payload as string) : null;
           const extensions = (payload?.status?.message?.extensions || []) as string[];
@@ -1096,7 +1097,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       if (hitlMsg) {
         const hitlTs = new Date(((hitlMsg.created_at || hitlMsg.timestamp) as string | undefined) ?? 0).getTime();
         const isResolved = raw.some((m: Record<string, unknown>) => {
-          if (m.kind !== 'status-update' || m.state === 'input-required') return false;
+          if (m.kind !== 'status-update' || getTaskState(m.state as string | undefined) === 'input-required') return false;
           const ts = new Date(((m.created_at || m.timestamp) as string | undefined) ?? 0).getTime();
           return ts > hitlTs;
         });
@@ -1109,11 +1110,12 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             let reviewConfigs: Array<{ action_name: string; allowed_decisions: string[] }> | undefined;
             let reason = '';
             for (const part of parts) {
-              if (part.kind === 'data') {
+              const partKind = getPartKind(part);
+              if (partKind === 'data') {
                 const d = part.data as Record<string, unknown> | undefined;
                 if (d?.action_requests) actionRequests = d.action_requests as typeof actionRequests;
                 if (d?.review_configs) reviewConfigs = d.review_configs as typeof reviewConfigs;
-              } else if (part.kind === 'text') {
+              } else if (partKind === 'text') {
                 reason = (part.text as string) || '';
               }
             }

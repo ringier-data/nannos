@@ -11,7 +11,7 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { FeedbackRating } from '@/api/generated';
 import { useChat } from '../contexts';
-import { formatTime } from '../utils';
+import { formatTime, getFileInfo } from '../utils';
 import type { Message } from '../types';
 import { UnifiedTimelineBlock } from './UnifiedTimelineBlock';
 import { MessageFeedback } from './MessageFeedback';
@@ -36,8 +36,10 @@ function MessageCard({ message, feedbackMap }: MessageCardProps) {
   const formattedTime = formatTime(message.timestamp);
   const [reportOpen, setReportOpen] = useState(false);
 
-  // Extract file parts if available
-  const fileParts = message.parts?.filter(part => part.kind === 'file' && part.file) || [];
+  // Extract file parts if available (normalized across A2A v1.0 / legacy v0.3 shapes)
+  const fileParts = (message.parts || [])
+    .map(getFileInfo)
+    .filter((f): f is { uri: string; mimeType?: string; name?: string } => f !== null);
 
   const currentRating = feedbackMap?.get(message.id) ?? null;
 
@@ -94,8 +96,7 @@ function MessageCard({ message, feedbackMap }: MessageCardProps) {
           {/* Render file attachments */}
           {fileParts.length > 0 && (
             <div className="space-y-2 mt-2">
-              {fileParts.map((part, index) => {
-                const file = part.file!;
+              {fileParts.map((file, index) => {
                 const isAudio = file.mimeType?.startsWith('audio/');
                 const isImage = file.mimeType?.startsWith('image/');
                 

@@ -123,16 +123,70 @@ export function shouldShowTaskProgress(status: string | undefined | null): boole
 }
 
 /**
- * Get normalized task state from status object or string
+ * A2A v1.0 protobuf TaskState enum names -> the short wire strings this app uses.
+ * (v0.3 short names like "completed" / "input-required" pass through unchanged.)
+ */
+const V1_TASK_STATE: Record<string, string> = {
+  task_state_submitted: 'submitted',
+  task_state_working: 'working',
+  task_state_completed: 'completed',
+  task_state_failed: 'failed',
+  task_state_canceled: 'canceled',
+  task_state_input_required: 'input-required',
+  task_state_rejected: 'rejected',
+  task_state_auth_required: 'auth-required',
+  task_state_unspecified: 'unknown',
+};
+
+/**
+ * Get normalized task state from status object or string.
+ * Accepts both A2A v1.0 (`TASK_STATE_*`) and legacy v0.3 (`completed`) forms.
  */
 export function getTaskState(status: string | { state?: string; message?: string } | undefined | null): string {
+  let raw: string | undefined;
   if (!status) return 'unknown';
-  if (typeof status === 'string') return status.toLowerCase();
-  if (typeof status === 'object') {
-    if (typeof status.state === 'string') return status.state.toLowerCase();
-    if (typeof status.message === 'string') return status.message.toLowerCase();
+  if (typeof status === 'string') raw = status;
+  else if (typeof status === 'object') {
+    if (typeof status.state === 'string') raw = status.state;
+    else if (typeof status.message === 'string') raw = status.message;
   }
-  return 'unknown';
+  if (!raw) return 'unknown';
+  const lower = raw.toLowerCase();
+  return V1_TASK_STATE[lower] ?? lower;
+}
+
+/**
+ * A2A part kind, resilient to both v1.0 (flat: text/data/url/raw fields) and
+ * legacy v0.3 (`kind` discriminator) shapes.
+ */
+export function getPartKind(part: unknown): 'text' | 'data' | 'file' | undefined {
+  if (!part || typeof part !== 'object') return undefined;
+  const p = part as Record<string, unknown>;
+  if (typeof p.kind === 'string') {
+    return p.kind as 'text' | 'data' | 'file';
+  }
+  if (p.text !== undefined) return 'text';
+  if (p.data !== undefined) return 'data';
+  if (p.url !== undefined || p.raw !== undefined || p.file !== undefined) return 'file';
+  return undefined;
+}
+
+/**
+ * Normalize a file part's info across A2A v1.0 (flat `url`/`mediaType`/`filename`)
+ * and legacy v0.3 (`file: { uri, mimeType, name }`) shapes.
+ */
+export function getFileInfo(part: unknown): { uri: string; mimeType?: string; name?: string } | null {
+  if (!part || typeof part !== 'object') return null;
+  const p = part as Record<string, any>;
+  // v0.3: { file: { uri, mimeType, name } }
+  if (p.file && typeof p.file === 'object' && typeof p.file.uri === 'string') {
+    return { uri: p.file.uri, mimeType: p.file.mimeType, name: p.file.name };
+  }
+  // v1.0: flat { url, mediaType, filename }
+  if (typeof p.url === 'string') {
+    return { uri: p.url, mimeType: p.mediaType, name: p.filename };
+  }
+  return null;
 }
 
 /**
@@ -140,10 +194,10 @@ export function getTaskState(status: string | { state?: string; message?: string
  */
 export function formatTaskStatusLabel(status: string | { label?: string; state?: string } | undefined | null): string {
   if (!status) return 'Unknown';
-  if (typeof status === 'string') return humanizeStatusText(status);
+  if (typeof status === 'string') return humanizeStatusText(getTaskState(status));
   if (typeof status === 'object') {
     if (typeof status.label === 'string') return status.label;
-    if (typeof status.state === 'string') return humanizeStatusText(status.state);
+    if (typeof status.state === 'string') return humanizeStatusText(getTaskState(status.state));
   }
   return 'Unknown';
 }
