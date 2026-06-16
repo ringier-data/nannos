@@ -845,11 +845,24 @@ async def _process_a2a_response(
                     and not status_obj.get("message")
                 )
 
+                # The terminal status re-sends the streamed answer as a fallback for
+                # non-streaming clients, tagged final_answer_source="fallback". The
+                # streamed answer was already persisted above (accumulated artifact
+                # buffer), so saving this terminal copy too would store the answer
+                # twice and replay it doubled on reload. Skip it — when nothing was
+                # streamed the orchestrator does NOT tag the status, so direct
+                # (non-streamed) answers are still persisted here.
+                is_streamed_fallback = (
+                    response_data.get("kind") == "status-update"
+                    and (response_data.get("metadata") or {}).get("final_answer_source") == "fallback"
+                )
+
                 if (
                     not is_work_plan
                     and not is_feedback_request
                     and not is_artifact_append
                     and not is_bare_completion_signal
+                    and not is_streamed_fallback
                     and not safety_net_saved
                 ):
                     await messages_service.save_agent_response(

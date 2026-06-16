@@ -164,6 +164,70 @@ async def test_process_a2a_response_uses_fallback_context_id():
         assert call_kwargs["user_id"] == "user-1"
 
 
+def _mock_sio_for_persistence(context_id: str):
+    """Build a mock sio whose services accept a persisted agent response."""
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_socket_session = MagicMock(user_id="user-1", agent_url="http://agent")
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(return_value=mock_socket_session)
+    mock_conversation = MagicMock(conversation_id=context_id, user_id="user-1")
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(return_value=mock_conversation)
+    mock_sio.app_instance.state.messages_service.save_history_messages = AsyncMock(return_value=0)
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+    mock_sio.app_instance.state.messages_service.insert_message = AsyncMock()
+    return mock_sio
+
+
+@pytest.mark.asyncio
+async def test_terminal_fallback_status_is_not_persisted():
+    """A terminal status tagged final_answer_source=fallback must NOT be persisted again.
+
+    The orchestrator streams the answer (persisted from the accumulated artifact
+    buffer) and re-sends it in the terminal status as a fallback for non-streaming
+    clients. Saving that terminal copy too stored the answer twice and replayed it
+    doubled on reload.
+    """
+    from a2a.types import Message, Part, Role, StreamResponse, TaskState, TaskStatus, TaskStatusUpdateEvent
+
+    from app import _process_a2a_response
+
+    mock_sio = _mock_sio_for_persistence("conv-fb-1")
+    with patch("app.sio", mock_sio):
+        msg = Message(role=Role.ROLE_AGENT, parts=[Part(text="The poem")], message_id="m1", context_id="conv-fb-1")
+        event = TaskStatusUpdateEvent(
+            task_id="t1",
+            context_id="conv-fb-1",
+            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED, message=msg),
+            metadata={"final_answer_source": "fallback"},
+        )
+        await _process_a2a_response(
+            client_event=StreamResponse(status_update=event), sid="sid", request_id="req-fb-1", context_id="conv-fb-1"
+        )
+        mock_sio.app_instance.state.messages_service.save_agent_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_terminal_status_without_fallback_is_persisted():
+    """A terminal status with NO fallback tag (nothing streamed) is still persisted."""
+    from a2a.types import Message, Part, Role, StreamResponse, TaskState, TaskStatus, TaskStatusUpdateEvent
+
+    from app import _process_a2a_response
+
+    mock_sio = _mock_sio_for_persistence("conv-fb-2")
+    with patch("app.sio", mock_sio):
+        msg = Message(role=Role.ROLE_AGENT, parts=[Part(text="The poem")], message_id="m2", context_id="conv-fb-2")
+        event = TaskStatusUpdateEvent(
+            task_id="t2",
+            context_id="conv-fb-2",
+            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED, message=msg),
+        )
+        await _process_a2a_response(
+            client_event=StreamResponse(status_update=event), sid="sid", request_id="req-fb-2", context_id="conv-fb-2"
+        )
+        mock_sio.app_instance.state.messages_service.save_agent_response.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_conversation_title_with_unicode_characters():
     """Test that conversation title handles Unicode characters correctly."""
