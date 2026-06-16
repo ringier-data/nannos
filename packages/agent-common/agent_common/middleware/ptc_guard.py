@@ -442,6 +442,10 @@ def wrap_tool_for_ptc(
         name=tool_name,
         description=inner.description,
         args_schema=inner.args_schema,
+        # Preserve the inner tool's metadata (notably ``server_name``) so downstream
+        # consumers can still distinguish MCP tools from base tools on the *wrapped*
+        # instance — e.g. the PTC middleware's core-vs-catalog render split.
+        metadata=inner.metadata,
     )
 
 

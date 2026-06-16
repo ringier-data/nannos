@@ -125,6 +125,7 @@ def build_runtime_context(
     from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
+    from agent_common.core.graph_utils import code_interpreter_ptc_enabled
     from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
     from .agents.file_analyzer import create_file_analyzer_subagent
@@ -406,31 +407,39 @@ def build_runtime_context(
                     subagent_extra_middlewares: list[Any] = [AuthErrorDetectionMiddleware()]
                     gp_inject_all_tools = None
                     if config.name == "general-purpose":
-                        # Inject ALL MCP tools from tool_registry (already discovered by orchestrator)
+                        # Inject ALL MCP tools from tool_registry (already discovered by orchestrator).
+                        # Under PTC these are exposed (bridge-installed) inside ``eval``; the model
+                        # finds the relevant ones at runtime via ``tools.search`` / ``tools.describe``.
                         gp_inject_all_tools = [t for t in tool_registry.values() if isinstance(t, BaseTool)]
-                        # Add ToolsetSelectorMiddleware for smart tool filtering
-                        subagent_extra_middlewares.append(
-                            ToolsetSelectorMiddleware(
-                                always_include=[
-                                    "get_current_time",
-                                    "generate_presigned_url",
-                                    "docstore_search",
-                                    "semantic_search_file",
-                                    "docstore_export",
-                                    "copy_file",
-                                    # The PTC code interpreter (`eval`) is the gateway to all
-                                    # PTC-exposed tools; it is a "base" tool (no server_name) so
-                                    # it survives Phase 1, but Phase 2 tool-selection can drop it.
-                                    # Pin it so the GP model never loses `tools.*` access.
-                                    PTC_CODE_INTERPRETER_TOOL_NAME,
-                                ],
-                                cost_logger=cost_logger,
-                                compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,
+                        # ToolsetSelectorMiddleware (per-turn LLM tool filtering) is only needed on the
+                        # native (PTC-off) path, where the full catalog would otherwise be bound to the
+                        # model. Under PTC, ``tools.search`` supersedes it (runtime discovery, no recall
+                        # ceiling, no per-turn selection LLM call) AND keeping the selector would re-break
+                        # prompt caching by varying the bound/exposed set per turn. So gate it on PTC-off.
+                        if not code_interpreter_ptc_enabled():
+                            subagent_extra_middlewares.append(
+                                ToolsetSelectorMiddleware(
+                                    always_include=[
+                                        "get_current_time",
+                                        "generate_presigned_url",
+                                        "docstore_search",
+                                        "semantic_search_file",
+                                        "docstore_export",
+                                        "copy_file",
+                                        # The PTC code interpreter (`eval`) is the gateway to all
+                                        # PTC-exposed tools; it is a "base" tool (no server_name) so
+                                        # it survives Phase 1, but Phase 2 tool-selection can drop it.
+                                        # Pin it so the GP model never loses `tools.*` access.
+                                        PTC_CODE_INTERPRETER_TOOL_NAME,
+                                    ],
+                                    cost_logger=cost_logger,
+                                    compression_server_slug=AgentSettings.GATANA_COMPRESSION_SERVER_SLUG,
+                                )
                             )
-                        )
+                        _selector_state = "off (PTC runtime discovery)" if code_interpreter_ptc_enabled() else "on"
                         logger.info(
                             f"GP agent: injecting {len(gp_inject_all_tools)} tools from tool_registry "
-                            f"with ToolsetSelectorMiddleware"
+                            f"(ToolsetSelectorMiddleware={_selector_state})"
                         )
 
                     # Auto-expand non-GP sub-agent MCP whitelist with compression

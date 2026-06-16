@@ -51,10 +51,14 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 The GP agent is a `DynamicLocalAgentRunnable` (from `agent-common`) registered as `"general-purpose"` in the subagent registry. It's special:
 
 - Gets ALL tools from `tool_registry` via `inject_all_tools` (bypasses MCP gateway discovery)
-- Has `ToolsetSelectorMiddleware` for LLM-driven smart tool filtering per task
 - Is the **primary executor of skills** — when the orchestrator is unsure which sub-agent to use, it delegates to GP
 - Loaded from DB as a user-configured sub-agent (name `"general-purpose"`)
 - Uses the same `DynamicLocalAgentRunnable` code path as other local agents
+
+**Tool filtering depends on PTC** (`CODE_INTERPRETER_PTC`):
+
+- **PTC off (native tool calling):** `ToolsetSelectorMiddleware` is added — an LLM filters the full catalog down to a relevant per-turn subset, so hundreds of tools aren't bound to the model.
+- **PTC on:** `ToolsetSelectorMiddleware` is **NOT** added. The catalog is exposed inside `eval` and the model discovers tools at runtime via `tools.search`/`tools.describe` (see `agent-common` → *PTC Tool Exposure*). This supersedes the selector (runtime discovery, no recall ceiling, no per-turn selection LLM call) and is required for prompt caching — keeping the selector under PTC would re-vary the exposed/rendered set per turn. The full catalog is still injected (`inject_all_tools`) so it can be exposed. Gating lives in `build_runtime_context()` via `code_interpreter_ptc_enabled()`.
 
 ### Sub-Agent Registry & Tool Registry
 
