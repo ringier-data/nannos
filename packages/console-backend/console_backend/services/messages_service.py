@@ -307,6 +307,7 @@ class MessagesService:
         message_id: str | None = None,
         final: bool = False,  # DEPRECATED: A2A 1.0.0 removes this field
         kind: str = "",
+        created_at: datetime | None = None,
     ) -> Message:
         """Insert a new message.
 
@@ -330,7 +331,10 @@ class MessagesService:
         if message_id is None:
             message_id = str(uuid7())
 
-        created_at = datetime.now(tz=timezone.utc)
+        # Allow callers to preserve an event's real time (e.g. streamed thoughts
+        # persisted at turn-end must keep their first-chunk timestamp so reload
+        # orders them where they actually occurred). Defaults to now.
+        created_at = created_at or datetime.now(tz=timezone.utc)
         created_at_iso = created_at.isoformat()
         timestamp_ms = int(created_at.timestamp() * 1000)  # Milliseconds for sort key
 

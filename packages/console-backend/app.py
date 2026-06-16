@@ -4,6 +4,7 @@ import logging
 import os
 import socket
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
@@ -477,6 +478,10 @@ _streaming_buffers: dict[str, str] = {}
 # Keyed by "{context_id}:{agent_name}". Persisted when the conversation turn ends
 # (terminal status or main artifact last_chunk) so reasoning blocks survive page reload.
 _intermediate_buffers: dict[str, str] = {}
+# First-chunk arrival time per intermediate buffer key. Buffers are flushed at
+# turn-end, but persisting them with this real start time (not turn-end) keeps
+# reload ordering aligned with how the thoughts streamed live.
+_intermediate_buffer_ts: dict[str, datetime] = {}
 
 
 # ==============================================================================
@@ -587,6 +592,7 @@ async def _flush_intermediate_buffers(
     keys_to_flush = [k for k in _intermediate_buffers if k.startswith(prefix)]
     for buf_key in keys_to_flush:
         content = _intermediate_buffers.pop(buf_key)
+        first_chunk_ts = _intermediate_buffer_ts.pop(buf_key, None)
         if not content.strip():
             continue
         agent_name = buf_key.split(":", 1)[1] if ":" in buf_key else "unknown"
@@ -616,6 +622,7 @@ async def _flush_intermediate_buffers(
             kind="artifact-update",
             raw_payload=synthetic_payload,
             metadata={"agent_name": agent_name},
+            created_at=first_chunk_ts,
         )
 
 
@@ -761,6 +768,10 @@ async def _process_a2a_response(
                         if chunk_text:
                             agent_name = artifact_metadata.get("agent_name", "unknown")
                             buf_key = f"{effective_context_id}:{agent_name}"
+                            # Stamp the first chunk's arrival time so the flushed message
+                            # keeps the real start time (reload ordering matches live).
+                            if buf_key not in _intermediate_buffers:
+                                _intermediate_buffer_ts[buf_key] = datetime.now(tz=timezone.utc)
                             _intermediate_buffers[buf_key] = _intermediate_buffers.get(buf_key, "") + chunk_text
                             logger.info(
                                 f"[STREAMING] Intermediate output chunk ({len(chunk_text)} chars) from {agent_name}, "
