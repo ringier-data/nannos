@@ -229,6 +229,40 @@ async def test_terminal_status_without_fallback_is_persisted():
 
 
 @pytest.mark.asyncio
+async def test_first_artifact_chunk_is_accumulated_not_persisted_standalone():
+    """The append=False first chunk of an artifact must be accumulated, not saved standalone.
+
+    The first chunk of any streamed artifact has append=False (it creates the
+    artifact). It used to fall through to save_agent_response as its own message,
+    splitting the content from the accumulated remainder — which reload rendered as
+    two fragments. It must now be accumulated like the appends that follow.
+    """
+    from a2a.types import Artifact, Part, StreamResponse, TaskArtifactUpdateEvent
+
+    from app import _process_a2a_response
+
+    mock_sio = _mock_sio_for_persistence("conv-firstchunk")
+    with patch("app.sio", mock_sio):
+        art = Artifact(
+            artifact_id="a1",
+            parts=[Part(text="The user wants me to delegate")],
+            metadata={"agent_name": "orchestrator"},
+        )
+        art.extensions.append("urn:nannos:a2a:intermediate-output:1.0")
+        event = TaskArtifactUpdateEvent(
+            task_id="t1", context_id="conv-firstchunk", artifact=art, append=False, last_chunk=False
+        )
+        await _process_a2a_response(
+            client_event=StreamResponse(artifact_update=event),
+            sid="sid",
+            request_id="req-fc",
+            context_id="conv-firstchunk",
+        )
+        # The first chunk is accumulated for later assembly, never persisted on its own.
+        mock_sio.app_instance.state.messages_service.save_agent_response.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_conversation_title_with_unicode_characters():
     """Test that conversation title handles Unicode characters correctly."""
 
