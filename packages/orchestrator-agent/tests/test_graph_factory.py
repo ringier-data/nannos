@@ -124,7 +124,7 @@ class TestMiddlewareStack:
         # cache, user prefs after steering, playbook after prefs, then the code
         # interpreter (_PTCToleranceCodeInterpreterMiddleware, which exposes the
         # eval REPL + PTC bridge and hides PTC-exposed tools from the model itself).
-        assert len(stack) == 16
+        assert len(stack) == 17
         assert stack[0].__class__.__name__ == "ConversationContextToolsMiddleware"
         assert isinstance(stack[1], DynamicToolDispatchMiddleware)
         assert isinstance(stack[2], StoragePathsInstructionMiddleware)
@@ -147,6 +147,9 @@ class TestMiddlewareStack:
         assert isinstance(stack[13], ToolRetryMiddleware)
         assert isinstance(stack[14], A2ATaskTrackingMiddleware)
         assert isinstance(stack[15], TodoStatusMiddleware)
+        # Innermost: strips duplicate plain-text content from AIMessages that
+        # carry a FinalResponseSchema tool call.
+        assert stack[16].__class__.__name__ == "FinalResponseTextStripMiddleware"
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
@@ -163,7 +166,7 @@ class TestMiddlewareStack:
 
         assert not any(isinstance(m, BedrockPromptCachingMiddleware) for m in stack)
         # One fewer middleware than the Bedrock case (cache middleware skipped)
-        assert len(stack) == 15
+        assert len(stack) == 16
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")

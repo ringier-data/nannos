@@ -521,10 +521,28 @@ class OrchestratorDeepAgent:
                             # (e.g. Gemini) emit as plain text instead of tool calls.
                             filtered = response_streamer.feed_content(token_text)
                             if filtered:
-                                if response_streamer.is_working:
-                                    # Intermediate "working" narration (e.g. while
-                                    # delegating) — route to the orchestrator
-                                    # thinking block, not the visible response.
+                                if response_streamer.content_tracking and not response_streamer.is_working:
+                                    # Structured response emitted as plain text
+                                    # (Gemini): the extracted ``message`` delta IS
+                                    # the final answer — stream it visibly.
+                                    stream_buffer.append(filtered)
+                                    for chunk in stream_buffer.flush_ready():
+                                        yield AgentStreamResponse(
+                                            state=TaskState.TASK_STATE_WORKING,
+                                            content=chunk,
+                                            metadata={"streaming_chunk": True},
+                                        )
+                                else:
+                                    # "Working" narration (e.g. while delegating) or
+                                    # plain text outside the structured response. The
+                                    # visible answer comes exclusively from the
+                                    # structured response — text the model emits
+                                    # alongside a FinalResponseSchema call would
+                                    # otherwise duplicate it in the streaming
+                                    # artifact. Route to the thinking channel; if the
+                                    # model never calls the response tool,
+                                    # parse_agent_response's fallback still surfaces
+                                    # this text in the final status message.
                                     yield AgentStreamResponse(
                                         state=TaskState.TASK_STATE_WORKING,
                                         content=filtered,
@@ -534,14 +552,6 @@ class OrchestratorDeepAgent:
                                             "agent_name": "orchestrator",
                                         },
                                     )
-                                else:
-                                    stream_buffer.append(filtered)
-                                    for chunk in stream_buffer.flush_ready():
-                                        yield AgentStreamResponse(
-                                            state=TaskState.TASK_STATE_WORKING,
-                                            content=chunk,
-                                            metadata={"streaming_chunk": True},
-                                        )
                     continue
 
                 if part_type == "custom":
