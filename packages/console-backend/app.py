@@ -706,7 +706,8 @@ async def _process_a2a_response(
                 message_extensions = status_message.get("extensions", []) if isinstance(status_message, dict) else []
                 is_work_plan = "urn:nannos:a2a:work-plan:1.0" in message_extensions
                 is_feedback_request = "urn:nannos:a2a:feedback-request:1.0" in message_extensions
-                is_artifact_append = response_data.get("kind") == "artifact-update" and response_data.get("append")
+                is_artifact_update = response_data.get("kind") == "artifact-update"
+                is_artifact_append = is_artifact_update and response_data.get("append")
                 # Handle both camelCase and snake_case, check explicitly for boolean value
                 # Don't use 'or' because False would fallback to checking second field
                 last_chunk_value = response_data.get("lastChunk")
@@ -721,9 +722,13 @@ async def _process_a2a_response(
                 # Accumulate streaming artifact text for persistence.
                 # Individual chunks are transient (not saved to DB); the assembled
                 # content is persisted when last_chunk arrives.
-                # IMPORTANT: Do NOT accumulate intermediate output (sub-agent thoughts).
-                # Those are display-only events, not part of the final persisted message.
-                if is_artifact_append:
+                # Use is_artifact_update (not is_artifact_append): the FIRST chunk of an
+                # artifact is append=False (it creates the artifact). It must be
+                # accumulated with the rest — otherwise it falls through to
+                # save_agent_response as its own standalone message and the content is
+                # split into two messages, which reload renders as two fragments
+                # (e.g. an orchestrator thought split mid-sentence).
+                if is_artifact_update:
                     artifact = response_data.get("artifact", {})
                     artifact_metadata = artifact.get("metadata", {}) if isinstance(artifact, dict) else {}
                     # Detect intermediate output via extensions array on the artifact
@@ -848,7 +853,7 @@ async def _process_a2a_response(
                 if (
                     not is_work_plan
                     and not is_feedback_request
-                    and not is_artifact_append
+                    and not is_artifact_update
                     and not is_bare_completion_signal
                     and not safety_net_saved
                 ):
