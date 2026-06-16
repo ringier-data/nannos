@@ -53,6 +53,7 @@ from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
 from .registry import RegistryService, User
+from .turn_state import TurnState, count_tool_messages
 from .steering_state import (
     get_all_active_subagent_dispatches,
     get_orchestrator_pending_messages,
@@ -625,8 +626,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 first_intermediate_chunk_sent = False  # Track if we've sent the initial INTERMEDIATE artifact chunk
                 streamed_chars = 0  # Total chars streamed via the MAIN artifact (code points, not wire bytes; for completion diagnostics)
                 deferred_terminal_item = None
+                # Per-round carrier: the agent populates this from its single
+                # end-of-stream aget_state, so the phantom / feedback / terminal
+                # checks below reuse it instead of re-reading the checkpoint
+                # (~1.5–5s each). Must be a per-round local — agent/executor are
+                # shared singletons.
+                turn_state = TurnState()
 
-                async for item in self.agent.stream(message_parts, user_config, config=config, resume=resume_value):
+                async for item in self.agent.stream(
+                    message_parts, user_config, config=config, resume=resume_value, turn_state=turn_state
+                ):
                     # Buffer the terminal completed item so we can check for unconsumed
                     # steering messages before emitting it to the SSE stream.
                     # Other terminal states are emitted immediately.
@@ -634,21 +643,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         deferred_terminal_item = item
                         continue
 
-                    # Skip costly graph.get_state() for transient streaming chunks
                     metadata = item.metadata or {}
+                    # is_final for in-loop items is only consumed by plain WORKING status
+                    # items (960/969), which carry metadata=None — so the two branches are
+                    # identical. activity_log / work_plan / streaming_chunk items return
+                    # before then, and interrupt items don't read it. So is_final is
+                    # immaterial here; use a constant and skip the per-item checkpoint read.
+                    # (Validated via the shadow phase: see git history.)
+                    is_final = True
                     if metadata.get("streaming_chunk"):
-                        is_final = True  # Doesn't matter for streaming chunks
                         # Track MAIN-artifact bytes only (intermediate sub-agent thoughts
                         # go to a separate "-thought" artifact and aren't part of the
                         # main response stream the client renders).
                         if not metadata.get("intermediate_output") and item.content:
                             streamed_chars += len(item.content)
-                    else:
-                        current_state = graph.get_state(config)  # type: ignore
-                        if hasattr(current_state, "interrupts") and current_state.interrupts:
-                            is_final = False
-                        else:
-                            is_final = True
 
                     # Pass per-artifact first_chunk_sent flags and update after each chunk
                     first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
@@ -697,8 +705,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     and deferred_terminal_item.state == TaskState.TASK_STATE_COMPLETED
                     and delegation_reinvocations < MAX_DELEGATION_REINVOCATIONS
                 ):
-                    phantom_state = graph.get_state(config)  # type: ignore
-                    phantom_values = phantom_state.values if hasattr(phantom_state, "values") else {}
+                    # Reuse the state the agent already read at end-of-stream (carrier),
+                    # instead of re-reading the checkpoint here (~1.5–5s).
+                    phantom_values = turn_state.final_values or {}
                     if StreamHandler.is_phantom_subagent_completion(phantom_values):
                         delegation_reinvocations += 1
                         message_parts = [Part(text=_DELEGATION_NUDGE)]
@@ -721,9 +730,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     force_feedback = request_metadata.get("forceFeedbackRequest") in (True, "true", "1")
                     feedback_threshold = int(os.environ.get("FEEDBACK_RECURSION_THRESHOLD", "40"))
                     try:
-                        final_state = graph.get_state(config)  # type: ignore
-                        msgs = final_state.values.get("messages", []) if hasattr(final_state, "values") else []
-                        tool_msg_count = sum(1 for m in msgs if hasattr(m, "tool_call_id"))
+                        # Reuse the agent's end-of-stream state (carrier) instead of re-reading.
+                        msgs = (turn_state.final_values or {}).get("messages", [])
+                        tool_msg_count = count_tool_messages(turn_state.final_values or {})
                         if force_feedback or tool_msg_count > feedback_threshold:
                             # Extract sub-agent IDs from activity-log metadata
                             # Prefer integer sub_agent_id; fall back to agent_name for built-in agents
@@ -756,11 +765,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     if metadata.get("streaming_chunk"):
                         is_final = True
                     else:
-                        current_state = graph.get_state(config)  # type: ignore
-                        if hasattr(current_state, "interrupts") and current_state.interrupts:
-                            is_final = False
-                        else:
-                            is_final = True
+                        # Reuse the agent's end-of-stream interrupts (carrier) instead of
+                        # re-reading. This preserves the "contradictory completed non-final"
+                        # guard (1099): a COMPLETED item is treated as final unless the
+                        # captured state shows pending interrupts.
+                        is_final = not turn_state.has_interrupts
                     first_chunk_sent, first_intermediate_chunk_sent = await self._handle_stream_item(
                         deferred_terminal_item,
                         updater,
