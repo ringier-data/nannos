@@ -2,12 +2,12 @@
 
 from .base import BaseAgent
 from .cost_tracking_mixin import CostTrackingMixin
-from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
+from .postgres_checkpointer_mixin import PostgreSQLCheckpointerMixin
 
 __all__ = [
     "BaseAgent",
     "CostTrackingMixin",
-    "DynamoDBCheckpointerMixin",
+    "PostgreSQLCheckpointerMixin",
     "LangGraphAgent",
     "LangGraphAnthropicAgent",
     "LangGraphBedrockAgent",
@@ -21,10 +21,10 @@ def __getattr__(name: str):
         from .langgraph import LangGraphAgent
 
         return LangGraphAgent
-    if name == "DynamoDBCheckpointerMixin":
-        from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
+    if name == "PostgreSQLCheckpointerMixin":
+        from .postgres_checkpointer_mixin import PostgreSQLCheckpointerMixin
 
-        return DynamoDBCheckpointerMixin
+        return PostgreSQLCheckpointerMixin
     if name == "LangGraphAnthropicAgent":
         try:
             from .langgraph_anthropic import LangGraphAnthropicAgent

@@ -15,27 +15,13 @@ from ringier_a2a_sdk.middleware.tool_schema_cleaning import ToolSchemaCleaningMi
 class TestLangGraphBedrockAgentMiddleware:
     """Tests for LangGraphBedrockAgent middleware setup."""
 
-    @patch.dict(
-        os.environ,
-        {
-            "CHECKPOINT_DYNAMODB_TABLE_NAME": "test-table",
-            "AWS_BEDROCK_REGION": "us-east-1",
-        },
-    )
+    @patch.dict(os.environ, {"AWS_BEDROCK_REGION": "us-east-1"})
     @patch("boto3.client")
-    @patch("boto3.resource")
     def test_bedrock_agent_includes_schema_cleaning_and_prompt_caching_by_default(
-        self, mock_boto3_resource, mock_boto3_client
+        self, mock_boto3_client
     ):
         """Test that LangGraphBedrockAgent includes both schema cleaning and prompt caching by default."""
-        # Mock AWS clients
-        mock_bedrock_client = MagicMock()
-        mock_boto3_client.return_value = mock_bedrock_client
-
-        mock_dynamodb = MagicMock()
-        mock_boto3_resource.return_value = mock_dynamodb
-        mock_table = MagicMock()
-        mock_dynamodb.Table.return_value = mock_table
+        mock_boto3_client.return_value = MagicMock()
 
         class MinimalBedrockAgent(LangGraphBedrockAgent):
             """Minimal concrete implementation for testing."""
@@ -59,25 +45,11 @@ class TestLangGraphBedrockAgentMiddleware:
         assert isinstance(middleware[1], ToolSchemaCleaningMiddleware)
         assert isinstance(middleware[2], SteeringMiddleware)
 
-    @patch.dict(
-        os.environ,
-        {
-            "CHECKPOINT_DYNAMODB_TABLE_NAME": "test-table",
-            "AWS_BEDROCK_REGION": "us-east-1",
-        },
-    )
+    @patch.dict(os.environ, {"AWS_BEDROCK_REGION": "us-east-1"})
     @patch("boto3.client")
-    @patch("boto3.resource")
-    def test_subclass_can_extend_middleware(self, mock_boto3_resource, mock_boto3_client):
+    def test_subclass_can_extend_middleware(self, mock_boto3_client):
         """Test that subclasses can extend the middleware list by calling super()."""
-        # Mock AWS clients
-        mock_bedrock_client = MagicMock()
-        mock_boto3_client.return_value = mock_bedrock_client
-
-        mock_dynamodb = MagicMock()
-        mock_boto3_resource.return_value = mock_dynamodb
-        mock_table = MagicMock()
-        mock_dynamodb.Table.return_value = mock_table
+        mock_boto3_client.return_value = MagicMock()
 
         from langchain.agents.middleware.types import AgentMiddleware
 
@@ -167,19 +139,10 @@ class TestBedrockImagePreprocessing:
         from unittest.mock import MagicMock, patch
 
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "CHECKPOINT_DYNAMODB_TABLE_NAME": "test-table",
-                    "AWS_BEDROCK_REGION": "us-east-1",
-                },
-            ),
+            patch.dict(os.environ, {"AWS_BEDROCK_REGION": "us-east-1"}),
             patch("boto3.client") as mock_c,
-            patch("boto3.resource") as mock_r,
         ):
             mock_c.return_value = MagicMock()
-            mock_r.return_value = MagicMock()
-            mock_r.return_value.Table.return_value = MagicMock()
 
             class MinimalAgent(LangGraphBedrockAgent):
                 async def _get_mcp_connections(self):

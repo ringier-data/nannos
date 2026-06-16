@@ -33,6 +33,23 @@ services:
       timeout: 5s
       retries: 15
 
+  postgres-checkpointer:
+    image: postgres:16
+    container_name: nannos-local-postgres-checkpointer
+    ports:
+      - "5403:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: checkpointer
+    volumes:
+      - pgdata-checkpointer:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.5.5
     container_name: nannos-local-keycloak
@@ -58,3 +75,4 @@ services:
 volumes:
   pgdata-console:
   pgdata-docstore:
+  pgdata-checkpointer:

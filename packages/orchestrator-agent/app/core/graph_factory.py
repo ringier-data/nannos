@@ -133,7 +133,8 @@ class GraphFactory:
         self._static_tools_cache: list[BaseTool] = []
 
         # Create shared checkpointer for all graphs
-        # This enables conversation continuity when users switch models
+        # Pool is opened in ensure_store_setup(); _checkpointer_pool is None when MemorySaver is used.
+        self._checkpointer_pool = None
         self._checkpointer: BaseCheckpointSaver = self._create_checkpointer(config)
 
         # Create shared document store with PostgreSQL + pgvector (optional)
@@ -186,37 +187,47 @@ class GraphFactory:
         )
         logger.debug("Initialized middleware stack")
 
-    @staticmethod
-    def _create_checkpointer(config: AgentSettings) -> BaseCheckpointSaver:
-        """Create the appropriate checkpointer based on available infrastructure.
+    def _create_checkpointer(self, config: AgentSettings) -> BaseCheckpointSaver:
+        """Create the connection pool and return a MemorySaver placeholder.
 
-        Uses DynamoDB when AWS credentials and a table name are configured,
-        otherwise falls back to an in-memory checkpointer for local development.
+        AsyncPostgresSaver.__init__ calls asyncio.get_running_loop() so it must be
+        constructed inside an async context.  This method creates the pool (safe to
+        do synchronously) and stores it on self._checkpointer_pool.
+        _setup_checkpointer() — called from ensure_store_setup() — instantiates
+        AsyncPostgresSaver and replaces self._checkpointer before any requests are served.
         """
-        if _has_aws_credentials() and config.CHECKPOINT_DYNAMODB_TABLE_NAME:
-            from langgraph_checkpoint_aws import DynamoDBSaver
-
-            s3_config: dict[str, str] | None = None
-            if config.CHECKPOINT_S3_BUCKET_NAME:
-                s3_config = {"bucket_name": config.CHECKPOINT_S3_BUCKET_NAME}
-                logger.info(f"S3 offloading enabled for large checkpoints: {config.CHECKPOINT_S3_BUCKET_NAME}")
-
-            checkpointer = DynamoDBSaver(
-                table_name=config.CHECKPOINT_DYNAMODB_TABLE_NAME,
-                region_name=config.CHECKPOINT_AWS_REGION,
-                ttl_seconds=config.CHECKPOINT_TTL_DAYS * 24 * 60 * 60,
-                enable_checkpoint_compression=config.CHECKPOINT_COMPRESSION_ENABLED,
-                s3_offload_config=s3_config,  # type: ignore[arg-type]
-            )
-            logger.info("Initialized shared DynamoDB checkpointer with S3 offloading support")
-            return checkpointer
-
         from langgraph.checkpoint.memory import MemorySaver
 
-        logger.info(
-            "AWS credentials or CHECKPOINT_DYNAMODB_TABLE_NAME not configured – "
-            "using in-memory checkpointer (conversations will not persist across restarts)"
+        if not config.CHECKPOINT_POSTGRES_HOST:
+            logger.info(
+                "CHECKPOINT_POSTGRES_HOST not set – using in-memory checkpointer "
+                "(conversations will not persist across restarts)"
+            )
+            return MemorySaver()
+
+        from psycopg_pool import AsyncConnectionPool
+
+        conn_string = (
+            f"postgresql://{config.CHECKPOINT_POSTGRES_USER}"
+            f":{config.CHECKPOINT_POSTGRES_PASSWORD}"
+            f"@{config.CHECKPOINT_POSTGRES_HOST}"
+            f":{config.CHECKPOINT_POSTGRES_PORT}"
+            f"/{config.CHECKPOINT_POSTGRES_DB}"
         )
+        pool = AsyncConnectionPool(
+            conninfo=conn_string,
+            open=False,
+            kwargs={"autocommit": True, "prepare_threshold": 0},
+        )
+        self._checkpointer_pool = pool
+
+        logger.info(
+            "Prepared PostgreSQL checkpointer pool (host=%s, db=%s) — "
+            "AsyncPostgresSaver will be created in _setup_checkpointer()",
+            config.CHECKPOINT_POSTGRES_HOST,
+            config.CHECKPOINT_POSTGRES_DB,
+        )
+        # Placeholder replaced by AsyncPostgresSaver in _setup_checkpointer()
         return MemorySaver()
 
     @property
@@ -296,15 +307,13 @@ class GraphFactory:
         return backend
 
     async def ensure_store_setup(self) -> None:
-        """Ensure the database schema is set up for the document store.
+        """Ensure all database schemas are set up (checkpointer + document store).
 
-        This method creates the necessary tables and indexes in PostgreSQL if they don't exist.
-        It handles cleanup of incompatible existing schemas.
-        It's safe to call multiple times - subsequent calls are no-ops.
-        Should be called once when the application starts before using the store.
-
-        No-op when PostgreSQL is not configured.
+        Opens connection pools, verifies PostgreSQL version, and creates tables.
+        Safe to call multiple times — subsequent calls are no-ops.
         """
+        await self._setup_checkpointer()
+
         if not self._store_enabled:
             logger.info("Document store not configured – skipping schema setup")
             return
@@ -361,22 +370,62 @@ class GraphFactory:
             self._store_setup_complete = True
             logger.info("AsyncPostgresStore schema setup completed successfully")
 
+    async def _setup_checkpointer(self) -> None:
+        """Instantiate AsyncPostgresSaver, open pool, verify PG ≥ 11, run migrations.
+
+        Replaces the MemorySaver placeholder in self._checkpointer with the real saver.
+        """
+        pool = self._checkpointer_pool
+        if pool is None:
+            return  # permanent MemorySaver — nothing to do
+
+        if not getattr(pool, "_opened", False):
+            await pool.open()
+            logger.info("Opened AsyncConnectionPool for checkpointer")
+
+        from ringier_a2a_sdk.agent.postgres_checkpointer_mixin import _verify_postgres_version
+
+        await _verify_postgres_version(pool)
+
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        serde = None
+        if self.config.CHECKPOINT_S3_BUCKET_NAME:
+            from ringier_a2a_sdk.agent.postgres_checkpointer_mixin import S3OffloadingSerde
+
+            threshold = int(self.config.CHECKPOINT_S3_THRESHOLD_MB * 1024 * 1024)
+            serde = S3OffloadingSerde(
+                bucket=self.config.CHECKPOINT_S3_BUCKET_NAME, threshold_bytes=threshold
+            )
+            logger.info("S3 checkpoint offloading enabled: %s", self.config.CHECKPOINT_S3_BUCKET_NAME)
+
+        checkpointer = AsyncPostgresSaver(pool, serde=serde)
+        try:
+            checkpointer.schema_name = self.config.CHECKPOINT_POSTGRES_SCHEMA  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+
+        await checkpointer.setup()
+        self._checkpointer = checkpointer
+        logger.info(
+            "PostgreSQL checkpointer ready (schema=%s)", self.config.CHECKPOINT_POSTGRES_SCHEMA
+        )
+
     @property
     def a2a_middleware(self) -> A2ATaskTrackingMiddleware:
         """Get the A2A task tracking middleware (needed by discovery service)."""
         return self._a2a_middleware
 
     async def close(self) -> None:
-        """Close the connection pool and clean up resources.
-
-        Should be called when the GraphFactory is no longer needed (e.g., on application shutdown).
-        """
-        # Shutdown cost logger if present
+        """Close connection pools and clean up resources on application shutdown."""
         if self.cost_logger is not None:
             await self.cost_logger.shutdown()
             logger.info("Cost logger shutdown complete")
 
-        # Close database connection pool
+        if self._checkpointer_pool is not None and getattr(self._checkpointer_pool, "_opened", False):
+            await self._checkpointer_pool.close()
+            logger.info("Closed AsyncConnectionPool for checkpointer")
+
         if self._connection_pool is not None and self._connection_pool._opened:
             await self._connection_pool.close()
             logger.info("Closed AsyncConnectionPool for document store")

@@ -31,11 +31,13 @@ class TestAgentSettings:
         """Test cache configuration."""
         assert AgentSettings.AGENT_DISCOVERY_CACHE_TTL == 30
 
-    def test_dynamodb_configuration(self):
-        """Test DynamoDB checkpoint configuration."""
-        assert AgentSettings.CHECKPOINT_DYNAMODB_TABLE_NAME == "dev-nannos-infrastructure-agents-langgraph-checkpoints"
+    def test_postgres_checkpoint_configuration(self):
+        """Test Postgres checkpoint configuration defaults."""
+        assert AgentSettings.CHECKPOINT_POSTGRES_HOST is None
+        assert AgentSettings.CHECKPOINT_POSTGRES_PORT == "5432"
+        assert AgentSettings.CHECKPOINT_POSTGRES_DB == "checkpointer"
+        assert AgentSettings.CHECKPOINT_POSTGRES_SCHEMA == "checkpoints"
         assert AgentSettings.CHECKPOINT_TTL_DAYS == 14
-        assert AgentSettings.CHECKPOINT_AWS_REGION == "eu-central-1"
         assert AgentSettings.CHECKPOINT_MAX_RETRIES == 5
 
     def test_system_instruction_not_empty(self):

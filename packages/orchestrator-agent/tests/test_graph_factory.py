@@ -34,9 +34,8 @@ from app.models.config import AgentSettings
 def mock_config():
     """Create a properly configured mock AgentSettings."""
     config = Mock(spec=AgentSettings)
-    config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
+    config.CHECKPOINT_POSTGRES_HOST = None
     config.CHECKPOINT_TTL_DAYS = 14
-    config.CHECKPOINT_AWS_REGION = "eu-west-1"
     config.CHECKPOINT_MAX_RETRIES = 3
     config.MAX_RETRIES = 3
     config.BACKOFF_FACTOR = 2
@@ -57,18 +56,13 @@ def mock_config():
 class TestGraphFactoryInitialization:
     """Test GraphFactory initialization."""
 
-    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_initialization_creates_checkpointer(self, mock_dynamodb_saver, _mock_creds, mock_config):
-        """Test GraphFactory creates a shared DynamoDB checkpointer."""
+    def test_initialization_creates_checkpointer(self, mock_config):
+        """Test GraphFactory creates a shared checkpointer (MemorySaver when no Postgres host)."""
         factory = GraphFactory(config=mock_config)
 
-        mock_dynamodb_saver.assert_called_once()
         assert factory._checkpointer is not None
 
-    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_initialization_creates_middleware_instances(self, mock_dynamodb_saver, _mock_creds, mock_config):
+    def test_initialization_creates_middleware_instances(self, mock_config):
         """Test GraphFactory creates middleware instances."""
         factory = GraphFactory(config=mock_config)
 
@@ -77,9 +71,7 @@ class TestGraphFactoryInitialization:
         assert factory._todo_middleware is not None
         assert factory._retry_middleware is not None
 
-    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_a2a_middleware_property(self, mock_dynamodb_saver, _mock_creds, mock_config):
+    def test_a2a_middleware_property(self, mock_config):
         """Test a2a_middleware property returns the middleware instance."""
         factory = GraphFactory(config=mock_config)
 
@@ -94,9 +86,7 @@ class TestGraphCreation:
     requiring an event loop. These scenarios should be covered by integration tests.
     """
 
-    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_graph_cache_dictionary_initialized(self, mock_dynamodb, _mock_creds, mock_config):
+    def test_graph_cache_dictionary_initialized(self, mock_config):
         """Test that the graph cache dictionary is initialized on factory creation."""
         factory = GraphFactory(config=mock_config)
 
@@ -110,8 +100,7 @@ class TestMiddlewareStack:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_middleware_stack_order(self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config):
+    def test_middleware_stack_order(self, mock_pg_store, _mock_creds, mock_config):
         """Test that middleware stack is assembled in the correct order for a Bedrock model."""
         factory = GraphFactory(config=mock_config)
 
@@ -153,9 +142,8 @@ class TestMiddlewareStack:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
     def test_middleware_stack_excludes_bedrock_caching_for_non_bedrock_models(
-        self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config
+        self, mock_pg_store, _mock_creds, mock_config
     ):
         """BedrockPromptCachingMiddleware must NOT be attached for non-Bedrock models."""
         factory = GraphFactory(config=mock_config)
@@ -170,9 +158,8 @@ class TestMiddlewareStack:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
     def test_middleware_stack_excludes_bedrock_caching_when_model_is_none(
-        self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config
+        self, mock_pg_store, _mock_creds, mock_config
     ):
         """Default (model=None) call path must not inject Bedrock caching either."""
         factory = GraphFactory(config=mock_config)
@@ -183,9 +170,8 @@ class TestMiddlewareStack:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
     def test_middleware_stack_dynamic_tool_dispatch_config(
-        self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config
+        self, mock_pg_store, _mock_creds, mock_config
     ):
         """Test that DynamicToolDispatchMiddleware is configured correctly."""
         factory = GraphFactory(config=mock_config)
@@ -203,8 +189,7 @@ class TestStaticTools:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_get_static_tools_returns_cached_tools(self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config):
+    def test_get_static_tools_returns_cached_tools(self, mock_pg_store, _mock_creds, mock_config):
         """Test that get_static_tools returns the same cached list on repeated calls."""
         factory = GraphFactory(config=mock_config)
 
@@ -218,8 +203,7 @@ class TestStaticTools:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
-    @patch("langgraph_checkpoint_aws.DynamoDBSaver")
-    def test_static_tools_include_time_and_file(self, mock_dynamodb, mock_pg_store, _mock_creds, mock_config):
+    def test_static_tools_include_time_and_file(self, mock_pg_store, _mock_creds, mock_config):
         """Test that static tools list includes expected tools."""
         factory = GraphFactory(config=mock_config)
 

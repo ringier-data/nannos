@@ -176,11 +176,8 @@ class TestThinkingLevelCaching:
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
-        config.CHECKPOINT_S3_BUCKET_NAME = "test-bucket"
-        config.CHECKPOINT_AWS_REGION = "eu-central-1"
+        config.CHECKPOINT_POSTGRES_HOST = None
         config.CHECKPOINT_TTL_DAYS = 30
-        config.CHECKPOINT_COMPRESSION_ENABLED = True
         config.POSTGRES_USER = "test"
         config.POSTGRES_PASSWORD = "test"
         config.POSTGRES_HOST = "localhost"
@@ -191,20 +188,19 @@ class TestThinkingLevelCaching:
         config.get_bedrock_region.return_value = "eu-central-1"
         mock_boto_client.return_value = Mock()
 
-        with patch("langgraph_checkpoint_aws.DynamoDBSaver"):
-            with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
-                factory = GraphFactory(config)
+        with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
+            factory = GraphFactory(config)
 
-                # Create model with low thinking
-                model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
+            # Create model with low thinking
+            model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
 
-                # Create model with high thinking
-                model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.high)
+            # Create model with high thinking
+            model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.high)
 
-                # Should have created two separate instances
-                assert len(factory._models) == 2
-                assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._models
-                assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._models
+            # Should have created two separate instances
+            assert len(factory._models) == 2
+            assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._models
+            assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._models
 
     @patch("boto3.client")
     @patch("langchain_aws.ChatBedrockConverse")
@@ -213,11 +209,8 @@ class TestThinkingLevelCaching:
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
-        config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
-        config.CHECKPOINT_S3_BUCKET_NAME = "test-bucket"
-        config.CHECKPOINT_AWS_REGION = "eu-central-1"
+        config.CHECKPOINT_POSTGRES_HOST = None
         config.CHECKPOINT_TTL_DAYS = 30
-        config.CHECKPOINT_COMPRESSION_ENABLED = True
         config.POSTGRES_USER = "test"
         config.POSTGRES_PASSWORD = "test"
         config.POSTGRES_HOST = "localhost"
@@ -228,14 +221,13 @@ class TestThinkingLevelCaching:
         config.get_bedrock_region.return_value = "eu-central-1"
         mock_boto_client.return_value = Mock()
 
-        with patch("langgraph_checkpoint_aws.DynamoDBSaver"):
-            with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
-                factory = GraphFactory(config)
+        with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
+            factory = GraphFactory(config)
 
-                # Create model with low thinking twice
-                model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
-                model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
+            # Create model with low thinking twice
+            model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
+            model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
 
-                # Should reuse the same instance
-                assert model1 is model2
-                assert len(factory._models) == 1
+            # Should reuse the same instance
+            assert model1 is model2
+            assert len(factory._models) == 1

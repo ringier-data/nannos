@@ -11,8 +11,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from pydantic import SecretStr
 
-from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
 from .langgraph import FinalResponseSchema, LangGraphAgent  # noqa: F401
+from .postgres_checkpointer_mixin import PostgreSQLCheckpointerMixin
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +41,14 @@ def _get_thinking_budget(thinking_level: str) -> int:
     return budget_map.get(thinking_level, 4096)
 
 
-class LangGraphAnthropicAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
-    """LangGraph agent using Anthropic API directly and DynamoDB checkpointing.
+class LangGraphAnthropicAgent(PostgreSQLCheckpointerMixin, LangGraphAgent):
+    """LangGraph agent using Anthropic API directly and PostgreSQL checkpointing.
 
     Supports both standard Claude models and extended thinking mode for complex reasoning.
 
     This is a concrete implementation of LangGraphAgent that:
     - Uses Anthropic API (Claude models) as the LLM
-    - Uses DynamoDB checkpointers with optional S3 offloading
+    - Uses PostgreSQL checkpointers with optional S3 offloading
     - Optionally enables Claude extended thinking mode
 
     Configuration:

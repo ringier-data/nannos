@@ -569,7 +569,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 ],
             }
 
-            current_state = graph.get_state(config)  # type: ignore
+            current_state = await graph.aget_state(config)  # type: ignore
 
             # Check if the graph is currently interrupted and this might be a resume request
             resume_value = None  # Initialize resume_value

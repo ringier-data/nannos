@@ -302,17 +302,19 @@ class AgentSettings:
     # Cache configuration
     AGENT_DISCOVERY_CACHE_TTL = 30  # seconds
 
-    # DynamoDB checkpoint configuration
-    CHECKPOINT_DYNAMODB_TABLE_NAME = os.getenv(
-        "CHECKPOINT_DYNAMODB_TABLE_NAME", "dev-nannos-infrastructure-agents-langgraph-checkpoints"
-    )
-    CHECKPOINT_TTL_DAYS = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
-    CHECKPOINT_AWS_REGION = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
-    CHECKPOINT_MAX_RETRIES = int(os.getenv("CHECKPOINT_MAX_RETRIES", "5"))
+    # PostgreSQL checkpoint configuration
+    CHECKPOINT_POSTGRES_HOST: str | None = os.getenv("CHECKPOINT_POSTGRES_HOST", None)
+    CHECKPOINT_POSTGRES_PORT: str = os.getenv("CHECKPOINT_POSTGRES_PORT", "5432")
+    CHECKPOINT_POSTGRES_DB: str = os.getenv("CHECKPOINT_POSTGRES_DB", "checkpointer")
+    CHECKPOINT_POSTGRES_USER: str = os.getenv("CHECKPOINT_POSTGRES_USER", "postgres")
+    CHECKPOINT_POSTGRES_PASSWORD: str = os.getenv("CHECKPOINT_POSTGRES_PASSWORD", "")
+    CHECKPOINT_POSTGRES_SCHEMA: str = os.getenv("CHECKPOINT_POSTGRES_SCHEMA", "checkpoints")
+    CHECKPOINT_TTL_DAYS: int = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
+    CHECKPOINT_MAX_RETRIES: int = int(os.getenv("CHECKPOINT_MAX_RETRIES", "5"))
 
-    # S3 offloading for large checkpoints (>350KB) - prevents DynamoDB 400KB limit errors
+    # Optional S3 offloading for large checkpoint blobs
     CHECKPOINT_S3_BUCKET_NAME: str | None = os.getenv("CHECKPOINT_S3_BUCKET_NAME", None)
-    CHECKPOINT_COMPRESSION_ENABLED = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
+    CHECKPOINT_S3_THRESHOLD_MB: float = float(os.getenv("CHECKPOINT_S3_THRESHOLD_MB", "10"))
 
     # file store configuration
     DOCUMENT_STORE_S3_BUCKET = os.getenv("DOCUMENT_STORE_S3_BUCKET", "dev-nannos-infrastructure-agents-files")

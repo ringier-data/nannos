@@ -760,6 +760,12 @@ class LangGraphAgent(BaseAgent):
         await self.flush_cost_tracking()
         logger.info(f"{self.__class__.__name__} closed")
 
+    async def _setup_checkpointer(self) -> None:
+        """No-op default; overridden by PostgreSQLCheckpointerMixin."""
+
+    async def _teardown_checkpointer(self) -> None:
+        """No-op default; overridden by PostgreSQLCheckpointerMixin."""
+
     async def startup(self) -> None:
         """Async startup hook for lifecycle initialization.
 
@@ -774,6 +780,7 @@ class LangGraphAgent(BaseAgent):
                 # subclass-specific startup logic
         """
         logger.info(f"Starting up {self.__class__.__name__}")
+        await self._setup_checkpointer()
         await self._start_mcp_refresh()
         logger.info(f"{self.__class__.__name__} startup complete")
 
@@ -793,6 +800,7 @@ class LangGraphAgent(BaseAgent):
         logger.info(f"Shutting down {self.__class__.__name__}")
         await self._stop_mcp_refresh()
         await self.close()
+        await self._teardown_checkpointer()
         logger.info(f"{self.__class__.__name__} shutdown complete")
 
     async def _stream_impl(

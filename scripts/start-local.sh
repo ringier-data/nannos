@@ -213,8 +213,9 @@ printf "${CYAN}│${RESET}                                                      
 
 # Infrastructure
 printf "${CYAN}│${RESET}  Infrastructure:                                       ${CYAN}│${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (console)   ${DIM}(Docker, localhost:5401)${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (docstore)  ${DIM}(Docker, localhost:5402)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (console)       ${DIM}(Docker, localhost:5401)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (docstore)      ${DIM}(Docker, localhost:5402)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (checkpointer)  ${DIM}(Docker, localhost:5403)${RESET}\n"
 if [[ "$_OIDC_MODE" == "local" ]]; then
   printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Keycloak        ${DIM}(Docker, localhost:8180)${RESET}\n"
 else
@@ -342,9 +343,7 @@ AWS_BEDROCK_REGION="${AWS_BEDROCK_REGION:-}"
 GCP_KEY="${GCP_KEY:-}"
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-}"
 GCP_LOCATION="${GCP_LOCATION:-}"
-CHECKPOINT_DYNAMODB_TABLE_NAME="${CHECKPOINT_DYNAMODB_TABLE_NAME:-}"
 CHECKPOINT_S3_BUCKET_NAME="${CHECKPOINT_S3_BUCKET_NAME:-}"
-CHECKPOINT_AWS_REGION="${CHECKPOINT_AWS_REGION:-}"
 DOCUMENT_STORE_S3_BUCKET="${DOCUMENT_STORE_S3_BUCKET:-}"
 FILES_S3_BUCKET="${FILES_S3_BUCKET:-}"
 CATALOG_VECTOR_BUCKET_NAME="${CATALOG_VECTOR_BUCKET_NAME:-}"
@@ -393,9 +392,7 @@ if [[ "$_HAS_AWS" == true ]]; then
   AWS_BEDROCK_REGION="eu-central-1"
   ok "AWS Bedrock enabled (region: $AWS_BEDROCK_REGION)"
 
-  CHECKPOINT_DYNAMODB_TABLE_NAME="dev-nannos-infrastructure-agents-langgraph-checkpoints"
   CHECKPOINT_S3_BUCKET_NAME="dev-nannos-infrastructure-agents-orchestrator-checkpoints"
-  CHECKPOINT_AWS_REGION="eu-central-1"
   DOCUMENT_STORE_S3_BUCKET="dev-nannos-infrastructure-agents-files"
   FILES_S3_BUCKET="dev-nannos-infrastructure-agents-files"
   CATALOG_VECTOR_BUCKET_NAME="dev-nannos-infrastructure-agents-catalog-vectors"
@@ -538,6 +535,9 @@ until docker compose exec -T postgres-console pg_isready -U postgres >/dev/null 
   sleep 1
 done
 until docker compose exec -T postgres-docstore pg_isready -U postgres >/dev/null 2>&1; do
+  sleep 1
+done
+until docker compose exec -T postgres-checkpointer pg_isready -U postgres >/dev/null 2>&1; do
   sleep 1
 done
 ok "PostgreSQL is ready"
@@ -838,8 +838,9 @@ cat <<'EOF'
     Voice Agent ....... http://localhost:8002
     soffice-worker .... http://localhost:8090
     Keycloak .......... $_KC_BASE_URL
-    PostgreSQL (console) . localhost:5401
-    PostgreSQL (docstore)  localhost:5402
+    PostgreSQL (console)       localhost:5401
+    PostgreSQL (docstore)      localhost:5402
+    PostgreSQL (checkpointer)  localhost:5403
 
   LLM Providers:
 ${_LLM_LINES}
@@ -909,8 +910,6 @@ procs:
       AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
       BEDROCK_MODEL_ID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      CHECKPOINT_DYNAMODB_TABLE_NAME: "$CHECKPOINT_DYNAMODB_TABLE_NAME"
-      CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
       FILES_S3_BUCKET: "$FILES_S3_BUCKET"
       OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
       LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
@@ -1016,9 +1015,13 @@ procs:
       GCP_KEY: '$GCP_KEY'
       GCP_PROJECT_ID: "$GCP_PROJECT_ID"
       GCP_LOCATION: "$GCP_LOCATION"
-      CHECKPOINT_DYNAMODB_TABLE_NAME: "$CHECKPOINT_DYNAMODB_TABLE_NAME"
+      CHECKPOINT_POSTGRES_HOST: "localhost"
+      CHECKPOINT_POSTGRES_PORT: "5403"
+      CHECKPOINT_POSTGRES_DB: "checkpointer"
+      CHECKPOINT_POSTGRES_USER: "postgres"
+      CHECKPOINT_POSTGRES_PASSWORD: "password"
+      CHECKPOINT_POSTGRES_SCHEMA: "checkpointer"
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
-      CHECKPOINT_AWS_REGION: "$CHECKPOINT_AWS_REGION"
       DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
       OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
       LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
@@ -1056,9 +1059,13 @@ procs:
       AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
       BEDROCK_MODEL_ID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-      CHECKPOINT_DYNAMODB_TABLE_NAME: "$CHECKPOINT_DYNAMODB_TABLE_NAME"
+      CHECKPOINT_POSTGRES_HOST: "localhost"
+      CHECKPOINT_POSTGRES_PORT: "5403"
+      CHECKPOINT_POSTGRES_DB: "checkpointer"
+      CHECKPOINT_POSTGRES_USER: "postgres"
+      CHECKPOINT_POSTGRES_PASSWORD: "password"
+      CHECKPOINT_POSTGRES_SCHEMA: "checkpointer"
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
-      CHECKPOINT_AWS_REGION: "$CHECKPOINT_AWS_REGION"
 
   runner:
     cwd: "$ROOT_DIR/packages/agent-runner"
@@ -1091,9 +1098,13 @@ procs:
       GCP_KEY: '$GCP_KEY'
       GCP_PROJECT_ID: "$GCP_PROJECT_ID"
       GCP_LOCATION: "$GCP_LOCATION"
-      CHECKPOINT_DYNAMODB_TABLE_NAME: "$CHECKPOINT_DYNAMODB_TABLE_NAME"
+      CHECKPOINT_POSTGRES_HOST: "localhost"
+      CHECKPOINT_POSTGRES_PORT: "5403"
+      CHECKPOINT_POSTGRES_DB: "checkpointer"
+      CHECKPOINT_POSTGRES_USER: "postgres"
+      CHECKPOINT_POSTGRES_PASSWORD: "password"
+      CHECKPOINT_POSTGRES_SCHEMA: "checkpointer"
       CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
-      CHECKPOINT_AWS_REGION: "$CHECKPOINT_AWS_REGION"
       DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
       SANDBOX_PROVIDER: "${SANDBOX_PROVIDER:-}"
       SANDBOX_POOL_CAPACITY: "${SANDBOX_POOL_CAPACITY:-}"

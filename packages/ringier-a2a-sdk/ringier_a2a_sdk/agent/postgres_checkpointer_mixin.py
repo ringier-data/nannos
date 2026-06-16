@@ -18,7 +18,7 @@ so the checkpoint DB can live on a different host/user):
     CHECKPOINT_POSTGRES_USER        Database user.  Default: postgres.
     CHECKPOINT_POSTGRES_PASSWORD    Password.  Required in production.
     CHECKPOINT_POSTGRES_SCHEMA      Schema that owns the checkpoint tables.
-                                    Default: checkpoints.
+                                    Default: checkpointer.
 
 The resulting DSN:
     postgresql://<user>:<password>@<host>:<port>/<db>
@@ -230,19 +230,22 @@ class PostgreSQLCheckpointerMixin:
     """
 
     def _create_checkpointer(self) -> BaseCheckpointSaver:
-        """Create AsyncPostgresSaver with a closed connection pool.
+        """Store connection pool config and return a MemorySaver placeholder.
 
-        The pool will be opened by _setup_checkpointer() during async startup.
-        All configuration is read from CHECKPOINT_POSTGRES_* environment variables.
+        AsyncPostgresSaver.__init__ calls asyncio.get_running_loop() and therefore
+        cannot be instantiated in a synchronous __init__.  This method creates the
+        AsyncConnectionPool (open=False, safe to construct sync) and stores it on
+        self._checkpointer_pool.  _setup_checkpointer() — called from the async
+        startup() hook — instantiates AsyncPostgresSaver and replaces self._checkpointer.
 
         Returns:
-            AsyncPostgresSaver bound to a closed pool, or MemorySaver when
-            CHECKPOINT_POSTGRES_HOST is not set.
+            MemorySaver placeholder (replaced by AsyncPostgresSaver at startup), or a
+            permanent MemorySaver when CHECKPOINT_POSTGRES_HOST is not set.
         """
+        from langgraph.checkpoint.memory import MemorySaver
+
         host = os.getenv("CHECKPOINT_POSTGRES_HOST")
         if not host:
-            from langgraph.checkpoint.memory import MemorySaver
-
             logger.warning(
                 "CHECKPOINT_POSTGRES_HOST not set — using in-memory checkpointer.  "
                 "Conversation history will be lost on restart."
@@ -250,14 +253,12 @@ class PostgreSQLCheckpointerMixin:
             self._checkpointer_pool = None
             return MemorySaver()
 
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         from psycopg_pool import AsyncConnectionPool
 
         port = os.getenv("CHECKPOINT_POSTGRES_PORT", "5432")
-        db = os.getenv("CHECKPOINT_POSTGRES_DB", "console")
+        db = os.getenv("CHECKPOINT_POSTGRES_DB", "checkpointer")
         user = os.getenv("CHECKPOINT_POSTGRES_USER", "postgres")
         password = os.getenv("CHECKPOINT_POSTGRES_PASSWORD", "")
-        schema = os.getenv("CHECKPOINT_POSTGRES_SCHEMA", "checkpoints")
 
         ttl_days = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
         logger.info(
@@ -265,8 +266,6 @@ class PostgreSQLCheckpointerMixin:
             "pg_cron / maintenance job — not enforced by this mixin)",
             ttl_days,
         )
-
-        serde = _build_serde()
 
         conn_string = f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
@@ -279,34 +278,27 @@ class PostgreSQLCheckpointerMixin:
         )
         self._checkpointer_pool = pool
 
-        checkpointer = AsyncPostgresSaver(pool, serde=serde)
-        try:
-            # schema_name supported in langgraph-checkpoint-postgres ≥ 2.0.11
-            checkpointer.schema_name = schema  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
         logger.info(
-            "Created PostgreSQL checkpointer (schema=%s, host=%s, db=%s, s3_offload=%s)",
-            schema,
+            "Prepared PostgreSQL checkpointer pool (host=%s, db=%s) — "
+            "AsyncPostgresSaver will be created in _setup_checkpointer()",
             host,
             db,
-            bool(serde),
         )
-        return checkpointer
+        # Placeholder: replaced by AsyncPostgresSaver in _setup_checkpointer()
+        return MemorySaver()
 
     async def _setup_checkpointer(self) -> None:
-        """Open the connection pool, verify PG version ≥ 11, and run schema setup.
+        """Instantiate AsyncPostgresSaver, open pool, verify PG ≥ 11, run migrations.
 
-        Called automatically by LangGraphAgent.startup().  Safe to call multiple
-        times — subsequent calls are no-ops once the pool is open.
+        Called automatically by LangGraphAgent.startup().  Replaces the MemorySaver
+        placeholder in self._checkpointer with the real AsyncPostgresSaver.
 
         Raises:
             RuntimeError: When the connected PostgreSQL server is older than PG 11.
         """
         pool = getattr(self, "_checkpointer_pool", None)
         if pool is None:
-            return  # MemorySaver — no async setup needed
+            return  # permanent MemorySaver — nothing to do
 
         if not getattr(pool, "_opened", False):
             await pool.open()
@@ -314,10 +306,24 @@ class PostgreSQLCheckpointerMixin:
 
         await _verify_postgres_version(pool)
 
-        checkpointer = getattr(self, "_checkpointer", None)
-        if checkpointer is not None and hasattr(checkpointer, "setup"):
-            await checkpointer.setup()
-            logger.info("PostgreSQL checkpoint schema setup complete")
+        schema = os.getenv("CHECKPOINT_POSTGRES_SCHEMA", "checkpoints")
+        serde = _build_serde()
+
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        checkpointer = AsyncPostgresSaver(pool, serde=serde)
+        try:
+            checkpointer.schema_name = schema  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+
+        await checkpointer.setup()
+
+        # Swap placeholder with the real checkpointer before any requests are served
+        self._checkpointer = checkpointer
+        logger.info(
+            "PostgreSQL checkpointer ready (schema=%s, s3_offload=%s)", schema, bool(serde)
+        )
 
     async def _teardown_checkpointer(self) -> None:
         """Close the connection pool on shutdown."""

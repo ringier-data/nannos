@@ -54,7 +54,6 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
-from langgraph_checkpoint_aws import DynamoDBSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel as PydanticBaseModel
@@ -102,30 +101,42 @@ def _build_postgres_conn() -> str | None:
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
-def _create_checkpointer() -> DynamoDBSaver | MemorySaver:
-    """Create a checkpointer: DynamoDB if configured, else in-memory fallback."""
-    checkpoint_table = os.getenv("CHECKPOINT_DYNAMODB_TABLE_NAME")
-    if not checkpoint_table:
+def _create_checkpointer() -> tuple[MemorySaver, AsyncConnectionPool | None]:
+    """Create a connection pool (closed) and return a MemorySaver placeholder.
+
+    AsyncPostgresSaver.__init__ calls asyncio.get_running_loop() and therefore
+    cannot be instantiated in a synchronous context.  This function creates only
+    the AsyncConnectionPool (open=False, safe to construct sync).
+    setup_checkpointer() — called from the async lifespan — instantiates
+    AsyncPostgresSaver and replaces self._checkpointer.
+
+    Returns (placeholder, pool). Pool is None when falling back to MemorySaver.
+    """
+    host = os.getenv("CHECKPOINT_POSTGRES_HOST")
+    if not host:
         logger.warning(
-            "CHECKPOINT_DYNAMODB_TABLE_NAME not set — using in-memory checkpointer. "
+            "CHECKPOINT_POSTGRES_HOST not set — using in-memory checkpointer. "
             "Conversation history will be lost on restart."
         )
-        return MemorySaver()
+        return MemorySaver(), None
 
-    checkpoint_region = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
-    checkpoint_ttl_days = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
-    checkpoint_compression = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
-    checkpoint_s3_bucket = os.getenv("CHECKPOINT_S3_BUCKET_NAME")
+    port = os.getenv("CHECKPOINT_POSTGRES_PORT", "5432")
+    db = os.getenv("CHECKPOINT_POSTGRES_DB", "checkpointer")
+    user = os.getenv("CHECKPOINT_POSTGRES_USER", "postgres")
+    password = os.getenv("CHECKPOINT_POSTGRES_PASSWORD", "")
 
-    s3_config = {"bucket_name": checkpoint_s3_bucket} if checkpoint_s3_bucket else None
-
-    return DynamoDBSaver(
-        table_name=checkpoint_table,
-        region_name=checkpoint_region,
-        ttl_seconds=checkpoint_ttl_days * 24 * 60 * 60,
-        enable_checkpoint_compression=checkpoint_compression,
-        s3_offload_config=s3_config,
+    pool = AsyncConnectionPool(
+        conninfo=f"postgresql://{user}:{password}@{host}:{port}/{db}",
+        open=False,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
     )
+    logger.info(
+        "Prepared PostgreSQL checkpointer pool (host=%s, db=%s) — "
+        "AsyncPostgresSaver will be created in setup_checkpointer()",
+        host,
+        db,
+    )
+    return MemorySaver(), pool
 
 
 def _extract_text_from_message(message: Message) -> str:
@@ -250,7 +261,7 @@ class AgentRunner(BaseAgent):
 
     def __init__(self) -> None:
         super().__init__()
-        self._checkpointer = _create_checkpointer()
+        self._checkpointer, self._checkpointer_pool = _create_checkpointer()
         self._oauth2_client: OidcOAuth2Client | None = None
         self._sandbox_pool: SandboxPool | None = None
         # Enable cost tracking so get_langchain_callbacks() works for LangGraph runs.
@@ -318,6 +329,50 @@ class AgentRunner(BaseAgent):
             )
             logger.info("Initialised AsyncPostgresStore (Titan Embeddings V2, 1024 dims)")
         return self._store
+
+    async def setup_checkpointer(self) -> None:
+        """Instantiate AsyncPostgresSaver, open pool, verify PG ≥ 11, run migrations.
+
+        Replaces the MemorySaver placeholder in self._checkpointer with the real saver.
+        """
+        pool = self._checkpointer_pool
+        if pool is None:
+            return  # permanent MemorySaver — nothing to do
+        if not getattr(pool, "_opened", False):
+            await pool.open()
+            logger.info("Opened AsyncConnectionPool for checkpointer")
+
+        from ringier_a2a_sdk.agent.postgres_checkpointer_mixin import _verify_postgres_version
+
+        await _verify_postgres_version(pool)
+
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        schema = os.getenv("CHECKPOINT_POSTGRES_SCHEMA", "checkpoints")
+        serde = None
+        s3_bucket = os.getenv("CHECKPOINT_S3_BUCKET_NAME")
+        if s3_bucket:
+            from ringier_a2a_sdk.agent.postgres_checkpointer_mixin import S3OffloadingSerde
+
+            threshold = int(float(os.getenv("CHECKPOINT_S3_THRESHOLD_MB", "10")) * 1024 * 1024)
+            serde = S3OffloadingSerde(bucket=s3_bucket, threshold_bytes=threshold)
+
+        checkpointer = AsyncPostgresSaver(pool, serde=serde)
+        try:
+            checkpointer.schema_name = schema  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+
+        await checkpointer.setup()
+        self._checkpointer = checkpointer
+        logger.info("PostgreSQL checkpointer ready (schema=%s, s3_offload=%s)", schema, bool(serde))
+
+    async def teardown_checkpointer(self) -> None:
+        """Close the checkpoint connection pool."""
+        pool = self._checkpointer_pool
+        if pool is not None and getattr(pool, "_opened", False):
+            await pool.close()
+            logger.info("Closed checkpoint connection pool")
 
     async def ensure_store_setup(self) -> None:
         """Open the connection pool and run store schema migrations.

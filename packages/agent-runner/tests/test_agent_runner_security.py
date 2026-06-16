@@ -23,12 +23,11 @@ def agent_runner():
     """
     mock_checkpointer = MagicMock(name="checkpointer")
 
-    with patch("agent.core._create_checkpointer", return_value=mock_checkpointer):
-        with patch.dict(os.environ, {"CHECKPOINT_DYNAMODB_TABLE_NAME": "test-table"}, clear=False):
-            from agent.core import AgentRunner
+    with patch("agent.core._create_checkpointer", return_value=(mock_checkpointer, None)):
+        from agent.core import AgentRunner
 
-            runner = AgentRunner()
-            return runner
+        runner = AgentRunner()
+        return runner
 
 
 class TestFetchUserIdFromBackend:

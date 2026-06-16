@@ -10,9 +10,8 @@ import os
 from agent_common.core.model_factory import MODEL_CONFIG, _has_aws_credentials, create_model, get_default_model
 from langchain_core.language_models import BaseChatModel
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import MemorySaver
 from ringier_a2a_sdk.agent import LangGraphAgent
+from ringier_a2a_sdk.agent.postgres_checkpointer_mixin import PostgreSQLCheckpointerMixin
 from ringier_a2a_sdk.middleware.credential_injector import TokenExchangeCredentialInjector
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 
@@ -324,7 +323,7 @@ You are not just creating agents — you are architecting an agent ecosystem. Th
 """
 
 
-class AgentCreator(LangGraphAgent):
+class AgentCreator(PostgreSQLCheckpointerMixin, LangGraphAgent):
     """Agent Creator - Helps users design and create specialized AI agents.
 
     This agent uses whichever LLM provider is available (via agent-common's
@@ -334,7 +333,7 @@ class AgentCreator(LangGraphAgent):
     Architecture:
     - Extends LangGraphAgent base class (provider-agnostic)
     - LLM model selected dynamically based on available credentials
-    - Checkpointing: DynamoDB when configured, in-memory otherwise
+    - Checkpointing: PostgreSQL when CHECKPOINT_POSTGRES_HOST is set, in-memory otherwise
     - MCP tools discovered once at initialization (unauthenticated)
     - User credentials injected at runtime via TokenExchangeCredentialInjector
     """
@@ -391,38 +390,6 @@ class AgentCreator(LangGraphAgent):
         model_type = get_default_model()
         logger.info(f"Agent Creator using model: {model_type}")
         return create_model(model_type)
-
-    def _create_checkpointer(self) -> BaseCheckpointSaver:
-        """Create checkpointer: DynamoDB if configured, else in-memory."""
-        checkpoint_table = os.getenv("CHECKPOINT_DYNAMODB_TABLE_NAME")
-        if checkpoint_table and _has_aws_credentials():
-            from langgraph_checkpoint_aws import DynamoDBSaver
-
-            checkpoint_region = os.getenv("CHECKPOINT_AWS_REGION", "eu-central-1")
-            checkpoint_ttl_days = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
-            checkpoint_compression = os.getenv("CHECKPOINT_COMPRESSION_ENABLED", "true").lower() == "true"
-            checkpoint_s3_bucket = os.getenv("CHECKPOINT_S3_BUCKET_NAME")
-
-            s3_config = None
-            if checkpoint_s3_bucket:
-                s3_config = {"bucket_name": checkpoint_s3_bucket}
-                logger.info(f"S3 offloading enabled for large checkpoints: {checkpoint_s3_bucket}")
-
-            checkpointer = DynamoDBSaver(
-                table_name=checkpoint_table,
-                region_name=checkpoint_region,
-                ttl_seconds=checkpoint_ttl_days * 24 * 60 * 60,
-                enable_checkpoint_compression=checkpoint_compression,
-                s3_offload_config=s3_config,  # type: ignore[arg-type]
-            )
-            logger.info(f"Initialized DynamoDB checkpointer: {checkpoint_table}")
-            return checkpointer
-        else:
-            logger.warning(
-                "CHECKPOINT_DYNAMODB_TABLE_NAME not set or AWS credentials unavailable — "
-                "using in-memory checkpointer. Conversation history will be lost on restart."
-            )
-            return MemorySaver()
 
     async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
         """Return MCP server connection for console backend."""

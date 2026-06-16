@@ -63,6 +63,7 @@ agent = AgentRunner()
 @asynccontextmanager
 async def lifespan(app) -> AsyncIterator[None]:
     """Lifespan context manager for the FastAPI application."""
+    await agent.setup_checkpointer()
     await agent.ensure_store_setup()
     await agent.init_sandbox_pool()
     logger.info("Application startup complete")
@@ -70,6 +71,7 @@ async def lifespan(app) -> AsyncIterator[None]:
     yield
 
     await agent.shutdown_sandbox_pool()
+    await agent.teardown_checkpointer()
     await agent.close()
     logger.info("Application shutdown - Agent Runner closed")
 

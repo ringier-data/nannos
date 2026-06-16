@@ -155,25 +155,21 @@ class TestGraphCreationWithThinking:
 
         agent = OrchestratorDeepAgent()
 
-        with (
-            patch("langgraph_checkpoint_aws.DynamoDBSaver"),
-            patch("app.core.graph_factory._has_aws_credentials", return_value=True),
-        ):
-            with patch.object(agent, "_graph_factory") as mock_factory:
-                mock_graph = Mock()
-                mock_factory.get_graph.return_value = mock_graph
+        with patch.object(agent, "_graph_factory") as mock_factory:
+            mock_graph = Mock()
+            mock_factory.get_graph.return_value = mock_graph
 
-                # Get graph with specific thinking level
-                graph = await agent.get_or_create_graph(
-                    model_type="claude-sonnet-4.5",
-                    thinking_level=ThinkingLevel.medium,
-                )
+            # Get graph with specific thinking level
+            graph = await agent.get_or_create_graph(
+                model_type="claude-sonnet-4.5",
+                thinking_level=ThinkingLevel.medium,
+            )
 
-                # Should call get_graph with both model_type and thinking_level
-                mock_factory.get_graph.assert_called_once_with(
-                    "claude-sonnet-4.5",
-                    thinking_level=ThinkingLevel.medium,
-                )
+            # Should call get_graph with both model_type and thinking_level
+            mock_factory.get_graph.assert_called_once_with(
+                "claude-sonnet-4.5",
+                thinking_level=ThinkingLevel.medium,
+            )
 
     @pytest.mark.asyncio
     async def test_graph_caching_by_thinking_level(self):
@@ -182,11 +178,8 @@ class TestGraphCreationWithThinking:
         from app.models.config import AgentSettings
 
         mock_config = Mock(spec=AgentSettings)
-        mock_config.CHECKPOINT_DYNAMODB_TABLE_NAME = "test-table"
-        mock_config.CHECKPOINT_S3_BUCKET_NAME = "test-bucket"
-        mock_config.CHECKPOINT_AWS_REGION = "eu-central-1"
+        mock_config.CHECKPOINT_POSTGRES_HOST = None
         mock_config.CHECKPOINT_TTL_DAYS = 30
-        mock_config.CHECKPOINT_COMPRESSION_ENABLED = True
         mock_config.POSTGRES_USER = "test"
         mock_config.POSTGRES_PASSWORD = "test"
         mock_config.POSTGRES_HOST = "localhost"
@@ -196,26 +189,22 @@ class TestGraphCreationWithThinking:
         mock_config.BACKOFF_FACTOR = 2
         mock_config.get_bedrock_region.return_value = "eu-central-1"
 
-        with (
-            patch("langgraph_checkpoint_aws.DynamoDBSaver"),
-            patch("app.core.graph_factory._has_aws_credentials", return_value=True),
-        ):
-            with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
-                with patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent:
-                    mock_create_deep_agent.return_value = Mock()
+        with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
+            with patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent:
+                mock_create_deep_agent.return_value = Mock()
 
-                    factory = GraphFactory(mock_config)
+                factory = GraphFactory(mock_config)
 
-                    # Create graphs with different thinking levels
-                    graph_low = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.low)
-                    graph_high = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.high)
-                    graph_none = factory.get_graph("claude-sonnet-4.5", thinking_level=None)
+                # Create graphs with different thinking levels
+                graph_low = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.low)
+                graph_high = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.high)
+                graph_none = factory.get_graph("claude-sonnet-4.5", thinking_level=None)
 
-                    # Should have created 3 separate graphs
-                    assert len(factory._graphs) == 3
-                    assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._graphs
-                    assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._graphs
-                    assert ("claude-sonnet-4.5", None) in factory._graphs
+                # Should have created 3 separate graphs
+                assert len(factory._graphs) == 3
+                assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._graphs
+                assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._graphs
+                assert ("claude-sonnet-4.5", None) in factory._graphs
 
 
 class TestExecutorThinkingFlow:
