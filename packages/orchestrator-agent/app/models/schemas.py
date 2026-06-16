@@ -54,7 +54,10 @@ class FinalResponseSchema(BaseModel):
 
     message: str = Field(
         description=(
-            "The final message to display to the user. Should be:\n"
+            "The final message to display to the user. This field is the ONLY channel "
+            "for your final answer — never write the answer (or any part of it) as "
+            "plain text outside this tool call; such text is discarded.\n"
+            "Should be:\n"
             "- For 'completed': Clear and concise summary of what was accomplished\n"
             "- For 'working': Explain what's happening asynchronously and estimated timeline\n"
             "- For 'input_required': Ask a clear, specific question that the user needs to answer\n"

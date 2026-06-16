@@ -50,6 +50,7 @@ from ..models.config import AgentSettings, GraphRuntimeContext, UserConfig
 from ..utils import build_runtime_context
 from .content_builder import build_text_content
 from .discovery import AgentDiscoveryService, ToolDiscoveryService
+from .turn_state import TurnState
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,7 @@ class OrchestratorDeepAgent:
         user_config: UserConfig,
         config: dict[str, Any],
         resume: Any = None,
+        turn_state: "TurnState | None" = None,
     ) -> AsyncIterable[AgentStreamResponse]:
         """
         Stream agent responses with runtime user context injection.
@@ -519,10 +521,28 @@ class OrchestratorDeepAgent:
                             # (e.g. Gemini) emit as plain text instead of tool calls.
                             filtered = response_streamer.feed_content(token_text)
                             if filtered:
-                                if response_streamer.is_working:
-                                    # Intermediate "working" narration (e.g. while
-                                    # delegating) — route to the orchestrator
-                                    # thinking block, not the visible response.
+                                if response_streamer.content_tracking and not response_streamer.is_working:
+                                    # Structured response emitted as plain text
+                                    # (Gemini): the extracted ``message`` delta IS
+                                    # the final answer — stream it visibly.
+                                    stream_buffer.append(filtered)
+                                    for chunk in stream_buffer.flush_ready():
+                                        yield AgentStreamResponse(
+                                            state=TaskState.TASK_STATE_WORKING,
+                                            content=chunk,
+                                            metadata={"streaming_chunk": True},
+                                        )
+                                else:
+                                    # "Working" narration (e.g. while delegating) or
+                                    # plain text outside the structured response. The
+                                    # visible answer comes exclusively from the
+                                    # structured response — text the model emits
+                                    # alongside a FinalResponseSchema call would
+                                    # otherwise duplicate it in the streaming
+                                    # artifact. Route to the thinking channel; if the
+                                    # model never calls the response tool,
+                                    # parse_agent_response's fallback still surfaces
+                                    # this text in the final status message.
                                     yield AgentStreamResponse(
                                         state=TaskState.TASK_STATE_WORKING,
                                         content=filtered,
@@ -532,14 +552,6 @@ class OrchestratorDeepAgent:
                                             "agent_name": "orchestrator",
                                         },
                                     )
-                                else:
-                                    stream_buffer.append(filtered)
-                                    for chunk in stream_buffer.flush_ready():
-                                        yield AgentStreamResponse(
-                                            state=TaskState.TASK_STATE_WORKING,
-                                            content=chunk,
-                                            metadata={"streaming_chunk": True},
-                                        )
                     continue
 
                 if part_type == "custom":
@@ -629,11 +641,22 @@ class OrchestratorDeepAgent:
             logger.debug("===== STREAM PROCESSING COMPLETE =====")
             logger.debug(f"Total chunks processed: {chunk_count}")
 
-            # Check if the graph was interrupted
+            # Check if the graph was interrupted. Use the native async API: the sync
+            # get_state() on an async (DynamoDB) saver takes a slow sync-bridge path
+            # (fresh, unpooled connection).
             logger.debug("Getting final state...")
-            final_state = graph.get_state(config)  # type: ignore
+            final_state = await graph.aget_state(config)  # type: ignore
             logger.debug(f"Final state type: {type(final_state)}")
             logger.debug(f"Final state: {final_state}")
+
+            # Store this single end-of-stream read on the per-turn carrier so the
+            # executor can reuse it instead of issuing its own get_state() re-reads
+            # (phantom / feedback / terminal checks). Nothing mutates the graph
+            # between here and those checks, so the executor sees identical state.
+            if turn_state is not None:
+                turn_state.final_values = getattr(final_state, "values", None)
+                turn_state.interrupts = tuple(getattr(final_state, "interrupts", ()) or ())
+                turn_state.captured = True
 
             # Check for general interrupt conditions (pending nodes without specific interrupts)
             # Note: Specific interrupt handling is done in agent_executor for proper A2A task state management
