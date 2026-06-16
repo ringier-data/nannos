@@ -1139,17 +1139,29 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         """Seal an open streaming artifact (if any) and emit a terminal status update.
 
         Shared by the ``input_required``, ``auth_required`` and ``completed``
-        fallback branches. When the orchestrator streamed token chunks this turn
-        (``first_chunk_sent``), the streaming artifact is closed with a final
-        empty chunk and the status metadata is tagged
-        ``final_answer_source="fallback"`` so well-behaved clients dedupe the
-        terminal message against the artifact text they already rendered.
+        branches. The artifact (if one was streamed) is closed with a final empty
+        chunk, then the terminal status is emitted.
 
-        Centralising this keeps the artifact-close, the completion log line and
-        the metadata key in one place so a format/key change cannot silently
-        miss one branch.
+        SINGLE-SOURCE EMISSION: when the full answer was streamed as artifact
+        chunks, the streamed artifact *is* the answer — re-sending it in the
+        terminal ``status.message`` would duplicate it for every consumer (web
+        render + persistence, slack, google-chat). So in that case emit a BARE
+        completion (state only) and let clients use the streamed artifact.
+
+        The terminal message stays authoritative only when the answer was NOT
+        fully streamed:
+        - interrupts (``input_required`` / ``auth_required`` carry the message);
+        - answers assembled at the terminal (e.g. ``include_subagent_output``,
+          where nothing — or only a partial prefix — was streamed to the main
+          artifact). A streamed partial prefix is tagged ``final_answer_source``
+          so consumers can still dedupe it.
         """
-        status_metadata = dict(base_metadata) if base_metadata else {}
+        answer_fully_streamed = (
+            state == TaskState.TASK_STATE_COMPLETED
+            and first_chunk_sent
+            and final_message_len > 0
+            and streamed_chars >= final_message_len
+        )
         if first_chunk_sent:
             await updater.add_artifact(
                 [Part(text="")],
@@ -1160,18 +1172,24 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             )
             logger.info(
                 "[STREAMING] Completion: artifact_id=%s streamed_chars=%d "
-                "final_message_len=%d task_state=%s",
+                "final_message_len=%d task_state=%s fully_streamed=%s",
                 streaming_artifact_id,
                 streamed_chars,
                 final_message_len,
                 state,
+                answer_fully_streamed,
             )
-            status_metadata["final_answer_source"] = "fallback"
-        await updater.update_status(
-            state,
-            msg,
-            metadata=status_metadata or None,
-        )
+        if answer_fully_streamed:
+            # Answer already delivered via the streamed artifact — emit a bare
+            # completion (no message) so it isn't re-sent / re-persisted / re-rendered.
+            await updater.update_status(state, None, metadata=(base_metadata or None))
+        else:
+            status_metadata = dict(base_metadata) if base_metadata else {}
+            if first_chunk_sent:
+                # Only a partial prefix was streamed (rare — e.g. a non-empty message
+                # alongside include_subagent_output). Tag so consumers can dedupe it.
+                status_metadata["final_answer_source"] = "fallback"
+            await updater.update_status(state, msg, metadata=status_metadata or None)
 
     def _validate_request(self, context: RequestContext) -> bool:
         return False

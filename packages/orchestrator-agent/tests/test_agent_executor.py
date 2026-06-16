@@ -150,14 +150,13 @@ class TestAgentExecutorStreamHandling:
         updater.update_status.assert_called_once()
 
     async def test_handle_stream_item_streaming_completion(self, dynamodb_table):
-        """Streaming completion closes the artifact AND embeds the authoritative final answer.
+        """A fully-streamed completion closes the artifact and emits a BARE completion.
 
-        Regression for the production incident on 2026-05-25 where a downstream A2A client
-        failed to parse a streamed artifact frame and the user never received the reply,
-        because the terminal `completed` status carried no message body. The terminal
-        status must now always carry the validated FinalResponseSchema.message text as a
-        fallback / source-of-truth, tagged with `final_answer_source: "fallback"` so
-        well-behaved clients that already rendered the streamed artifact can dedupe.
+        Single-source emission: when the full answer was already streamed as the
+        artifact (streamed_chars >= final_message_len), the terminal `completed`
+        status carries NO message — re-sending it would duplicate the answer for
+        every consumer (web render + persistence, slack, google-chat). Clients use
+        the streamed artifact; the terminal is state-only.
         """
         from app.models.responses import AgentStreamResponse
 
@@ -198,17 +197,15 @@ class TestAgentExecutorStreamHandling:
         parts = artifact_call[0][0]
         assert parts[0].text == ""
 
-        # Completion status MUST carry the authoritative final answer as a fallback
+        # Single-source emission: the full answer was already streamed as the
+        # artifact, so the terminal status is a BARE completion (no message body) —
+        # nothing to re-send / re-persist / re-render.
         updater.update_status.assert_called_once()
         status_call = updater.update_status.call_args
         assert status_call[0][0] == TaskState.TASK_STATE_COMPLETED
-        # Second positional arg is the message carrying the final answer text
-        assert len(status_call[0]) == 2
-        final_msg = status_call[0][1]
-        text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
-        assert "Full response content" in "".join(text_parts)
-        # Metadata flag signals well-behaved clients to dedupe against the artifact stream
-        assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
+        assert status_call[0][1] is None  # bare completion, no message
+        # No fallback tag — there is no duplicate terminal copy to dedupe.
+        assert status_call[1].get("metadata") is None
 
         # _handle_stream_item now returns (first_chunk_sent, first_intermediate_chunk_sent)
         assert result == (True, False)
