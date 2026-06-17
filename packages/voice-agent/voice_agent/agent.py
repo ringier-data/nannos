@@ -475,7 +475,7 @@ class GeminiLiveAgent:
                     result_id = f"result_{_result_counter[0]}"
                     _result_counter[0] += 1
                     _stored_results[result_id] = full_text
-                    size_kb = len(full_text) / 1024
+                    size_kb = len(full_text.encode("utf-8")) / 1024
                     # Report paginated line count so the model's range reads line up
                     # with what search/read return, even for single-line payloads.
                     line_count = len(_paginate(full_text))
