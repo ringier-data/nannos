@@ -17,15 +17,15 @@ so the checkpoint DB can live on a different host/user):
     CHECKPOINT_POSTGRES_DB          Database name.  Default: console.
     CHECKPOINT_POSTGRES_USER        Database user.  Default: postgres.
     CHECKPOINT_POSTGRES_PASSWORD    Password.  Required in production.
-    CHECKPOINT_POSTGRES_SCHEMA      Schema that owns the checkpoint tables.
-                                    Default: checkpointer.
+
+Tables are created in the public schema (AsyncPostgresSaver v3.x does not
+support custom schema names).
 
 The resulting DSN:
     postgresql://<user>:<password>@<host>:<port>/<db>
 
 Required grants for CHECKPOINT_POSTGRES_USER:
-    CREATE SCHEMA checkpoints   (first run — schema owner)
-    CREATE, SELECT, INSERT, UPDATE, DELETE on all tables in the schema
+    CREATE, SELECT, INSERT, UPDATE, DELETE on all tables in public
 
 Connection pool (psycopg AsyncConnectionPool):
     autocommit=True     Required by AsyncPostgresSaver — implicit per-statement
@@ -306,23 +306,17 @@ class PostgreSQLCheckpointerMixin:
 
         await _verify_postgres_version(pool)
 
-        schema = os.getenv("CHECKPOINT_POSTGRES_SCHEMA", "checkpoints")
         serde = _build_serde()
 
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
         checkpointer = AsyncPostgresSaver(pool, serde=serde)
-        try:
-            checkpointer.schema_name = schema  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
         await checkpointer.setup()
 
         # Swap placeholder with the real checkpointer before any requests are served
         self._checkpointer = checkpointer
         logger.info(
-            "PostgreSQL checkpointer ready (schema=%s, s3_offload=%s)", schema, bool(serde)
+            "PostgreSQL checkpointer ready (tables in public schema, s3_offload=%s)", bool(serde)
         )
 
     async def _teardown_checkpointer(self) -> None:

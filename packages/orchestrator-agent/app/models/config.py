@@ -308,7 +308,6 @@ class AgentSettings:
     CHECKPOINT_POSTGRES_DB: str = os.getenv("CHECKPOINT_POSTGRES_DB", "checkpointer")
     CHECKPOINT_POSTGRES_USER: str = os.getenv("CHECKPOINT_POSTGRES_USER", "postgres")
     CHECKPOINT_POSTGRES_PASSWORD: str = os.getenv("CHECKPOINT_POSTGRES_PASSWORD", "")
-    CHECKPOINT_POSTGRES_SCHEMA: str = os.getenv("CHECKPOINT_POSTGRES_SCHEMA", "checkpointer")
     CHECKPOINT_TTL_DAYS: int = int(os.getenv("CHECKPOINT_TTL_DAYS", "14"))
     CHECKPOINT_MAX_RETRIES: int = int(os.getenv("CHECKPOINT_MAX_RETRIES", "5"))
 

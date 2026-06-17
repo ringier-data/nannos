@@ -400,16 +400,9 @@ class GraphFactory:
             logger.info("S3 checkpoint offloading enabled: %s", self.config.CHECKPOINT_S3_BUCKET_NAME)
 
         checkpointer = AsyncPostgresSaver(pool, serde=serde)
-        try:
-            checkpointer.schema_name = self.config.CHECKPOINT_POSTGRES_SCHEMA  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-
         await checkpointer.setup()
         self._checkpointer = checkpointer
-        logger.info(
-            "PostgreSQL checkpointer ready (schema=%s)", self.config.CHECKPOINT_POSTGRES_SCHEMA
-        )
+        logger.info("PostgreSQL checkpointer ready (tables in public schema)")
 
     @property
     def a2a_middleware(self) -> A2ATaskTrackingMiddleware:
