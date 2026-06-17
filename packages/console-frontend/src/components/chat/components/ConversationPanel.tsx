@@ -113,6 +113,16 @@ export function ConversationPanel() {
   const [searchQuery, setSearchQuery] = useState('');
   const isSearching = searchQuery.trim().length > 0;
 
+  // Keep a stable reference to loadConversations so the debounce effect below
+  // only re-runs when the search term actually changes. loadConversations'
+  // identity changes whenever activeConversationId changes, so depending on it
+  // directly would reload (and replace) the list every time a conversation is
+  // created — dropping the unsaved new conversation before it can be used.
+  const loadConversationsRef = useRef(loadConversations);
+  useEffect(() => {
+    loadConversationsRef.current = loadConversations;
+  }, [loadConversations]);
+
   // Debounce the search term and query the backend (title ILIKE). The initial
   // (empty) load is already handled by ChatProvider, so skip the first run.
   const didMountRef = useRef(false);
@@ -122,10 +132,10 @@ export function ConversationPanel() {
       return;
     }
     const handle = setTimeout(() => {
-      loadConversations(searchQuery);
+      loadConversationsRef.current(searchQuery);
     }, 300);
     return () => clearTimeout(handle);
-  }, [searchQuery, loadConversations]);
+  }, [searchQuery]);
 
   return (
     <div className="w-64 h-full flex flex-col bg-muted/30 border-r border-border flex-shrink-0 overflow-hidden">
