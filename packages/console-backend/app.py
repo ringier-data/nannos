@@ -23,10 +23,7 @@ from a2a.types import (
     Part,
     Role,
     SendMessageRequest,
-    Task,
-    TaskArtifactUpdateEvent,
     TaskState,
-    TaskStatusUpdateEvent,
 )
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value

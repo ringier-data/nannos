@@ -1450,7 +1450,7 @@ def build_sub_agent_graph(
         model: ``BaseChatModel`` instance (Bedrock, OpenAI, Gemini, …).
         tools: List of tools available to the agent.
         system_prompt: System prompt string.
-        checkpointer: LangGraph checkpoint saver (DynamoDB, memory, …).
+        checkpointer: LangGraph checkpoint saver (PostgreSQL, memory, …).
         store: Optional initialised ``AsyncPostgresStore`` for persistent
             memory / document search.
         model_name: Model to use for indexing/chunking in the document store

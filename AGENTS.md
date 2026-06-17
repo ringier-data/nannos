@@ -77,7 +77,7 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
 
 - **PostgreSQL**: `console` schema (pgcrypto), `docstore` schema (pgvector) shared by agents, `slack_client`, `email_client`, and `google_chat_client` schemas
 - **Auth**: Keycloak (or any OIDC provider). Per-service OIDC clients: `orchestrator`, `agent-console`, `slack-client`, `email-client`, `google-chat-client`
-- **AWS** (production): DynamoDB (checkpoints), S3 (files), SES (email), Secrets Manager, SSM
+- **AWS** (production): Postgresql (checkpoints), S3 (files), SES (email), Secrets Manager, SSM
 - **LLM providers**: Local (OpenAI-compatible), AWS Bedrock, Azure OpenAI, Google Vertex AI — configurable via env vars
 - **Optional**: MCP Gateway (tool extensions), LangSmith (tracing)
 

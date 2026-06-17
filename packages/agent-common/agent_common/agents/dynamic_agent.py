@@ -219,7 +219,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             orchestrator_tools: Essential tools always included (get_current_time, docstore, etc.)
             oauth2_client: OAuth2 client for token exchange (required for MCP tool discovery)
             user_token: User's access token for token exchange (required for MCP tool discovery)
-            checkpointer: Shared checkpointer for multi-turn conversation state (e.g., DynamoDBSaver)
+            checkpointer: Shared checkpointer for multi-turn conversation state (e.g., PostgreSQLsaver)
             user_name: User's display name for personalization
             user_language: User's preferred language (ISO 639-1 code)
             user_timezone: User's timezone (IANA timezone name)
@@ -334,7 +334,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         return f"{context_id}::dynamic-{self.name}" if context_id else f"dynamic-{self.name}"
 
     def get_checkpointer(self, input_data: SubAgentInput) -> Optional[Any]:
-        """Return DynamoDB checkpointer for this dynamic agent."""
+        """Return PostgreSQL checkpointer for this dynamic agent."""
         return self.checkpointer
 
     def get_sub_agent_identifier(self, input_data: SubAgentInput) -> str:
@@ -1545,7 +1545,7 @@ def create_dynamic_local_subagent(
         orchestrator_tools: Essential tools always included (get_current_time, docstore, etc.)
         oauth2_client: OAuth2 client for token exchange (required for MCP tool discovery)
         user_token: User's access token for token exchange (required for MCP tool discovery)
-        checkpointer: Shared checkpointer for multi-turn conversation state (e.g., DynamoDBSaver)
+        checkpointer: Shared checkpointer for multi-turn conversation state (e.g., PostgreSQLSaver)
         user_name: User's display name for personalization
         user_language: User's preferred language (ISO 639-1 code)
         user_timezone: User's timezone (IANA timezone name)

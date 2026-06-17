@@ -642,7 +642,7 @@ class OrchestratorDeepAgent:
             logger.debug(f"Total chunks processed: {chunk_count}")
 
             # Check if the graph was interrupted. Use the native async API: the sync
-            # get_state() on an async (DynamoDB) saver takes a slow sync-bridge path
+            # get_state() on an async saver takes a slow sync-bridge path
             # (fresh, unpooled connection).
             logger.debug("Getting final state...")
             final_state = await graph.aget_state(config)  # type: ignore

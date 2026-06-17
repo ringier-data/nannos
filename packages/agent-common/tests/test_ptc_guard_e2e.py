@@ -483,7 +483,7 @@ async def test_inner_interrupted_nested_resume_through_resuming_parent():
     Mirrors the real orchestrator → sub-agent path end-to-end:
 
     * The sub-agent (inner) graph runs from *inside* the orchestrator's (outer)
-      Pregel node, sharing a single checkpointer (production has one DynamoDB
+      Pregel node, sharing a single checkpointer (production has one PostgreSQL
       saver for both, on distinct ``thread_id``s).
     * On the first dispatch the inner PTC interrupt is suppressed + persisted and
       re-raised so it propagates to the outer graph.
@@ -516,7 +516,7 @@ async def test_inner_interrupted_nested_resume_through_resuming_parent():
     from agent_common.core.graph_utils import denest_parent_pregel_context
 
     code = "const r = await tools.safeRead({path: '/etc/passwd'}); JSON.stringify(r)"
-    # ONE shared checkpointer for outer + inner (production = one DynamoDB saver).
+    # ONE shared checkpointer for outer + inner (production = one PostgreSQL saver).
     saver = InMemorySaver()
     inner_cfg = {"configurable": {"thread_id": "inner-nested", "checkpoint_ns": ""}}
 

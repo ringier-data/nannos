@@ -8,7 +8,7 @@ When implementing new features or refactoring existing code, consider if these i
 
 - FastAPI with async/await
 - SQLAlchemy 2.0+ (async) with PostgreSQL
-- DynamoDB for sessions and conversations
+- Postgresql for sessions and conversations
 - Pydantic v2 for data validation
 - pytest with pytest-asyncio for testing
 
