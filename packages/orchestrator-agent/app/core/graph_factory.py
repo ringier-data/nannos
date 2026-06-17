@@ -317,46 +317,7 @@ class GraphFactory:
                 await self._connection_pool.open()
                 logger.info("Opened AsyncConnectionPool for document store")
 
-            # Check if store table exists with incompatible schema and clean it up
-            try:
-                from langgraph.checkpoint.postgres import _ainternal
-
-                async with _ainternal.get_connection(store.conn) as conn:
-                    async with conn.cursor() as cur:
-                        # Check if store table exists
-                        await cur.execute("""
-                            SELECT EXISTS (
-                                SELECT FROM information_schema.tables 
-                                WHERE table_name = 'store'
-                            )
-                        """)
-                        table_exists = (await cur.fetchone())[0]
-
-                        if table_exists:
-                            # Check if prefix column exists
-                            await cur.execute("""
-                                SELECT EXISTS (
-                                    SELECT FROM information_schema.columns 
-                                    WHERE table_name = 'store' AND column_name = 'prefix'
-                                )
-                            """)
-                            has_prefix = (await cur.fetchone())[0]
-
-                            if not has_prefix:
-                                # Drop incompatible table and related objects
-                                logger.warning("Found incompatible 'store' table schema, dropping and recreating...")
-                                await cur.execute("DROP TABLE IF EXISTS store CASCADE")
-                                await cur.execute("DROP TABLE IF EXISTS store_migrations CASCADE")
-                                await cur.execute("DROP TABLE IF EXISTS vector_migrations CASCADE")
-                                await cur.execute("DROP TABLE IF EXISTS store_vectors CASCADE")
-                                await conn.commit()
-                                logger.info("Dropped incompatible schema objects")
-
-            except Exception as e:
-                logger.error(f"Error checking/cleaning store schema: {e}")
-                # Continue anyway - setup() will handle it
-
-            # Now run the standard setup
+            # Set up the schema (idempotent; safe to call repeatedly)
             await store.setup()
             self._store_setup_complete = True
             logger.info("AsyncPostgresStore schema setup completed successfully")
