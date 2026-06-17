@@ -50,7 +50,7 @@ interface ChatContextType {
   dismissInterrupt: () => void;
   dismissFeedbackRequest: () => void;
   updateSettings: (settings: Settings) => Promise<boolean>;
-  loadConversations: () => Promise<void>;
+  loadConversations: (search?: string) => Promise<void>;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -847,12 +847,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   }, [onAgentResponse, addMessage, addOrUpdateTask, updateConversation, tasksMap]);
 
   // Load conversations from backend
-  const loadConversations = useCallback(async () => {
+  const loadConversations = useCallback(async (search?: string) => {
     setIsLoadingConversations(true);
     try {
       const effectiveAgentUrl = settings?.agentUrl || null;
       const url = new URL('/api/v1/conversations/', window.location.origin);
       url.searchParams.set('limit', '50');
+      if (search && search.trim()) url.searchParams.set('search', search.trim());
       if (effectiveAgentUrl) url.searchParams.set('agent_url', effectiveAgentUrl);
       // In playground mode, filter by sub_agent_config_hash
       if (playgroundModeRef.current?.subAgentConfigHash) {

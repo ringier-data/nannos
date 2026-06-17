@@ -41,12 +41,16 @@ class InMemoryConversationService:
         self,
         user_id: str,
         limit: int = 20,
+        search: str | None = None,
     ) -> list[Conversation]:
+        needle = search.strip().lower() if search and search.strip() else None
         conv_ids = self._user_index.get(user_id, [])
         conversations = []
         for cid in reversed(conv_ids):  # Most recent first
             conv = self._conversations.get(cid)
             if conv and conv.status == "active":
+                if needle and needle not in conv.title.lower():
+                    continue
                 conversations.append(conv)
                 if len(conversations) >= limit:
                     break
