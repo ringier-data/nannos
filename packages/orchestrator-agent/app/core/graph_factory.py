@@ -38,7 +38,7 @@ from agent_common.middleware.conversation_context_tools_middleware import Conver
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
-from agent_common.models.base import DEFAULT_MODEL, ModelType, ThinkingLevel
+from agent_common.models.base import ModelType, ThinkingLevel, get_resolved_default_model
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
@@ -723,12 +723,12 @@ class GraphFactory:
         """Get or create a graph for the given model type.
 
         Args:
-            model_type: The type of model (defaults to DEFAULT_MODEL)
+            model_type: The type of model (defaults to the resolved default model)
 
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
         """
-        effective_model: ModelType = model_type or DEFAULT_MODEL
+        effective_model: ModelType = model_type or get_resolved_default_model()
 
         cache_key = (effective_model, thinking_level)
 

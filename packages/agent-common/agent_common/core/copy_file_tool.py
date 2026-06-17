@@ -6,7 +6,6 @@ particularly useful for large files that shouldn't be processed by the model.
 """
 
 import logging
-from typing import Any
 
 from deepagents.backends.protocol import BackendProtocol
 from langchain.tools import ToolRuntime
@@ -56,7 +55,7 @@ def _validate_path(path: str) -> str:
     return path
 
 
-def create_copy_file_tool(backend: Any) -> BaseTool:
+def create_copy_file_tool(backend: BackendProtocol) -> BaseTool:
     """Create tool for copying files to long-term memory without LLM context loading.
 
     The tool uses the CompositeBackend's routing to automatically:
@@ -69,7 +68,7 @@ def create_copy_file_tool(backend: Any) -> BaseTool:
     - Automatic semantic indexing on write to /memories/
 
     Args:
-        backend: A BackendProtocol instance (or legacy callable factory)
+        backend: A BackendProtocol instance
 
     Returns:
         BaseTool for copying files to memories
@@ -113,8 +112,7 @@ def create_copy_file_tool(backend: Any) -> BaseTool:
 
             destination_path = _validate_path(destination_path)
 
-            # Get backend (supports both instances and legacy callable factories)
-            resolved_backend: BackendProtocol = backend(runtime) if callable(backend) else backend
+            resolved_backend: BackendProtocol = backend
 
             logger.info(f"Copying file from '{source_path}' to '{destination_path}'")
 

@@ -21,9 +21,6 @@ from .langgraph import LangGraphAgent
 
 logger = logging.getLogger(__name__)
 
-# Re-export FinalResponseSchema for backward compatibility
-from .langgraph import FinalResponseSchema  # noqa: F401, E402
-
 
 class LangGraphGoogleGenAIAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     """LangGraph agent using Google Generative AI (Gemini) and DynamoDB checkpointing.

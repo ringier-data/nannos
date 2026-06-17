@@ -489,11 +489,11 @@ _intermediate_buffer_ts: dict[str, datetime] = {}
 # ==============================================================================
 
 
-# Map v1.0 protobuf TaskState names -> the legacy short wire strings that the
-# backend's turn-ending / persistence control-flow is keyed against. The frontend
-# handles raw v1.0 states natively (so we no longer rewrite the outbound payload);
-# this is used only to normalize states for internal branching below.
-_LEGACY_STATE: dict[str, str] = {
+# Map v1.0 protobuf TaskState names -> the short state strings that the backend's
+# turn-ending / persistence control-flow is keyed against. The frontend handles raw
+# v1.0 states natively (so we no longer rewrite the outbound payload); this is used
+# only to normalize states for internal branching below.
+_SHORT_STATE_NAMES: dict[str, str] = {
     "TASK_STATE_SUBMITTED": "submitted",
     "TASK_STATE_WORKING": "working",
     "TASK_STATE_COMPLETED": "completed",
@@ -506,9 +506,9 @@ _LEGACY_STATE: dict[str, str] = {
 }
 
 
-def _legacy_state_name(state: Any) -> Any:
-    """Normalize a v1.0 ProtoJSON TaskState name to its legacy short form."""
-    return _LEGACY_STATE.get(state, state) if isinstance(state, str) else state
+def _short_state_name(state: Any) -> Any:
+    """Normalize a v1.0 ProtoJSON TaskState name to its short form."""
+    return _SHORT_STATE_NAMES.get(state, state) if isinstance(state, str) else state
 
 
 def _extract_a2a_task_id(stream_result: Any) -> str | None:
@@ -724,7 +724,7 @@ async def _process_a2a_response(
 
                 # Extract status object early for use in multiple checks below
                 status_obj = response_data.get("status", {})
-                status_state = _legacy_state_name(status_obj.get("state")) if isinstance(status_obj, dict) else None
+                status_state = _short_state_name(status_obj.get("state")) if isinstance(status_obj, dict) else None
 
                 # Accumulate streaming artifact text for persistence.
                 # Individual chunks are transient (not saved to DB); the assembled

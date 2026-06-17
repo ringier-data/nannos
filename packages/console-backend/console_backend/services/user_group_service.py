@@ -1196,10 +1196,6 @@ class UserGroupService:
             logger.error(f"Failed to check group membership: {e}")
             return False
 
-    async def is_group_admin(self, db: AsyncSession, group_id: int, user_id: str) -> bool:
-        """Backward compatibility alias for is_group_manager."""
-        return await self.is_group_manager(db, group_id, user_id)
-
     async def check_user_permission(self, db: AsyncSession, user_id: str, resource: str, action: str) -> bool:
         """Check if a user has a specific permission based on their system role.
 

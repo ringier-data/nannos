@@ -346,7 +346,7 @@ class TestSelfUpdate:
             registry_id=registry_id,
             sub_agent_id=agent_id,
             agent_name="test-agent",
-            user_id=user_id,
+            actor=MagicMock(id=user_id),
         )
         await pg_session.commit()
 
@@ -372,7 +372,7 @@ class TestSelfUpdate:
             registry_id=registry_id,
             sub_agent_id=agent_id,
             agent_name="test-agent",
-            user_id=user_id,
+            actor=MagicMock(id=user_id),
         )
         assert result is False
 

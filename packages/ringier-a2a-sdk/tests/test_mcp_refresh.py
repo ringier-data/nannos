@@ -354,21 +354,18 @@ async def test_check_mcp_interface_changed_detects_version_change(mock_langgraph
 
     # First check should store the version and return False (no change)
     changed = await mock_langgraph_agent._check_mcp_interface_changed(
-        server_name="test_server", tools=tools, server_info={"version": "1.0"}
-    )
+        server_name="test_server", tools=tools    )
     assert not changed, "First check should store version without detecting change"
 
     # Second check with same tools should return False
     changed = await mock_langgraph_agent._check_mcp_interface_changed(
-        server_name="test_server", tools=tools, server_info={"version": "1.0"}
-    )
+        server_name="test_server", tools=tools    )
     assert not changed, "Same tools should not be detected as changed"
 
     # Third check with changed tool (simulating a version bump) should return True
     tool.description = "Test tool v1.1"
     changed = await mock_langgraph_agent._check_mcp_interface_changed(
-        server_name="test_server", tools=tools, server_info={"version": "1.1"}
-    )
+        server_name="test_server", tools=tools    )
     assert changed, "Version change should be detected"
 
 
@@ -386,16 +383,14 @@ async def test_check_mcp_interface_changed_detects_schema_change(mock_langgraph_
 
     # First check should store the hash and return False
     changed = await mock_langgraph_agent._check_mcp_interface_changed(
-        server_name="test_server", tools=tools_v1, server_info={"version": "1.0"}
-    )
+        server_name="test_server", tools=tools_v1    )
     assert not changed, "First check should store hash without detecting change"
 
     # Second check with modified tool should detect change
     tool1.description = "Modified description"
 
     changed = await mock_langgraph_agent._check_mcp_interface_changed(
-        server_name="test_server", tools=tools_v1, server_info={"version": "1.0"}
-    )
+        server_name="test_server", tools=tools_v1    )
     assert changed, "Tool description change should be detected"
 
 
@@ -435,8 +430,7 @@ async def test_refresh_worker_skips_rebuild_when_no_changes(mock_langgraph_agent
 
     # Store initial hash
     await mock_langgraph_agent._check_mcp_interface_changed(
-        server_name="test_server", tools=[tool], server_info={"version": "1.0"}
-    )
+        server_name="test_server", tools=[tool]    )
 
     # Mock interval for fast testing
     mock_langgraph_agent._mcp_refresh_interval_seconds = 0.05

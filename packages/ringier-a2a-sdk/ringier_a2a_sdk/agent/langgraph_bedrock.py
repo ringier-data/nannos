@@ -48,10 +48,6 @@ def _get_thinking_budget(thinking_level: str) -> int:
     return budget_map.get(thinking_level, 4096)
 
 
-# Re-export FinalResponseSchema from langgraph module for backward compatibility
-from .langgraph import FinalResponseSchema  # noqa: F401, E402
-
-
 class LangGraphBedrockAgent(DynamoDBCheckpointerMixin, LangGraphAgent):
     """LangGraph agent using AWS Bedrock and DynamoDB checkpointing.
 

@@ -44,7 +44,6 @@ async def test_save_agent_response_nested_and_flat_formats():
             raw_payload=kwargs.get("raw_payload", ""),
             metadata=kwargs.get("metadata", {}),
             ttl=0,
-            final=kwargs.get("final", False),
             kind=kwargs.get("kind", ""),
         )
 
@@ -233,7 +232,6 @@ async def test_save_agent_response_with_history():
             raw_payload=kwargs["raw_payload"],
             metadata=kwargs["metadata"],
             ttl=0,
-            final=False,  # A2A 1.0.0: final field removed from protocol
             kind=kwargs["kind"],
         )
 

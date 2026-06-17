@@ -48,7 +48,8 @@ class CostTrackingCallback(BaseCallbackHandler):
             logger.info("[COST TRACKING] on_llm_end callback invoked")
             for generation_list in response.generations:
                 for generation in generation_list:
-                    message = generation.message
+                    # Only chat generations carry a `.message`; base Generation does not.
+                    message = getattr(generation, "message", None)
 
                     # Extract usage metadata if available
                     if not hasattr(message, "usage_metadata") or not message.usage_metadata:

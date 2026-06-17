@@ -276,7 +276,6 @@ class MessagesService:
                             state=stored_state_enum,
                             raw_payload=row["raw_payload"] or "",
                             metadata=row["metadata"] or {},
-                            final=row["final"] or False,
                             kind=row["kind"] or "",
                         )
                     )
@@ -305,7 +304,6 @@ class MessagesService:
         raw_payload: str = "",
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
-        final: bool = False,  # DEPRECATED: A2A 1.0.0 removes this field
         kind: str = "",
         created_at: datetime | None = None,
     ) -> Message:
@@ -322,7 +320,6 @@ class MessagesService:
             raw_payload: Original JSON payload (optional)
             metadata: Optional metadata dictionary
             message_id: Optional message ID (will be generated if not provided)
-            final: DEPRECATED - A2A 1.0.0 removes this field (terminal states indicate finality)
             kind: Message kind ('message', 'status-update', etc.) (optional)
 
         Returns:
@@ -359,7 +356,6 @@ class MessagesService:
             state=state,
             raw_payload=raw_payload,
             metadata=metadata or {},
-            final=final,
             kind=kind,
         )
 
@@ -369,9 +365,9 @@ class MessagesService:
                     text(
                         "INSERT INTO messages "
                         "(conversation_id, message_id, sort_key, user_id, role, parts, "
-                        "task_id, created_at, state, raw_payload, metadata, kind, final) "
+                        "task_id, created_at, state, raw_payload, metadata, kind) "
                         "VALUES (:conversation_id, :message_id, :sort_key, :user_id, :role, CAST(:parts AS jsonb), "
-                        ":task_id, :created_at, :state, :raw_payload, CAST(:metadata AS jsonb), :kind, :final) "
+                        ":task_id, :created_at, :state, :raw_payload, CAST(:metadata AS jsonb), :kind) "
                         "ON CONFLICT (message_id) DO UPDATE SET "
                         "conversation_id = EXCLUDED.conversation_id, "
                         "sort_key = EXCLUDED.sort_key, "
@@ -382,8 +378,7 @@ class MessagesService:
                         "state = EXCLUDED.state, "
                         "raw_payload = EXCLUDED.raw_payload, "
                         "metadata = EXCLUDED.metadata, "
-                        "kind = EXCLUDED.kind, "
-                        "final = EXCLUDED.final"
+                        "kind = EXCLUDED.kind"
                     ),
                     {
                         "conversation_id": conversation_id,
@@ -398,7 +393,6 @@ class MessagesService:
                         "raw_payload": raw_payload,
                         "metadata": json.dumps(metadata or {}, default=str),
                         "kind": kind,
-                        "final": final,
                     },
                 )
                 await db.commit()

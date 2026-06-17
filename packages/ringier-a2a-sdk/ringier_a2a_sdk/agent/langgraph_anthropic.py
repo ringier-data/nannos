@@ -12,7 +12,7 @@ from langchain_core.language_models import BaseChatModel
 from pydantic import SecretStr
 
 from .dynamodb_checkpointer_mixin import DynamoDBCheckpointerMixin
-from .langgraph import FinalResponseSchema, LangGraphAgent  # noqa: F401
+from .langgraph import LangGraphAgent
 
 logger = logging.getLogger(__name__)
 

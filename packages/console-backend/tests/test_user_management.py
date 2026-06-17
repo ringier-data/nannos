@@ -648,9 +648,9 @@ class TestUserGroupService:
             db=pg_session, group_id=group.id, user_ids=[member_user.id], role="read", actor=test_user
         )
 
-        assert await user_group_service.is_group_admin(pg_session, group.id, admin_user.id) is True
-        assert await user_group_service.is_group_admin(pg_session, group.id, member_user.id) is False
-        assert await user_group_service.is_group_admin(pg_session, group.id, "non-member") is False
+        assert await user_group_service.is_group_manager(pg_session, group.id, admin_user.id) is True
+        assert await user_group_service.is_group_manager(pg_session, group.id, member_user.id) is False
+        assert await user_group_service.is_group_manager(pg_session, group.id, "non-member") is False
 
     async def test_is_group_member(
         self, user_service: UserService, user_group_service: UserGroupService, pg_session: AsyncSession

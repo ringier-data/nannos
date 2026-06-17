@@ -44,7 +44,7 @@ from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
 from agent_common.core.model_factory import _has_aws_credentials, create_model, is_valid_model
 from object_storage import get_object_storage_service
-from agent_common.models.base import DEFAULT_MODEL
+from agent_common.models.base import get_resolved_default_model
 
 if TYPE_CHECKING:
     from agent_common.core.sandbox_pool import SandboxPool
@@ -790,7 +790,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             "description": cfg_version.get("description", ""),
             "system_prompt": cfg_version.get("system_prompt", ""),
             "mcp_tools": cfg_version.get("mcp_tools") or [],
-            "model": cfg_version.get("model") or DEFAULT_MODEL,
+            "model": cfg_version.get("model") or get_resolved_default_model(),
             "agent_url": cfg_version.get("agent_url"),
             "enable_thinking": cfg_version.get("enable_thinking", False),
             "thinking_level": cfg_version.get("thinking_level"),
@@ -906,7 +906,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
         # Validate and create LLM via agent-common model factory
         if not is_valid_model(model_name):
             logger.warning(
-                f"Invalid model '{model_name}' in sub-agent config for job {scheduled_job_id} — defaulting to {DEFAULT_MODEL}",
+                f"Invalid model '{model_name}' in sub-agent config for job {scheduled_job_id} — defaulting to {get_resolved_default_model()}",
             )
 
         # Determine thinking level

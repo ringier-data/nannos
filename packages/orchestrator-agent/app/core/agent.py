@@ -29,7 +29,7 @@ from agent_common.backends.attachments_store import (
     set_current_attachments_backend,
 )
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
-from agent_common.models.base import DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
+from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel, get_resolved_default_model
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk
 from langgraph.errors import GraphRecursionError
@@ -136,7 +136,7 @@ class OrchestratorDeepAgent:
     ):
         self.config = AgentSettings()
         self._default_thinking_level: ThinkingLevel | None = thinking_level or DEFAULT_THINKING_LEVEL
-        self._default_model_type: ModelType = model or DEFAULT_MODEL
+        self._default_model_type: ModelType = model or get_resolved_default_model()
 
         # Initialize GraphFactory - centralizes all graph-related concerns
         # (model creation, checkpointer, middleware, graph caching)

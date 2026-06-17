@@ -136,8 +136,6 @@ def clean_schema_properties(
     level: CleanupLevel = CleanupLevel.MINIMAL,
     tool_name: str | None = None,
     _path: str = "",
-    # Legacy positional arg — older callers pass depth: int as 4th arg
-    depth: int = 0,
 ) -> dict[str, Any]:
     """Recursively remove invalid property schemas with progressive cleanup levels.
 

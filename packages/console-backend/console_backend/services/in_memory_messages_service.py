@@ -47,7 +47,6 @@ class InMemoryMessagesService:
         raw_payload: str = "",
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
-        final: bool = False,
         kind: str = "",
     ) -> Message:
         now = datetime.now(timezone.utc)
@@ -67,7 +66,6 @@ class InMemoryMessagesService:
             state=state,
             raw_payload=raw_payload,
             metadata=metadata or {},
-            final=final,
             kind=kind,
         )
         self._messages.setdefault(conversation_id, []).append(msg)

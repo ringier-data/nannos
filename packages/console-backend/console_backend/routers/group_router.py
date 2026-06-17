@@ -79,7 +79,7 @@ async def get_group(
         )
 
     # If not admin or group admin, hide member list
-    is_group_admin = await user_group_service.is_group_admin(db, group_id, user.id)
+    is_group_admin = await user_group_service.is_group_manager(db, group_id, user.id)
     if not user.is_administrator and not is_group_admin:
         # Return group without detailed member info
         group.members = []

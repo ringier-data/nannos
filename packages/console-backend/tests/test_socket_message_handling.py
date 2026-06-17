@@ -233,21 +233,21 @@ async def test_conversation_title_with_unicode_characters():
     assert "🌍" in title or "🚀" in title  # Emojis might be truncated depending on char count
 
 
-def test_legacy_state_name_normalizes_v1_states():
+def test_short_state_name_normalizes_v1_states():
     """v1.0 ProtoJSON TaskState names normalize to the short forms the backend branches on.
 
     The outbound payload is now emitted as raw v1.0 (the frontend handles it natively),
     but the backend's turn-ending / is_bare_completion_signal control-flow still keys off
-    the short state strings. _legacy_state_name bridges that — if it stops mapping
+    the short state strings. _short_state_name bridges that — if it stops mapping
     TASK_STATE_COMPLETED -> "completed", is_bare_completion_signal misfires and the reply
     is persisted/rendered twice.
     """
-    from app import _legacy_state_name
+    from app import _short_state_name
 
-    assert _legacy_state_name("TASK_STATE_COMPLETED") == "completed"
-    assert _legacy_state_name("TASK_STATE_INPUT_REQUIRED") == "input-required"
-    assert _legacy_state_name("TASK_STATE_FAILED") == "failed"
-    assert _legacy_state_name("TASK_STATE_CANCELED") == "canceled"
-    # Already-short (legacy) values and non-strings pass through untouched.
-    assert _legacy_state_name("completed") == "completed"
-    assert _legacy_state_name(None) is None
+    assert _short_state_name("TASK_STATE_COMPLETED") == "completed"
+    assert _short_state_name("TASK_STATE_INPUT_REQUIRED") == "input-required"
+    assert _short_state_name("TASK_STATE_FAILED") == "failed"
+    assert _short_state_name("TASK_STATE_CANCELED") == "canceled"
+    # Already-short values and non-strings pass through untouched.
+    assert _short_state_name("completed") == "completed"
+    assert _short_state_name(None) is None
