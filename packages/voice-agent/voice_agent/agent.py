@@ -126,15 +126,9 @@ _TOOL_MAP: dict[str, object] = {}
 
 _NO_PROACTIVE_TOOLS_INSTRUCTION = (
     "\n\nCRITICAL: Your FIRST action must always be to speak a greeting to the user. "
+    "If your initial greeting is cut off, re-introduce yourself once and only once."
     "Never call any tools before your first spoken response. "
     "After the greeting you may use tools freely."
-)
-
-_WRITE_TOOL_INSTRUCTION = (
-    "\n\nFor any tool that creates, modifies, deletes, or sends data — such as creating "
-    "issues, posting messages, committing code, or sending emails — you MUST first ask "
-    "the user for explicit verbal confirmation. Say what you are about to do and ask "
-    "'Shall I proceed?' Wait for a clear yes before calling the tool."
 )
 
 # Keywords that indicate a tool has write/mutate side-effects (fallback only).
@@ -271,7 +265,7 @@ def build_live_config(
     """
     prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
     if tools:
-        prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION + _WRITE_TOOL_INSTRUCTION
+        prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION
     tool_list = tools
 
     return types.LiveConnectConfig(
