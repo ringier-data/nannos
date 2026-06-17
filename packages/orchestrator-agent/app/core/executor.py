@@ -22,7 +22,7 @@ from a2a.types import (
     TaskStatusUpdateEvent,
 )
 from agent_common.a2a.client_runnable import A2AClientRunnable
-from agent_common.models.base import ModelType
+from agent_common.models.base import ModelType, ThinkingLevel
 from pydantic import SecretStr
 from ringier_a2a_sdk.cost_tracking.logger import set_request_access_token
 from ringier_a2a_sdk.server.executor import (
@@ -532,6 +532,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 thinking_level = user_config.thinking_level
             elif user_config.enable_thinking is None:
                 thinking_level = self.agent._default_thinking_level
+
+            # Normalize to a plain string. thinking_level may be a ThinkingLevel enum
+            # (str-Enum) here, and it gets stored in config["metadata"] below, which
+            # LangGraph persists into the checkpoint. Serializing the enum triggers a
+            # "Deserializing unregistered type ... ThinkingLevel" warning from the
+            # msgpack serde on read-back. The plain value works identically downstream
+            # (get_thinking_budget's map and the model factory accept the string) and
+            # keeps the graph cache key consistent across resolution paths.
+            if isinstance(thinking_level, ThinkingLevel):
+                thinking_level = thinking_level.value
 
             model_type = user_config.model if user_config.model else self.agent._default_model_type
             graph = await self.agent.get_or_create_graph(
