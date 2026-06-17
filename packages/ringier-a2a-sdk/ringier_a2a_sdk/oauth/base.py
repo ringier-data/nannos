@@ -79,7 +79,9 @@ class BaseOAuth2Client:
                     logger.info(f"Discovered OIDC metadata for {self.issuer}")
             except httpx.HTTPError as e:
                 logger.error(
-                    f"HTTP error fetching OIDC metadata: status={getattr(e.response, 'status_code', 'N/A')}, url={well_known_url}, error={e}"
+                    f"HTTP error fetching OIDC metadata: "
+                    f"status={getattr(getattr(e, 'response', None), 'status_code', 'N/A')}, "
+                    f"url={well_known_url}, error={e}"
                 )
                 raise OAuthError(f"Failed to fetch OIDC metadata from {well_known_url}: {e}") from e
             except Exception as e:

@@ -365,9 +365,7 @@ class LangGraphAgent(BaseAgent):
         interface_json = json.dumps(interface_data, sort_keys=True)
         return hashlib.sha256(interface_json.encode()).hexdigest()
 
-    async def _check_mcp_interface_changed(
-        self, server_name: str, tools: list[BaseTool], server_info: dict | None = None
-    ) -> bool:
+    async def _check_mcp_interface_changed(self, server_name: str, tools: list[BaseTool]) -> bool:
         """Check if MCP server interface has changed since last discovery.
 
         Uses tool interface hash (names and schemas) for reliable change detection.
@@ -379,7 +377,6 @@ class LangGraphAgent(BaseAgent):
         Args:
             server_name: Name of the MCP server
             tools: List of tools discovered from the server
-            server_info: Unused (kept for compatibility), hash comparison is reliable
 
         Returns:
             True if interface changed (refresh needed), False if unchanged

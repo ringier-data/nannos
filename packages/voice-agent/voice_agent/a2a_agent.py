@@ -61,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from enum import Enum
 from typing import AsyncIterable
 
@@ -78,11 +79,13 @@ from ringier_a2a_sdk.utils.a2a_part_conversion import a2a_parts_to_content
 from voice_agent.agent import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
 from voice_agent.agent import GeminiLiveAgent
 from voice_agent.call_bridge import (
+    _CALL_ANSWERED,
     _CALL_FUTURES,
     _PENDING_CALLS,
     OutboundCallRequest,
     make_outbound_call,
     send_sms,
+    build_effective_prompt
 )
 
 _CONSOLE_BACKEND_URL = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
@@ -279,9 +282,8 @@ class VoiceAgent(BaseAgent):
         if session_key in self._active_sessions:
             return
 
-        prompt = (system_prompt or DEFAULT_SYSTEM_PROMPT) + (
-            " IMPORTANT: Keep responses short and conversational. Do NOT use markdown, lists, or special characters."
-        )
+        prompt = (system_prompt or DEFAULT_SYSTEM_PROMPT)
+
         voice = voice_name or "Kore"
 
         mcp_headers: dict[str, str] | None = None
@@ -332,9 +334,12 @@ class VoiceAgent(BaseAgent):
     ) -> None:
         """Pre-warm a Gemini session while Twilio is ringing the callee.
 
-        Fired by ``_stream_phone_call`` right after ``make_outbound_call()`` returns
-        the call_sid. The MCP handshake + Gemini WebSocket connection happen
-        concurrently with Twilio dialling, so the session is ready when answered.
+        Fired by ``_stream_phone_call`` *before* ``make_outbound_call()`` is called,
+        using a temporary prewarm_key.  Blocks until MCP tools are initialised and
+        the Gemini Live WebSocket is open so the session is fully ready the instant
+        the callee answers.  After ``make_outbound_call()`` returns the real
+        call_sid, the caller re-keys both ``_active_sessions`` and
+        ``_prewarm_tasks`` to that call_sid.
         """
         await self._create_audio_session(
             session_key=session_key,
@@ -344,6 +349,18 @@ class VoiceAgent(BaseAgent):
             access_token=access_token,
             phone_number=phone_number,
         )
+
+        session = self._active_sessions.get(session_key)
+        if not session:
+            return
+        agent = session["agent"]
+
+        # agent.run() was just scheduled as a task — yield once so it can start
+        # executing and set agent.mcp_status to a Future before we await it.
+        await asyncio.sleep(0)
+
+        if agent.mcp_status is not None:
+            await asyncio.shield(agent.mcp_status)
 
     async def _start_audio_session(
         self,
@@ -390,12 +407,19 @@ class VoiceAgent(BaseAgent):
                 )
 
         voice_name = self._active_sessions[session_key]["agent"].voice_name
+        audio_in = self._active_sessions[session_key]["audio_in"]
         event_out = self._active_sessions[session_key]["event_out"]
         yield AgentStreamResponse(
             state=TaskState.TASK_STATE_WORKING,
             content="Voice session initialized",
             metadata={"session_id": session_key, "voice_name": voice_name},
         )
+
+        # Trigger the opening greeting immediately by injecting a text turn.
+        # Without this, Gemini waits silently for user audio to clear VAD,
+        # causing 3-4 s of dead air after the callee answers.
+        await audio_in.put("[call_connected]")
+        logger.debug("Injected greeting trigger for session %s", session_key)
 
         try:
             while True:
@@ -535,10 +559,6 @@ class VoiceAgent(BaseAgent):
             system_prompt = DEFAULT_SYSTEM_PROMPT
             logger.info("No system_prompt source found — will use DEFAULT_SYSTEM_PROMPT.")
 
-        if system_prompt:
-            system_prompt += """ IMPORTANT: Keep responses short and conversational. Do NOT use markdown, lists, or special characters.
-            Ignore any phone number in the prompt, and start by introducing yourself and the meaning of your call."""
-
         # ── Resolve phone number ──────────────────────────────────────────────
         # Security: only the authenticated user's own phone number is allowed.
         #
@@ -639,15 +659,21 @@ class VoiceAgent(BaseAgent):
         """Initiate a Twilio phone call and hold the A2A stream open until it ends.
 
         Flow:
-          1. Call make_outbound_call() in a thread executor (sync Twilio REST).
-          2. Register OutboundCallRequest in _PENDING_CALLS so the Twilio Media
+          1. Pre-warm the Gemini session and await it fully (token exchange +
+             WebSocket connect + MCP handshake) — all before the call starts
+             ringing so the session is ready the instant the callee answers.
+          2. Check MCP status and send SMS if auth failed.
+          3. Call make_outbound_call() in a thread executor (sync Twilio REST).
+          4. Re-key the prewarm session from the temporary key to call_sid.
+          5. Register OutboundCallRequest in _PENDING_CALLS so the Twilio Media
              Stream WebSocket picks up system_prompt / voice_name / mcp_tools.
-          3. Register an asyncio.Future in _CALL_FUTURES keyed by call_sid.
-          4. Await the future — resolved by twilio_stream's finally block.
-          5. Yield ``completed`` with the formatted transcript.
+          6. Register an asyncio.Future in _CALL_FUTURES keyed by call_sid.
+          7. Await the future — resolved by twilio_stream's finally block.
+          8. Yield ``completed`` with the formatted transcript.
         """
         public_url: str = os.environ.get("PUBLIC_URL") or os.environ.get("VOICE_AGENT_BASE_URL", "")
-        timeout: int = int(os.getenv("CALL_TIMEOUT_SECONDS", "60"))
+        connect_timeout: int = int(os.getenv("CALL_CONNECT_TIMEOUT_SECONDS", "60"))
+        duration_timeout: int = int(os.getenv("CALL_DURATION_TIMEOUT_SECONDS", "3600"))
 
         # Validate PUBLIC_URL — Twilio must be able to reach /twilio/voice via this URL.
         # localhost / 127.0.0.1 will cause Twilio to fail silently when the call is answered.
@@ -672,59 +698,50 @@ class VoiceAgent(BaseAgent):
             metadata={"type": "call_initiating", "phone_number": phone_number},
         )
 
-        # Initiate the call via Twilio REST API (sync → thread executor)
-        try:
-            loop = asyncio.get_event_loop()
-            call_sid: str = await loop.run_in_executor(None, make_outbound_call, phone_number, public_url)
-        except Exception as exc:
-            logger.error("Failed to initiate Twilio call: %s", exc)
-            yield AgentStreamResponse(
-                state=TaskState.TASK_STATE_FAILED,
-                content=f"Call initiation failed: {exc}",
-            )
-            return
+        effective_prompt = build_effective_prompt(system_prompt or DEFAULT_SYSTEM_PROMPT, context_messages)
 
-        # Pre-warm the Gemini session while Twilio is ringing the callee.
+        # Pre-warm the Gemini session and wait for it to be fully ready before
+        # placing the call.  Any latency here (token exchange, WebSocket connect,
+        # MCP handshake) is invisible to the caller; the same work done after
+        # make_outbound_call() would risk a cold-start if the callee answers fast.
         # asyncio.create_task inherits the current context so contextvars
         # (user token etc.) are available inside _prewarm_audio_session.
-        # By the time the callee answers, Gemini + MCP are already connected.
+        prewarm_key = str(uuid.uuid4())
         prewarm_task = asyncio.create_task(
             self._prewarm_audio_session(
-                session_key=call_sid,
-                system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+                session_key=prewarm_key,
+                system_prompt=effective_prompt,
                 voice_name=voice_name,
                 mcp_tools=mcp_tools,
                 access_token=access_token,
                 phone_number=phone_number,
             )
         )
-        self._prewarm_tasks[call_sid] = prewarm_task
-        logger.info("Fired Gemini pre-warm while ringing (call_sid=%s)", call_sid)
+        self._prewarm_tasks[prewarm_key] = prewarm_task
+        logger.info("Pre-warming Gemini session before dialling (prewarm_key=%s)", prewarm_key)
 
-        # Wait for the agent's mcp_status future to be resolved.
+        # Wait for the agent's mcp_status future to be resolved before dialling.
         # _prewarm_audio_session creates the agent and starts agent.run(), which
         # sets mcp_status as soon as the MCP handshake succeeds or fails.
-        # We wait for the prewarm task first (up to 5 s) to ensure the agent
-        # object exists in _active_sessions, then await mcp_status (up to 15 s).
         try:
-            await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=5.0)
+            await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=60.0)
         except (asyncio.TimeoutError, Exception) as exc:
-            logger.debug("Pre-warm not yet done at MCP-status check point: %s", exc)
+            logger.warning("Pre-warm did not complete before call: %s — will cold-start on answer", exc)
 
+        # MCP status check — prewarm has had its full time budget so
+        # mcp_status should already be resolved or close to it.
         mcp_auth_failed = False
-        session = self._active_sessions.get(call_sid)
+        session = self._active_sessions.get(prewarm_key)
         if session:
             agent = session["agent"]
             if agent.mcp_status is not None:
                 try:
                     mcp_ok = await asyncio.wait_for(asyncio.shield(agent.mcp_status), timeout=15.0)
                     mcp_auth_failed = not mcp_ok
-                    logger.info("MCP status for call_sid=%s: %s", call_sid, "ok" if mcp_ok else "failed")
+                    logger.info("MCP status: %s", "ok" if mcp_ok else "failed")
                 except (asyncio.TimeoutError, Exception) as exc:
                     logger.debug("MCP status check timed out or failed: %s", exc)
 
-        # Send SMS if MCP auth failed during pre-warm so the caller knows
-        # their tools are unavailable and can authorize in the browser.
         if mcp_auth_failed:
             sms_body = (
                 "Your AI assistant is calling but couldn't connect to your tools. "
@@ -734,14 +751,37 @@ class VoiceAgent(BaseAgent):
             try:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, send_sms, phone_number, sms_body)
-                logger.info("MCP auth failure SMS sent (call_sid=%s)", call_sid)
+                logger.info("MCP auth failure SMS sent")
                 yield AgentStreamResponse(
                     state=TaskState.TASK_STATE_WORKING,
                     content="SMS sent to caller with tool authorization instructions.",
                     metadata={"type": "mcp_auth_sms_sent"},
                 )
             except Exception as sms_exc:
-                logger.warning("Failed to send MCP auth SMS (call_sid=%s): %s", call_sid, sms_exc)
+                logger.warning("Failed to send MCP auth SMS: %s", sms_exc)
+
+        # Initiate the call — Gemini session is ready for when the callee answers.
+        try:
+            loop = asyncio.get_event_loop()
+            call_sid: str = await loop.run_in_executor(None, make_outbound_call, phone_number, public_url)
+        except Exception as exc:
+            logger.error("Failed to initiate Twilio call: %s", exc)
+            self._prewarm_tasks.pop(prewarm_key, None)
+            if prewarm_key in self._active_sessions:
+                await self._end_session(prewarm_key)
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_FAILED,
+                content=f"Call initiation failed: {exc}",
+            )
+            return
+
+        # Re-key from temporary prewarm_key to call_sid.
+        # Prewarm is already complete so the session is guaranteed to be present.
+        if prewarm_key in self._active_sessions:
+            self._active_sessions[call_sid] = self._active_sessions.pop(prewarm_key)
+        prewarm_task = self._prewarm_tasks.pop(prewarm_key, prewarm_task)
+        self._prewarm_tasks[call_sid] = prewarm_task
+        logger.info("Pre-warm session keyed to call_sid=%s", call_sid)
 
         # Register config so twilio_stream picks it up when the call connects.
         _PENDING_CALLS[call_sid] = OutboundCallRequest(
@@ -753,14 +793,18 @@ class VoiceAgent(BaseAgent):
             context_messages=context_messages,
         )
 
-        # Register future — twilio_stream finally block will resolve it
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        # Register futures:
+        #   _CALL_ANSWERED — resolved by twilio_stream on the "start" event (callee answered)
+        #   _CALL_FUTURES  — resolved by twilio_stream's finally block (call ended)
+        loop = asyncio.get_event_loop()
+        answered_future: asyncio.Future = loop.create_future()
+        _CALL_ANSWERED[call_sid] = answered_future
+        future: asyncio.Future = loop.create_future()
         _CALL_FUTURES[call_sid] = future
 
         logger.info(
-            "Call %s initiated (timeout=%ds)",
-            call_sid,
-            timeout,
+            "Call %s initiated (connect_timeout=%ds, duration_timeout=%ds)",
+            call_sid, connect_timeout, duration_timeout,
         )
         yield AgentStreamResponse(
             state=TaskState.TASK_STATE_WORKING,
@@ -768,15 +812,40 @@ class VoiceAgent(BaseAgent):
             metadata={"type": "call_ringing", "call_sid": call_sid},
         )
 
-        # Wait for the Twilio stream to end
+        # Phase 1 — wait for the callee to answer.
         try:
-            result: dict = await asyncio.wait_for(future, timeout=timeout)
+            await asyncio.wait_for(asyncio.shield(answered_future), timeout=connect_timeout)
+            logger.info("Call %s answered", call_sid)
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_WORKING,
+                content="Call answered.",
+                metadata={"type": "call_answered", "call_sid": call_sid},
+            )
         except asyncio.TimeoutError:
+            _CALL_ANSWERED.pop(call_sid, None)
             _CALL_FUTURES.pop(call_sid, None)
-            logger.warning("Call %s timed out after %ds", call_sid, timeout)
+            logger.warning("Call %s not answered within %ds", call_sid, connect_timeout)
             yield AgentStreamResponse(
                 state=TaskState.TASK_STATE_FAILED,
-                content=f"Call timed out after {timeout}s without completion.",
+                content=f"Call not answered within {connect_timeout}s.",
+            )
+            return
+        except Exception as exc:
+            _CALL_ANSWERED.pop(call_sid, None)
+            _CALL_FUTURES.pop(call_sid, None)
+            logger.exception("Unexpected error waiting for call %s to be answered", call_sid)
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=f"Call error: {exc}")
+            return
+
+        # Phase 2 — wait for the call to end.
+        try:
+            result: dict = await asyncio.wait_for(future, timeout=duration_timeout)
+        except asyncio.TimeoutError:
+            _CALL_FUTURES.pop(call_sid, None)
+            logger.warning("Call %s exceeded max duration of %ds", call_sid, duration_timeout)
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_FAILED,
+                content=f"Call exceeded maximum duration of {duration_timeout}s.",
             )
             return
         except Exception as exc:

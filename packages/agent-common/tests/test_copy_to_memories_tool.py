@@ -16,12 +16,7 @@ async def test_copy_file_success():
     mock_backend.aread.return_value = "Test content for large file"
     mock_backend.awrite.return_value = WriteResult(path="/memories/test.txt", error=None, files_update=None)
 
-    # Mock backend factory
-    def backend_factory(runtime):
-        return mock_backend
-
-    # Create tool
-    tool = create_copy_file_tool(backend_factory)
+    tool = create_copy_file_tool(mock_backend)
 
     # Invoke tool directly with function parameters (bypassing LangChain's parameter injection)
     result = await tool.coroutine(
@@ -50,10 +45,7 @@ async def test_copy_file_with_auto_destination():
         path="/memories/large_result.json", error=None, files_update=None
     )
 
-    def backend_factory(runtime):
-        return mock_backend
-
-    tool = create_copy_file_tool(backend_factory)
+    tool = create_copy_file_tool(mock_backend)
 
     # Invoke without destination_name
     result = await tool.coroutine(
@@ -75,10 +67,7 @@ async def test_copy_file_source_not_found():
     mock_backend = AsyncMock()
     mock_backend.aread.side_effect = FileNotFoundError("File not found")
 
-    def backend_factory(runtime):
-        return mock_backend
-
-    tool = create_copy_file_tool(backend_factory)
+    tool = create_copy_file_tool(mock_backend)
 
     result = await tool.coroutine(
         source_path="/temp/nonexistent.txt",
@@ -97,10 +86,7 @@ async def test_copy_file_write_error():
     mock_backend.aread.return_value = "Content"
     mock_backend.awrite.return_value = WriteResult(path=None, error="Write failed: disk full", files_update=None)
 
-    def backend_factory(runtime):
-        return mock_backend
-
-    tool = create_copy_file_tool(backend_factory)
+    tool = create_copy_file_tool(mock_backend)
 
     result = await tool.coroutine(
         source_path="/temp/test.txt",
@@ -118,10 +104,7 @@ async def test_copy_file_invalid_path():
     """Test validation of invalid paths."""
     mock_backend = AsyncMock()
 
-    def backend_factory(runtime):
-        return mock_backend
-
-    tool = create_copy_file_tool(backend_factory)
+    tool = create_copy_file_tool(mock_backend)
 
     # Test relative path (should fail validation)
     result = await tool.coroutine(
@@ -150,10 +133,7 @@ async def test_copy_file_empty_file():
     mock_backend = AsyncMock()
     mock_backend.aread.return_value = ""  # Empty content
 
-    def backend_factory(runtime):
-        return mock_backend
-
-    tool = create_copy_file_tool(backend_factory)
+    tool = create_copy_file_tool(mock_backend)
 
     result = await tool.coroutine(
         source_path="/temp/empty.txt",
@@ -180,10 +160,7 @@ async def test_copy_file_file_size_display():
         mock_backend.aread.return_value = content
         mock_backend.awrite.return_value = WriteResult(path="/memories/test.txt", error=None, files_update=None)
 
-        def backend_factory(runtime):
-            return mock_backend
-
-        tool = create_copy_file_tool(backend_factory)
+        tool = create_copy_file_tool(mock_backend)
 
         result = await tool.coroutine(
             source_path="/temp/test.txt",

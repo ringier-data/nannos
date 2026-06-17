@@ -76,80 +76,40 @@ def validate_skill_name(name: str) -> str | None:
 def parse_skill_frontmatter(content: str) -> ParsedSkill | None:
     """Parse a SKILL.md file into frontmatter and body.
 
-    Supports both:
-    - New format: YAML frontmatter between --- delimiters
-    - Legacy format: H1 heading + first paragraph (returns synthetic frontmatter)
-
-    Returns None if content is empty or unparseable.
+    Expects YAML frontmatter between ``---`` delimiters. Returns None if the
+    content is empty, has no frontmatter block, or the frontmatter is unparseable.
     """
     if not content or not content.strip():
         return None
 
     stripped = content.strip()
+    if not stripped.startswith("---"):
+        return None
 
-    # Try YAML frontmatter format
-    if stripped.startswith("---"):
-        parts = stripped.split("---", 2)
-        if len(parts) >= 3:
-            yaml_str = parts[1].strip()
-            body = parts[2].strip()
-            try:
-                fm_data = yaml.safe_load(yaml_str)
-                if isinstance(fm_data, dict):
-                    name = str(fm_data.get("name", ""))
-                    description = str(fm_data.get("description", ""))
-                    raw_meta = fm_data.get("metadata", {})
-                    metadata = {str(k): str(v) for k, v in raw_meta.items()} if isinstance(raw_meta, dict) else {}
-                    return ParsedSkill(
-                        frontmatter=SkillFrontmatter(
-                            name=name,
-                            description=description,
-                            metadata=metadata,
-                        ),
-                        body=body,
-                    )
-            except yaml.YAMLError:
-                pass  # Fall through to legacy parsing
+    parts = stripped.split("---", 2)
+    if len(parts) < 3:
+        return None
 
-    # Legacy format: extract from markdown headings
-    return _parse_legacy_skill(content)
+    yaml_str = parts[1].strip()
+    body = parts[2].strip()
+    try:
+        fm_data = yaml.safe_load(yaml_str)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(fm_data, dict):
+        return None
 
-
-def _parse_legacy_skill(content: str) -> ParsedSkill:
-    """Parse a legacy skill file (no frontmatter) into a ParsedSkill.
-
-    Extracts:
-    - name from first H1 heading (normalized to skill-name format)
-    - description from first non-empty, non-heading line
-    - body is the entire content
-    """
-    first_heading = ""
-    description = ""
-
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            heading_text = stripped.lstrip("#").strip()
-            if not first_heading:
-                first_heading = heading_text
-            continue
-        if first_heading and not description:
-            description = stripped[:_MAX_DESCRIPTION_LEN]
-            break
-
-    # Normalize heading to a skill-name-like identifier
-    name = re.sub(r"[^a-z0-9-]", "-", first_heading.lower())
-    name = re.sub(r"-+", "-", name).strip("-")
-
+    name = str(fm_data.get("name", ""))
+    description = str(fm_data.get("description", ""))
+    raw_meta = fm_data.get("metadata", {})
+    metadata = {str(k): str(v) for k, v in raw_meta.items()} if isinstance(raw_meta, dict) else {}
     return ParsedSkill(
         frontmatter=SkillFrontmatter(
-            name=name or "untitled",
+            name=name,
             description=description,
-            metadata={},
+            metadata=metadata,
         ),
-        body=content,
+        body=body,
     )
 
 

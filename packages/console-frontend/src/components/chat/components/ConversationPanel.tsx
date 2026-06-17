@@ -1,6 +1,8 @@
-import { Plus, MessageSquare, Loader2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Plus, MessageSquare, Loader2, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useChat } from '../contexts';
@@ -82,23 +84,58 @@ function LoadingState() {
   );
 }
 
-function EmptyState() {
+function EmptyState({ isSearching }: { isSearching?: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-12 px-4 text-center">
       <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
-        <MessageSquare className="w-6 h-6 text-muted-foreground" />
+        {isSearching ? (
+          <Search className="w-6 h-6 text-muted-foreground" />
+        ) : (
+          <MessageSquare className="w-6 h-6 text-muted-foreground" />
+        )}
       </div>
       <div className="space-y-1">
-        <p className="text-sm font-medium text-foreground">No conversations</p>
-        <p className="text-xs text-muted-foreground">Click + to start a new chat</p>
+        <p className="text-sm font-medium text-foreground">
+          {isSearching ? 'No matches' : 'No conversations'}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {isSearching ? 'Try a different search term' : 'Click + to start a new chat'}
+        </p>
       </div>
     </div>
   );
 }
 
 export function ConversationPanel() {
-  const { conversations, activeConversationId, isLoadingConversations, createConversation, selectConversation } =
+  const { conversations, activeConversationId, isLoadingConversations, createConversation, selectConversation, loadConversations } =
     useChat();
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const isSearching = searchQuery.trim().length > 0;
+
+  // Keep a stable reference to loadConversations so the debounce effect below
+  // only re-runs when the search term actually changes. loadConversations'
+  // identity changes whenever activeConversationId changes, so depending on it
+  // directly would reload (and replace) the list every time a conversation is
+  // created — dropping the unsaved new conversation before it can be used.
+  const loadConversationsRef = useRef(loadConversations);
+  useEffect(() => {
+    loadConversationsRef.current = loadConversations;
+  }, [loadConversations]);
+
+  // Debounce the search term and query the backend (title ILIKE). The initial
+  // (empty) load is already handled by ChatProvider, so skip the first run.
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    const handle = setTimeout(() => {
+      loadConversationsRef.current(searchQuery);
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [searchQuery]);
 
   return (
     <div className="w-64 h-full flex flex-col bg-muted/30 border-r border-border flex-shrink-0 overflow-hidden">
@@ -117,13 +154,29 @@ export function ConversationPanel() {
         </Button>
       </div>
 
+      {/* Search */}
+      <div className="px-3 py-2 border-b border-border">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            placeholder="Search conversations..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="pl-9 h-8"
+            data-testid="input-search-conversations"
+            aria-label="Search conversations by title"
+          />
+        </div>
+      </div>
+
       {/* Conversation List */}
       <ScrollArea className="flex-1 min-h-0">
         <div className="p-2 space-y-0.5">
           {isLoadingConversations ? (
             <LoadingState />
           ) : conversations.length === 0 ? (
-            <EmptyState />
+            <EmptyState isSearching={isSearching} />
           ) : (
             conversations.map((conv) => (
               <ConversationItem

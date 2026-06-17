@@ -48,7 +48,7 @@ class TestValidateSkillName:
 
 
 class TestParseSkillFrontmatter:
-    """Test frontmatter parsing for both new and legacy formats."""
+    """Test frontmatter parsing."""
 
     def test_parse_frontmatter_format(self):
         content = "---\nname: my-skill\ndescription: Does something useful.\n---\n\n## Steps\n\n1. Do it"
@@ -65,12 +65,10 @@ class TestParseSkillFrontmatter:
         assert result.frontmatter.name == "deploy"
         assert result.frontmatter.metadata["author"] == "test-user"
 
-    def test_parse_legacy_format(self):
+    def test_no_frontmatter_returns_none(self):
+        # Plain markdown without a frontmatter block is no longer supported.
         content = "# Incident Triage\n\nHandle production incidents step by step.\n\n## Steps\n\n1. Check alerts"
-        result = parse_skill_frontmatter(content)
-        assert result is not None
-        assert result.frontmatter.name == "incident-triage"
-        assert "Handle production incidents" in result.frontmatter.description
+        assert parse_skill_frontmatter(content) is None
 
     def test_empty_content(self):
         assert parse_skill_frontmatter("") is None

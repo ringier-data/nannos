@@ -7,12 +7,39 @@ formatters:
     rename_fields:
       levelname: level
       asctime: time
+    # Drop uvicorn's ANSI-colored duplicate of the message from the JSON output.
+    reserved_attrs: &reserved_attrs
+      - args
+      - asctime
+      - created
+      - exc_info
+      - exc_text
+      - filename
+      - funcName
+      - levelname
+      - levelno
+      - lineno
+      - message
+      - module
+      - msecs
+      - msg
+      - name
+      - pathname
+      - process
+      - processName
+      - relativeCreated
+      - stack_info
+      - taskName
+      - thread
+      - threadName
+      - color_message
   access:
     "()": "rcplus_alloy_common.logging.CustomJsonFormatter"
     fmt: "%(asctime)s %(levelname)s %(name)s %(message)s"
     rename_fields:
       levelname: level
       asctime: time
+    reserved_attrs: *reserved_attrs
 handlers:
   default:
     formatter: default

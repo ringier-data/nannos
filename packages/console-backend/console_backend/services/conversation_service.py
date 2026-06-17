@@ -55,27 +55,36 @@ class ConversationService:
             logger.error(f"Failed to get conversation: {e}")
             return None
 
-    async def get_conversations_by_user_id(self, user_id: str, limit: int = 20) -> list[Conversation]:
+    async def get_conversations_by_user_id(
+        self, user_id: str, limit: int = 20, search: str | None = None
+    ) -> list[Conversation]:
         """Retrieve conversations for a user.
 
         Args:
             user_id: The user ID
             limit: Maximum number of conversations to return (default: 20)
+            search: Optional case-insensitive substring to filter conversations by title
 
         Returns:
             List of conversations ordered by last_message_at (newest first)
         """
         try:
+            conditions = ["user_id = :user_id"]
+            params: dict[str, object] = {"user_id": user_id, "limit": limit}
+
+            if search and search.strip():
+                conditions.append("title ILIKE :search")
+                params["search"] = f"%{search.strip()}%"
+
+            query = (
+                "SELECT * FROM conversations "
+                f"WHERE {' AND '.join(conditions)} "
+                "ORDER BY last_message_at DESC "
+                "LIMIT :limit"
+            )
+
             async with self._session_factory() as db:
-                result = await db.execute(
-                    text(
-                        "SELECT * FROM conversations "
-                        "WHERE user_id = :user_id "
-                        "ORDER BY last_message_at DESC "
-                        "LIMIT :limit"
-                    ),
-                    {"user_id": user_id, "limit": limit},
-                )
+                result = await db.execute(text(query), params)
                 rows = result.mappings().all()
 
             conversations = []

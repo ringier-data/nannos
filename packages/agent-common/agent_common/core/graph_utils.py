@@ -57,7 +57,7 @@ from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddlewa
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_quickjs import CodeInterpreterMiddleware
-from langchain_quickjs.middleware import REPLState
+from langchain_quickjs.middleware import REPLState, _resolve_thread_id
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
@@ -75,6 +75,12 @@ from agent_common.middleware.conversation_context_tools_middleware import (
     ConversationContextToolsMiddleware,
 )
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+from agent_common.core.ptc_discovery import (
+    PTC_DESCRIBE_TOOL_NAME,
+    PTC_SEARCH_TOOL_NAME,
+    build_discovery_tools,
+)
+from agent_common.core.ptc_signatures import render_tools_namespace
 from agent_common.middleware.ptc_guard import (
     PTC_CODE_INTERPRETER_TOOL_NAME,
     begin_ptc_turn,
@@ -307,6 +313,30 @@ _PTC_EXCLUDED_TOOL_NAMES: frozenset[str] = frozenset(
 # Must equal the field name on ``_PTCExposureState``.
 PTC_EXPOSED_TOOL_NAMES_STATE_KEY = "ptc_exposed_tool_names"
 
+# When the number of MCP catalog tools (those carrying ``server_name`` metadata)
+# exposed via PTC exceeds this threshold, the middleware switches to *core-only*
+# rendering: it still exposes (installs bridges for) every tool, but renders only the
+# stable, user-invariant core into the system prompt (filesystem/base tools plus the
+# ``search``/``describe`` discovery tools) and instructs the model to find the rest at
+# runtime. This keeps the prompt invariant across turns (restoring prompt caching) for
+# the large-catalog GP agent, while small, fixed sub-agent toolsets stay fully rendered
+# inline. Override via env for tuning.
+PTC_INLINE_RENDER_THRESHOLD = int(os.getenv("PTC_INLINE_RENDER_THRESHOLD", "40"))
+
+# Appended to the PTC prompt in core-only mode. Tells the model that only the core
+# tools above are listed and the rest must be discovered at runtime via the pinned
+# ``search`` / ``describe`` helpers (which are themselves rendered above).
+_PTC_DISCOVERY_INSTRUCTION = (
+    "Only the core tools above are listed. Many more tools are available but NOT listed "
+    "here (to keep this prompt stable). Discover them at runtime:\n"
+    f"- `await tools.{PTC_SEARCH_TOOL_NAME}({{ query: '...' }})` — find tools by intent; "
+    "returns `{ name, description }` matches.\n"
+    f"- `await tools.{PTC_DESCRIBE_TOOL_NAME}({{ name: '...' }})` — get the exact "
+    "signature for a tool before calling it.\n"
+    f"Always `{PTC_SEARCH_TOOL_NAME}`/`{PTC_DESCRIBE_TOOL_NAME}` a tool you don't see "
+    "above before calling it — calling an unknown `tools.<name>` throws."
+)
+
 # Max characters of a tool result kept inline before the code-interpreter
 # middleware evicts it to a file. Override via env for tuning. Default: 20k chars.
 PTC_MAX_RESULT_CHARS = int(os.getenv("PTC_MAX_RESULT_CHARS", "20000"))
@@ -348,6 +378,16 @@ def _code_interpreter_ptc_enabled() -> bool:
         "off",
         "",
     }
+
+
+def code_interpreter_ptc_enabled() -> bool:
+    """Public wrapper around :func:`_code_interpreter_ptc_enabled`.
+
+    Used by callers outside this module (e.g. the orchestrator's GP wiring) to decide
+    PTC-conditional behaviour such as gating ``ToolsetSelectorMiddleware`` off when PTC
+    runtime tool discovery (``tools.search``/``tools.describe``) supersedes it.
+    """
+    return _code_interpreter_ptc_enabled()
 
 
 class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
@@ -553,7 +593,42 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                     continue
                 _consider(tool)
 
+        # Large catalog (the GP agent): the prompt renders only the stable core, so
+        # pin the read-only ``search``/``describe`` discovery tools into the exposed
+        # set (callable + rendered) so the model can find the unrendered catalog at
+        # runtime. They close over the catalog collected above. Small, fixed sub-agent
+        # toolsets stay fully rendered inline and need no discovery helpers.
+        if self._is_core_only(collected):
+            collected.extend(build_discovery_tools(collected))
+
         return collected
+
+    @staticmethod
+    def _mcp_tool_count(tools: list[BaseTool]) -> int:
+        """Count exposed tools carrying ``server_name`` metadata (MCP catalog tools)."""
+        return sum(1 for t in tools if isinstance(t, BaseTool) and (t.metadata or {}).get("server_name"))
+
+    def _is_core_only(self, tools: list[BaseTool]) -> bool:
+        """Whether to render only the stable core (vs. every exposed tool) this turn.
+
+        Triggered when the exposed MCP catalog exceeds
+        ``PTC_INLINE_RENDER_THRESHOLD`` — i.e. the large-catalog GP agent. Sub-agents
+        and the orchestrator (small / no MCP catalog) render every exposed tool inline.
+        """
+        return self._mcp_tool_count(tools) > PTC_INLINE_RENDER_THRESHOLD
+
+    def _render_partition(self, exposed: list[BaseTool]) -> tuple[list[BaseTool], str]:
+        """Split the exposed set into (tools_to_render, discovery_note).
+
+        In core-only mode render only the stable, user-invariant core — base tools
+        (no ``server_name``: filesystem + orchestrator static tools) plus the pinned
+        ``search``/``describe`` helpers — and append the discovery instruction. The
+        MCP catalog stays exposed-but-unrendered. Otherwise render everything.
+        """
+        if self._is_core_only(exposed):
+            render_set = [t for t in exposed if not (getattr(t, "metadata", None) or {}).get("server_name")]
+            return render_set, _PTC_DISCOVERY_INSTRUCTION
+        return list(exposed), ""
 
     @staticmethod
     def _checkpointed_exposure(request: Any) -> set[str] | None:
@@ -569,6 +644,34 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         if not names:
             return None
         return set(names)
+
+    def _prepare_for_call(self, request: Any) -> str:
+        """Install the full exposed set as bridges, but render only the core.
+
+        Overrides the upstream ``_prepare_for_call`` (which renders *every* exposed
+        tool) to decouple **exposing** a tool (installing its callable
+        ``globalThis.tools`` bridge) from **rendering** its signature into the prompt.
+        Every tool in ``self._ptc`` (set by ``_ptc_prompt_and_hidden`` to this turn's
+        exposed set) is installed so it is callable; only ``_render_partition``'s core
+        subset is written into the prompt, with ``$ref``-resolved signatures via our
+        own renderer (also fixing nested-arg type hints on the sub-agent inline path).
+        """
+        if self._ptc is None:
+            return self._base_system_prompt
+        exposed = [t for t in self._ptc if isinstance(t, BaseTool) and t.name != self._tool_name]
+        thread_id = _resolve_thread_id(self._fallback_thread_id)
+        repl = self._registry.get(thread_id)
+        repl.install_tools(exposed)
+        self._ptc_tools_by_thread[thread_id] = tuple(exposed)
+        render_set, discovery_note = self._render_partition(exposed)
+        # Cache the rendered body by the set of *rendered* names (+ a discovery marker).
+        # In core-only mode this set is user-invariant and stable across turns, so the
+        # returned block is identical turn-to-turn — restoring prompt caching.
+        cache_key = frozenset(t.name for t in render_set) | ({"__discovery__"} if discovery_note else frozenset())
+        if self._ptc_prompt_cache is None or self._ptc_prompt_cache[0] != cache_key:
+            body = render_tools_namespace(render_set, tool_name=self._tool_name, discovery_note=discovery_note)
+            self._ptc_prompt_cache = (cache_key, body)
+        return self._base_system_prompt + self._ptc_prompt_cache[1]
 
     def _ptc_prompt_and_hidden(self, request: Any) -> tuple[str, set[str]]:
         """Build the PTC prompt and the set of tool names exposed this turn.

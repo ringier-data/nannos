@@ -322,7 +322,6 @@ class SkillActivationService:
         sub_agent_id: int,
         agent_name: str,
         actor: "User | None" = None,
-        user_id: str | None = None,
     ) -> bool:
         """Auto-update the calling agent's own activation after a registry edit.
 
@@ -338,7 +337,6 @@ class SkillActivationService:
             sub_agent_id: Target sub-agent ID
             agent_name: Sub-agent name (for docstore keys)
             actor: User performing the update (required for sub-agent activations)
-            user_id: Deprecated — use actor instead. Falls back for docstore writes.
 
         Returns:
             True if an activation was updated, False if no activation exists
@@ -363,7 +361,7 @@ class SkillActivationService:
             return False
 
         new_hash = registry.content_hash
-        effective_user_id = actor.id if actor else user_id
+        effective_user_id = actor.id if actor else None
 
         for act in activations:
             # Update activation hash

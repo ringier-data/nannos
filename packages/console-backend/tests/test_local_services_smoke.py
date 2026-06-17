@@ -119,6 +119,22 @@ async def test_conversation_list_by_user():
 
 
 @pytest.mark.asyncio
+async def test_conversation_list_by_user_search():
+    svc = InMemoryConversationService()
+    await svc.insert_conversation("u5", title="Quarterly budget review", conversation_id="c1")
+    await svc.insert_conversation("u5", title="Vacation planning", conversation_id="c2")
+    # Case-insensitive substring match on title
+    convs = await svc.get_conversations_by_user_id("u5", search="BUDGET")
+    assert [c.conversation_id for c in convs] == ["c1"]
+    # Blank search returns everything
+    convs = await svc.get_conversations_by_user_id("u5", search="  ")
+    assert len(convs) == 2
+    # No match returns empty
+    convs = await svc.get_conversations_by_user_id("u5", search="nonexistent")
+    assert convs == []
+
+
+@pytest.mark.asyncio
 async def test_conversation_insert_and_get():
     svc = InMemoryConversationService()
     await svc.insert_conversation("u4", title="My Chat", conversation_id="c4")

@@ -21,6 +21,7 @@ async def get_conversations_by_user(
     limit: int = 20,
     sub_agent_config_hash: str | None = None,
     exclude_playground: bool = False,
+    search: str | None = None,
     user: User = Depends(require_auth),
 ) -> dict:
     """Get all conversations for a user.
@@ -29,6 +30,7 @@ async def get_conversations_by_user(
         limit: Maximum number of conversations to return (default: 20, max: 50)
         sub_agent_config_hash: Optional filter by sub-agent config version hash
         exclude_playground: If True, exclude conversations with sub_agent_config_hash set
+        search: Optional case-insensitive substring to filter conversations by title
 
     Returns:
         Dictionary containing:
@@ -51,6 +53,7 @@ async def get_conversations_by_user(
         conversations = await request.app.state.conversation_service.get_conversations_by_user_id(
             user_id=str(user_id),
             limit=limit,
+            search=search,
         )
 
         # Filter by sub_agent_config_hash if provided

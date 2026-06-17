@@ -158,6 +158,18 @@ The `/skills/` virtual filesystem is **read-only** for agents. All mutations go 
 
 **CRITICAL**: `checkpoint_ns` must be `""` for standalone graphs (DynamicLocalAgentRunnable graphs are standalone, not subgraphs). Thread isolation is provided by unique `thread_id` patterns like `"{context_id}::dynamic-{name}"`.
 
+### PTC Tool Exposure (core/graph_utils.py, ptc_signatures.py, ptc_discovery.py)
+
+When `CODE_INTERPRETER_PTC` is enabled, the model calls tools by writing JavaScript in the sandboxed `eval` REPL (`tools.<name>({...})`) instead of one native tool call per step. `_PTCToleranceCodeInterpreterMiddleware` subclasses `langchain_quickjs`'s `CodeInterpreterMiddleware`. Non-obvious decisions:
+
+1. **Expose ≠ render.** *Exposing* a tool (installing its callable `globalThis.tools` bridge) is separate from *rendering* its signature into the system prompt. When the exposed MCP catalog exceeds `PTC_INLINE_RENDER_THRESHOLD` (default 40 — the large-catalog GP agent), `_prepare_for_call` installs the **full** catalog as bridges but renders only the **stable core**: base tools (no `server_name` metadata: filesystem + orchestrator static tools) plus the `search`/`describe` helpers. The volatile MCP catalog stays callable-but-unrendered. This keeps the rendered block invariant across turns, restoring prompt caching. Small, fixed sub-agent toolsets (under threshold) render every exposed tool inline.
+
+2. **Runtime discovery (ptc_discovery.py).** In core-only mode the model finds tools via two read-only, **unguarded** `StructuredTool`s pinned into the namespace: `tools.search({query})` (keyword/token ranking over name+description) and `tools.describe({name})` (full typed signature). They close over the per-turn exposed catalog and never execute a side-effecting tool, so they must never trip the HITL guard.
+
+3. **Own signature renderer (ptc_signatures.py).** The upstream `render_ptc_prompt` is no longer used. Our renderer resolves `$ref`/`$defs` (upstream degrades nested args to `unknown`), handles **dict `args_schema`** (MCP tools carry a raw JSON-schema dict, not a Pydantic model), and renders **no-param tools** as `()` rather than a misleading `input: Record<string, unknown>` (reserved strictly for the schema-truly-unavailable case). Used by both `describe` and the inline render path, so the type-hint fix applies everywhere a signature is shown.
+
+4. **`wrap_tool_for_ptc` preserves `.metadata`** (notably `server_name`) so the base-vs-MCP split in (1) works on the *wrapped* instances exposed inside `eval`.
+
 ## Critical Design Decisions
 
 ### Console Self-Improvement Tools Are Independent of MCP Whitelist

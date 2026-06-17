@@ -165,6 +165,50 @@ async def test_process_a2a_response_uses_fallback_context_id():
 
 
 @pytest.mark.asyncio
+async def test_first_artifact_chunk_is_accumulated_not_persisted_standalone():
+    """The append=False first chunk of an artifact must be accumulated, not saved standalone.
+
+    The first chunk of a streamed artifact has append=False (it creates the
+    artifact). It used to fall through to save_agent_response as its own message,
+    splitting the content from the accumulated remainder — which reload rendered as
+    two fragments. It must be accumulated like the appends that follow.
+    """
+    from a2a.types import Artifact, Part, StreamResponse, TaskArtifactUpdateEvent
+
+    from app import _process_a2a_response
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_socket_session = MagicMock(user_id="user-1", agent_url="http://agent")
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(return_value=mock_socket_session)
+    mock_conversation = MagicMock(conversation_id="conv-firstchunk", user_id="user-1")
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(return_value=mock_conversation)
+    mock_sio.app_instance.state.messages_service.save_history_messages = AsyncMock(return_value=0)
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+    mock_sio.app_instance.state.messages_service.insert_message = AsyncMock()
+
+    with patch("app.sio", mock_sio):
+        art = Artifact(
+            artifact_id="a1",
+            parts=[Part(text="The user wants me to delegate")],
+            metadata={"agent_name": "orchestrator"},
+        )
+        art.extensions.append("urn:nannos:a2a:intermediate-output:1.0")
+        event = TaskArtifactUpdateEvent(
+            task_id="t1", context_id="conv-firstchunk", artifact=art, append=False, last_chunk=False
+        )
+        await _process_a2a_response(
+            client_event=StreamResponse(artifact_update=event),
+            sid="sid",
+            request_id="req-fc",
+            context_id="conv-firstchunk",
+        )
+        # First chunk is accumulated for later assembly, never persisted on its own.
+        mock_sio.app_instance.state.messages_service.save_agent_response.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_conversation_title_with_unicode_characters():
     """Test that conversation title handles Unicode characters correctly."""
 
@@ -189,21 +233,21 @@ async def test_conversation_title_with_unicode_characters():
     assert "🌍" in title or "🚀" in title  # Emojis might be truncated depending on char count
 
 
-def test_legacy_state_name_normalizes_v1_states():
+def test_short_state_name_normalizes_v1_states():
     """v1.0 ProtoJSON TaskState names normalize to the short forms the backend branches on.
 
     The outbound payload is now emitted as raw v1.0 (the frontend handles it natively),
     but the backend's turn-ending / is_bare_completion_signal control-flow still keys off
-    the short state strings. _legacy_state_name bridges that — if it stops mapping
+    the short state strings. _short_state_name bridges that — if it stops mapping
     TASK_STATE_COMPLETED -> "completed", is_bare_completion_signal misfires and the reply
     is persisted/rendered twice.
     """
-    from app import _legacy_state_name
+    from app import _short_state_name
 
-    assert _legacy_state_name("TASK_STATE_COMPLETED") == "completed"
-    assert _legacy_state_name("TASK_STATE_INPUT_REQUIRED") == "input-required"
-    assert _legacy_state_name("TASK_STATE_FAILED") == "failed"
-    assert _legacy_state_name("TASK_STATE_CANCELED") == "canceled"
-    # Already-short (legacy) values and non-strings pass through untouched.
-    assert _legacy_state_name("completed") == "completed"
-    assert _legacy_state_name(None) is None
+    assert _short_state_name("TASK_STATE_COMPLETED") == "completed"
+    assert _short_state_name("TASK_STATE_INPUT_REQUIRED") == "input-required"
+    assert _short_state_name("TASK_STATE_FAILED") == "failed"
+    assert _short_state_name("TASK_STATE_CANCELED") == "canceled"
+    # Already-short values and non-strings pass through untouched.
+    assert _short_state_name("completed") == "completed"
+    assert _short_state_name(None) is None

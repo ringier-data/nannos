@@ -11,7 +11,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from pydantic import SecretStr
 
-from .langgraph import FinalResponseSchema, LangGraphAgent  # noqa: F401
+from .langgraph import LangGraphAgent  # noqa: F401
 from .postgres_checkpointer_mixin import PostgreSQLCheckpointerMixin
 
 logger = logging.getLogger(__name__)

@@ -29,11 +29,6 @@ logger = logging.getLogger(__name__)
 # Cache TTL in seconds
 _CACHE_TTL = 60
 
-# Legacy namespace — try as fallback when "agent-data" yields nothing.
-# Remove after one release cycle.
-_LEGACY_NAMESPACE = "playbooks"
-_CURRENT_NAMESPACE = "agent-data"
-
 
 @dataclass
 class SkillIndexEntry:
@@ -86,10 +81,6 @@ class PlaybookReaderService:
     async def _read_file_from_store(self, namespace: tuple[str, ...], file_path: str) -> str | None:
         """Read a file from the store by namespace and path.
 
-        Tries the provided namespace first; if the namespace ends with
-        ``_CURRENT_NAMESPACE`` and no content is found, retries with the
-        legacy ``_LEGACY_NAMESPACE`` for backward compatibility.
-
         Args:
             namespace: Store namespace tuple (e.g., (user_id, "agent-data"))
             file_path: The file path key in the store
@@ -97,13 +88,6 @@ class PlaybookReaderService:
         Returns:
             File content as string, or None if not found
         """
-        content = await self._try_read(namespace, file_path)
-        if content is None and len(namespace) >= 2 and namespace[-1] == _CURRENT_NAMESPACE:
-            content = await self._try_read((*namespace[:-1], _LEGACY_NAMESPACE), file_path)
-        return content
-
-    async def _try_read(self, namespace: tuple[str, ...], file_path: str) -> str | None:
-        """Attempt to read a single file from the store."""
         try:
             items = await self._store.aget(namespace=namespace, key=file_path)
             if items and hasattr(items, "value") and items.value:
@@ -130,8 +114,7 @@ class PlaybookReaderService:
         """List file keys in a store namespace matching a prefix.
 
         Uses asearch without a semantic query (query=None) to list items,
-        then filters by key prefix client-side. Falls back to the legacy
-        namespace if the current one returns no results.
+        then filters by key prefix client-side.
 
         Args:
             namespace: Store namespace tuple
@@ -140,13 +123,6 @@ class PlaybookReaderService:
         Returns:
             List of matching file path keys
         """
-        results = await self._try_list(namespace, prefix)
-        if not results and len(namespace) >= 2 and namespace[-1] == _CURRENT_NAMESPACE:
-            results = await self._try_list((*namespace[:-1], _LEGACY_NAMESPACE), prefix)
-        return results
-
-    async def _try_list(self, namespace: tuple[str, ...], prefix: str) -> list[str]:
-        """Attempt to list files in a single namespace."""
         try:
             results = await self._store.asearch(namespace, limit=100)
             return [item.key for item in results if item.key.startswith(prefix)]
@@ -424,9 +400,8 @@ class PlaybookReaderService:
     async def _extract_skill_description(self, namespace: tuple[str, ...], file_path: str) -> str:
         """Extract description from a skill file.
 
-        Supports both SKILL.md frontmatter format (preferred) and legacy
-        markdown heading format (fallback). Uses parse_skill_frontmatter
-        which handles both formats.
+        Reads the ``description`` field from SKILL.md YAML frontmatter via
+        parse_skill_frontmatter.
 
         Args:
             namespace: Store namespace

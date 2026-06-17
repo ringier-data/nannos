@@ -64,9 +64,6 @@ def get_resolved_default_model() -> ModelType:
     return _default_model
 
 
-# DEFAULT_MODEL kept for backward compat — reads env var directly.
-# Use get_resolved_default_model() for runtime resolution that respects available credentials.
-DEFAULT_MODEL: ModelType = os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")  # type: ignore
 DEFAULT_THINKING_LEVEL: ThinkingLevel | None = (
     ThinkingLevel(os.getenv("ORCHESTRATOR_THINKING_LEVEL", ThinkingLevel.low))
     if os.getenv("ORCHESTRATOR_ENABLE_THINKING", "false").lower() == "true"

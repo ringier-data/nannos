@@ -4,6 +4,7 @@ import logging
 import os
 import socket
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
@@ -474,6 +475,10 @@ _streaming_buffers: dict[str, str] = {}
 # Keyed by "{context_id}:{agent_name}". Persisted when the conversation turn ends
 # (terminal status or main artifact last_chunk) so reasoning blocks survive page reload.
 _intermediate_buffers: dict[str, str] = {}
+# First-chunk arrival time per intermediate buffer key. Buffers are flushed at
+# turn-end, but persisting them with this real start time (not turn-end) keeps
+# reload ordering aligned with how the thoughts streamed live.
+_intermediate_buffer_ts: dict[str, datetime] = {}
 
 
 # ==============================================================================
@@ -481,11 +486,11 @@ _intermediate_buffers: dict[str, str] = {}
 # ==============================================================================
 
 
-# Map v1.0 protobuf TaskState names -> the legacy short wire strings that the
-# backend's turn-ending / persistence control-flow is keyed against. The frontend
-# handles raw v1.0 states natively (so we no longer rewrite the outbound payload);
-# this is used only to normalize states for internal branching below.
-_LEGACY_STATE: dict[str, str] = {
+# Map v1.0 protobuf TaskState names -> the short state strings that the backend's
+# turn-ending / persistence control-flow is keyed against. The frontend handles raw
+# v1.0 states natively (so we no longer rewrite the outbound payload); this is used
+# only to normalize states for internal branching below.
+_SHORT_STATE_NAMES: dict[str, str] = {
     "TASK_STATE_SUBMITTED": "submitted",
     "TASK_STATE_WORKING": "working",
     "TASK_STATE_COMPLETED": "completed",
@@ -498,9 +503,9 @@ _LEGACY_STATE: dict[str, str] = {
 }
 
 
-def _legacy_state_name(state: Any) -> Any:
-    """Normalize a v1.0 ProtoJSON TaskState name to its legacy short form."""
-    return _LEGACY_STATE.get(state, state) if isinstance(state, str) else state
+def _short_state_name(state: Any) -> Any:
+    """Normalize a v1.0 ProtoJSON TaskState name to its short form."""
+    return _SHORT_STATE_NAMES.get(state, state) if isinstance(state, str) else state
 
 
 def _extract_a2a_task_id(stream_result: Any) -> str | None:
@@ -584,6 +589,7 @@ async def _flush_intermediate_buffers(
     keys_to_flush = [k for k in _intermediate_buffers if k.startswith(prefix)]
     for buf_key in keys_to_flush:
         content = _intermediate_buffers.pop(buf_key)
+        first_chunk_ts = _intermediate_buffer_ts.pop(buf_key, None)
         if not content.strip():
             continue
         agent_name = buf_key.split(":", 1)[1] if ":" in buf_key else "unknown"
@@ -613,6 +619,7 @@ async def _flush_intermediate_buffers(
             kind="artifact-update",
             raw_payload=synthetic_payload,
             metadata={"agent_name": agent_name},
+            created_at=first_chunk_ts,
         )
 
 
@@ -703,7 +710,8 @@ async def _process_a2a_response(
                 message_extensions = status_message.get("extensions", []) if isinstance(status_message, dict) else []
                 is_work_plan = "urn:nannos:a2a:work-plan:1.0" in message_extensions
                 is_feedback_request = "urn:nannos:a2a:feedback-request:1.0" in message_extensions
-                is_artifact_append = response_data.get("kind") == "artifact-update" and response_data.get("append")
+                is_artifact_update = response_data.get("kind") == "artifact-update"
+                is_artifact_append = is_artifact_update and response_data.get("append")
                 # Handle both camelCase and snake_case, check explicitly for boolean value
                 # Don't use 'or' because False would fallback to checking second field
                 last_chunk_value = response_data.get("lastChunk")
@@ -713,14 +721,18 @@ async def _process_a2a_response(
 
                 # Extract status object early for use in multiple checks below
                 status_obj = response_data.get("status", {})
-                status_state = _legacy_state_name(status_obj.get("state")) if isinstance(status_obj, dict) else None
+                status_state = _short_state_name(status_obj.get("state")) if isinstance(status_obj, dict) else None
 
                 # Accumulate streaming artifact text for persistence.
                 # Individual chunks are transient (not saved to DB); the assembled
                 # content is persisted when last_chunk arrives.
-                # IMPORTANT: Do NOT accumulate intermediate output (sub-agent thoughts).
-                # Those are display-only events, not part of the final persisted message.
-                if is_artifact_append:
+                # Use is_artifact_update (not is_artifact_append): the FIRST chunk of an
+                # artifact is append=False (it creates the artifact). It must be
+                # accumulated with the rest — otherwise it falls through to
+                # save_agent_response as its own standalone message and the content is
+                # split into two messages, which reload renders as two fragments
+                # (e.g. an orchestrator thought split mid-sentence).
+                if is_artifact_update:
                     artifact = response_data.get("artifact", {})
                     artifact_metadata = artifact.get("metadata", {}) if isinstance(artifact, dict) else {}
                     # Detect intermediate output via extensions array on the artifact
@@ -753,6 +765,10 @@ async def _process_a2a_response(
                         if chunk_text:
                             agent_name = artifact_metadata.get("agent_name", "unknown")
                             buf_key = f"{effective_context_id}:{agent_name}"
+                            # Stamp the first chunk's arrival time so the flushed message
+                            # keeps the real start time (reload ordering matches live).
+                            if buf_key not in _intermediate_buffers:
+                                _intermediate_buffer_ts[buf_key] = datetime.now(tz=timezone.utc)
                             _intermediate_buffers[buf_key] = _intermediate_buffers.get(buf_key, "") + chunk_text
                             logger.info(
                                 f"[STREAMING] Intermediate output chunk ({len(chunk_text)} chars) from {agent_name}, "
@@ -845,7 +861,7 @@ async def _process_a2a_response(
                 if (
                     not is_work_plan
                     and not is_feedback_request
-                    and not is_artifact_append
+                    and not is_artifact_update
                     and not is_bare_completion_signal
                     and not safety_net_saved
                 ):

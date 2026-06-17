@@ -481,7 +481,7 @@ class GroupAdminChecker:
         # Get DB session from app state
         async_session_factory = request.app.state.async_session_factory
         async with async_session_factory() as db:
-            is_admin = await user_group_service.is_group_admin(db, group_id, user.id)
+            is_admin = await user_group_service.is_group_manager(db, group_id, user.id)
 
         if not is_admin:
             raise HTTPException(
@@ -519,7 +519,7 @@ async def require_group_admin_or_admin(
         return user
 
     # Check if user is group admin
-    is_admin = await user_group_service.is_group_admin(db, group_id, user.id)
+    is_admin = await user_group_service.is_group_manager(db, group_id, user.id)
     if not is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

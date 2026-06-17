@@ -21,9 +21,6 @@ from .postgres_checkpointer_mixin import PostgreSQLCheckpointerMixin
 
 logger = logging.getLogger(__name__)
 
-# Re-export FinalResponseSchema for backward compatibility
-from .langgraph import FinalResponseSchema  # noqa: F401, E402
-
 
 class LangGraphGoogleGenAIAgent(PostgreSQLCheckpointerMixin, LangGraphAgent):
     """LangGraph agent using Google Generative AI (Gemini) and PostgreSQL checkpointing.

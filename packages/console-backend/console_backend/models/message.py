@@ -30,5 +30,4 @@ class Message(BaseModel):
     state: int = TaskState.TASK_STATE_UNSPECIFIED  # Message state as A2A TaskState
     raw_payload: str = ""  # Original JSON payload
     metadata: dict[str, Any] = Field(default_factory=dict)  # Optional metadata
-    final: bool = False  # DEPRECATED: A2A 1.0.0 removes this field (kept for backward compatibility)
     kind: str = ""  # Message kind: 'message', 'status-update', etc.

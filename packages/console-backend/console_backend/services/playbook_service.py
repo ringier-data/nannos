@@ -530,10 +530,10 @@ class PlaybookService:
         return None
 
     def _extract_title_and_description(self, content: str) -> tuple[str, str]:
-        """Extract title (name) and description from a skill file.
+        """Extract title (name) and description from a SKILL.md file.
 
-        Supports both SKILL.md frontmatter format (preferred) and legacy
-        markdown heading format (fallback for old skills).
+        Reads the required ``name`` and ``description`` fields from YAML
+        frontmatter. Returns empty strings when no frontmatter is present.
 
         Args:
             content: Full skill file content
@@ -541,7 +541,6 @@ class PlaybookService:
         Returns:
             Tuple of (title/name, description)
         """
-        # Try YAML frontmatter first
         stripped = content.strip()
         if stripped.startswith("---"):
             parts = stripped.split("---", 2)
@@ -555,20 +554,7 @@ class PlaybookService:
                 except yaml.YAMLError:
                     pass
 
-        # Legacy: extract from markdown headings
-        title = ""
-        description = ""
-        lines = content.split("\n")
-
-        for line in lines:
-            stripped_line = line.strip()
-            if not title and stripped_line.startswith("# "):
-                title = stripped_line[2:].strip()
-            elif title and not description and stripped_line and not stripped_line.startswith("#"):
-                description = stripped_line
-                break
-
-        return title, description
+        return "", ""
 
 
 def _to_jsonb(content: str, encoding: str | None = None) -> str:
