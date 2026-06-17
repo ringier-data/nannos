@@ -25,7 +25,7 @@ The Agent Creator acts as an expert consultant that guides users through:
 - **Runtime**: FastAPI with A2A protocol support
 - **LLM**: Claude Sonnet 4.5 via AWS Bedrock
 - **Tools**: MCP (Model Context Protocol) tools from console backend
-- **Checkpointing**: DynamoDB with S3 offload for conversation persistence
+- **Checkpointing**: PostgreSQL with optional S3 offload for conversation persistence
 - **Authentication**: JWT bearer tokens via JWTValidatorMiddleware (validates orchestrator tokens)
 
 ## Available MCP Tools
@@ -59,7 +59,7 @@ See `.env.template` for all configuration options. Key variables:
 - `AGENT_ID`: Unique identifier for this agent (for provenance tracking)
 - `CONSOLE_BACKEND_URL`: URL of the console backend MCP endpoint
 - `AWS_BEDROCK_REGION`: AWS region for Bedrock access
-- `CHECKPOINT_DYNAMODB_TABLE_NAME`: DynamoDB table for conversation state
+- `CHECKPOINT_POSTGRES_HOST`: PostgreSQL host for conversation state
 
 ## Development
 

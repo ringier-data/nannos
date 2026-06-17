@@ -4,7 +4,7 @@ Graph factory for OrchestratorDeepAgent.
 This module provides a centralized factory for creating and managing LangGraph instances.
 It encapsulates all graph-related concerns:
 - Model creation and caching (Bedrock vs OpenAI)
-- Checkpointer setup (DynamoDB)
+- Checkpointer setup (PostgreSQL)
 - Middleware stack assembly
 - Graph creation and caching per model type
 
@@ -92,7 +92,7 @@ class GraphFactory:
 
     Centralizes all graph-related concerns:
     - Model creation/caching (Bedrock vs OpenAI)
-    - Checkpointer (shared DynamoDB instance)
+    - Checkpointer (shared PostgreSQL instance)
     - Middleware stack
     - Graph creation/caching per model type
 

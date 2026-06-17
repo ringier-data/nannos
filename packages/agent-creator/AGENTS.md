@@ -8,8 +8,8 @@ When implementing new features or refactoring existing code, consider if these i
 
 - FastAPI with async/await
 - LangGraph for agent workflows
-- DynamoDB for checkpoints
-- S3 for checkpoint storage
+- PostgreSQL for checkpoints
+- S3 for checkpoint storage (optional offload)
 - Pydantic v2 for data validation
 - pytest with pytest-asyncio for testing
 
@@ -54,7 +54,7 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 ### Agent Creation Workflow
 
 - Implements LangGraph workflows for creating and managing sub-agents
-- Uses checkpointers for workflow persistence (DynamoDB + S3)
+- Uses checkpointers for workflow persistence (PostgreSQL + optional S3)
 - Integrates with Console Backend for creating agents
 - Supports agent configuration validation and testing
 

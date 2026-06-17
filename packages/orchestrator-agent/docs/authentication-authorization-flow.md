@@ -352,7 +352,7 @@ class GraphFactory:
         self._graphs: dict[str, CompiledStateGraph] = {}
         
         # Shared checkpointer for all graphs
-        self._checkpointer = DynamoDBSaver(...)
+        self._checkpointer = AsyncPostgresSaver(pool, serde=serde)
     
     def get_graph(self, model_type: ModelType) -> CompiledStateGraph:
         """Get or create a graph for the given model type."""
@@ -370,20 +370,13 @@ class GraphFactory:
 
 ### Checkpointing Architecture
 
-**Checkpointer:** `DynamoDBSaver` (langgraph_checkpoint_dynamodb)
+**Checkpointer:** `AsyncPostgresSaver` (langgraph-checkpoint-postgres)
 
 ```python
-self._checkpointer = DynamoDBSaver(
-    DynamoDBConfig(
-        table_config=DynamoDBTableConfig(
-            table_name=config.CHECKPOINT_DYNAMODB_TABLE_NAME,
-            ttl_days=config.CHECKPOINT_TTL_DAYS,  # Configurable via AgentSettings
-        ),
-        region_name=config.CHECKPOINT_AWS_REGION,
-        max_retries=config.CHECKPOINT_MAX_RETRIES,
-    ),
-    deploy=False,
-)
+self._checkpointer = AsyncPostgresSaver(pool, serde=serde)
+# Where:
+#   pool = AsyncConnectionPool(conninfo=postgresql://..., open=False)
+#   serde = S3OffloadingSerde(bucket=..., threshold_bytes=...) if S3 configured
 ```
 
 **What's Checkpointed:**
@@ -600,7 +593,7 @@ class OidcOAuth2Client:
         │                                                        │
         │                                                        ▼
         │                              ┌─────────────────────────────────────────┐
-        │                              │ DynamoDB Checkpoint                     │
+        │                              │ PostgreSQL Checkpoint (+ optional S3)   │
         │                              │ ┌─────────────────────────────────────┐ │
         │                              │ │ Stored: messages, state, interrupts │ │
         │                              │ │ NOT stored: tokens, tools, subagents│ │
@@ -829,7 +822,7 @@ For true multi-party conversation support:
 | `DynamicToolDispatchMiddleware` | Bind tools at runtime | Uses GraphRuntimeContext |
 | `SmartTokenInterceptor` | Sub-agent auth | Token exchange or client creds |
 | `OidcOAuth2Client` | Token operations | Per-audience caching with expiry |
-| `DynamoDBSaver` | Checkpoint state | NO credentials stored |
+| `AsyncPostgresSaver` | Checkpoint state | NO credentials stored |
 
 **Key Security Properties:**
 - ✅ Zero-trust: Identity from validated JWT only

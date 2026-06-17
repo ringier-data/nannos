@@ -48,7 +48,7 @@ just start-local
   <td valign="top">Medium</td>
   <td valign="top">• Orchestrator</td>
   <td valign="top">
-    + S3, DynamoDB (LangGraph Checkpointing)<br>
+    + S3, PostgreSQL (LangGraph Checkpointing)<br>
     + S3 (binary file storage)<br>
     + MCP Gateway (e.g. <a href="https://www.gatana.ai">Gatana</a>)
   </td>

@@ -52,7 +52,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
 - **A2A SDK**: Agent-to-Agent protocol implementation
 - **LangGraph**: State machine for agent workflows
 - **LangChain**: LLM orchestration (OpenAI/Azure/Google)
-- **DynamoDB**: Checkpoint persistence for conversation state
+- **PostgreSQL**: Checkpoint persistence for conversation state (with optional S3 offload)
 - **Oidc**: OAuth2 authentication and authorization
 - **Starlette**: ASGI web framework
 - **SSE**: Server-Sent Events for streaming responses
@@ -61,7 +61,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
 
 ### Multi-Turn Conversations
 - Maintains conversation context across multiple interactions
-- Persists state in DynamoDB for session continuity
+- Persists state in PostgreSQL for session continuity
 - Supports thread-based conversations with unique context IDs
 
 ### Dynamic Agent Discovery
@@ -92,7 +92,7 @@ The Orchestrator Agent is an enterprise-grade agentic system that:
 - Python 3.13+
 - Oidc account and application credentials
 - OpenAI/Azure OpenAI/Google API key
-- AWS credentials (for DynamoDB checkpoints)
+- PostgreSQL credentials (for checkpoint persistence)
 
 ### Installation
 
@@ -126,9 +126,17 @@ OIDC_DOMAIN=rcplus.oidc.com
 OIDC_CLIENT_ID=your-client-id
 OIDC_AUDIENCE=api://default
 
-# DynamoDB Checkpoints (for conversation persistence)
-AWS_DEFAULT_REGION=us-east-1
-DYNAMODB_TABLE_NAME=orchestrator-checkpoints
+# PostgreSQL Checkpoints (for conversation persistence)
+CHECKPOINT_POSTGRES_HOST=localhost
+CHECKPOINT_POSTGRES_PORT=5403
+CHECKPOINT_POSTGRES_DB=checkpointer
+CHECKPOINT_POSTGRES_USER=postgres
+CHECKPOINT_POSTGRES_PASSWORD=password
+CHECKPOINT_POSTGRES_SCHEMA=checkpoints
+
+# Optional S3 Offloading (for checkpoints > 10 MB)
+# CHECKPOINT_S3_BUCKET_NAME=my-bucket
+# CHECKPOINT_S3_THRESHOLD_MB=10
 
 # Agent Discovery
 AGENT_REGISTRY_URL=http://localhost:9000/agents
@@ -310,10 +318,11 @@ Key variables:
 - Check sub-agent availability
 - Review discovery logs with `LOG_LEVEL=DEBUG`
 
-**DynamoDB checkpoint errors**
-- Verify AWS credentials
-- Ensure table exists: `aws dynamodb describe-table --table-name orchestrator-checkpoints`
-- Check IAM permissions for DynamoDB access
+**PostgreSQL checkpoint errors**
+- Verify PostgreSQL is running: `pg_isready -h localhost -p 5403`
+- Check checkpoint schema exists: `psql -h localhost -U postgres -d checkpointer -c "SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'checkpoints';"`
+- Check IAM/credentials for checkpoint database
+- For S3 offloading issues, verify S3 bucket permissions and `CHECKPOINT_S3_BUCKET_NAME` is set
 
 **LLM API errors**
 - Verify API key and endpoint configuration

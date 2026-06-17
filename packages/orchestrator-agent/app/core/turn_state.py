@@ -4,8 +4,8 @@ Created fresh inside ``OrchestratorDeepAgentExecutor.execute()`` for each stream
 round and passed into ``OrchestratorDeepAgent.stream()``. The agent already reads
 the final graph state once at end-of-stream (``graph.aget_state``); it stores that
 result here so the executor can reuse it for the phantom / feedback / terminal
-checks WITHOUT issuing its own ``graph.get_state()`` re-reads — each of which is a
-~5s checkpoint fetch (DynamoDB + S3 offload). Nothing mutates the graph between
+checks WITHOUT issuing its own ``graph.aget_state()`` re-reads — each of which is a
+~5s checkpoint fetch (PostgreSQL + optional S3 offload). Nothing mutates the graph between
 the agent's end-of-stream read and the executor's post-stream checks, so the
 carrier IS what a re-read would return — equivalence by construction.
 
