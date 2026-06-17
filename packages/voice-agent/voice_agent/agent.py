@@ -264,8 +264,7 @@ def build_live_config(
         tools: List of tools to make available. If None, uses default [get_current_time].
     """
     prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
-    if tools:
-        prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION
+    prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION
     tool_list = tools
 
     return types.LiveConnectConfig(
