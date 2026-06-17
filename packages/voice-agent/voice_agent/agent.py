@@ -170,6 +170,31 @@ def _is_write_tool(name: str, description: str) -> bool:
 # don't inflate the model's context window.
 _LARGE_RESULT_THRESHOLD: int = 15 * 1024  # 15 KB
 
+# A logical line longer than this is hard-wrapped into multiple display lines for
+# paging. Without this a single-line payload (minified JSON, a CSV with no breaks)
+# would be one giant "line" — search would return the whole blob and a range read
+# couldn't page it. Both stored-result tools wrap via _paginate so line numbers stay
+# consistent between search and read.
+_PAGE_LINE_WIDTH: int = 400
+
+
+def _paginate(text: str) -> list[str]:
+    """Split text into display lines, hard-wrapping over-long lines.
+
+    Splits on newlines, then breaks any line longer than _PAGE_LINE_WIDTH into
+    fixed-width chunks so single-line payloads remain navigable by line number.
+    """
+    out: list[str] = []
+    for line in text.splitlines() or [text]:
+        if len(line) <= _PAGE_LINE_WIDTH:
+            out.append(line)
+        else:
+            out.extend(
+                line[i : i + _PAGE_LINE_WIDTH]
+                for i in range(0, len(line), _PAGE_LINE_WIDTH)
+            )
+    return out
+
 # ── Tool risk scoring ─────────────────────────────────────────────────────────
 
 # Risk score threshold: >= this value → treat tool as write/mutate (require confirmation).
@@ -451,7 +476,9 @@ class GeminiLiveAgent:
                     _result_counter[0] += 1
                     _stored_results[result_id] = full_text
                     size_kb = len(full_text) / 1024
-                    line_count = full_text.count("\n") + 1
+                    # Report paginated line count so the model's range reads line up
+                    # with what search/read return, even for single-line payloads.
+                    line_count = len(_paginate(full_text))
                     preview = full_text[:200].replace("\n", " ")
                     logger.info(
                         "Large result from %r stored as %s (%.0fKB, %d lines)",
@@ -483,7 +510,7 @@ class GeminiLiveAgent:
             text = _stored_results.get(result_id)
             if text is None:
                 return f"No stored result with id '{result_id}'."
-            lines = text.splitlines()
+            lines = _paginate(text)
             matches = [(i + 1, line) for i, line in enumerate(lines) if pattern.lower() in line.lower()]
             if not matches:
                 return f"No lines matching '{pattern}' in {result_id} ({len(lines)} lines total)."
@@ -499,7 +526,7 @@ class GeminiLiveAgent:
             text = _stored_results.get(result_id)
             if text is None:
                 return f"No stored result with id '{result_id}'."
-            lines = text.splitlines()
+            lines = _paginate(text)
             total = len(lines)
             start = max(0, start_line - 1)
             end = min(total, end_line)
