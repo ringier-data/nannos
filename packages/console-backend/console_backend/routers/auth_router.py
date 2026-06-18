@@ -274,7 +274,7 @@ async def update_current_user_settings(
     # rather than after the TTL — these aren't part of the orchestrator cache key.
     if {"mcp_tools", "tool_bypass_rules"} & update_request.model_fields_set and user.sub:
         schedule_orchestrator_discovery_cache_invalidation(
-            background_tasks, request, f"settings change for user {user.id}", [user.sub]
+            background_tasks, request, f"settings change for user sub={user.sub}", [user.sub]
         )
 
     # Sync phone override to Keycloak if it was updated
@@ -347,7 +347,7 @@ async def upsert_tool_bypass_rule(
     # flush this user's cache to apply the change on their next turn instead of after the TTL.
     if user.sub:
         schedule_orchestrator_discovery_cache_invalidation(
-            background_tasks, request, f"tool bypass rule change for user {user.id}", [user.sub]
+            background_tasks, request, f"tool bypass rule change for user sub={user.sub}", [user.sub]
         )
 
     return ToolBypassRuleResponse(tool_bypass_rules=rules)

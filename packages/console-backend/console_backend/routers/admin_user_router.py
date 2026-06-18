@@ -350,7 +350,7 @@ async def update_user_role(
     # new role takes effect on their next turn instead of waiting out the orchestrator TTL.
     if current_user.sub:
         schedule_orchestrator_discovery_cache_invalidation(
-            background_tasks, request, f"role change for user {user_id}", [current_user.sub]
+            background_tasks, request, f"role change for user sub={current_user.sub}", [current_user.sub]
         )
 
     # Trigger outbound SCIM push (fire-and-forget)
