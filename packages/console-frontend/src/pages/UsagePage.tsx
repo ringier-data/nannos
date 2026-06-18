@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, Fragment } from 'react';
 import { useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { Download, ChevronDown, ChevronRight, MessageSquare, Copy, Check, Calendar, X, Filter, ExternalLink, Database } from 'lucide-react';
@@ -152,11 +152,6 @@ export function UsagePage() {
       return newSet;
     });
   };
-
-  // Debug: Log the first record to see what data we're receiving
-  if (logs.length > 0) {
-    console.log('First log record:', logs[0]);
-  }
 
   const handleExportCSV = () => {
     if (!logs.length) return;
@@ -552,10 +547,9 @@ export function UsagePage() {
                   };
                   
                   return (
-                    <>
+                    <Fragment key={conversationId}>
                       {/* Conversation Summary Row */}
                       <TableRow
-                        key={conversationId}
                         id={`conversation-${conversationId}`}
                         className="bg-muted/50 hover:bg-muted cursor-pointer font-medium"
                         onClick={() => toggleConversation(conversationId)}
@@ -765,7 +759,7 @@ export function UsagePage() {
                           </TableRow>
                         );
                       })}
-                    </>
+                    </Fragment>
                   );
                 })
               )}

@@ -1,7 +1,16 @@
 import { useState } from 'react';
-import { Bot, Globe, Terminal, Users, Database, User, Shield, UsersRound } from 'lucide-react';
+import { Bot, Globe, Terminal, Users, Database, Shield, UsersRound } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  consoleListSubAgentsOptions,
+  activateSubAgentApiV1SubAgentsSubAgentIdActivatePostMutation,
+  deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostMutation,
+} from '@/api/generated/@tanstack/react-query.gen';
 import { SubAgentPermissionsDialog } from './SubAgentPermissionsDialog';
 import { useAuth } from '@/contexts/AuthContext';
 import type { SubAgentListItem, SubAgentStatus } from './types';
@@ -22,7 +31,41 @@ interface SubAgentCardProps {
 
 export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAccess = false }: SubAgentCardProps) {
   const { user, adminMode } = useAuth();
+  const queryClient = useQueryClient();
   const [showPermissionsDialog, setShowPermissionsDialog] = useState(false);
+
+  const invalidateList = () => {
+    queryClient.invalidateQueries({ queryKey: consoleListSubAgentsOptions({}).queryKey });
+    queryClient.invalidateQueries({ queryKey: consoleListSubAgentsOptions({ query: { owned_only: true } }).queryKey });
+  };
+
+  const activateMutation = useMutation({
+    ...activateSubAgentApiV1SubAgentsSubAgentIdActivatePostMutation(),
+    onSuccess: () => {
+      toast.success('Sub-agent enabled');
+      invalidateList();
+    },
+    onError: () => toast.error('Failed to enable sub-agent'),
+  });
+
+  const deactivateMutation = useMutation({
+    ...deactivateSubAgentApiV1SubAgentsSubAgentIdDeactivatePostMutation(),
+    onSuccess: () => {
+      toast.success('Sub-agent disabled');
+      invalidateList();
+    },
+    onError: () => toast.error('Failed to disable sub-agent'),
+  });
+
+  const isToggling = activateMutation.isPending || deactivateMutation.isPending;
+
+  const handleToggleActivation = () => {
+    if (subAgent.is_activated) {
+      deactivateMutation.mutate({ path: { sub_agent_id: subAgent.id } });
+    } else {
+      activateMutation.mutate({ path: { sub_agent_id: subAgent.id } });
+    }
+  };
   
   // Get status from embedded config_version
   const status = subAgent.config_version?.status ?? 'draft';
@@ -65,6 +108,20 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
     e.stopPropagation();
     setShowPermissionsDialog(true);
   };
+
+  const activationControl = (
+    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+      <span className="text-xs text-muted-foreground">
+        {subAgent.is_activated ? 'Enabled' : 'Disabled'}
+      </span>
+      <Switch
+        checked={subAgent.is_activated ?? false}
+        onCheckedChange={handleToggleActivation}
+        disabled={!isApproved || isToggling}
+        aria-label={`Enable ${subAgent.name}`}
+      />
+    </div>
+  );
 
   return (
     <>
@@ -118,8 +175,8 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
           <p className="text-sm text-muted-foreground line-clamp-2">{subAgent.config_version.description}</p>
         )}
 
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+        <div className="mt-auto flex items-center justify-between text-xs text-muted-foreground">
+          <div className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <TypeIcon className="h-3 w-3" />
               <span className="capitalize">{subAgent.type}</span>
@@ -129,48 +186,51 @@ export function SubAgentCard({ subAgent, onClick, showOwner = true, showManageAc
                 🤖 Automated
               </Badge>
             )}
-            {subAgent.activated_by && (
-              <>
-                {subAgent.activated_by === 'user' && (
-                  <Badge variant="outline" className="flex items-center gap-1 text-xs">
-                    <User className="h-3 w-3" />
-                    Self-enabled
-                  </Badge>
+            {subAgent.activated_by === 'group' && (
+              <Badge variant="secondary" className="flex items-center gap-1 text-xs">
+                <UsersRound className="h-3 w-3" />
+                Group default
+                {subAgent.activated_by_groups && subAgent.activated_by_groups.length > 0 && (
+                  <span className="ml-1">({subAgent.activated_by_groups.length})</span>
                 )}
-                {subAgent.activated_by === 'group' && (
-                  <Badge variant="secondary" className="flex items-center gap-1 text-xs">
-                    <UsersRound className="h-3 w-3" />
-                    Group default
-                    {subAgent.activated_by_groups && subAgent.activated_by_groups.length > 0 && (
-                      <span className="ml-1">({subAgent.activated_by_groups.length})</span>
-                    )}
-                  </Badge>
-                )}
-                {subAgent.activated_by === 'admin' && (
-                  <Badge variant="default" className="flex items-center gap-1 text-xs">
-                    <Shield className="h-3 w-3" />
-                    Admin-enabled
-                  </Badge>
-                )}
-              </>
+              </Badge>
+            )}
+            {subAgent.activated_by === 'admin' && (
+              <Badge variant="default" className="flex items-center gap-1 text-xs">
+                <Shield className="h-3 w-3" />
+                Admin-enabled
+              </Badge>
             )}
           </div>
-          <div className="flex items-center gap-1">
-            {canManageAccess && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="opacity-0 group-hover:opacity-100 transition-opacity"
-                onClick={handleManageAccessClick}
-                title="Manage group access"
-              >
-                <Users className="h-4 w-4" />
-              </Button>
-            )}
-            <Button variant="ghost" size="sm" className="opacity-0 group-hover:opacity-100 transition-opacity">
-              Open
-            </Button>
-          </div>
+          {canManageAccess && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-mr-2 h-7 gap-1.5 px-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                  onClick={handleManageAccessClick}
+                >
+                  <Users className="h-3.5 w-3.5" />
+                  Access
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Manage group access</TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+
+        {/* Activation row — anchored to the bottom block so it aligns across all cards */}
+        <div className="-mb-1 flex items-center justify-between border-t pt-3">
+          <span className="text-xs font-medium text-foreground">Use in orchestrator</span>
+          {isApproved ? (
+            activationControl
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>{activationControl}</TooltipTrigger>
+              <TooltipContent>Approve a version before enabling</TooltipContent>
+            </Tooltip>
+          )}
         </div>
 
         {status === 'rejected' && subAgent.config_version?.rejection_reason && (
