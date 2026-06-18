@@ -21,6 +21,7 @@ from ..models.user_group import (
     UserGroupDetailResponse,
     UserGroupWithMembers,
 )
+from ..services.orchestrator_cache import invalidate_orchestrator_discovery_cache
 from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/groups", tags=["groups"])
@@ -312,6 +313,7 @@ async def set_group_default_agents(
             actor=user,
         )
         await db.commit()
+        await invalidate_orchestrator_discovery_cache(f"set default agents for group {group_id}")
 
     except ValueError as e:
         raise HTTPException(
@@ -353,6 +355,7 @@ async def add_group_default_agent(
             actor=user,
         )
         await db.commit()
+        await invalidate_orchestrator_discovery_cache(f"add default agent {sub_agent_id} to group {group_id}")
 
     except ValueError as e:
         raise HTTPException(
@@ -393,6 +396,7 @@ async def remove_group_default_agent(
             actor=user,
         )
         await db.commit()
+        await invalidate_orchestrator_discovery_cache(f"remove default agent {sub_agent_id} from group {group_id}")
 
     except ValueError as e:
         raise HTTPException(

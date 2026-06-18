@@ -35,7 +35,7 @@ from ringier_a2a_sdk.server.executor import (
 
 from app.models.responses import AgentStreamResponse
 
-from ..models.config import UserConfig
+from ..models.config import AgentSettings, UserConfig
 from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
@@ -52,6 +52,7 @@ from .a2a_extensions import (
 from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
+from .discovery_cache import entitlement_key, get_discovery_cache, get_user_cache, user_key
 from .registry import RegistryService, User
 from .turn_state import TurnState, count_tool_messages
 from .steering_state import (
@@ -258,22 +259,49 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             tool_bypass_rules=user.tool_bypass_rules,
         )
 
-        # Discover capabilities (tools and sub-agents)
-        logger.debug(f"Discovering capabilities for user_sub: {user_config.user_sub}")
-        sub_agents = await self.agent.agent_discovery_service.register_agents(
-            agent_metadata=user_config.agent_metadata or {},
-            token=user_config.access_token.get_secret_value(),
+        # Discover capabilities (tools and sub-agents), memoized per-user to avoid
+        # re-running the ~3s discovery (gatana token exchange + fetch servers + per-server
+        # list_tools) on every turn. Keyed by the entitlement-determining inputs so group
+        # changes invalidate automatically; entries are bounded by the token expiry.
+        cache = get_discovery_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
+        cache_key = entitlement_key(
+            user_sub=user_config.user_sub,
+            groups=user_config.groups,
+            sub_agent_config_hash=user_config.sub_agent_config_hash,
+            tool_names=user.tool_names,
+            policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
         )
-
-        # Discover ALL tools (without whitelist)
-        # The whitelist will be applied later in build_runtime_context for orchestrator binding
-        # Server info is stored in tool.metadata["server_name"] by MultiServerMCPClient
-        tools = await self.agent.tool_discovery_service.discover_tools(
-            user_config.access_token.get_secret_value(),
-            white_list=None,  # Don't filter here - GP agent needs access to all tools
-        )
+        cached = cache.get(cache_key)
+        if cached is not None:
+            tools, sub_agents = cached
+            logger.info(
+                "[DISCOVERY-CACHE] hit for user_sub=%s (%d tools, %d sub-agents) — skipping discovery",
+                user_config.user_sub,
+                len(tools),
+                len(sub_agents),
+            )
+        else:
+            logger.debug(f"[DISCOVERY-CACHE] miss; discovering capabilities for user_sub: {user_config.user_sub}")
+            sub_agents = await self.agent.agent_discovery_service.register_agents(
+                agent_metadata=user_config.agent_metadata or {},
+                token=user_config.access_token.get_secret_value(),
+            )
+            # Discover ALL tools (without whitelist)
+            # The whitelist will be applied later in build_runtime_context for orchestrator binding
+            # Server info is stored in tool.metadata["server_name"] by MultiServerMCPClient
+            tools = await self.agent.tool_discovery_service.discover_tools(
+                user_config.access_token.get_secret_value(),
+                white_list=None,  # Don't filter here - GP agent needs access to all tools
+            )
+            cache.put(cache_key, (tools, sub_agents), user_config.access_token.get_secret_value())
+            logger.info(
+                "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
+                len(tools),
+                len(sub_agents),
+                user_config.user_sub,
+            )
         logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
-        logger.debug(f"Discovered {len(tools)} total tools (unfiltered)")
+        logger.debug(f"Discovered {len(tools)} total tools (cached or fresh)")
 
         # Update user_config with discovered data
         user_config.tools = tools
@@ -424,14 +452,27 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if sub_agent_config_hash:
             logger.info(f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}")
 
-        # Fetch user from registry to get stable database ID (user.id)
-        # This allows us to use the database ID in config metadata instead of OIDC sub e.g. for docstore read/write
-        user = await self._get_user_from_registry(
-            user_sub,
-            access_token=user_token,
+        # Fetch user from registry to get stable database ID (user.id). Memoized per-user
+        # (keyed incl. groups + policy_version) to avoid the ~1s of console-backend calls
+        # on every turn; entry bounded by the user token's expiry.
+        ucache = get_user_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
+        ukey = user_key(
+            user_sub=user_sub,
+            groups=user_groups,
             sub_agent_config_hash=sub_agent_config_hash,
+            policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
         )
-        logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
+        user = ucache.get(ukey)
+        if user is not None:
+            logger.info(f"[USER-CACHE] hit for user_sub={user_sub}, database_id={user.id}")
+        else:
+            user = await self._get_user_from_registry(
+                user_sub,
+                access_token=user_token,
+                sub_agent_config_hash=sub_agent_config_hash,
+            )
+            ucache.put(ukey, user, user_token)
+            logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
 
         # Extract metadata from both message-level and params-level (message takes priority)
         logger.info(f"[EXECUTOR] Params-level metadata: {context.metadata}")

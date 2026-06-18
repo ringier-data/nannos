@@ -29,7 +29,8 @@ class TestAgentSettings:
 
     def test_cache_configuration(self):
         """Test cache configuration."""
-        assert AgentSettings.AGENT_DISCOVERY_CACHE_TTL == 30
+        assert AgentSettings.AGENT_DISCOVERY_CACHE_TTL == 300
+        assert AgentSettings.ENTITLEMENT_POLICY_VERSION == "0"
 
     def test_postgres_checkpoint_configuration(self):
         """Test Postgres checkpoint configuration defaults.

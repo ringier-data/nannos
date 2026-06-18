@@ -300,7 +300,13 @@ class AgentSettings:
     """Model to use for server and tool selection (fast, cheap model preferred)."""
 
     # Cache configuration
-    AGENT_DISCOVERY_CACHE_TTL = 30  # seconds
+    AGENT_DISCOVERY_CACHE_TTL = int(
+        os.getenv("AGENT_DISCOVERY_CACHE_TTL", "300")
+    )  # seconds; per-user discovery + registry cache
+    # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env)
+    # or call discovery_cache.invalidate_all() when a group→server/tool access policy
+    # changes without the user's own groups/config changing.
+    ENTITLEMENT_POLICY_VERSION = os.getenv("ENTITLEMENT_POLICY_VERSION", "0")
 
     # PostgreSQL checkpoint configuration.
     # The checkpointer reuses the main POSTGRES_* connection (same DB/user/schema as the

@@ -61,6 +61,7 @@ from app.core.a2a_extensions import (
 )
 from app.core.agent import OrchestratorDeepAgent
 from app.core.budget_guard import init_budget_guard
+from app.core.discovery_cache import invalidate_all as invalidate_discovery_caches
 from app.core.executor import OrchestratorDeepAgentExecutor
 from app.core.risk_score_api_client import HttpRiskScoreAPIClient
 from app.core.task_store import create_task_store
@@ -414,6 +415,29 @@ async def list_available_models():
             logger.debug("Could not fetch live models from LLM server: %s", e)
 
     return metadata
+
+
+@app.post("/internal/discovery-cache/invalidate")
+async def invalidate_discovery_cache() -> JSONResponse:
+    """Flush this replica's per-user discovery + registry caches.
+
+    console-backend calls this when an admin changes a group→MCP-server or
+    group→default-agent mapping, so the affected users' entitlements take effect on their
+    next turn instead of waiting out the cache TTL. Idempotent and cheap.
+
+    Auth: protected by the orchestrator's standard OIDC JWT middleware (this is not a
+    public path). The admin gate lives in console-backend — the calling routes require an
+    admin, and console-backend exchanges that admin's token for this service's audience
+    before calling. The action only clears an in-memory cache, so the blast radius of an
+    unexpected authenticated call is a brief cache rebuild.
+
+    Multi-replica note: the cache is in-process, so one call flushes one replica. Behind a
+    load balancer the other replicas fall back to the TTL (or bump
+    ``ENTITLEMENT_POLICY_VERSION`` for a fleet-wide flush). A fan-out/pub-sub broadcast is
+    the follow-up for instant fleet-wide invalidation.
+    """
+    invalidate_discovery_caches()
+    return JSONResponse({"status": "ok"})
 
 
 @click.command()

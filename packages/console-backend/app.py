@@ -4,9 +4,9 @@ import logging
 import os
 import socket
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -26,12 +26,12 @@ from a2a.types import (
     SendMessageRequest,
     TaskState,
 )
-from google.protobuf.json_format import MessageToDict, ParseDict
-from google.protobuf.struct_pb2 import Value
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi_mcp import FastApiMCP
+from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.struct_pb2 import Value
 from rcplus_alloy_common.logging import (
     configure_existing_logger,
     configure_logger,
@@ -39,7 +39,6 @@ from rcplus_alloy_common.logging import (
 from sqlalchemy import text as sa_text
 from starlette.middleware.sessions import SessionMiddleware
 
-from console_backend.services.messages_service import _parse_task_state
 from console_backend.config import config
 from console_backend.db import close_db, get_async_session_factory, init_db
 from console_backend.db.docstore import close_docstore, init_docstore
@@ -51,8 +50,11 @@ from console_backend.models.socket_session import SocketSession
 from console_backend.models.user import User
 from console_backend.routers.admin_audit_router import router as admin_audit_router
 from console_backend.routers.admin_group_router import router as admin_group_router
-from console_backend.routers.admin_mcp_gateway_server_access_router import router as admin_mcp_gateway_server_access_router
+from console_backend.routers.admin_mcp_gateway_server_access_router import (
+    router as admin_mcp_gateway_server_access_router,
+)
 from console_backend.routers.admin_user_router import router as admin_user_router
+from console_backend.routers.analytics_router import router as analytics_router
 from console_backend.routers.auth_router import router as auth_router
 from console_backend.routers.bug_report_mcp_tools import router as bug_report_mcp_router
 from console_backend.routers.bug_report_router import router as bug_report_router
@@ -77,11 +79,10 @@ from console_backend.routers.skill_activations_router import router as skill_act
 from console_backend.routers.skills_registry_router import router as skills_registry_router
 from console_backend.routers.sub_agent_router import router as sub_agent_router
 from console_backend.routers.tool_risk_router import router as tool_risk_router
-from console_backend.routers.analytics_router import router as analytics_router
 from console_backend.routers.usage_router import router as usage_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
-from console_backend.services.messages_service import MessagesService
+from console_backend.services.messages_service import MessagesService, _parse_task_state
 from console_backend.services.socket_notification_manager import SocketNotificationManager
 from console_backend.utils.connection_pool import connection_pool
 from console_backend.utils.cookie_signer import verify_cookie

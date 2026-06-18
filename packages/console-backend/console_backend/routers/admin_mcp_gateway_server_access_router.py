@@ -10,6 +10,7 @@ from ..models.mcp_gateway_server_access import (
 )
 from ..models.user import User
 from ..services.mcp_gateway_server_access_service import McpGatewayServerAccessService
+from ..services.orchestrator_cache import invalidate_orchestrator_discovery_cache
 from ..utils.gatana_auth import get_gatana_token
 
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-mcp-gateway"])
@@ -75,6 +76,7 @@ async def grant_mcp_gateway_server_access(
         await service.grant_server_access(gatana_token, group_id, server_slug, body.role)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    await invalidate_orchestrator_discovery_cache(f"grant server '{server_slug}' to group {group_id}")
 
 
 @router.delete(
@@ -95,3 +97,4 @@ async def revoke_mcp_gateway_server_access(
         await service.revoke_server_access(gatana_token, group_id, server_slug)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    await invalidate_orchestrator_discovery_cache(f"revoke server '{server_slug}' from group {group_id}")
