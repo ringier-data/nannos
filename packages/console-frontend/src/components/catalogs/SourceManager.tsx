@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect, type KeyboardEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
+import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import {
   HardDrive,
   Loader2,
@@ -244,6 +245,7 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
 
   // --- Wizard state ---
   const [step, setStep] = useState<WizardStep>('idle');
+  const [sourceToDelete, setSourceToDelete] = useState<{ id: string; label: string } | null>(null);
   const [selectedDrive, setSelectedDrive] = useState<{ id: string; name: string } | null>(null);
   const [folderPath, setFolderPath] = useState<BreadcrumbItem[]>([]);
   const [selectedFolder, setSelectedFolder] = useState<{ id: string; name: string } | null>(null);
@@ -514,7 +516,7 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-destructive hover:text-destructive"
-                      onClick={() => removeMutation.mutate(s.id)}
+                      onClick={() => setSourceToDelete({ id: s.id, label: sourceLabel(s) })}
                       disabled={removeMutation.isPending}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -717,6 +719,20 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
           No sources configured. Add a Shared Drive or shared folder to start syncing.
         </div>
       )}
+
+      <ConfirmDialog
+        open={sourceToDelete !== null}
+        onOpenChange={(o) => { if (!o) setSourceToDelete(null); }}
+        title="Remove source?"
+        description={`"${sourceToDelete?.label ?? ''}" will be removed from this catalog and will stop syncing. This cannot be undone.`}
+        confirmLabel="Remove"
+        variant="destructive"
+        isLoading={removeMutation.isPending}
+        onConfirm={() => {
+          if (sourceToDelete) removeMutation.mutate(sourceToDelete.id);
+          setSourceToDelete(null);
+        }}
+      />
     </div>
   );
 }

@@ -11,6 +11,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Select,
   SelectContent,
@@ -269,7 +270,7 @@ export function AnalyticsPage() {
         </CardHeader>
         <CardContent>
           {activeUsersLoading ? (
-            <div className="flex h-[250px] items-center justify-center text-muted-foreground">Loading...</div>
+            <Skeleton className="h-[250px] w-full" />
           ) : !activeUsers?.data?.length ? (
             <EmptyChart message="No active user data for this period" />
           ) : (
@@ -322,7 +323,7 @@ export function AnalyticsPage() {
           </CardHeader>
           <CardContent>
             {churnLoading ? (
-              <div className="flex h-[220px] items-center justify-center text-muted-foreground">Loading...</div>
+              <Skeleton className="h-[220px] w-full" />
             ) : !churn?.data?.length ? (
               <EmptyChart message="Not enough data to calculate churn (requires 2+ weeks)" />
             ) : (
@@ -384,7 +385,7 @@ export function AnalyticsPage() {
           </CardHeader>
           <CardContent>
             {costLoading ? (
-              <div className="flex h-[220px] items-center justify-center text-muted-foreground">Loading...</div>
+              <Skeleton className="h-[220px] w-full" />
             ) : !costOverTime?.data?.length ? (
               <EmptyChart message="No cost data recorded for this period" />
             ) : (
@@ -438,7 +439,7 @@ export function AnalyticsPage() {
           </CardHeader>
           <CardContent>
             {engagementLoading ? (
-              <div className="flex h-[220px] items-center justify-center text-muted-foreground">Loading...</div>
+              <Skeleton className="h-[220px] w-full" />
             ) : !engagement?.data?.length ? (
               <EmptyChart message="No engagement data for this period" />
             ) : (
@@ -483,7 +484,7 @@ export function AnalyticsPage() {
           </CardHeader>
           <CardContent>
             {cohortsLoading ? (
-              <div className="flex h-[220px] items-center justify-center text-muted-foreground">Loading...</div>
+              <Skeleton className="h-[220px] w-full" />
             ) : !cohorts?.data?.length ? (
               <EmptyChart message="No cohort data for this period" />
             ) : (

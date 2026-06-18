@@ -16,6 +16,7 @@ import {
   Sparkles,
   Send,
   Undo2,
+  Pencil,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -23,7 +24,23 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import { Separator } from '@/components/ui/separator';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import {
   Select,
   SelectContent,
@@ -31,6 +48,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { config } from '@/config';
 import {
   type JobRunStatus,
@@ -52,6 +70,9 @@ import {
   consoleListMcpToolsOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { useAuth } from '@/contexts/AuthContext';
+import { CronField } from '@/components/CronField';
+import { describeCron } from '@/lib/cron';
+import { DetailSkeleton } from '@/components/skeletons';
 import { io } from 'socket.io-client';
 
 interface SchedulerNotification {
@@ -201,25 +222,29 @@ function JobHeader({
       </div>
 
       <div className="flex gap-2">
-        <Button
-          variant="default"
-          size="sm"
-          disabled={isRunningNow}
-          onClick={onRunNow}
-          title="Trigger a full test run right now — resolves token, calls agent-runner, delivers webhook"
-        >
-          {isRunningNow ? (
-            <>
-              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-              Running…
-            </>
-          ) : (
-            <>
-              <Play className="mr-1.5 h-4 w-4" />
-              Run now
-            </>
-          )}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="default"
+              size="sm"
+              disabled={isRunningNow}
+              onClick={onRunNow}
+            >
+              {isRunningNow ? (
+                <>
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  Running…
+                </>
+              ) : (
+                <>
+                  <Play className="mr-1.5 h-4 w-4" />
+                  Run now
+                </>
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Trigger a full test run right now — resolves token, calls agent-runner, delivers webhook</TooltipContent>
+        </Tooltip>
         {job.enabled ? (
           <Button
             variant="outline"
@@ -292,6 +317,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [voiceCall, setVoiceCall] = useState((job as any).voice_call ?? false);
   const [dirty, setDirty] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aiQuery, setAiQuery] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -376,6 +402,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
         queryKey: ['scheduler-job', job.id],
       });
       setDirty(false);
+      setEditing(false);
     },
     onError: (e: unknown) => {
       setError(e instanceof Error ? e.message : String(e));
@@ -383,6 +410,11 @@ function EditForm({ job }: { job: ScheduledJob }) {
   });
 
   function handleSave() {
+    if (job.schedule_kind === 'cron' && cronExpr.trim() && !describeCron(cronExpr).ok) {
+      setError('Cron expression is invalid');
+      return;
+    }
+
     let check_args: Record<string, unknown> | undefined;
     if (checkArgsText.trim()) {
       try {
@@ -420,29 +452,47 @@ function EditForm({ job }: { job: ScheduledJob }) {
   }
 
   return (
-    <div className="grid gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="font-semibold">Job configuration</h2>
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={resetForm}
-            disabled={!dirty || mutation.isPending}
-          >
-            <Undo2 className="mr-1.5 h-4 w-4" />
-            Discard
-          </Button>
-          <Button
-            size="sm"
-            onClick={handleSave}
-            disabled={!dirty || mutation.isPending}
-          >
-            <Save className="mr-1.5 h-4 w-4" />
-            {mutation.isPending ? 'Saving…' : 'Save changes'}
-          </Button>
+    <Card>
+      <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
+        <div className="space-y-1">
+          <CardTitle>Job configuration</CardTitle>
+          <CardDescription>
+            {editing
+              ? 'Editing — change the fields below, then save.'
+              : 'Read-only. Click Edit configuration to make changes.'}
+          </CardDescription>
         </div>
-      </div>
+        <div className="flex shrink-0 gap-2">
+          {editing ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { resetForm(); setEditing(false); }}
+                disabled={mutation.isPending}
+              >
+                <Undo2 className="mr-1.5 h-4 w-4" />
+                Discard
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleSave}
+                disabled={!dirty || mutation.isPending}
+              >
+                <Save className="mr-1.5 h-4 w-4" />
+                {mutation.isPending ? 'Saving…' : 'Save changes'}
+              </Button>
+            </>
+          ) : (
+            <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+              <Pencil className="mr-1.5 h-4 w-4" />
+              Edit configuration
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        <fieldset disabled={!editing} className="m-0 grid min-w-0 gap-4 border-0 p-0">
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="grid gap-1.5">
@@ -465,16 +515,10 @@ function EditForm({ job }: { job: ScheduledJob }) {
       </div>
 
       {job.schedule_kind === 'cron' && (
-        <div className="grid gap-1.5">
-          <Label>
-            Cron expression{' '}
-            <span className="text-muted-foreground text-xs">(e.g. 0 9 * * 1-5)</span>
-          </Label>
-          <Input
-            value={cronExpr}
-            onChange={(e) => { setCronExpr(e.target.value); touch(); }}
-          />
-        </div>
+        <CronField
+          value={cronExpr}
+          onChange={(v) => { setCronExpr(v); touch(); }}
+        />
       )}
 
       {job.schedule_kind === 'interval' && (
@@ -509,6 +553,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
             <Select
               value={subAgentId}
               onValueChange={(v) => { setSubAgentId(v); touch(); }}
+              disabled={!editing}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select a sub-agent…" />
@@ -597,6 +642,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
             <Select
               value={checkTool}
               onValueChange={(v) => { setCheckTool(v); touch(); }}
+              disabled={!editing}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select an MCP tool…" />
@@ -692,6 +738,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
             id="voice-call-edit"
             checked={voiceCall}
             onCheckedChange={(v) => { setVoiceCall(v); touch(); }}
+            disabled={!editing}
           />
           <Label htmlFor="voice-call-edit" className="cursor-pointer text-sm">
             Deliver via voice call
@@ -707,6 +754,7 @@ function EditForm({ job }: { job: ScheduledJob }) {
         <Label>Delivery channel</Label>
         <Select
           value={deliveryChannel}
+          disabled={!editing}
           onValueChange={(v) => {
             setDeliveryChannel(v);
             touch();
@@ -737,9 +785,10 @@ function EditForm({ job }: { job: ScheduledJob }) {
       </div>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
+        </fieldset>
 
-      {/* Read-only info */}
-      <div className="grid gap-2 rounded-lg bg-muted/30 p-3 text-sm text-muted-foreground sm:grid-cols-2">
+      {/* Read-only info — always visible */}
+      <div className="mt-4 grid gap-2 rounded-lg bg-muted/30 p-3 text-sm text-muted-foreground sm:grid-cols-2">
         <div>
           <span className="font-medium text-foreground">Created:</span>{' '}
           {formatDate(job.created_at)}
@@ -757,7 +806,8 @@ function EditForm({ job }: { job: ScheduledJob }) {
           {job.consecutive_failures}
         </div>
       </div>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -819,22 +869,31 @@ function RunHistoryTable({ runs }: { runs: ScheduledJobRun[] }) {
               </td>
               <td className="px-4 py-3 text-center">
                 {run.delivered ? (
-                  <div title="Notification sent (best effort — delivery receipt not confirmed)">
-                    <Send className="mx-auto h-4 w-4 text-muted-foreground" />
-                  </div>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div>
+                        <Send className="mx-auto h-4 w-4 text-muted-foreground" />
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>Notification sent (best effort — delivery receipt not confirmed)</TooltipContent>
+                  </Tooltip>
                 ) : (
                   <span className="text-muted-foreground">—</span>
                 )}
               </td>
               <td className="px-4 py-3 text-center">
                 {run.conversation_id ? (
-                  <a
-                    href={`/app/usage?conversation_id=${run.conversation_id}`}
-                    className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                    title="View usage logs for this run"
-                  >
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <a
+                        href={`/app/usage?conversation_id=${run.conversation_id}`}
+                        className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </TooltipTrigger>
+                    <TooltipContent>View usage logs for this run</TooltipContent>
+                  </Tooltip>
                 ) : (
                   <span className="text-muted-foreground">—</span>
                 )}
@@ -842,15 +901,19 @@ function RunHistoryTable({ runs }: { runs: ScheduledJobRun[] }) {
               {isAdmin && (
                 <td className="px-4 py-3 text-center">
                   {run.conversation_id ? (
-                    <a
-                      href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${run.conversation_id}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                      title="View trace in LangSmith"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <a
+                          href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${run.conversation_id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </TooltipTrigger>
+                      <TooltipContent>View trace in LangSmith</TooltipContent>
+                    </Tooltip>
                   ) : (
                     <span className="text-muted-foreground">—</span>
                   )}
@@ -880,6 +943,7 @@ export function SchedulerJobDetailPage() {
   const [runNowRunId, setRunNowRunId] = useState<number | null>(null);
   const [runNowResult, setRunNowResult] = useState<RunNowResult | null>(null);
   const [runNowError, setRunNowError] = useState<string | null>(null);
+  const [showDelete, setShowDelete] = useState(false);
 
   async function handleRunNow() {
     setRunNowLoading(true);
@@ -947,9 +1011,7 @@ export function SchedulerJobDetailPage() {
   });
 
   function handleDelete() {
-    if (job && confirm(`Delete job "${job.name}"? This cannot be undone.`)) {
-      deleteMutation.mutate();
-    }
+    setShowDelete(true);
   }
 
   return (
@@ -965,12 +1027,7 @@ export function SchedulerJobDetailPage() {
         Back to Scheduler
       </Button>
 
-      {jobLoading && (
-        <div className="flex items-center gap-2 text-muted-foreground text-sm">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Loading…
-        </div>
-      )}
+      {jobLoading && <DetailSkeleton />}
 
       {jobError && (
         <div className="flex items-center gap-2 text-destructive text-sm">
@@ -1034,21 +1091,51 @@ export function SchedulerJobDetailPage() {
             </div>
           )}
 
-          <Separator />
-
           <EditForm job={job} />
 
-          <Separator />
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                Run history
+                {runsLoading && (
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <RunHistoryTable runs={runs} />
+            </CardContent>
+          </Card>
 
-          <div className="flex flex-col gap-3">
-            <h2 className="font-semibold">
-              Run history
-              {runsLoading && (
-                <Loader2 className="ml-2 inline h-4 w-4 animate-spin text-muted-foreground" />
-              )}
-            </h2>
-            <RunHistoryTable runs={runs} />
-          </div>
+          {/* Delete confirmation */}
+          <AlertDialog open={showDelete} onOpenChange={setShowDelete}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete scheduled job?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  The job <strong>{job.name}</strong> will be permanently deleted.
+                  This action cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={deleteMutation.isPending}>
+                  Cancel
+                </AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  disabled={deleteMutation.isPending}
+                  onClick={() => deleteMutation.mutate()}
+                >
+                  {deleteMutation.isPending ? 'Deleting…' : (
+                    <>
+                      <Trash2 className="mr-1.5 h-4 w-4" />
+                      Delete
+                    </>
+                  )}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </>
       )}
     </div>

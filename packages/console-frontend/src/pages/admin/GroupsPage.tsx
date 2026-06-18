@@ -22,6 +22,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { TableRowsSkeleton } from '@/components/skeletons';
+import { TableEmptyRow } from '@/components/EmptyState';
 import {
   Dialog,
   DialogContent,
@@ -194,17 +196,9 @@ export function GroupsPage() {
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center py-8">
-                  Loading...
-                </TableCell>
-              </TableRow>
+              <TableRowsSkeleton columns={5} />
             ) : groups.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                  No groups found
-                </TableCell>
-              </TableRow>
+              <TableEmptyRow colSpan={5} title="No groups found" />
             ) : (
               groups.map((group) => (
                 <TableRow key={group.id}>

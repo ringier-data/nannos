@@ -13,6 +13,8 @@ import type { UserWithGroups, ActionEnum } from '@/api/generated';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { TableRowsSkeleton } from '@/components/skeletons';
+import { TableEmptyRow } from '@/components/EmptyState';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   DropdownMenu,
@@ -239,17 +241,9 @@ export function UsersPage() {
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center py-8">
-                  Loading...
-                </TableCell>
-              </TableRow>
+              <TableRowsSkeleton columns={7} />
             ) : users.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                  No users found
-                </TableCell>
-              </TableRow>
+              <TableEmptyRow colSpan={7} title="No users found" />
             ) : (
               users.map((user) => (
                 <TableRow key={user.id}>

@@ -1,5 +1,6 @@
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { RefreshCw, CheckCircle2, XCircle, Pause, Play, Square, Ban, ChevronDown, ChevronUp } from 'lucide-react';
 import type { CatalogSyncJob } from '@/api/generated/types.gen';
 import { useState } from 'react';
@@ -75,19 +76,34 @@ export function SyncStatusBar({ syncJob, onPause, onResume, onCancel }: SyncStat
         {/* Controls */}
         <div className="flex items-center gap-1">
           {isRunning && onPause && (
-            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onPause} title="Pause sync">
-              <Pause className="h-3.5 w-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onPause}>
+                  <Pause className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Pause sync</TooltipContent>
+            </Tooltip>
           )}
           {isPaused && onResume && (
-            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onResume} title="Resume sync">
-              <Play className="h-3.5 w-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onResume}>
+                  <Play className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Resume sync</TooltipContent>
+            </Tooltip>
           )}
           {(isRunning || isPending || isPaused) && onCancel && (
-            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={onCancel} title="Cancel sync">
-              <Square className="h-3.5 w-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={onCancel}>
+                  <Square className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Cancel sync</TooltipContent>
+            </Tooltip>
           )}
         </div>
       </div>

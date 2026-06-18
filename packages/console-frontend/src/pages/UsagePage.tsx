@@ -44,6 +44,7 @@ import {
 } from '@/lib/billing-units';
 import { useAuth } from '@/contexts/AuthContext';
 import { config } from '@/config';
+import { PageHeaderSkeleton, StatCardsSkeleton, ChartSkeleton, TableSkeleton } from '@/components/skeletons';
 
 export function UsagePage() {
   const { isAdmin } = useAuth();
@@ -249,7 +250,14 @@ export function UsagePage() {
   }, [detailed]);
 
   if (summaryLoading || detailedLoading || logsLoading) {
-    return <div className="flex justify-center items-center h-screen">Loading...</div>;
+    return (
+      <div className="container mx-auto p-6 space-y-6">
+        <PageHeaderSkeleton action />
+        <StatCardsSkeleton count={4} />
+        <ChartSkeleton />
+        <TableSkeleton columns={7} />
+      </div>
+    );
   }
 
   return (
@@ -479,17 +487,21 @@ export function UsagePage() {
                   <Badge variant="secondary" className="flex items-center gap-1">
                     <Filter className="h-3 w-3" />
                     Filtered
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-4 w-4 p-0 ml-1 hover:bg-transparent"
-                      onClick={() => {
-                        window.location.href = '/app/usage';
-                      }}
-                      title="Clear filter and show all conversations"
-                    >
-                      <X className="h-3 w-3" />
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-4 w-4 p-0 ml-1 hover:bg-transparent"
+                          onClick={() => {
+                            window.location.href = '/app/usage';
+                          }}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Clear filter and show all conversations</TooltipContent>
+                    </Tooltip>
                   </Badge>
                 )}
               </div>
@@ -634,16 +646,20 @@ export function UsagePage() {
                         {isAdmin && (
                           <TableCell className="text-center">
                             {!isNoConversation && !isCatalogGroup && (
-                              <a
-                                href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${conversationId}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                                title="View trace in LangSmith"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <ExternalLink className="h-3 w-3" />
-                              </a>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <a
+                                    href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${conversationId}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <ExternalLink className="h-3 w-3" />
+                                  </a>
+                                </TooltipTrigger>
+                                <TooltipContent>View trace in LangSmith</TooltipContent>
+                              </Tooltip>
                             )}
                           </TableCell>
                         )}
@@ -744,15 +760,19 @@ export function UsagePage() {
                             {isAdmin && (
                               <TableCell className="text-center">
                                 {log.conversation_id && (
-                                  <a
-                                    href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${log.conversation_id}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                                    title="View trace in LangSmith"
-                                  >
-                                    <ExternalLink className="h-3 w-3" />
-                                  </a>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <a
+                                        href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${log.conversation_id}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                                      >
+                                        <ExternalLink className="h-3 w-3" />
+                                      </a>
+                                    </TooltipTrigger>
+                                    <TooltipContent>View trace in LangSmith</TooltipContent>
+                                  </Tooltip>
                                 )}
                               </TableCell>
                             )}

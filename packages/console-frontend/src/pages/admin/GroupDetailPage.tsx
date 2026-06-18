@@ -35,6 +35,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
@@ -58,6 +59,7 @@ export function GroupDetailPage() {
   const [newMemberRole, setNewMemberRole] = useState<RoleEnum>('read');
 
   const [selectedMembersToRemove, setSelectedMembersToRemove] = useState<Set<string>>(new Set());
+  const [confirmRemoveMembers, setConfirmRemoveMembers] = useState(false);
 
   const [membersPage, setMembersPage] = useState(1);
 
@@ -644,7 +646,7 @@ export function GroupDetailPage() {
             {selectedMembersToRemove.size > 0 && (
               <Button
                 variant="destructive"
-                onClick={handleRemoveSelectedMembers}
+                onClick={() => setConfirmRemoveMembers(true)}
                 disabled={removeMembersMutation.isPending}
               >
                 <X className="h-4 w-4 mr-2" />
@@ -863,6 +865,20 @@ export function GroupDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={confirmRemoveMembers}
+        onOpenChange={setConfirmRemoveMembers}
+        title="Remove selected members?"
+        description={`${selectedMembersToRemove.size} member${selectedMembersToRemove.size === 1 ? '' : 's'} will be removed from this group.`}
+        confirmLabel="Remove"
+        variant="destructive"
+        isLoading={removeMembersMutation.isPending}
+        onConfirm={() => {
+          handleRemoveSelectedMembers();
+          setConfirmRemoveMembers(false);
+        }}
+      />
     </div>
   );
 }

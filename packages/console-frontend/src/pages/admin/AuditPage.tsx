@@ -13,6 +13,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { TableRowsSkeleton } from '@/components/skeletons';
+import { TableEmptyRow } from '@/components/EmptyState';
 import {
   Select,
   SelectContent,
@@ -194,17 +196,9 @@ export function AuditPage() {
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center py-8">
-                  Loading...
-                </TableCell>
-              </TableRow>
+              <TableRowsSkeleton columns={5} />
             ) : logs.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                  No audit logs found
-                </TableCell>
-              </TableRow>
+              <TableEmptyRow colSpan={5} title="No audit logs found" />
             ) : (
               logs.map((log) => (
                 <TableRow key={log.id}>

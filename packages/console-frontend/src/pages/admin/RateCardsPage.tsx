@@ -28,6 +28,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { CardListSkeleton } from '@/components/skeletons';
 import { Badge } from '@/components/ui/badge';
 
 interface GroupedModel {
@@ -213,7 +214,7 @@ export function RateCardsPage() {
 
       {/* Grouped Models */}
       {entriesLoading ? (
-        <div className="text-center py-8">Loading...</div>
+        <CardListSkeleton />
       ) : groupedModels.length === 0 ? (
         <Card>
           <CardContent className="pt-6">
@@ -548,7 +549,7 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{isEdit ? 'Edit' : 'Add'} Model Pricing</DialogTitle>
           <DialogDescription>

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { AlertTriangle, ShieldAlert, ShieldCheck, Check, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChat } from '../contexts';
 
 /** Human-readable labels for known HITL tool names. Falls back to raw name. */
@@ -196,23 +197,31 @@ function SingleActionCard() {
             {isRiskScored && allowed.has('approve') && (
               <>
                 {riskMeta!.matched_pattern && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => send({ type: 'approve', bypass: true, bypass_pattern: riskMeta!.matched_pattern })}
-                    title="Approve and skip this specific pattern next time"
-                  >
-                    Allow Pattern
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => send({ type: 'approve', bypass: true, bypass_pattern: riskMeta!.matched_pattern })}
+                      >
+                        Allow Pattern
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Approve and skip this specific pattern next time</TooltipContent>
+                  </Tooltip>
                 )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => send({ type: 'approve', bypass: true, bypass_all: true })}
-                  title="Approve and never ask again for this tool"
-                >
-                  Always Allow
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => send({ type: 'approve', bypass: true, bypass_all: true })}
+                    >
+                      Always Allow
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Approve and never ask again for this tool</TooltipContent>
+                </Tooltip>
               </>
             )}
             {allowed.has('approve') && (
@@ -281,22 +290,30 @@ function MultiActionCard() {
                   <ActionDetails action={action} />
                 </div>
                 <div className="flex gap-1 shrink-0">
-                  <Button
-                    variant={choice === 'approve' ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => setChoices((p) => ({ ...p, [idx]: 'approve' }))}
-                    title="Approve this call"
-                  >
-                    <Check className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant={choice === 'reject' ? 'destructive' : 'outline'}
-                    size="sm"
-                    onClick={() => setChoices((p) => ({ ...p, [idx]: 'reject' }))}
-                    title="Reject this call"
-                  >
-                    <X className="w-4 h-4" />
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={choice === 'approve' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setChoices((p) => ({ ...p, [idx]: 'approve' }))}
+                      >
+                        <Check className="w-4 h-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Approve this call</TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={choice === 'reject' ? 'destructive' : 'outline'}
+                        size="sm"
+                        onClick={() => setChoices((p) => ({ ...p, [idx]: 'reject' }))}
+                      >
+                        <X className="w-4 h-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Reject this call</TooltipContent>
+                  </Tooltip>
                 </div>
               </div>
               {choice === 'reject' && (

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -190,9 +191,14 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         </div>
 
         <DialogFooter className="flex items-center justify-between sm:justify-between">
-          <div className="text-xs text-muted-foreground" title={`Full Session ID: ${sessionId}`}>
-            Session: {sessionId.slice(0, 8)}...
-          </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="text-xs text-muted-foreground">
+                Session: {sessionId.slice(0, 8)}...
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>{`Full Session ID: ${sessionId}`}</TooltipContent>
+          </Tooltip>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={onClose}>
               {hasUserSettings ? 'Close' : 'Cancel'}

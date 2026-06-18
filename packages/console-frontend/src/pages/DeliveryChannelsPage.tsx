@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Pencil, Trash2, Webhook, Plus, X, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { TableSkeleton } from '@/components/skeletons';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -32,6 +33,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   getDeliveryChannels,
   updateDeliveryChannel,
@@ -266,7 +268,7 @@ export function DeliveryChannelsPage() {
 
       {/* Table */}
       {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <TableSkeleton columns={5} />
       ) : error ? (
         <p className="text-sm text-destructive">Failed to load delivery channels.</p>
       ) : channels.length === 0 ? (
@@ -324,24 +326,32 @@ export function DeliveryChannelsPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1 justify-end">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        title="Edit channel"
-                        onClick={() => setEditChannel(ch)}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-destructive hover:text-destructive"
-                        title="Delete channel"
-                        onClick={() => { setDeleteTarget(ch); setDeleteError(null); }}
-                      >
-                        <X className="h-4 w-4" />
-                      </Button>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            onClick={() => setEditChannel(ch)}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Edit channel</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive hover:text-destructive"
+                            onClick={() => { setDeleteTarget(ch); setDeleteError(null); }}
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Delete channel</TooltipContent>
+                      </Tooltip>
                     </div>
                   </TableCell>
                 </TableRow>

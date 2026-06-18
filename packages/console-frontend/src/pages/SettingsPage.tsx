@@ -15,6 +15,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { SubAgentActivationList } from '@/components/settings/SubAgentActivationList';
 import { UserPermissionsTable } from '@/components/settings/UserPermissionsTable';
 import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
@@ -358,24 +359,28 @@ export function SettingsPage() {
                 <>
                   <span className="text-sm font-mono">{currentUser.phone_number as string}</span>
                   {currentUser?.phone_number_override && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      title="Remove override and use IdP number"
-                      onClick={async () => {
-                        try {
-                          const { client } = await import('@/api/generated/client.gen');
-                          await client.delete({ url: '/api/v1/auth/me/phone/override' });
-                          toast.success('Phone number override removed');
-                          queryClient.invalidateQueries({ queryKey: getCurrentUserApiV1AuthMeGetQueryKey() });
-                        } catch {
-                          toast.error('Failed to remove phone number override');
-                        }
-                      }}
-                    >
-                      <X className="h-3 w-3" />
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={async () => {
+                            try {
+                              const { client } = await import('@/api/generated/client.gen');
+                              await client.delete({ url: '/api/v1/auth/me/phone/override' });
+                              toast.success('Phone number override removed');
+                              queryClient.invalidateQueries({ queryKey: getCurrentUserApiV1AuthMeGetQueryKey() });
+                            } catch {
+                              toast.error('Failed to remove phone number override');
+                            }
+                          }}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Remove override and use IdP number</TooltipContent>
+                    </Tooltip>
                   )}
                   <Button variant="outline" size="sm" onClick={() => setVerifyDialogOpen(true)}>
                     Change

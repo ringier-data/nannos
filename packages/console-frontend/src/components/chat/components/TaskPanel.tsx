@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChat } from '../contexts';
 import {
   capitalize,
@@ -56,15 +57,19 @@ function CopyableId({ label, value }: { label: string; value: string }) {
   };
 
   return (
-    <button
-      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-      onClick={handleCopy}
-      title={`Click to copy: ${value}`}
-    >
-      <span>{label}:</span>
-      <span className="font-mono">{shortenIdentifier(value)}</span>
-      {copied && <span className="text-green-500">✓</span>}
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          onClick={handleCopy}
+        >
+          <span>{label}:</span>
+          <span className="font-mono">{shortenIdentifier(value)}</span>
+          {copied && <span className="text-green-500">✓</span>}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{`Click to copy: ${value}`}</TooltipContent>
+    </Tooltip>
   );
 }
 

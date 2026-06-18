@@ -50,6 +50,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { SkillEditorPanel } from '@/components/skills/SkillEditorPanel';
 import { SkillImportPanel } from '@/components/skills/SkillImportPanel';
 
@@ -359,25 +360,33 @@ export function SkillsPage() {
               Skills
             </span>
             <div className="flex items-center gap-0.5">
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-6 w-6 p-0"
-                onClick={() => { setShowImport(true); setActiveSkill(null); }}
-                title="Import from registry"
-              >
-                <Download className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-6 w-6 p-0"
-                onClick={() => setShowCreateDialog(true)}
-                title="New skill"
-                disabled={view === 'standard'}
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 w-6 p-0"
+                    onClick={() => { setShowImport(true); setActiveSkill(null); }}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Import from registry</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 w-6 p-0"
+                    onClick={() => setShowCreateDialog(true)}
+                    disabled={view === 'standard'}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>New skill</TooltipContent>
+              </Tooltip>
             </div>
           </div>
           <Select value={selectedAgent} onValueChange={handleAgentChange}>

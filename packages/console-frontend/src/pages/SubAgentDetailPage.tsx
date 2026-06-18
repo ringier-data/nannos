@@ -1295,44 +1295,56 @@ export function SubAgentDetailPage() {
                   <>
                     {isEditing ? (
                       <>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={handleCancelEdit}
-                          disabled={updateMutation.isPending}
-                          className="h-7 w-7"
-                          title="Cancel editing"
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="icon"
-                          onClick={handleSave}
-                          disabled={updateMutation.isPending}
-                          className="h-7 w-7"
-                          title="Save changes"
-                        >
-                          {updateMutation.isPending ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Save className="h-4 w-4" />
-                          )}
-                        </Button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={handleCancelEdit}
+                              disabled={updateMutation.isPending}
+                              className="h-7 w-7"
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Cancel editing</TooltipContent>
+                        </Tooltip>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              size="icon"
+                              onClick={handleSave}
+                              disabled={updateMutation.isPending}
+                              className="h-7 w-7"
+                            >
+                              {updateMutation.isPending ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Save className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Save changes</TooltipContent>
+                        </Tooltip>
                       </>
                     ) : (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => {
-                          setIsEditing(true);
-                          setActiveFocusArea('config');
-                          setShowConversationList(false);
-                        }}
-                        className="h-7 w-7"
-                        title="Edit configuration"
-                      >
-                        <Edit className="h-4 w-4" />
-                      </Button>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              setIsEditing(true);
+                              setActiveFocusArea('config');
+                              setShowConversationList(false);
+                            }}
+                            className="h-7 w-7"
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Edit configuration</TooltipContent>
+                      </Tooltip>
                     )}
                   </>
                 )}
@@ -1900,14 +1912,18 @@ export function SubAgentDetailPage() {
                                   className="flex items-center gap-2 py-1 px-2 rounded bg-muted/40 text-[11px] group/skill"
                                 >
                                   {skill.scope && skill.scope !== 'sub-agent' ? (
-                                    <a
-                                      href={`/app/skill-registry?skill=${skill.registry_id}`}
-                                      className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline inline-flex items-center gap-0.5"
-                                      title="View in skill registry"
-                                    >
-                                      {skill.name || '(unnamed)'}
-                                      <ExternalLink className="h-2.5 w-2.5 opacity-60" />
-                                    </a>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <a
+                                          href={`/app/skill-registry?skill=${skill.registry_id}`}
+                                          className="font-mono font-medium shrink-0 whitespace-nowrap text-primary hover:underline inline-flex items-center gap-0.5"
+                                        >
+                                          {skill.name || '(unnamed)'}
+                                          <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                                        </a>
+                                      </TooltipTrigger>
+                                      <TooltipContent>View in skill registry</TooltipContent>
+                                    </Tooltip>
                                   ) : (
                                     <code className="font-mono font-medium shrink-0 whitespace-nowrap">{skill.name || '(unnamed)'}</code>
                                   )}
@@ -2198,29 +2214,37 @@ export function SubAgentDetailPage() {
                     )}
                     <div className="flex items-center gap-0.5 opacity-0 group-hover/activation:opacity-100 transition-opacity ml-auto shrink-0">
                       {activation.update_available && (
-                        <button
-                          type="button"
-                          className="text-primary hover:text-primary/80 p-0.5"
-                          title="Update to latest"
-                          onClick={() => setSkillDiffInfo({
-                            registryId: activation.registry_id,
-                            contentHash: activation.content_hash,
-                            name: activation.skill_name,
-                            updateTarget: { type: 'activation', activationId: activation.id },
-                          })}
-                          disabled={updateActivationMutation.isPending}
-                        >
-                          <RefreshCw className="h-3 w-3" />
-                        </button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="text-primary hover:text-primary/80 p-0.5"
+                              onClick={() => setSkillDiffInfo({
+                                registryId: activation.registry_id,
+                                contentHash: activation.content_hash,
+                                name: activation.skill_name,
+                                updateTarget: { type: 'activation', activationId: activation.id },
+                              })}
+                              disabled={updateActivationMutation.isPending}
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>Update to latest</TooltipContent>
+                        </Tooltip>
                       )}
-                      <button
-                        type="button"
-                        className="text-destructive hover:text-destructive/80 p-0.5"
-                        title="Deactivate"
-                        onClick={() => setDeactivatingActivation(activation)}
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            className="text-destructive hover:text-destructive/80 p-0.5"
+                            onClick={() => setDeactivatingActivation(activation)}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Deactivate</TooltipContent>
+                      </Tooltip>
                     </div>
                   </div>
                 ))
@@ -2341,15 +2365,19 @@ export function SubAgentDetailPage() {
         <div className="flex-1 flex flex-col rounded-lg border border-border bg-muted/30 min-w-0 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
             <div className="flex items-center gap-2">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={() => setShowConversationList(!showConversationList)}
-                title={showConversationList ? 'Hide conversations' : 'Show conversations'}
-              >
-                <MessageSquare className="h-4 w-4" />
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => setShowConversationList(!showConversationList)}
+                  >
+                    <MessageSquare className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{showConversationList ? 'Hide conversations' : 'Show conversations'}</TooltipContent>
+              </Tooltip>
               <h2 className="text-sm font-semibold">{activeConversation ? activeConversation.title : 'Test Chat'}</h2>
               {activeConversation && (
                 <Badge variant="outline" className="text-xs">
@@ -2361,26 +2389,34 @@ export function SubAgentDetailPage() {
               )}
             </div>
             <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={handleNewConversation}
-                title="New conversation"
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={handleNewConversation}
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>New conversation</TooltipContent>
+              </Tooltip>
               {/* Show version history button when collapsed */}
               {versionHistory.length > 0 && versionSidebarCollapsed && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={() => setVersionSidebarCollapsed(false)}
-                  title="Show version history"
-                >
-                  <PanelRightOpen className="h-4 w-4" />
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setVersionSidebarCollapsed(false)}
+                    >
+                      <PanelRightOpen className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Show version history</TooltipContent>
+                </Tooltip>
               )}
             </div>
           </div>

@@ -39,6 +39,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 /** Parse SKILL.md content into frontmatter fields + body */
 function parseSkillContent(raw: string): { description: string; body: string } {
@@ -300,15 +301,19 @@ export function SkillEditorPanel({
             Files
           </span>
           {!isReadOnly && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 w-6 p-0"
-              onClick={() => setShowAddFile(true)}
-              title="Add file"
-            >
-              <Plus className="h-3.5 w-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0"
+                  onClick={() => setShowAddFile(true)}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Add file</TooltipContent>
+            </Tooltip>
           )}
         </div>
 

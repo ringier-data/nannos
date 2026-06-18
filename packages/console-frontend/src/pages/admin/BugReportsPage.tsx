@@ -21,6 +21,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { TableRowsSkeleton } from '@/components/skeletons';
+import { TableEmptyRow } from '@/components/EmptyState';
 import {
   Select,
   SelectContent,
@@ -46,6 +48,7 @@ import { Pagination } from '@/components/admin/Pagination';
 import { BugReportStatusBadge } from '@/components/admin/BugReportStatusBadge';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 export function BugReportsPage() {
   const queryClient = useQueryClient();
@@ -250,17 +253,9 @@ export function BugReportsPage() {
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                  Loading...
-                </TableCell>
-              </TableRow>
+              <TableRowsSkeleton columns={7} />
             ) : filteredReports.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                  No bug reports found
-                </TableCell>
-              </TableRow>
+              <TableEmptyRow colSpan={7} title="No bug reports found" />
             ) : (
               filteredReports.map((report) => (
                 <TableRow key={report.id}>
@@ -278,37 +273,49 @@ export function BugReportsPage() {
                   <TableCell>
                     <div className="flex items-center gap-2">
                       {report.external_link && (
-                        <a
-                          href={report.external_link}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                          title="View linked issue"
-                        >
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <a
+                              href={report.external_link}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          </TooltipTrigger>
+                          <TooltipContent>View linked issue</TooltipContent>
+                        </Tooltip>
                       )}
                       {report.conversation_id && config.langsmith.organizationId && (
-                        <a
-                          href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${report.conversation_id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                          title="Original conversation trace"
-                        >
-                          <FlaskConical className="h-3 w-3" />
-                        </a>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <a
+                              href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${report.conversation_id}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                            >
+                              <FlaskConical className="h-3 w-3" />
+                            </a>
+                          </TooltipTrigger>
+                          <TooltipContent>Original conversation trace</TooltipContent>
+                        </Tooltip>
                       )}
                       {report.debug_conversation_id && config.langsmith.organizationId && (
-                        <a
-                          href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${report.debug_conversation_id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                          title="Debug agent trace"
-                        >
-                          <Bug className="h-3 w-3" />
-                        </a>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <a
+                              href={`https://eu.smith.langchain.com/o/${config.langsmith.organizationId}/projects/p/${config.langsmith.projectId}/t/${report.debug_conversation_id}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
+                            >
+                              <Bug className="h-3 w-3" />
+                            </a>
+                          </TooltipTrigger>
+                          <TooltipContent>Debug agent trace</TooltipContent>
+                        </Tooltip>
                       )}
                     </div>
                   </TableCell>

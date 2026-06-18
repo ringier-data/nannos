@@ -9,6 +9,8 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { TableRowsSkeleton } from '@/components/skeletons';
+import { TableEmptyRow } from '@/components/EmptyState';
 import {
   Dialog,
   DialogContent,
@@ -18,6 +20,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface OutboundScimEndpoint {
   id: string;
@@ -258,18 +261,9 @@ export function OutboundScimPage() {
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center py-8">
-                  Loading...
-                </TableCell>
-              </TableRow>
+              <TableRowsSkeleton columns={6} />
             ) : endpoints.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                  <Globe className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                  No outbound SCIM endpoints configured
-                </TableCell>
-              </TableRow>
+              <TableEmptyRow colSpan={6} icon={Globe} title="No outbound SCIM endpoints configured" />
             ) : (
               endpoints.map((ep) => (
                 <TableRow key={ep.id}>
@@ -291,36 +285,53 @@ export function OutboundScimPage() {
                   <TableCell className="text-sm">{formatDate(ep.created_at)}</TableCell>
                   <TableCell>
                     <div className="flex gap-1">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => pushAllMutation.mutate(ep.id)}
-                        disabled={pushAllMutation.isPending || !ep.enabled}
-                        title="Push all users and groups"
-                      >
-                        <RefreshCw className="h-4 w-4" /> Full Sync
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => testMutation.mutate(ep.id)}
-                        disabled={testMutation.isPending}
-                        title="Test connection"
-                      >
-                        <TestTube className="h-4 w-4" /> Test
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => openEditDialog(ep)} title="Edit">
-                        <Pencil className="h-4 w-4" /> Edit
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => setDeleteDialog({ open: true, endpoint: ep })}
-                        title="Delete"
-                      >
-                        <Trash2 className="h-4 w-4" /> Delete
-                      </Button>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => pushAllMutation.mutate(ep.id)}
+                            disabled={pushAllMutation.isPending || !ep.enabled}
+                          >
+                            <RefreshCw className="h-4 w-4" /> Full Sync
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Push all users and groups</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => testMutation.mutate(ep.id)}
+                            disabled={testMutation.isPending}
+                          >
+                            <TestTube className="h-4 w-4" /> Test
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Test connection</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="outline" size="sm" onClick={() => openEditDialog(ep)}>
+                            <Pencil className="h-4 w-4" /> Edit
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Edit</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setDeleteDialog({ open: true, endpoint: ep })}
+                          >
+                            <Trash2 className="h-4 w-4" /> Delete
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Delete</TooltipContent>
+                      </Tooltip>
                     </div>
                   </TableCell>
                 </TableRow>

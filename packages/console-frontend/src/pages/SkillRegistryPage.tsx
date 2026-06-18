@@ -72,6 +72,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { SkillImportPanel } from '@/components/skills/SkillImportPanel';
 
 // --- Helpers for SKILL.md structured editing ---
@@ -186,6 +187,8 @@ export function SkillRegistryPage() {
   const [deletingFile, setDeletingFile] = useState<string | null>(null);
   const [renamingFile, setRenamingFile] = useState<string | null>(null);
   const [renameFileValue, setRenameFileValue] = useState('');
+  // File the user wants to switch to, pending confirmation to discard unsaved edits
+  const [pendingFile, setPendingFile] = useState<string | null>(null);
 
   // Update check state
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -764,12 +767,22 @@ export function SkillRegistryPage() {
             )}
           </div>
           <div className="flex items-center gap-1">
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Create skill" onClick={handleStartCreate} disabled={!!draftSkill}>
-              <Plus className="h-3.5 w-3.5" />
-            </Button>
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Import from external" onClick={() => setShowImport(true)}>
-              <Import className="h-3.5 w-3.5" />
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleStartCreate} disabled={!!draftSkill}>
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Create skill</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setShowImport(true)}>
+                  <Import className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Import from external</TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
@@ -823,17 +836,21 @@ export function SkillRegistryPage() {
                   </p>
                 </div>
                 {!editingDraftName && (
-                  <span
-                    className="p-0.5 opacity-0 group-hover:opacity-100 hover:text-blue-600 text-muted-foreground shrink-0"
-                    title="Rename"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedSkillId(null);
-                      setEditingDraftName(true);
-                    }}
-                  >
-                    <PencilLine className="h-3 w-3" />
-                  </span>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="p-0.5 opacity-0 group-hover:opacity-100 hover:text-blue-600 text-muted-foreground shrink-0"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedSkillId(null);
+                          setEditingDraftName(true);
+                        }}
+                      >
+                        <PencilLine className="h-3 w-3" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>Rename</TooltipContent>
+                  </Tooltip>
                 )}
               </div>
             </div>
@@ -895,7 +912,12 @@ export function SkillRegistryPage() {
                         {displaySource && (
                           <>
                             <span className="text-muted-foreground/40 text-xs shrink-0">·</span>
-                            <span className={`text-muted-foreground truncate ${isEditing ? 'text-[10px]' : 'text-xs'}`} title={displaySource}>{displaySource}</span>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className={`text-muted-foreground truncate ${isEditing ? 'text-[10px]' : 'text-xs'}`}>{displaySource}</span>
+                              </TooltipTrigger>
+                              <TooltipContent>{displaySource}</TooltipContent>
+                            </Tooltip>
                           </>
                         )}
                       </div>
@@ -928,22 +950,26 @@ export function SkillRegistryPage() {
                     </span>
                   )}
                   {isEditing && !isSkillImported && !isRenaming && (
-                    <span
-                      className="p-0.5 opacity-0 group-hover:opacity-100 hover:text-primary text-muted-foreground shrink-0"
-                      title="Rename"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (selectedSkillId !== skill.slug && selectedSkillId !== skill.id) {
-                          if (draftSkill?.existingId && draftSkill.existingId !== skill.id) setDraftSkillRaw(null);
-                          setSelectedSkillId(skill.slug || skill.id);
-                          setActiveFile('SKILL.md');
-                        }
-                        setRenamingSkillId(skill.id);
-                        setRenameValue(skill.name);
-                      }}
-                    >
-                      <PencilLine className="h-3 w-3" />
-                    </span>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span
+                          className="p-0.5 opacity-0 group-hover:opacity-100 hover:text-primary text-muted-foreground shrink-0"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (selectedSkillId !== skill.slug && selectedSkillId !== skill.id) {
+                              if (draftSkill?.existingId && draftSkill.existingId !== skill.id) setDraftSkillRaw(null);
+                              setSelectedSkillId(skill.slug || skill.id);
+                              setActiveFile('SKILL.md');
+                            }
+                            setRenamingSkillId(skill.id);
+                            setRenameValue(skill.name);
+                          }}
+                        >
+                          <PencilLine className="h-3 w-3" />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>Rename</TooltipContent>
+                    </Tooltip>
                   )}
                 </div>
                 );
@@ -1012,35 +1038,43 @@ export function SkillRegistryPage() {
             {/* Editor toolbar */}
             <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/30">
               <div className="flex items-center gap-2">
-                <button
-                  className="p-0.5 hover:text-primary text-muted-foreground -ml-1"
-                  title="Back to browse"
-                  onClick={() => {
-                    if (isDraft && !draftSkill.existingId) return; // don't leave unsaved new draft
-                    setSelectedSkillId(null);
-                  }}
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      className="p-0.5 hover:text-primary text-muted-foreground -ml-1"
+                      onClick={() => {
+                        if (isDraft && !draftSkill.existingId) return; // don't leave unsaved new draft
+                        setSelectedSkillId(null);
+                      }}
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Back to browse</TooltipContent>
+                </Tooltip>
                 <span className="flex items-center gap-1">
                   <span className="font-medium text-sm">
                     {isDraft ? draftSkill.name : detail?.name}
                   </span>
                   {!isImported && (
-                    <button
-                      className="p-0.5 hover:text-primary text-muted-foreground"
-                      title="Rename"
-                      onClick={() => {
-                        if (isDraft) {
-                          setEditingDraftName(true);
-                        } else {
-                          const d = ensureEditDraft();
-                          if (d) setEditingDraftName(true);
-                        }
-                      }}
-                    >
-                      <PencilLine className="h-3 w-3" />
-                    </button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          className="p-0.5 hover:text-primary text-muted-foreground"
+                          onClick={() => {
+                            if (isDraft) {
+                              setEditingDraftName(true);
+                            } else {
+                              const d = ensureEditDraft();
+                              if (d) setEditingDraftName(true);
+                            }
+                          }}
+                        >
+                          <PencilLine className="h-3 w-3" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Rename</TooltipContent>
+                    </Tooltip>
                   )}
                 </span>
                 {isDraft && !draftSkill.existingId && (
@@ -1113,32 +1147,37 @@ export function SkillRegistryPage() {
               </div>
               <div className="flex items-center gap-3">
                 {(selectedSkillId || isDraft) && (
-                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer" title="Run skill files in a sandboxed environment">
-                    <Switch
-                      checked={isDraft ? (draftSkill.sandboxRequired ?? false) : (detail?.sandbox_required ?? false)}
-                      onCheckedChange={async (checked) => {
-                        if (isImported && detail?.id) {
-                          // Imported skills: update sandbox_required directly via API
-                          try {
-                            await updateRegistrySkillApiV1SkillsRegistrySkillIdPut({
-                              path: { skill_id: detail.id },
-                              body: { sandbox_required: checked } as any,
-                              throwOnError: true,
-                            });
-                            invalidateDetail();
-                            toast.success(checked ? 'Sandbox enabled' : 'Sandbox disabled');
-                          } catch {
-                            toast.error('Failed to update sandbox setting');
-                          }
-                        } else {
-                          const d = draftSkill ?? ensureEditDraft();
-                          if (d) setDraftSkill({ ...d, sandboxRequired: checked });
-                        }
-                      }}
-                      className="scale-75"
-                    />
-                    Sandbox
-                  </label>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                        <Switch
+                          checked={isDraft ? (draftSkill.sandboxRequired ?? false) : (detail?.sandbox_required ?? false)}
+                          onCheckedChange={async (checked) => {
+                            if (isImported && detail?.id) {
+                              // Imported skills: update sandbox_required directly via API
+                              try {
+                                await updateRegistrySkillApiV1SkillsRegistrySkillIdPut({
+                                  path: { skill_id: detail.id },
+                                  body: { sandbox_required: checked } as any,
+                                  throwOnError: true,
+                                });
+                                invalidateDetail();
+                                toast.success(checked ? 'Sandbox enabled' : 'Sandbox disabled');
+                              } catch {
+                                toast.error('Failed to update sandbox setting');
+                              }
+                            } else {
+                              const d = draftSkill ?? ensureEditDraft();
+                              if (d) setDraftSkill({ ...d, sandboxRequired: checked });
+                            }
+                          }}
+                          className="scale-75"
+                        />
+                        Sandbox
+                      </label>
+                    </TooltipTrigger>
+                    <TooltipContent>Run skill files in a sandboxed environment</TooltipContent>
+                  </Tooltip>
                 )}
                 <div className="flex items-center gap-1.5">
                 {isDraft ? (
@@ -1166,53 +1205,69 @@ export function SkillRegistryPage() {
                   </>
                 ) : isImported ? (
                   <>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs"
-                      onClick={handleCheckUpdate}
-                      disabled={checkingUpdate}
-                      title="Check for upstream updates"
-                    >
-                      {checkingUpdate ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <RefreshCw className="h-3 w-3 mr-1" />}
-                      Check Updates
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs"
-                      onClick={handleCopySkill}
-                      disabled={copying}
-                      title="Create an editable copy"
-                    >
-                      {copying ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Copy className="h-3 w-3 mr-1" />}
-                      Copy to Edit
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={handleCheckUpdate}
+                          disabled={checkingUpdate}
+                        >
+                          {checkingUpdate ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+                          Check Updates
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Check for upstream updates</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={handleCopySkill}
+                          disabled={copying}
+                        >
+                          {copying ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Copy className="h-3 w-3 mr-1" />}
+                          Copy to Edit
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Create an editable copy</TooltipContent>
+                    </Tooltip>
                   </>
                 ) : null}
                 {selectedSkillId && !isDraft && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0"
-                    title="Version history"
-                    onClick={handleShowHistory}
-                  >
-                    <History className="h-3.5 w-3.5" />
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        onClick={handleShowHistory}
+                      >
+                        <History className="h-3.5 w-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Version history</TooltipContent>
+                  </Tooltip>
                 )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                  title="Delete skill"
-                  onClick={() => {
-                    const skill = skills.find((s) => s.id === selectedSkillId || s.slug === selectedSkillId);
-                    if (skill) setDeletingSkill(skill);
-                  }}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                      onClick={() => {
+                        const skill = skills.find((s) => s.id === selectedSkillId || s.slug === selectedSkillId);
+                        if (skill) setDeletingSkill(skill);
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Delete skill</TooltipContent>
+                </Tooltip>
                 </div>
               </div>
             </div>
@@ -1223,15 +1278,19 @@ export function SkillRegistryPage() {
                 <div className="flex items-center justify-between px-3 py-2 border-b">
                   <span className="text-[10px] font-semibold uppercase text-muted-foreground tracking-wider">Files</span>
                   {!isImported && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-5 w-5 p-0"
-                      title="Add file"
-                      onClick={() => { setAddingFile(true); setNewFilePath(''); }}
-                    >
-                      <FilePlus className="h-3 w-3" />
-                    </Button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-5 w-5 p-0"
+                          onClick={() => { setAddingFile(true); setNewFilePath(''); }}
+                        >
+                          <FilePlus className="h-3 w-3" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Add file</TooltipContent>
+                    </Tooltip>
                   )}
                 </div>
                 <div className="flex-1 overflow-y-auto py-1">
@@ -1264,7 +1323,8 @@ export function SkillRegistryPage() {
                                 const flushed = flushDraftEdits();
                                 if (flushed) setDraftSkill(flushed);
                               } else if (isDirty) {
-                                if (!confirm('Discard unsaved changes?')) return;
+                                setPendingFile(f.path);
+                                return;
                               }
                               setEditedContent(null);
                               setEditedDescription(null);
@@ -1277,29 +1337,37 @@ export function SkillRegistryPage() {
                           {!isImported && (
                             <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
                               {f.path !== 'SKILL.md' && (
-                                <button
-                                  className="p-0.5 hover:text-primary"
-                                  title="Rename"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setRenamingFile(f.path);
-                                    setRenameFileValue(f.path);
-                                  }}
-                                >
-                                  <PencilLine className="h-2.5 w-2.5" />
-                                </button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      className="p-0.5 hover:text-primary"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setRenamingFile(f.path);
+                                        setRenameFileValue(f.path);
+                                      }}
+                                    >
+                                      <PencilLine className="h-2.5 w-2.5" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Rename</TooltipContent>
+                                </Tooltip>
                               )}
                               {f.path !== 'SKILL.md' && (
-                                <button
-                                  className="p-0.5 hover:text-destructive"
-                                  title="Delete"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setDeletingFile(f.path);
-                                  }}
-                                >
-                                  <X className="h-2.5 w-2.5" />
-                                </button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      className="p-0.5 hover:text-destructive"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setDeletingFile(f.path);
+                                      }}
+                                    >
+                                      <X className="h-2.5 w-2.5" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Delete</TooltipContent>
+                                </Tooltip>
                               )}
                             </div>
                           )}
@@ -1407,6 +1475,36 @@ export function SkillRegistryPage() {
       </div>
 
       {/* Delete file confirmation */}
+      {/* Discard unsaved changes when switching files */}
+      <AlertDialog open={!!pendingFile} onOpenChange={(o) => { if (!o) setPendingFile(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You have unsaved edits in <strong>{activeFile}</strong>. Switching files will
+              discard them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingFile) {
+                  setEditedContent(null);
+                  setEditedDescription(null);
+                  setEditedBody(null);
+                  setActiveFile(pendingFile);
+                }
+                setPendingFile(null);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Discard changes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={!!deletingFile} onOpenChange={() => setDeletingFile(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1455,7 +1553,7 @@ export function SkillRegistryPage() {
 
       {/* Update diff dialog */}
       <Dialog open={!!updateDiff} onOpenChange={() => setUpdateDiff(null)}>
-        <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
+        <DialogContent className="sm:max-w-4xl max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Upstream Changes Available</DialogTitle>
             <DialogDescription>
@@ -1496,7 +1594,7 @@ export function SkillRegistryPage() {
 
       {/* Version history dialog */}
       <Dialog open={showHistory} onOpenChange={(open) => { if (!open) { setShowHistory(false); setSelectedVersion(null); } }}>
-        <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
+        <DialogContent className="sm:max-w-4xl max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Version History</DialogTitle>
             <DialogDescription>

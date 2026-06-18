@@ -3,6 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ShieldOff, Trash2, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
 import { client } from '@/api/generated/client.gen';
 
 interface BypassRule {
@@ -32,6 +34,7 @@ async function removeBypassRule(key: string): Promise<void> {
 export function ToolBypassRulesList() {
   const queryClient = useQueryClient();
   const [removingKey, setRemovingKey] = useState<string | null>(null);
+  const [pendingRemoveKey, setPendingRemoveKey] = useState<string | null>(null);
 
   const { data: rules, isLoading } = useQuery({
     queryKey: ['toolBypassRules'],
@@ -106,23 +109,41 @@ export function ToolBypassRulesList() {
                 )}
               </p>
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-destructive hover:text-destructive"
-              onClick={() => handleRemove(key)}
-              disabled={isRemoving}
-              title="Remove bypass rule (will ask for approval again)"
-            >
-              {isRemoving ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Trash2 className="h-4 w-4" />
-              )}
-            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-destructive hover:text-destructive"
+                  onClick={() => setPendingRemoveKey(key)}
+                  disabled={isRemoving}
+                >
+                  {isRemoving ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Remove bypass rule (will ask for approval again)</TooltipContent>
+            </Tooltip>
           </div>
         );
       })}
+
+      <ConfirmDialog
+        open={pendingRemoveKey !== null}
+        onOpenChange={(o) => { if (!o) setPendingRemoveKey(null); }}
+        title="Remove bypass rule?"
+        description="This tool will prompt for approval again based on its risk score."
+        confirmLabel="Remove"
+        variant="destructive"
+        isLoading={removeMutation.isPending}
+        onConfirm={() => {
+          if (pendingRemoveKey) handleRemove(pendingRemoveKey);
+          setPendingRemoveKey(null);
+        }}
+      />
     </div>
   );
 }

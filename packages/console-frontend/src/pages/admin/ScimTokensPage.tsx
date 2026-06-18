@@ -15,6 +15,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { TableRowsSkeleton } from '@/components/skeletons';
+import { TableEmptyRow } from '@/components/EmptyState';
 import {
   Dialog,
   DialogContent,
@@ -180,17 +182,9 @@ export function ScimTokensPage() {
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center py-8">
-                  Loading...
-                </TableCell>
-              </TableRow>
+              <TableRowsSkeleton columns={7} />
             ) : tokens.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                  No SCIM tokens created yet
-                </TableCell>
-              </TableRow>
+              <TableEmptyRow colSpan={7} title="No SCIM tokens created yet" />
             ) : (
               tokens.map((token) => {
                 const status = getTokenStatus(token);

@@ -15,6 +15,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -302,29 +303,37 @@ export function VersionSidebar({
                       <div className="flex items-center gap-2">
                         {/* Show release number for approved, hash for others */}
                         {isApproved && version.release_number ? (
-                          <div
-                            className={`flex h-7 min-w-7 px-2 items-center justify-center rounded-full text-sm font-medium ${
-                              isViewing
-                                ? 'bg-blue-500 text-white'
-                                : isDefault
-                                  ? 'bg-primary text-primary-foreground'
-                                  : 'bg-muted text-muted-foreground'
-                            }`}
-                            title={`Release ${version.release_number}`}
-                          >
-                            v{version.release_number}
-                          </div>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div
+                                className={`flex h-7 min-w-7 px-2 items-center justify-center rounded-full text-sm font-medium ${
+                                  isViewing
+                                    ? 'bg-blue-500 text-white'
+                                    : isDefault
+                                      ? 'bg-primary text-primary-foreground'
+                                      : 'bg-muted text-muted-foreground'
+                                }`}
+                              >
+                                v{version.release_number}
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent>{`Release ${version.release_number}`}</TooltipContent>
+                          </Tooltip>
                         ) : (
-                          <div
-                            className={`flex h-7 px-2 items-center justify-center rounded text-xs font-mono ${
-                              isViewing
-                                ? 'bg-blue-500 text-white'
-                                : 'bg-muted text-muted-foreground'
-                            }`}
-                            title={version.version_hash || `Version ${version.version}`}
-                          >
-                            {version.version_hash ? `#${version.version_hash.slice(0, 7)}` : `v${version.version}`}
-                          </div>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div
+                                className={`flex h-7 px-2 items-center justify-center rounded text-xs font-mono ${
+                                  isViewing
+                                    ? 'bg-blue-500 text-white'
+                                    : 'bg-muted text-muted-foreground'
+                                }`}
+                              >
+                                {version.version_hash ? `#${version.version_hash.slice(0, 7)}` : `v${version.version}`}
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent>{version.version_hash || `Version ${version.version}`}</TooltipContent>
+                          </Tooltip>
                         )}
                         {isCurrent && (
                           <Badge variant="default" className="bg-blue-500 text-xs">

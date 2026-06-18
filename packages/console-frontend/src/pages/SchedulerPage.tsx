@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { TableSkeleton } from '@/components/skeletons';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -46,6 +47,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   type ScheduledJob,
   type JobType,
@@ -65,6 +67,8 @@ import {
   consoleListMcpToolsOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
 import { config } from '@/config';
+import { CronField } from '@/components/CronField';
+import { describeCron } from '@/lib/cron';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -269,8 +273,11 @@ function CreateJobDialog({
 
   async function handleSubmit() {
     if (!form.name.trim()) return setError('Name is required');
-    if (form.schedule_kind === 'cron' && !form.cron_expr.trim())
-      return setError('Cron expression is required');
+    if (form.schedule_kind === 'cron') {
+      if (!form.cron_expr.trim()) return setError('Cron expression is required');
+      if (!describeCron(form.cron_expr).ok)
+        return setError('Cron expression is invalid');
+    }
     if (form.schedule_kind === 'interval' && !form.interval_seconds)
       return setError('Interval is required');
     if (form.schedule_kind === 'once' && !form.run_at)
@@ -368,7 +375,7 @@ function CreateJobDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[90vh] sm:max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Create Scheduled Job</DialogTitle>
           <DialogDescription>
@@ -425,18 +432,11 @@ function CreateJobDialog({
 
           {/* Schedule detail */}
           {form.schedule_kind === 'cron' && (
-            <div className="grid gap-1.5">
-              <Label htmlFor="cron">
-                Cron expression{' '}
-                <span className="text-muted-foreground text-xs">(e.g. 0 9 * * 1-5)</span>
-              </Label>
-              <Input
-                id="cron"
-                value={form.cron_expr}
-                onChange={(e) => update('cron_expr', e.target.value)}
-                placeholder="0 9 * * 1-5"
-              />
-            </div>
+            <CronField
+              id="cron"
+              value={form.cron_expr}
+              onChange={(v) => update('cron_expr', v)}
+            />
           )}
           {form.schedule_kind === 'interval' && (
             <div className="grid gap-1.5">
@@ -800,32 +800,32 @@ function CreateJobDialog({
                 />
               </div>
 
-              {/* Condition expression */}
-              <div className="grid gap-1.5">
-                <Label htmlFor="condition_expr">
-                  Condition expression{' '}
-                  <span className="text-muted-foreground text-xs">(JSONPath)</span>
-                </Label>
-                <Input
-                  id="condition_expr"
-                  value={form.condition_expr}
-                  onChange={(e) => update('condition_expr', e.target.value)}
-                  placeholder="$.status"
-                />
-              </div>
-
-              {/* Expected value */}
-              <div className="grid gap-1.5">
-                <Label htmlFor="expected_value">
-                  Expected value{' '}
-                  <span className="text-muted-foreground text-xs">(leave empty to check "is not null")</span>
-                </Label>
-                <Input
-                  id="expected_value"
-                  value={form.expected_value}
-                  onChange={(e) => update('expected_value', e.target.value)}
-                  placeholder="success"
-                />
+              {/* Condition expression + expected value */}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="condition_expr">
+                    Condition expression{' '}
+                    <span className="text-muted-foreground text-xs">(JSONPath)</span>
+                  </Label>
+                  <Input
+                    id="condition_expr"
+                    value={form.condition_expr}
+                    onChange={(e) => update('condition_expr', e.target.value)}
+                    placeholder="$.status"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="expected_value">
+                    Expected value{' '}
+                    <span className="text-muted-foreground text-xs">(leave empty to check "is not null")</span>
+                  </Label>
+                  <Input
+                    id="expected_value"
+                    value={form.expected_value}
+                    onChange={(e) => update('expected_value', e.target.value)}
+                    placeholder="success"
+                  />
+                </div>
               </div>
 
               {/* LLM Condition */}
@@ -978,7 +978,7 @@ export function SchedulerPage() {
 
       {/* Job table */}
       {isLoading ? (
-        <div className="text-muted-foreground text-sm">Loading…</div>
+        <TableSkeleton columns={7} />
       ) : jobs.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-12 text-center">
           <Calendar className="h-8 w-8 text-muted-foreground" />
@@ -1042,36 +1042,48 @@ export function SchedulerPage() {
                       onClick={(e) => e.stopPropagation()}
                     >
                       {job.enabled ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          title="Pause"
-                          disabled={pauseMutation.isPending}
-                          onClick={() => pauseMutation.mutate(job.id)}
-                        >
-                          <Pause className="h-4 w-4" />
-                        </Button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={pauseMutation.isPending}
+                              onClick={() => pauseMutation.mutate(job.id)}
+                            >
+                              <Pause className="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Pause</TooltipContent>
+                        </Tooltip>
                       ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          title="Resume"
-                          disabled={resumeMutation.isPending}
-                          onClick={() => resumeMutation.mutate(job.id)}
-                        >
-                          <Play className="h-4 w-4" />
-                        </Button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={resumeMutation.isPending}
+                              onClick={() => resumeMutation.mutate(job.id)}
+                            >
+                              <Play className="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Resume</TooltipContent>
+                        </Tooltip>
                       )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        title="Delete"
-                        className="text-destructive hover:text-destructive"
-                        disabled={deleteMutation.isPending}
-                        onClick={() => setDeleteTarget(job)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            disabled={deleteMutation.isPending}
+                            onClick={() => setDeleteTarget(job)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Delete</TooltipContent>
+                      </Tooltip>
                     </div>
                   </td>
                 </tr>

@@ -21,6 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   listSecretsApiV1SecretsGetOptions,
   listSecretsApiV1SecretsGetQueryKey,
@@ -175,27 +176,35 @@ export function SecretsVaultList() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setSelectedSecretId(secret.id);
-                    setSelectedSecretName(secret.name);
-                    setShowPermissionsDialog(true);
-                  }}
-                  title="Manage permissions"
-                >
-                  <Users className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => confirmDelete(secret.id)}
-                  disabled={deleteMutation.isPending}
-                  title="Delete secret"
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setSelectedSecretId(secret.id);
+                        setSelectedSecretName(secret.name);
+                        setShowPermissionsDialog(true);
+                      }}
+                    >
+                      <Users className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Manage permissions</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => confirmDelete(secret.id)}
+                      disabled={deleteMutation.isPending}
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Delete secret</TooltipContent>
+                </Tooltip>
               </div>
             </div>
           ))}
