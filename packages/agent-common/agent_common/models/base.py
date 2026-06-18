@@ -18,38 +18,25 @@ ModelType = Literal[
 ]
 
 
-# Thinking level literal for extended thinking configuration
+# Thinking level literal for extended thinking configuration.
+# Mirrors LiteLLM's reasoning_effort vocabulary (minus "none", which the
+# enable-thinking toggle covers). Per-model support is read from the gateway.
 class ThinkingLevel(str, Enum):
     minimal = "minimal"
     low = "low"
     medium = "medium"
     high = "high"
+    xhigh = "xhigh"
 
 
 def _resolve_default_model() -> ModelType:
-    """Resolve the default model, falling back if the configured model is unavailable.
+    """The configured default model alias.
 
-    Imports MODEL_CONFIG lazily to avoid circular imports.
+    The Model Gateway is the source of truth for which models exist (ADR-0001), so we
+    simply trust the configured DEFAULT_MODEL alias; the gateway validates it at call
+    time. No static registry to check against.
     """
-    from agent_common.core.model_factory import MODEL_CONFIG
-
-    configured: str = os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")
-    if configured in MODEL_CONFIG:
-        return configured  # type: ignore[return-value]
-
-    if MODEL_CONFIG:
-        fallback = next(iter(MODEL_CONFIG))
-        logger.warning(
-            "DEFAULT_MODEL '%s' is not available (no credentials). Falling back to '%s'.",
-            configured,
-            fallback,
-        )
-        return fallback  # type: ignore[return-value]
-
-    raise RuntimeError(
-        f"DEFAULT_MODEL '{configured}' is not available and no other models have credentials configured. "
-        "Set OPENAI_COMPATIBLE_BASE_URL for a local model, or provide cloud credentials."
-    )
+    return os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")  # type: ignore[return-value]
 
 
 # Lazy default model — resolved on first access via _resolve_default_model()

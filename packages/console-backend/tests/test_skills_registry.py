@@ -149,14 +149,17 @@ class TestBrowseRepo:
         with patch(
             "console_backend.routers.skills_registry_router.skills_registry_service.browse_repo",
             new_callable=AsyncMock,
-            return_value=mock_results,
+            return_value=(mock_results, len(mock_results)),
         ) as mock_browse:
-            result = await browse_repo(repo="anthropics/skills", ref="main", user=_make_user())
+            # Pass explicit limit/offset: calling the router fn directly bypasses FastAPI's
+            # Query-default resolution, so the defaults would otherwise stay Query() objects.
+            result = await browse_repo(repo="anthropics/skills", ref="main", limit=50, offset=0, user=_make_user())
 
             assert isinstance(result, SkillSearchResponse)
             assert len(result.data) == 1
             assert result.data[0].slug == "code-review"
-            mock_browse.assert_called_once_with(repo="anthropics/skills", ref="main")
+            # browse_repo returns (results, total) and is called with pagination kwargs.
+            mock_browse.assert_called_once_with(repo="anthropics/skills", ref="main", limit=50, offset=0)
 
     @pytest.mark.asyncio
     async def test_browse_invalid_repo_format(self):
@@ -174,9 +177,9 @@ class TestBrowseRepo:
         with patch(
             "console_backend.routers.skills_registry_router.skills_registry_service.browse_repo",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=([], 0),
         ):
-            result = await browse_repo(repo="empty/repo", ref="main", user=_make_user())
+            result = await browse_repo(repo="empty/repo", ref="main", limit=50, offset=0, user=_make_user())
             assert result.count == 0
 
 
@@ -741,7 +744,7 @@ class TestMcpSearchSkills:
         with patch(
             "console_backend.routers.skills_registry_router.skills_registry_service.browse_repo",
             new_callable=AsyncMock,
-            return_value=mock_results,
+            return_value=(mock_results, len(mock_results)),
         ):
             result = await mcp_search_skills(body=body, request=request, user=_make_user(), db=mock_db)
 

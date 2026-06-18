@@ -30,6 +30,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { useAvailableModels } from '@/config/models';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -209,6 +210,7 @@ function CreateJobDialog({
   onCreated: (jobId: number) => void;
 }) {
   const [form, setForm] = useState<CreateJobForm>({ ...defaultForm });
+  const { models: availableModels } = useAvailableModels();
   const [error, setError] = useState<string | null>(null);
   const [aiQuery, setAiQuery] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -540,11 +542,11 @@ function CreateJobDialog({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="claude-sonnet-4.5">Claude Sonnet 4.5</SelectItem>
-                          <SelectItem value="claude-sonnet-4.6">Claude Sonnet 4.6</SelectItem>
-                          <SelectItem value="claude-haiku-4-5">Claude Haiku 4</SelectItem>
-                          <SelectItem value="gpt-4o">GPT-4o</SelectItem>
-                          <SelectItem value="gpt-4o-mini">GPT-4o Mini</SelectItem>
+                          {availableModels.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>

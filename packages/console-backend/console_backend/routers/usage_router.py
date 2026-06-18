@@ -1,9 +1,11 @@
 """API router for usage tracking and reporting."""
 
+import hmac
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from ..authorization import check_capability
 from ..db.session import DbSession
@@ -11,6 +13,7 @@ from ..dependencies import require_auth, require_auth_or_bearer_token
 from ..models.usage import (
     BillingUnitDetail,
     DetailedUsageReport,
+    GatewayUsageLogBatchCreate,
     UsageLog,
     UsageLogBatchCreate,
     UsageLogCreate,
@@ -62,6 +65,62 @@ async def log_usage(
         return {"id": usage_log_id, "status": "logged"}
     except Exception as e:
         logger.error(f"Failed to log usage: {e}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to log usage: {str(e)}",
+        )
+
+
+def _verify_gateway_token(authorization: str) -> None:
+    """Validate the shared service secret used by the Model Gateway (ADR-0002/0005)."""
+    expected = os.getenv("GATEWAY_INGEST_TOKEN", "")
+    token = authorization.removeprefix("Bearer ").strip() if authorization else ""
+    if not expected or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid gateway ingest token")
+
+
+@router.post("/gateway-batch-log", status_code=status.HTTP_201_CREATED)
+async def gateway_batch_log_usage(
+    request: Request,
+    batch_data: GatewayUsageLogBatchCreate,
+    db: DbSession,
+    authorization: str = Header(default=""),
+):
+    """Batch-log usage from the Model Gateway (trusted service; ADR-0002).
+
+    Authenticated by a shared service secret, NOT a user token. Each record is
+    attributed to its own `user_sub` (the proxy batches across many users), unlike
+    /batch-log which derives the user from the caller's token.
+    """
+    _verify_gateway_token(authorization)
+    usage_service = get_usage_service(request)
+    user_service = request.app.state.user_service
+    try:
+        logs = []
+        for log_obj in batch_data.logs:
+            log_dict = log_obj.model_dump()
+            # The gateway attributes each record by `user_sub` (the OIDC subject). Resolve
+            # it to the internal users.id (sub != id). Fall back to treating it as an id
+            # directly (some callers pass owner_user_id). Skip records whose user we can't
+            # resolve rather than failing the whole batch with an FK violation.
+            sub = log_dict.pop("user_sub")
+            user = await user_service.get_user_by_sub(db, sub) or await user_service.get_user(db, sub)
+            if user is None:
+                logger.warning("gateway usage: unknown user_sub=%s; skipping record", sub)
+                continue
+            log_dict["user_id"] = user.id
+            logs.append(log_dict)
+
+        if not logs:
+            return {"count": 0, "ids": [], "status": "no_known_users"}
+        usage_log_ids = await usage_service.batch_log_usage(db=db, logs=logs)
+        await db.commit()
+        return {"count": len(usage_log_ids), "ids": usage_log_ids, "status": "logged"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to gateway-batch-log usage: {e}", exc_info=True)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

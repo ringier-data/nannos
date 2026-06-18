@@ -70,6 +70,7 @@ from console_backend.routers.models_router import router as models_router
 from console_backend.routers.notification_router import router as notification_router
 from console_backend.routers.outbound_scim_router import router as outbound_scim_router
 from console_backend.routers.playbook_router import router as playbook_router
+from console_backend.routers.admin_model_gateway_router import router as admin_model_gateway_router
 from console_backend.routers.rate_card_router import router as rate_card_router
 from console_backend.routers.scheduler_router import router as scheduler_router
 from console_backend.routers.scim_router import router as scim_router
@@ -325,6 +326,7 @@ app.include_router(group_router)
 app.include_router(usage_router)
 app.include_router(analytics_router)
 app.include_router(rate_card_router)
+app.include_router(admin_model_gateway_router)
 app.include_router(models_router)
 app.include_router(notification_router)
 # Scheduler router MUST be registered before FastApiMCP instantiation below

@@ -1,0 +1,8 @@
+# Not a real Python package — present so the justfile/release tooling can read a
+# per-package version (scripts/release-helpers.sh get_package_version). The image
+# is built from the upstream LiteLLM base (see Dockerfile); there is no Python build.
+[project]
+name = "nannos-litellm-proxy"
+version = "0.1.0"
+description = "Nannos Model Gateway — LiteLLM proxy config + cost-capture callback"
+requires-python = ">=3.12"

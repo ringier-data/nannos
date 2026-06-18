@@ -1,0 +1,76 @@
+# LiteLLM Proxy config for the gateway verification spike. Throwaway.
+#
+# Model aliases mirror the real Nannos aliases (model_factory.py _BEDROCK_MODELS).
+# model_info cost fields are illustrative seeds — Check 3 only needs cost tracking
+# to fire and retain the cache/reasoning breakdown, not exact prices.
+
+model_list:
+  # --- Real Bedrock (Checks 1, 2c, 3) ---
+  - model_name: claude-sonnet-4.6
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-4-6
+      aws_region_name: os.environ/AWS_BEDROCK_REGION
+    model_info:
+      input_cost_per_token: 0.000003
+      output_cost_per_token: 0.000015
+      cache_creation_input_token_cost: 0.00000375
+      cache_read_input_token_cost: 0.0000003
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: os.environ/AWS_BEDROCK_REGION
+    model_info:
+      input_cost_per_token: 0.000001
+      output_cost_per_token: 0.000005
+
+  # --- Aggressive stream timeout against real Bedrock (Check 2c, the bug gate) ---
+  # Same backend, tiny stream_timeout: if this does NOT abort, reproduces #23375.
+  - model_name: claude-sonnet-4.6-tighttimeout
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-4-6
+      aws_region_name: os.environ/AWS_BEDROCK_REGION
+      stream_timeout: 0.5
+      timeout: 2
+      max_retries: 0
+
+  # --- Mock upstream: slow first token (Check 2a) ---
+  - model_name: mock-first-token-delay
+    litellm_params:
+      model: openai/first-token-delay
+      api_base: http://mock-upstream:8090/v1
+      api_key: dummy-key
+      stream_timeout: 5
+      timeout: 60
+      max_retries: 0   # OpenAI SDK default is 2; otherwise a 5s timeout reads as ~16s
+
+  # --- Mock upstream: stall after first chunk (Check 2b) ---
+  - model_name: mock-inter-chunk-stall
+    litellm_params:
+      model: openai/inter-chunk-stall
+      api_base: http://mock-upstream:8090/v1
+      api_key: dummy-key
+      stream_timeout: 5
+      timeout: 60
+      max_retries: 0
+
+  # --- Mock upstream: normal, fast (Checks 4a/4b attribution; no Bedrock cost) ---
+  - model_name: mock-fast
+    litellm_params:
+      model: openai/fast
+      api_base: http://mock-upstream:8090/v1
+      api_key: dummy-key
+
+litellm_settings:
+  # Proxy-side capture for cost fidelity + attribution (Checks 3, 4).
+  callbacks: custom_logger.proxy_handler_instance
+  # Global outer bound; per-model stream_timeout set above.
+  request_timeout: 600
+  drop_params: true
+  # Single attempt — otherwise retries stack and a 5s stream_timeout reads as ~15s.
+  num_retries: 0
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # DATABASE_URL is read from env; presence enables SpendLogs persistence (Check 3).
+  database_url: os.environ/DATABASE_URL

@@ -296,26 +296,25 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         return self.config.description
 
     def get_supported_input_modes(self) -> List[str]:
-        """Get list of input modes supported by this dynamic agent.
+        """Input modes supported by this dynamic agent.
 
-        Returns input modes from configuration if explicitly specified,
-        otherwise derives capabilities from the model type. Falls back to
-        ["text", "image"] if model type is unknown.
+        Resolution order:
+        1. explicit `config.input_modes` (per-sub-agent override), else
+        2. the model's `input_modes` from the gateway model_info (declared at model
+           registration — the source of truth, incl. for dynamically-registered models), else
+        3. text+image safety net.
 
         Returns:
             List of supported content types (e.g., ["text", "image"])
         """
-        # Use config if explicitly specified
         if self.config.input_modes:
             return self.config.input_modes
-        # Derive from model capabilities if model is known
         model_type = self.get_model_type()
         if model_type:
             try:
                 return get_model_input_capabilities(model_type)  # type: ignore[arg-type]
-            except ValueError:
+            except Exception:
                 pass
-        # Default to text+image for modern models
         return ["text", "image"]
 
     def get_model_type(self) -> str | None:

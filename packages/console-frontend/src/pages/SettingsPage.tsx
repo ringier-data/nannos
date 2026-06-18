@@ -23,7 +23,7 @@ import { SecretsVaultList } from '@/components/settings/SecretsVaultList';
 import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PhoneVerificationDialog } from '@/components/settings/PhoneVerificationDialog';
 import { ToolBypassRulesList } from '@/components/settings/ToolBypassRulesList';
-import { MODEL_OPTIONS, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
+import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
 
 const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
@@ -57,7 +57,7 @@ function getTabFromHash(): TabId {
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
-  const availableModels = MODEL_OPTIONS;
+  const { models: availableModels } = useAvailableModels();
   const [activeTab, setActiveTab] = useState<TabId>(getTabFromHash);
   const handleTabChange = useCallback((tab: TabId) => {
     setActiveTab(tab);

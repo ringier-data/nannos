@@ -49,7 +49,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
-from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
+from ringier_a2a_sdk.cost_tracking import CostLogger
 
 from ..handlers import handle_tool_failure, should_retry
 from ..middleware import (
@@ -149,21 +149,12 @@ class GraphFactory:
                 f"postgresql://{config.POSTGRES_USER}:{config.POSTGRES_PASSWORD}"
                 f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DB}"
             )
-            if _has_aws_credentials():
-                from agent_common.core.cost_tracking_embeddings import CostTrackingBedrockEmbeddings
+            from agent_common.core.model_factory import create_embeddings
 
-                self._embeddings_model = CostTrackingBedrockEmbeddings(
-                    model_id="amazon.titan-embed-text-v2:0",
-                    region_name=config.get_bedrock_region(),
-                    cost_logger=self.cost_logger,
-                )
-                logger.debug("Configured AsyncPostgresStore with Bedrock embeddings (will initialize on first access)")
-            else:
-                logger.info(
-                    "PostgreSQL configured but AWS credentials unavailable – "
-                    "document store will work without semantic indexing"
-                )
-                logger.debug("Configured AsyncPostgresStore without embeddings (will initialize on first access)")
+            # Embeddings via the Model Gateway (ADR-0001); cost captured proxy-side.
+            # No AWS-creds gate any more — the gateway owns provider credentials.
+            self._embeddings_model = create_embeddings("titan-embed-text-v2")
+            logger.debug("Configured AsyncPostgresStore with gateway embeddings (lazy init)")
         else:
             logger.info(
                 "PostgreSQL not configured – document store disabled. "
@@ -402,14 +393,10 @@ class GraphFactory:
         Returns:
             BaseChatModel: The created model instance
         """
-        # Create callbacks list if cost_logger is available
-        callbacks = []
-        if self.cost_logger:
-            callbacks.append(CostTrackingCallback(self.cost_logger))
-
-        return create_model(
-            model_type, self.config.get_bedrock_region(), thinking_level, callbacks=callbacks if callbacks else None
-        )
+        # LLM cost is captured at the Model Gateway now (proxy CustomLogger, ADR-0002);
+        # the in-app CostTrackingCallback is intentionally NOT attached here to avoid
+        # double-counting. (cost_logger remains for the embeddings path until Phase 5.)
+        return create_model(model_type, self.config.get_bedrock_region(), thinking_level, callbacks=None)
 
     def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
         """Get or create a model instance

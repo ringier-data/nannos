@@ -78,12 +78,13 @@ class FoundryScope(str, Enum):
 
 
 class ThinkingLevel(str, Enum):
-    """Thinking depth level for extended thinking mode."""
+    """Reasoning effort (LiteLLM convention). Per-model support comes from the gateway."""
 
     MINIMAL = "minimal"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    XHIGH = "xhigh"
 
 
 class FoundryAgentConfiguration(BaseModel):

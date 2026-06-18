@@ -208,6 +208,23 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
             )
         return
 
+    # Embedding-dependent: disable gracefully until a default embedding model is set.
+    embedding_alias = await pipeline.resolve_embedding_alias()
+    if not embedding_alias:
+        logger.warning("Sync job %s blocked: no default embedding model configured", sync_job_id)
+        async with session_factory() as db:
+            await pipeline._update_sync_job(
+                db,
+                sync_job_id,
+                status="failed",
+                completed_at=datetime.now(timezone.utc),
+                error_details={
+                    "error": "No default embedding model is configured. An administrator must set "
+                    "a default embedding model in the console (Admin → Model Gateway) before catalogs can be indexed."
+                },
+            )
+        return
+
     # Set up progress callback (HTTP webhook to console-backend)
     progress_callback = _make_progress_callback(catalog_id, sync_job_id, catalog.owner_user_id)
 
@@ -216,6 +233,7 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
         user_sub=catalog.owner_user_id,
         catalog_id=catalog_id,
         progress_callback=progress_callback,
+        embedding_model=embedding_alias,
     )
 
     try:
@@ -321,12 +339,30 @@ async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
         cost_logger=_cost_logger,
     )
 
+    # Embedding-dependent: disable gracefully until a default embedding model is set.
+    embedding_alias = await pipeline.resolve_embedding_alias()
+    if not embedding_alias:
+        logger.warning("Reindex job %s blocked: no default embedding model configured", sync_job_id)
+        async with session_factory() as db:
+            await pipeline._update_sync_job(
+                db,
+                sync_job_id,
+                status="failed",
+                completed_at=datetime.now(timezone.utc),
+                error_details={
+                    "error": "No default embedding model is configured. An administrator must set "
+                    "a default embedding model in the console (Admin → Model Gateway) before catalogs can be indexed."
+                },
+            )
+        return
+
     progress_callback = _make_reindex_progress_callback(catalog_id, sync_job_id, catalog.owner_user_id)
 
     pipeline.setup_job(
         sync_job_id=sync_job_id,
         user_sub=catalog.owner_user_id,
         catalog_id=catalog_id,
+        embedding_model=embedding_alias,
     )
 
     try:

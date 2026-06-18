@@ -28,6 +28,7 @@ from agent_common.backends.attachments_store import (
     reset_current_attachments_backend,
     set_current_attachments_backend,
 )
+from agent_common.core.stream_watchdog import watch_stream
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel, get_resolved_default_model
 from langchain.messages import HumanMessage
@@ -434,9 +435,12 @@ class OrchestratorDeepAgent:
             # CRITICAL: Pass BOTH config and context parameters:
             # - config: Infrastructure (checkpointing via thread_id, metadata for LangSmith)
             # - context: Runtime data (tools, user preferences, sub-agents)
-            async for part in graph.astream(
-                input_data, config, stream_mode=["custom", "messages"], context=runtime_context, version="v2"
-            ):  # type: ignore
+            async for part in watch_stream(
+                graph.astream(  # type: ignore
+                    input_data, config, stream_mode=["custom", "messages"], context=runtime_context, version="v2"
+                ),
+                label="orchestrator",
+            ):
                 chunk_count += 1
                 part_type = part["type"]
 

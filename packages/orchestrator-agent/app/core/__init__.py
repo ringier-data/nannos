@@ -31,7 +31,6 @@ Usage:
 # Import model_factory utilities directly when needed
 
 from agent_common.core.model_factory import (
-    MODEL_CONFIG,
     _has_aws_credentials as has_aws_credentials,
     create_model,
     get_available_models,
@@ -45,5 +44,4 @@ __all__ = [
     "has_aws_credentials",
     "is_valid_model",
     "get_default_model",
-    "MODEL_CONFIG",
 ]

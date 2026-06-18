@@ -110,18 +110,12 @@ class CostTrackingMixin:
 
         # Note: Worker will be started lazily on first request (when event loop is running)
 
-        # Try to create LangChain callback if langchain_core is available
-        # This uses lazy import to avoid forcing langchain_core dependency
-        try:
-            from ..cost_tracking import CostTrackingCallback
-
-            self._langchain_callbacks = [CostTrackingCallback(self._cost_logger, sub_agent_id=sub_agent_id)]
-            logger.info(
-                f"Cost tracking enabled with LangChain auto-instrumentation ({log_context}, sub_agent_id={sub_agent_id})"
-            )
-        except ImportError as e:
-            logger.info(f"Cost tracking enabled with manual instrumentation only (langchain_core not available: {e})")
-            self._langchain_callbacks = []
+        # No in-app LangChain cost callback: all LLM traffic goes through the Model
+        # Gateway, whose proxy-side CostLogger is the single source of cost (ADR-0002).
+        # Attaching CostTrackingCallback here would double-count every sub-agent call
+        # (once proxy-side with the real provider, once in-app mislabeled as "openai").
+        self._langchain_callbacks = []
+        logger.info(f"Cost tracking via Model Gateway (proxy-side); in-app callback disabled ({log_context})")
 
         # Always enable cost tracking if CostLogger initialized successfully
         self._cost_tracking_enabled = True

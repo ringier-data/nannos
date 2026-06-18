@@ -17,27 +17,15 @@ from console_backend.dependencies import (
     require_auth_or_bearer_token,
 )
 from console_backend.models.user import User, UserRole, UserStatus
-from console_backend.repositories.tool_risk_repository import ToolRiskRepository
-from console_backend.services.audit_service import AuditService
-from console_backend.services.tool_risk_service import tool_risk_service
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _inject_tool_risk_repo():
-    """Inject a repository into the module-level tool_risk_service singleton.
-
-    The router imports the module-level singleton which doesn't get wired
-    during tests unless we do it here.
-    """
-    repo = ToolRiskRepository()
-    repo.set_audit_service(AuditService())
-    tool_risk_service.set_repository(repo)
-    yield
-    tool_risk_service._repo = None
+#
+# The tool risk service is wired onto ``app.state.tool_risk_service`` (with its repository
+# and audit service) by ``initialize_services`` during the app lifespan — see
+# ``service_instances.py`` — and the router resolves it from ``request.app.state``. The
+# ``client_with_db`` fixture runs that lifespan, so no manual service injection is needed here.
 
 
 @pytest.fixture

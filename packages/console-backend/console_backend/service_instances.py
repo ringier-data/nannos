@@ -44,6 +44,8 @@ from .services.notification_service import NotificationService
 from .services.outbound_scim_endpoint_service import OutboundScimEndpointService
 from .services.outbound_scim_push_service import OutboundScimPushService
 from .services.playbook_service import PlaybookService
+from .services.model_defaults_service import ModelDefaultsService
+from .services.model_gateway_service import ModelGatewayService
 from .services.rate_card_service import RateCardService
 from .services.scheduler_engine import SchedulerEngine
 from .services.scheduler_service import SchedulerService
@@ -200,6 +202,12 @@ async def initialize_services(app: "FastAPI") -> None:
 
     app.state.rate_card_service = RateCardService()
     app.state.rate_card_service.set_repository(app.state.rate_card_repository)
+
+    # Model Gateway management client (runtime model registration, Q6)
+    app.state.model_gateway_service = ModelGatewayService()
+
+    # Per-role default model aliases (graceful degradation, ADR-0001)
+    app.state.model_defaults_service = ModelDefaultsService()
 
     app.state.usage_service = UsageService()
     app.state.usage_service.set_repository(app.state.usage_repository)

@@ -70,7 +70,7 @@ class TestPlaybookServiceContentExtraction:
         assert self.service._extract_content("not a dict") is None
 
     def test_extract_title_and_description(self):
-        content = "# My Skill\n\nThis is a description.\n\n## Steps\n\n1. Do something"
+        content = "---\nname: My Skill\ndescription: This is a description.\n---\n\n## Steps\n\n1. Do something"
         title, description = self.service._extract_title_and_description(content)
         assert title == "My Skill"
         assert description == "This is a description."
@@ -87,7 +87,7 @@ class TestPlaybookServiceContentExtraction:
         assert description == ""
 
     def test_extract_title_only(self):
-        content = "# Title Only"
+        content = "---\nname: Title Only\n---"
         title, description = self.service._extract_title_and_description(content)
         assert title == "Title Only"
         assert description == ""
@@ -265,11 +265,11 @@ class TestPlaybookServiceListSkills:
         mock_result.all.return_value = [
             (
                 "/orchestrator/skills/incident_triage/SKILL.md",
-                {"content": "# Incident Triage\n\nA workflow for handling incidents."},
+                {"content": "---\nname: Incident Triage\ndescription: A workflow for handling incidents.\n---\n"},
             ),
             (
                 "/orchestrator/skills/deploy/SKILL.md",
-                {"content": "# Deploy Process\n\nHow to deploy safely."},
+                {"content": "---\nname: Deploy Process\ndescription: How to deploy safely.\n---\n"},
             ),
         ]
         mock_session = AsyncMock()

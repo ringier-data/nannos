@@ -23,7 +23,6 @@ from pydantic import BaseModel, Field
 from ringier_a2a_sdk.agent.cost_tracking_mixin import CostTrackingMixin
 from ringier_a2a_sdk.utils.bedrock_image_processor import preprocess_content_blocks_for_bedrock
 
-from agent_common.core.model_factory import get_model_backend
 
 from .stream_events import ErrorEvent, StreamEvent, TaskResponseData, TaskUpdate
 
@@ -585,20 +584,11 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         Returns:
             Transformed content blocks ready for the provider's API
         """
-        model_type = self.get_model_type()
-        if not model_type:
-            return content_blocks
-
-        try:
-            backend = get_model_backend(model_type)
-        except ValueError:
-            return content_blocks
-
-        if backend == "bedrock":
-            return await self._transform_blocks_for_bedrock(content_blocks)
-        elif backend == "google":
-            return self._infer_mime_types(content_blocks)
-
+        # Gateway-only (ADR-0001): the app no longer knows the provider, and the
+        # LiteLLM gateway normalizes content for the target provider (image
+        # fetch/encode for Bedrock, MIME inference for Gemini). So this is a
+        # passthrough. (Provider-specific content handling is now the gateway's
+        # responsibility — verify multimodal round-trips during rollout.)
         return content_blocks
 
     @staticmethod

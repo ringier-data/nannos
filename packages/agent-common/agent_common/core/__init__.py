@@ -1,12 +1,11 @@
 """Core utilities: model factory, graph utilities, object storage."""
 
 from .model_factory import (
-    MODEL_CONFIG,
     _has_aws_credentials as has_aws_credentials,
     create_model,
     get_available_models,
     get_default_model,
-    get_thinking_budget,
+    get_reasoning_effort,
     is_valid_model,
 )
 from object_storage import (
@@ -27,8 +26,7 @@ __all__ = [
     "has_aws_credentials",
     "is_valid_model",
     "get_default_model",
-    "MODEL_CONFIG",
-    "get_thinking_budget",
+    "get_reasoning_effort",
     # Object storage
     "IObjectStorageService",
     "LocalObjectStorageService",

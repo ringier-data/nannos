@@ -4,10 +4,8 @@ All endpoints are tagged "MCP" so FastApiMCP auto-exposes them as MCP tools,
 allowing the orchestrator to create and manage scheduled jobs conversationally.
 """
 
-import asyncio
 import json
 import logging
-import os
 import re
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
@@ -25,6 +23,7 @@ from ..models.scheduled_job import (
     ScheduledJobUpdate,
 )
 from ..models.user import User
+from ..services.llm_gateway import gateway_chat
 from ..services.scheduler_engine import SchedulerEngine
 from ..services.scheduler_service import _UNSET, SchedulerService
 
@@ -48,9 +47,9 @@ def _get_scheduler_service(request: Request) -> SchedulerService:
 )
 async def generate_watch_params(
     data: GenerateWatchParamsRequest,
-    _: User = Depends(require_auth),
+    current_user: User = Depends(require_auth),
 ) -> GenerateWatchParamsResponse:
-    """Call Bedrock to auto-generate watch parameters for a given tool list and query."""
+    """Auto-generate watch parameters via the Model Gateway for a tool list and query."""
     tools_summary = json.dumps(
         [
             {"name": t.get("name"), "description": t.get("description"), "input_schema": t.get("input_schema")}
@@ -74,39 +73,19 @@ async def generate_watch_params(
         '"condition_expr": "$.result.status", "expected_value": "success", "notification_message": "Task completed successfully"}'
     )
 
-    def _invoke_bedrock() -> dict:  # runs in a thread
-        import boto3
-
-        client = boto3.client(
-            "bedrock-runtime",
-            region_name=os.environ.get("AWS_REGION", "eu-central-1"),
+    try:
+        text = await gateway_chat(
+            prompt,
+            model=config.scheduler.ai_model_id,
+            max_tokens=1024,
+            metadata={"user_sub": current_user.id},
         )
-        body = json.dumps(
-            {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-        )
-        response = client.invoke_model(
-            modelId=config.scheduler.ai_model_id,
-            body=body,
-            contentType="application/json",
-            accept="application/json",
-        )
-        result_body = json.loads(response["body"].read())
-        text: str = result_body["content"][0]["text"]
-        # Strip optional markdown fences
+        # Strip optional markdown fences and extract the JSON object.
         text = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
         match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-        return {}
-
-    try:
-        result = await asyncio.to_thread(_invoke_bedrock)
+        result = json.loads(match.group()) if match else {}
     except Exception as exc:
-        logger.warning("Bedrock watch-param generation failed: %s", exc)
+        logger.warning("Watch-param generation via gateway failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI generation service unavailable",

@@ -7,7 +7,7 @@ specialized subagents through natural language conversation.
 import logging
 import os
 
-from agent_common.core.model_factory import MODEL_CONFIG, create_model, get_default_model
+from agent_common.core.model_factory import create_model, get_default_model
 from langchain_core.language_models import BaseChatModel
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.agent import LangGraphAgent
@@ -18,11 +18,9 @@ from ringier_a2a_sdk.oauth import OidcOAuth2Client
 logger = logging.getLogger(__name__)
 
 # Model descriptions for the agent-creator system prompt.
-# IMPORTANT: Keep in sync with MODEL_CONFIG in agent_common/core/model_factory.py
-# (the canonical source of truth for all model metadata).
-# agent-creator cannot depend on agent-common due to deepagents version mismatch,
-# so this is maintained as a mirror. When adding/removing/renaming models, update
-# both MODEL_CONFIG and this dict.
+# NOTE: legacy static list. The Model Gateway (DB-backed, Q6) is the source of truth
+# for models; this only seeds the creator's prompt. Follow-up: make it live from the
+# gateway model list so newly-registered models are offered here too.
 _MODEL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     # model_id: (display_name, description)
     "gpt-4o": ("GPT-4o", "Best for general-purpose tasks, faster responses, strong coding capabilities"),
@@ -378,16 +376,10 @@ class AgentCreator(PostgreSQLCheckpointerMixin, LangGraphAgent):
     # --- LangGraphAgent abstract method implementations ---
 
     def _create_model(self) -> BaseChatModel:
-        """Create LLM using agent-common model_factory.
+        """Create the Agent Creator's LLM via the Model Gateway (ADR-0001).
 
-        Picks the default available model based on whatever credentials
-        are configured (Azure OpenAI, Bedrock, Gemini, or local).
+        Uses the configured default alias; the gateway validates/routes it.
         """
-        if not MODEL_CONFIG:
-            raise RuntimeError(
-                "No LLM provider credentials found. Set cloud credentials "
-                "or OPENAI_COMPATIBLE_BASE_URL to enable at least one model."
-            )
         model_type = get_default_model()
         logger.info(f"Agent Creator using model: {model_type}")
         return create_model(model_type)

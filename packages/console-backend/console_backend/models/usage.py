@@ -192,6 +192,25 @@ class UsageLogBatchCreate(BaseModel):
     logs: list[UsageLogCreate] = Field(..., max_length=100, description="Up to 100 logs per batch")
 
 
+class GatewayUsageLogCreate(UsageLogCreate):
+    """A usage log posted by the Model Gateway (trusted service, ADR-0002).
+
+    Unlike UsageLogCreate (where the endpoint derives the user from the caller's
+    token), the gateway batches across many users, so each record carries its own
+    pre-attributed `user_sub`. `invoked_at` is optional (defaults to now) since the
+    proxy callback doesn't always have it.
+    """
+
+    user_sub: str = Field(..., description="Stable user id this usage is attributed to")
+    invoked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class GatewayUsageLogBatchCreate(BaseModel):
+    """Batch of gateway-attributed usage logs."""
+
+    logs: list[GatewayUsageLogCreate] = Field(..., max_length=500, description="Up to 500 logs per batch")
+
+
 class UsageSummary(BaseModel):
     """Summary of usage for a user or time period."""
 

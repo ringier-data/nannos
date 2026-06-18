@@ -9,6 +9,7 @@ resources:
   - ./catalog-worker.yaml
   - ./console.yaml
   - ./orchestrator.yaml
+  - ./litellm-proxy.yaml
   - ./client-slack.yaml
   - ./client-email.yaml
   - ./client-google-chat.yaml

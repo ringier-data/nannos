@@ -1,178 +1,75 @@
-"""Unit tests for thinking level configuration in model factory."""
+"""Unit tests for thinking level → reasoning_effort and gateway model creation."""
 
+import os
 from unittest.mock import Mock, patch
 
-from agent_common.core.model_factory import (
-    MODEL_CONFIG,
-    _AZURE_MODELS,
-    _BEDROCK_MODELS,
-    _GEMINI_MODELS,
-    create_model,
-    get_thinking_budget,
-)
+from agent_common.core.model_factory import create_model, get_reasoning_effort
 from agent_common.models.base import ThinkingLevel
 
 from app.models.config import AgentSettings
 
-
-class TestGetThinkingBudget:
-    """Test get_thinking_budget() mapping function."""
-
-    def test_minimal_thinking_level(self):
-        """Test minimal thinking level returns 1024 tokens."""
-        budget = get_thinking_budget(ThinkingLevel.minimal)
-        assert budget == 1024
-
-    def test_low_thinking_level(self):
-        """Test low thinking level returns 4096 tokens."""
-        budget = get_thinking_budget(ThinkingLevel.low)
-        assert budget == 4096
-
-    def test_medium_thinking_level(self):
-        """Test medium thinking level returns 10000 tokens."""
-        budget = get_thinking_budget(ThinkingLevel.medium)
-        assert budget == 10000
-
-    def test_high_thinking_level(self):
-        """Test high thinking level returns 16000 tokens."""
-        budget = get_thinking_budget(ThinkingLevel.high)
-        assert budget == 16000
+_GW_ENV = {"LLM_GATEWAY_URL": "http://litellm-proxy.test", "LLM_GATEWAY_API_KEY": "sk-test"}
 
 
-class TestCreateModelWithThinking:
-    """Test create_model() with thinking level parameters."""
+class TestGetReasoningEffort:
+    """thinking_level → unified reasoning_effort (ADR-0003)."""
 
-    @patch("boto3.client")
-    @patch("langchain_aws.ChatBedrockConverse")
-    def test_claude_sonnet_with_thinking_minimal(self, mock_chat_bedrock, mock_boto_client):
-        """Test Claude Sonnet with minimal thinking level."""
-        mock_boto_client.return_value = Mock()
+    def test_mapping(self):
+        assert get_reasoning_effort(ThinkingLevel.minimal) == "low"  # no distinct tier; Bedrock floors at 1024
+        assert get_reasoning_effort(ThinkingLevel.low) == "low"
+        assert get_reasoning_effort(ThinkingLevel.medium) == "medium"
+        assert get_reasoning_effort(ThinkingLevel.high) == "high"
 
-        create_model("claude-sonnet-4.5", "eu-central-1", thinking_level=ThinkingLevel.minimal)
+    def test_none(self):
+        assert get_reasoning_effort(None) is None
 
-        mock_chat_bedrock.assert_called_once()
-        call_kwargs = mock_chat_bedrock.call_args[1]
 
-        assert "thinking" in call_kwargs["additional_model_request_fields"]
-        assert call_kwargs["additional_model_request_fields"]["thinking"]["type"] == "enabled"
-        assert call_kwargs["additional_model_request_fields"]["thinking"]["budget_tokens"] == 1024
-        assert call_kwargs["temperature"] == 1.0
+class TestCreateModelGateway:
+    """create_model builds a single gateway-backed ChatOpenAI (no provider branches)."""
 
-    @patch("boto3.client")
-    @patch("langchain_aws.ChatBedrockConverse")
-    def test_claude_sonnet_with_thinking_high(self, mock_chat_bedrock, mock_boto_client):
-        """Test Claude Sonnet with high thinking level."""
-        mock_boto_client.return_value = Mock()
+    @patch.dict(os.environ, _GW_ENV)
+    @patch("langchain_openai.ChatOpenAI")
+    def test_thinking_model_sets_reasoning_effort(self, mock_chat):
+        create_model("claude-sonnet-4.6", "eu-central-1", thinking_level=ThinkingLevel.high)
+        kwargs = mock_chat.call_args[1]
+        assert kwargs["model"] == "claude-sonnet-4.6"
+        assert kwargs["base_url"] == "http://litellm-proxy.test"
+        assert kwargs["stream_usage"] is True
+        assert kwargs["model_kwargs"]["reasoning_effort"] == "high"
 
-        create_model("claude-sonnet-4.5", "eu-central-1", thinking_level=ThinkingLevel.high)
+    @patch.dict(os.environ, _GW_ENV)
+    @patch("langchain_openai.ChatOpenAI")
+    def test_effort_always_forwarded(self, mock_chat):
+        # No per-model capability table in the app: reasoning_effort is always
+        # forwarded when a thinking_level is set; the gateway drops it for
+        # non-reasoning models via drop_params (ADR-0003).
+        create_model("gpt-4o", thinking_level=ThinkingLevel.low)
+        kwargs = mock_chat.call_args[1]
+        assert kwargs["model_kwargs"]["reasoning_effort"] == "low"
 
-        mock_chat_bedrock.assert_called_once()
-        call_kwargs = mock_chat_bedrock.call_args[1]
+    @patch.dict(os.environ, _GW_ENV)
+    @patch("langchain_openai.ChatOpenAI")
+    def test_no_thinking_level(self, mock_chat):
+        create_model("claude-sonnet-4.6", thinking_level=None)
+        kwargs = mock_chat.call_args[1]
+        assert kwargs["model_kwargs"] == {}
 
-        assert "thinking" in call_kwargs["additional_model_request_fields"]
-        assert call_kwargs["additional_model_request_fields"]["thinking"]["type"] == "enabled"
-        assert call_kwargs["additional_model_request_fields"]["thinking"]["budget_tokens"] == 16000
-        assert call_kwargs["temperature"] == 1.0
-
-    @patch("boto3.client")
-    @patch("langchain_aws.ChatBedrockConverse")
-    def test_claude_haiku_with_thinking(self, mock_chat_bedrock, mock_boto_client):
-        """Test Claude Haiku with thinking level (now supports Extended Thinking)."""
-        mock_boto_client.return_value = Mock()
-
-        create_model("claude-haiku-4-5", "eu-central-1", thinking_level=ThinkingLevel.low)
-
-        mock_chat_bedrock.assert_called_once()
-        call_kwargs = mock_chat_bedrock.call_args[1]
-
-        assert "thinking" in call_kwargs["additional_model_request_fields"]
-        assert call_kwargs["additional_model_request_fields"]["thinking"]["type"] == "enabled"
-        assert call_kwargs["additional_model_request_fields"]["thinking"]["budget_tokens"] == 4096
-        assert call_kwargs["temperature"] == 1.0
-
-    @patch("boto3.client")
-    @patch("langchain_aws.ChatBedrockConverse")
-    def test_claude_sonnet_without_thinking(self, mock_chat_bedrock, mock_boto_client):
-        """Test Claude Sonnet without thinking level (None)."""
-        mock_boto_client.return_value = Mock()
-
-        create_model("claude-sonnet-4.5", "eu-central-1", thinking_level=None)
-
-        mock_chat_bedrock.assert_called_once()
-        call_kwargs = mock_chat_bedrock.call_args[1]
-
-        assert "thinking" not in call_kwargs
-        assert call_kwargs["temperature"] == 0.0
-
-    @patch("google.oauth2.service_account.Credentials")
-    @patch("langchain_google_genai.ChatGoogleGenerativeAI")
-    def test_gemini_with_thinking_medium(self, mock_gemini, mock_credentials):
-        """Test Gemini model with medium thinking level."""
-        mock_creds = Mock()
-        mock_credentials.from_service_account_info.return_value = mock_creds
-
-        with patch.dict(MODEL_CONFIG, _GEMINI_MODELS), patch.dict(
-            "os.environ",
-            {
-                "GCP_KEY": '{"type": "service_account"}',  # Mock GCP credentials
-                "GCP_PROJECT_ID": "test-project",
-                "GCP_LOCATION": "us-central1",
-            },
-        ):
-            create_model("gemini-3.1-pro-preview", thinking_level=ThinkingLevel.medium)
-
-        mock_gemini.assert_called_once()
-        call_kwargs = mock_gemini.call_args[1]
-
-        assert call_kwargs["thinking_level"] == "medium"
-        assert call_kwargs["include_thoughts"] is True
-        assert call_kwargs["temperature"] == 1.0
-
-    @patch("google.oauth2.service_account.Credentials")
-    @patch("langchain_google_genai.ChatGoogleGenerativeAI")
-    def test_gemini_without_thinking(self, mock_gemini, mock_credentials):
-        """Test Gemini model without thinking level."""
-        mock_creds = Mock()
-        mock_credentials.from_service_account_info.return_value = mock_creds
-
-        with patch.dict(MODEL_CONFIG, _GEMINI_MODELS), patch.dict(
-            "os.environ",
-            {
-                "GCP_KEY": '{"type": "service_account"}',  # Mock GCP credentials
-                "GCP_PROJECT_ID": "test-project",
-                "GCP_LOCATION": "us-central1",
-            },
-        ):
-            create_model("gemini-3.1-pro-preview", thinking_level=None)
-
-        mock_gemini.assert_called_once()
-        call_kwargs = mock_gemini.call_args[1]
-
-        assert call_kwargs["thinking_level"] is None
-        assert call_kwargs["include_thoughts"] is False
-
-    @patch("langchain_openai.AzureChatOpenAI")
-    def test_gpt_4o_ignores_thinking_level(self, mock_azure):
-        """Test that GPT-4o ignores thinking level parameter (not supported)."""
-        with patch.dict(MODEL_CONFIG, _AZURE_MODELS), patch("agent_common.core.model_factory.logger") as mock_logger:
-            create_model("gpt-4o", thinking_level=ThinkingLevel.low)
-
-            # Should log a warning about thinking not being supported
-            mock_logger.warning.assert_called_once()
-            warning_msg = mock_logger.warning.call_args[0][0]
-            assert "Thinking mode is only supported" in warning_msg
-
-        # Model should still be created normally
-        mock_azure.assert_called_once()
+    def test_missing_gateway_url_raises(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LLM_GATEWAY_URL", None)
+            try:
+                create_model("claude-sonnet-4.6")
+                assert False, "expected RuntimeError when LLM_GATEWAY_URL unset"
+            except RuntimeError as e:
+                assert "LLM_GATEWAY_URL" in str(e)
 
 
 class TestThinkingLevelCaching:
-    """Test that models are cached by (model_type, thinking_level) tuple."""
+    """GraphFactory caches models by (model_type, thinking_level)."""
 
-    @patch("boto3.client")
-    @patch("langchain_aws.ChatBedrockConverse")
-    def test_different_thinking_levels_create_separate_instances(self, mock_chat_bedrock, mock_boto_client):
-        """Test that different thinking levels create separate model instances."""
+    @patch.dict(os.environ, _GW_ENV)
+    @patch("langchain_openai.ChatOpenAI")
+    def test_different_thinking_levels_create_separate_instances(self, mock_chat):
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
@@ -186,26 +83,18 @@ class TestThinkingLevelCaching:
         config.MAX_RETRIES = 3
         config.BACKOFF_FACTOR = 2
         config.get_bedrock_region.return_value = "eu-central-1"
-        mock_boto_client.return_value = Mock()
 
         with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
             factory = GraphFactory(config)
-
-            # Create model with low thinking
-            model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
-
-            # Create model with high thinking
-            model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.high)
-
-            # Should have created two separate instances
+            factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
+            factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.high)
             assert len(factory._models) == 2
             assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._models
             assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._models
 
-    @patch("boto3.client")
-    @patch("langchain_aws.ChatBedrockConverse")
-    def test_same_thinking_level_reuses_instance(self, mock_chat_bedrock, mock_boto_client):
-        """Test that same thinking level reuses cached model instance."""
+    @patch.dict(os.environ, _GW_ENV)
+    @patch("langchain_openai.ChatOpenAI")
+    def test_same_thinking_level_reuses_instance(self, mock_chat):
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
@@ -219,15 +108,10 @@ class TestThinkingLevelCaching:
         config.MAX_RETRIES = 3
         config.BACKOFF_FACTOR = 2
         config.get_bedrock_region.return_value = "eu-central-1"
-        mock_boto_client.return_value = Mock()
 
         with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
             factory = GraphFactory(config)
-
-            # Create model with low thinking twice
             model1 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
             model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
-
-            # Should reuse the same instance
             assert model1 is model2
             assert len(factory._models) == 1

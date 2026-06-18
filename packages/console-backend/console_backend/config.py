@@ -108,6 +108,34 @@ class MCPGatewayConfig(BaseModel):
     client_id: str = Field(default_factory=lambda: os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana"))
 
 
+class ModelGatewayConfig(BaseModel):
+    """LiteLLM Model Gateway — admin/management access (ADR-0001/0005).
+
+    console-backend is the sole writer of the proxy's /model/* management API and
+    holds the master key (kept server-side, never exposed to the frontend).
+    """
+
+    url: str = Field(default_factory=lambda: os.getenv("LLM_GATEWAY_URL", "http://litellm-proxy.nannos.svc"))
+    master_key: SecretStr = Field(default_factory=lambda: SecretStr(os.getenv("LITELLM_MASTER_KEY", "")))
+    # Providers this deployment has integrated (has credentials for on the proxy).
+    # The model-catalog picker is pre-filtered to these litellm_provider values.
+    # NOTE: LiteLLM tags a model by its *implementation*, so the same vendor spans
+    # several keys — e.g. newer Bedrock Claude is `bedrock_converse` (not `bedrock`)
+    # and Vertex Claude is `vertex_ai-anthropic_models`. The default lists every
+    # variant for our integrated vendors so the newest models aren't filtered out.
+    # Empty = no filter (show the whole catalog). Comma-separated env.
+    integrated_providers: list[str] = Field(
+        default_factory=lambda: [
+            p.strip()
+            for p in os.getenv(
+                "LLM_GATEWAY_PROVIDERS",
+                "bedrock,bedrock_converse,azure,azure_ai,vertex_ai,vertex_ai-anthropic_models,gemini",
+            ).split(",")
+            if p.strip()
+        ]
+    )
+
+
 class SchedulerConfig(BaseModel):
     """Scheduler engine configuration."""
 
@@ -115,8 +143,8 @@ class SchedulerConfig(BaseModel):
     claim_limit: int = Field(default_factory=lambda: int(os.getenv("SCHEDULER_CLAIM_LIMIT", "10")))
     agent_runner_url: str = Field(default_factory=lambda: os.getenv("AGENT_RUNNER_URL", "http://localhost:5005"))
     ai_model_id: str = Field(
-        default_factory=lambda: os.getenv("SCHEDULER_AI_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
-    )  # NOTE: supports just bedrock models for now, but can be extended in the future
+        default_factory=lambda: os.getenv("SCHEDULER_AI_MODEL_ID", "claude-haiku-4-5")
+    )  # Model Gateway alias (resolved by the proxy)
 
 
 class OutboundScimConfig(BaseModel):
@@ -233,10 +261,8 @@ class CatalogConfig(BaseModel):
         )
     )
     summarization_model_id: str = Field(
-        default_factory=lambda: os.getenv(
-            "CATALOG_SUMMARIZATION_MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:0"
-        )
-    )
+        default_factory=lambda: os.getenv("CATALOG_SUMMARIZATION_MODEL_ID", "claude-haiku-4-5")
+    )  # Model Gateway alias (resolved by the proxy)
     sync_interval_seconds: int = Field(default_factory=lambda: int(os.getenv("CATALOG_SYNC_INTERVAL_SECONDS", "86400")))
     sync_tick_interval_seconds: int = Field(
         default_factory=lambda: int(os.getenv("CATALOG_SYNC_TICK_INTERVAL_SECONDS", "300"))
@@ -287,6 +313,7 @@ class Config(BaseModel):
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)
     mcp_gateway: MCPGatewayConfig = Field(default_factory=MCPGatewayConfig)
+    model_gateway: ModelGatewayConfig = Field(default_factory=ModelGatewayConfig)
     file_storage: FileStorageConfig = Field(default_factory=FileStorageConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     outbound_scim: OutboundScimConfig = Field(default_factory=OutboundScimConfig)

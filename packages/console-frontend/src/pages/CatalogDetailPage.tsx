@@ -11,9 +11,11 @@ import {
   AlertCircle,
   Link2,
   SearchCheck,
+  AlertTriangle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { useEmbeddingConfigured } from '@/config/models';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -54,6 +56,7 @@ export function CatalogDetailPage() {
   const queryClient = useQueryClient();
   const { user, adminMode } = useAuth();
   const { onCatalogSyncProgress } = useSocket();
+  const { embeddingConfigured } = useEmbeddingConfigured();
 
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showPermissionsDialog, setShowPermissionsDialog] = useState(false);
@@ -241,7 +244,8 @@ export function CatalogDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={!isReady || isSyncing}
+              disabled={!isReady || isSyncing || !embeddingConfigured}
+              title={!embeddingConfigured ? 'Set a default embedding model in Admin → Model Gateway first' : undefined}
               onClick={() => syncMutation.mutate({ path: { catalog_id: id! } })}
             >
               <RefreshCw className={`mr-2 h-4 w-4 ${isSyncing ? 'animate-spin' : ''}`} />
@@ -251,7 +255,8 @@ export function CatalogDetailPage() {
               <Button
                 variant="outline"
                 size="sm"
-                disabled={isSyncing || isReindexing}
+                disabled={isSyncing || isReindexing || !embeddingConfigured}
+                title={!embeddingConfigured ? 'Set a default embedding model in Admin → Model Gateway first' : undefined}
                 onClick={() => reindexMutation.mutate({ path: { catalog_id: id! } })}
               >
                 <SearchCheck className={`mr-2 h-4 w-4 ${isReindexing ? 'animate-spin' : ''}`} />
@@ -269,6 +274,17 @@ export function CatalogDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Embedding-dependent: indexing needs a default embedding model. */}
+      {!embeddingConfigured && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            Syncing and re-indexing are disabled until a default embedding model is configured. An
+            administrator can set one in <strong>Admin → Model Gateway</strong>.
+          </span>
+        </div>
+      )}
 
       {/* Google Drive Connection */}
       {canEdit && !hasConnection && (

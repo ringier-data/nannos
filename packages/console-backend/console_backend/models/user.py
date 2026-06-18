@@ -9,12 +9,13 @@ from pydantic import BaseModel, Field
 
 
 class OrchestratorThinkingLevel(str, Enum):
-    """Thinking depth level for extended thinking mode."""
+    """Reasoning effort (LiteLLM convention). Per-model support comes from the gateway."""
 
     MINIMAL = "minimal"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    XHIGH = "xhigh"
 
 
 class UserStatus(str, Enum):

@@ -1,99 +1,68 @@
-"""Gemini Embedding 2 adapter implementing LangChain's Embeddings interface.
+"""Gemini Embedding 2 adapter (LangChain Embeddings) routed through the Model Gateway.
 
-Model: gemini-embedding-2-preview  (Vertex AI)
-Supports unified multimodal embeddings: text, image, or text+image in one call.
-Uses Matryoshka Representation Learning for adjustable output dimensions.
+All embedding traffic goes through the LiteLLM proxy `/embeddings` endpoint — no direct
+Vertex SDK or GCP credentials in app pods. Gemini Embedding 2 supports unified
+multimodal embeddings (text, image, or text+image fused into a single vector) and
+Matryoshka adjustable output dimensions.
 
-Gemini Embedding 2 does NOT support the task_type config parameter.
-Instead, task instructions are embedded as text prefixes:
-  - Indexing:  "title: none | text: {content}"
-  - Querying:  "task: search result | query: {text}"
-See: https://ai.google.dev/gemini-api/docs/embeddings
+Gemini Embedding 2 has no task_type parameter; asymmetric retrieval uses text prefixes:
+  - Indexing  (role="document"): "title: none | text: {content}"
+  - Querying  (role="query"):    "task: search result | query: {text}"
+
+Vertex fuses every element of the request's input list into ONE embedding, so text+image
+go in a single flat list → one combined vector (one model call per item).
+
+Cost is captured proxy-side: we stamp per-request spend-logs metadata (user_sub,
+catalog_id) that the proxy's CustomLogger reads — no in-app cost logging.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 from concurrent.futures import Executor
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from google import genai
-from google.genai import types
+import httpx
 from langchain_core.embeddings import Embeddings
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL_ID = "gemini-embedding-2-preview"
+# Gateway alias for the embedding model (registered on the proxy; overridable per env).
+_DEFAULT_MODEL_ALIAS = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 _DEFAULT_DIMENSION = 1024
 _MAX_CONCURRENT = 20
-
-# Gemini Embedding 2 is only available in us-central1
-_GCP_EMBEDDING_LOCATION = "us-central1"
+_SPEND_LOGS_HEADER = "x-litellm-spend-logs-metadata"
 
 
-def _build_genai_client() -> genai.Client:
-    """Build a Gemini client authenticated via Vertex AI service account.
-
-    Reads GCP_KEY (service account JSON), GCP_PROJECT_ID from environment.
-    """
-    gcp_key = os.getenv("GCP_KEY")
-    gcp_project = os.getenv("GCP_PROJECT_ID")
-
-    if not gcp_key:
-        raise RuntimeError("GCP_KEY is not set — add the service account JSON blob to .env")
-    if not gcp_project:
-        raise RuntimeError("GCP_PROJECT_ID is not set — add it to .env")
-
-    from google.oauth2 import service_account as _sa
-
-    credentials = _sa.Credentials.from_service_account_info(
-        json.loads(gcp_key),
-        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-    )
-
-    return genai.Client(
-        vertexai=True,
-        credentials=credentials,
-        project=gcp_project,
-        location=_GCP_EMBEDDING_LOCATION,
-    )
-
-
-# Module-level singleton client (created once on first use)
-_client: genai.Client | None = None
-
-
-def _get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        _client = _build_genai_client()
-    return _client
+def _gateway_base() -> str:
+    base = os.getenv("LLM_GATEWAY_URL")
+    if not base:
+        raise RuntimeError("LLM_GATEWAY_URL is not set — the Model Gateway is required for embeddings")
+    return base.rstrip("/")
 
 
 class GeminiEmbeddings(Embeddings):
-    """LangChain Embeddings wrapping Gemini Embedding 2 on Vertex AI.
+    """LangChain Embeddings for Gemini Embedding 2, served via the Model Gateway.
 
-    For asymmetric retrieval, create two instances:
+    For asymmetric retrieval create two instances:
       - role="document" for indexing (formats text as "title: none | text: ...")
       - role="query" for searching (formats text as "task: search result | query: ...")
 
     Also supports multimodal text+image embedding via embed_with_image().
 
-    The cost_logger can be any object with a ``log_cost_async()`` method
-    (e.g. ``ringier_a2a_sdk.CostLogger`` or agent-console backend's ``InternalCostLogger``).
+    `cost_logger` is accepted for backwards compatibility but no longer used — cost is
+    captured proxy-side from the per-request spend-logs metadata.
     """
 
     def __init__(
         self,
         role: str = "document",
         dimension: int = _DEFAULT_DIMENSION,
-        model_id: str = _DEFAULT_MODEL_ID,
+        model_id: str = _DEFAULT_MODEL_ALIAS,
         cost_logger: Any | None = None,
         user_sub: str | None = None,
         catalog_id: str | None = None,
@@ -104,7 +73,6 @@ class GeminiEmbeddings(Embeddings):
         self.role = role
         self.dimension = dimension
         self.model_id = model_id
-        self._cost_logger = cost_logger
         self._user_sub = user_sub
         self._catalog_id = catalog_id
         self._executor = executor
@@ -115,8 +83,46 @@ class GeminiEmbeddings(Embeddings):
             return f"task: search result | query: {text}"
         return f"title: none | text: {text}"
 
+    def _spend_metadata(self) -> dict[str, str]:
+        """Attribution for proxy-side cost capture (user_sub explicit or from ContextVar)."""
+        user_sub = self._user_sub
+        if not user_sub:
+            try:
+                from ringier_a2a_sdk.cost_tracking.logger import get_request_user_sub
+
+                user_sub = get_request_user_sub()
+            except Exception:
+                user_sub = None
+        meta: dict[str, str] = {}
+        if user_sub:
+            meta["user_sub"] = user_sub
+        if self._catalog_id:
+            meta["catalog_id"] = self._catalog_id
+        return meta
+
+    def _invoke(self, text: str, image_bytes: bytes | None = None, mime_type: str = "image/png") -> list[float]:
+        """POST one item (text, or text+image fused) to the gateway and return its vector."""
+        inputs: list[str] = [self._format_text(text)]
+        if image_bytes:
+            inputs.append(f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode())
+
+        headers = {
+            "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
+            "Content-Type": "application/json",
+        }
+        meta = self._spend_metadata()
+        if meta:
+            headers[_SPEND_LOGS_HEADER] = json.dumps(meta)
+
+        body = {"model": self.model_id, "input": inputs, "dimensions": self.dimension}
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(f"{_gateway_base()}/embeddings", json=body, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()["data"]
+        return list(data[0]["embedding"])
+
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed multiple texts synchronously (used by VectorStore.add_documents)."""
+        """Embed multiple texts (one model call each — Vertex fuses a list into one vector)."""
         return [self._invoke(text=t) for t in texts]
 
     def embed_query(self, text: str) -> list[float]:
@@ -130,14 +136,14 @@ class GeminiEmbeddings(Embeddings):
 
         async def _embed_one(t: str) -> list[float]:
             async with semaphore:
-                return await loop.run_in_executor(self._executor, self._invoke, t, None)
+                return await loop.run_in_executor(self._executor, self._invoke, t)
 
         return await asyncio.gather(*[_embed_one(t) for t in texts])
 
     async def aembed_query(self, text: str) -> list[float]:
         """Embed a single query text asynchronously."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self._invoke, text, None)
+        return await loop.run_in_executor(self._executor, self._invoke, text)
 
     def embed_with_image(self, text: str, image_bytes: bytes) -> list[float]:
         """Embed text + image together (multimodal). Used by the sync pipeline."""
@@ -147,49 +153,3 @@ class GeminiEmbeddings(Embeddings):
         """Async version of embed_with_image."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self._invoke, text, image_bytes)
-
-    def _invoke(self, text: str, image_bytes: bytes | None = None) -> list[float]:
-        """Call Gemini embed_content and return the embedding vector."""
-        client = _get_client()
-
-        formatted = self._format_text(text)
-        parts: list[types.Part] = [types.Part(text=formatted)]
-        if image_bytes:
-            parts.append(types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
-
-        result = client.models.embed_content(
-            model=self.model_id,
-            contents=[types.Content(parts=parts)],
-            config=types.EmbedContentConfig(
-                output_dimensionality=self.dimension,
-            ),
-        )
-
-        self._log_cost(formatted, image_bytes)
-
-        return list(result.embeddings[0].values)
-
-    def _log_cost(self, formatted_text: str, image_bytes: bytes | None = None) -> None:
-        """Log embedding cost if a cost logger is configured."""
-        if not self._cost_logger:
-            return
-
-        user_sub = self._user_sub
-        if not user_sub:
-            from ringier_a2a_sdk.cost_tracking.logger import get_request_user_sub
-
-            user_sub = get_request_user_sub()
-        if not user_sub:
-            return
-
-        billing: dict[str, int] = {"input_text_tokens": len(formatted_text) // 4}
-        if image_bytes:
-            billing["input_images"] = 1
-
-        self._cost_logger.log_cost_async(
-            user_sub=user_sub,
-            billing_unit_breakdown=billing,
-            provider="google",
-            model_name=self.model_id,
-            catalog_id=self._catalog_id,
-        )

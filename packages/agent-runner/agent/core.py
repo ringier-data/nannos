@@ -38,10 +38,10 @@ from agent_common.a2a.models import LocalFoundrySubAgentConfig
 from agent_common.a2a.stream_events import ArtifactUpdate, ErrorEvent, TaskResponseData, TaskUpdate
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM, SubAgentResponseSchema, get_response_format
 from agent_common.agents.foundry_agent import create_foundry_local_subagent
-from agent_common.core.cost_tracking_embeddings import CostTrackingBedrockEmbeddings
 from agent_common.core.document_store_tools import create_document_store_tools
 from agent_common.core.graph_utils import build_sub_agent_graph
-from agent_common.core.model_factory import _has_aws_credentials, create_model, is_valid_model
+from agent_common.core.model_factory import create_embeddings, create_model, is_valid_model
+from agent_common.core.stream_watchdog import watch_stream
 from agent_common.models.base import get_resolved_default_model
 from google.protobuf.json_format import ParseDict
 from object_storage import get_object_storage_service
@@ -288,17 +288,9 @@ class AgentRunner(BaseAgent):
         self._store: AsyncPostgresStore | None = None
         self._connection_pool: AsyncConnectionPool | None = None
         if self._postgres_conn:
-            if _has_aws_credentials():
-                self._embeddings_model = CostTrackingBedrockEmbeddings(
-                    model_id="amazon.titan-embed-text-v2:0",
-                    region_name=os.getenv("AWS_BEDROCK_REGION", "eu-central-1"),
-                    cost_logger=getattr(self, "_cost_logger", None),
-                )
-                logger.info("AgentRunner: document store configured (PostgreSQL)")
-            else:
-                self._embeddings_model = None
-                self._postgres_conn = None
-                logger.warning("AgentRunner: document store disabled (no AWS credentials for embeddings)")
+            # Embeddings via the Model Gateway (ADR-0001); cost captured proxy-side.
+            self._embeddings_model = create_embeddings("titan-embed-text-v2")
+            logger.info("AgentRunner: document store configured (PostgreSQL, gateway embeddings)")
         else:
             self._embeddings_model = None
             logger.info("AgentRunner: document store disabled (POSTGRES_HOST not set)")
@@ -1070,7 +1062,10 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             #   {"type": "values", "ns": (), "data": <state snapshot>}
             # We consume all and use the final state.
             final_state = None
-            async for part in graph.astream({"messages": messages}, config=config, stream_mode="values", version="v2"):
+            async for part in watch_stream(
+                graph.astream({"messages": messages}, config=config, stream_mode="values", version="v2"),
+                label="agent-runner",
+            ):
                 if part["type"] == "values":
                     final_state = part["data"]
                 # Future: could yield progress events here for streaming execution

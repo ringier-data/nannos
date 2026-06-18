@@ -365,6 +365,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         caller_sub: str | None = None
         if context.call_context and hasattr(context.call_context, "state"):
             caller_sub = context.call_context.state.get("user_sub")
+
+        # Attribute this request's gateway LLM calls so the proxy CostLogger can bill them
+        # (ADR-0002). The orchestrator's own (top-level) model calls reach the gateway via
+        # the attribution http client, which stamps these ContextVars onto
+        # x-litellm-spend-logs-metadata at send time. Without this they arrive with no
+        # user_sub and the proxy drops them. (Sub-agents set their own via
+        # create_runnable_config.) ContextVars propagate to the graph's async tasks.
+        if caller_sub:
+            from agent_common.core.attribution import set_attribution
+
+            set_attribution(user_sub=caller_sub, conversation_id=context_id)
         # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
         if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
@@ -494,6 +505,27 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             f"[THINKING CONFIG] model_choice={model_choice}, enable_thinking={enable_thinking}, thinking_level={thinking_level}"
         )
 
+        # No models configured on the gateway → guide the admin instead of failing deep
+        # in the graph with an opaque provider error.
+        try:
+            from agent_common.core.model_factory import get_available_models
+
+            models_configured = bool(get_available_models())
+        except Exception as e:  # don't block on a transient gateway hiccup
+            logger.debug(f"Gateway model availability check failed ({e}); proceeding")
+            models_configured = True
+        if not models_configured:
+            await updater.update_status(
+                TaskState.TASK_STATE_FAILED,
+                new_text_message(
+                    "No language model is configured yet. An administrator needs to register at "
+                    "least one model in the Console (Admin → Model Gateway) before I can respond.",
+                    context_id=task.context_id,
+                    task_id=task.id,
+                ),
+            )
+            return
+
         # Check budget guard before processing request
         budget_guard = get_budget_guard()
         if budget_guard and budget_guard.enabled and budget_guard.is_locked:
@@ -583,8 +615,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # LangGraph persists into the checkpoint. Serializing the enum triggers a
             # "Deserializing unregistered type ... ThinkingLevel" warning from the
             # msgpack serde on read-back. The plain value works identically downstream
-            # (get_thinking_budget's map and the model factory accept the string) and
-            # keeps the graph cache key consistent across resolution paths.
+            # (the model factory maps it to reasoning_effort) and keeps the graph cache
+            # key consistent across resolution paths.
             if isinstance(thinking_level, ThinkingLevel):
                 thinking_level = thinking_level.value
 

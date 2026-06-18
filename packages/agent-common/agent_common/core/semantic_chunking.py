@@ -20,7 +20,7 @@ from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, SystemMessage
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
-from agent_common.core.cost_tracking_embeddings import CostTrackingBedrockEmbeddings
+from langchain_core.embeddings import Embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ async def chunk_with_context(
     content: str,
     metadata: dict[str, Any],
     model: ChatBedrockConverse,
-    embeddings_model: CostTrackingBedrockEmbeddings | None = None,
+    embeddings_model: Embeddings | None = None,
     chunk_size_chars: int = DEFAULT_CHUNK_SIZE_CHARS,
     cost_logger: Optional[CostLogger] = None,
 ) -> list[tuple[str, str]]:
@@ -182,13 +182,12 @@ async def chunk_with_context(
     """
     logger.info(f"Starting semantic chunking for document with {len(content)} chars")
 
-    # Initialize embeddings model if not provided
+    # Initialize embeddings model if not provided — via the Model Gateway (ADR-0001),
+    # cost captured proxy-side.
     if embeddings_model is None:
-        embeddings_model = CostTrackingBedrockEmbeddings(
-            model_id="amazon.titan-embed-text-v2:0",
-            region_name=model.region_name,
-            cost_logger=cost_logger,
-        )
+        from agent_common.core.model_factory import create_embeddings
+
+        embeddings_model = create_embeddings("titan-embed-text-v2")
 
     # Step 1: Split into sentences
     try:

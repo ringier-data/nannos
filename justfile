@@ -39,6 +39,7 @@ img_voice_agent := registry + "/nannos-voice-agent"
 img_catalog_worker := registry + "/nannos-catalog-worker"
 img_client_google_chat := registry + "/nannos-client-google-chat"
 img_soffice_worker := registry + "/nannos-soffice-worker"
+img_litellm_proxy := registry + "/nannos-litellm-proxy"
 
 # Default build platform
 platform := "linux/arm64"
@@ -47,7 +48,7 @@ platform := "linux/arm64"
 build_ts := `date -u +%Y%m%d%H%M%S`
 
 # Packages that have Dockerfiles (used by build recipes)
-_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend catalog-worker console-frontend client-slack client-slack-frontend client-email voice-agent client-google-chat soffice-worker"
+_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend catalog-worker console-frontend client-slack client-slack-frontend client-email voice-agent client-google-chat soffice-worker litellm-proxy"
 
 # Build flags (override on CLI, e.g. just push=true build)
 push := ""
@@ -81,6 +82,7 @@ pkg-image pkg:
       catalog-worker)     echo "{{ img_catalog_worker }}" ;;
       client-google-chat) echo "{{ img_client_google_chat }}" ;;
       soffice-worker)     echo "{{ img_soffice_worker }}" ;;
+      litellm-proxy)      echo "{{ img_litellm_proxy }}" ;;
       *) echo "" ;;
     esac
 
@@ -786,11 +788,13 @@ start-local *FLAGS:
 # Stop local infrastructure (PostgreSQL + Keycloak) and all services
 stop-local:
   tmux kill-session -t nannos 2>/dev/null || true
+  docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
   cd scripts/local-dev && docker compose down
 
 # Stop local infrastructure and delete all data
 reset-local:
   tmux kill-session -t nannos 2>/dev/null || true
+  docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
   cd scripts/local-dev && docker compose down -v
   @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."
 

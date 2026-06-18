@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import jwt
 
-# Load .env BEFORE any agent_common imports (MODEL_CONFIG is built at import time)
+# Load .env BEFORE any agent_common imports (LLM_GATEWAY_URL etc. read at import time)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,7 +41,7 @@ from a2a.types import (
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from google.protobuf.json_format import MessageToDict
-from agent_common.core.model_factory import MODEL_CONFIG, get_available_models_metadata, get_default_model
+from agent_common.core.model_factory import get_available_models, get_available_models_metadata, get_default_model
 from agent_common.core.sandbox_pool import SandboxPool
 from agent_common.core.tool_risk_cache import ToolRiskCache
 from gatana_client import GatanaClient
@@ -228,14 +228,15 @@ def create_lifespan(
 def create_app():
     """Factory function to create the FastAPI app instance."""
 
-    # Log available LLM providers at startup
-    if MODEL_CONFIG:
-        logger.info("Available LLM models: %s", ", ".join(MODEL_CONFIG.keys()))
-        logger.info("Default model: %s", get_default_model())
-    else:
-        logger.error(
-            "No LLM models available! Set cloud credentials or OPENAI_COMPATIBLE_BASE_URL to enable at least one model."
-        )
+    # Models live on the Model Gateway (ADR-0001); log the default + the live list
+    # (best-effort — the gateway is the source of truth).
+    logger.info("Default model: %s; gateway: %s", get_default_model(), os.getenv("LLM_GATEWAY_URL", "<unset>"))
+    try:
+        available = get_available_models()
+        if available:
+            logger.info("Models registered on the gateway: %s", ", ".join(available))
+    except Exception as e:
+        logger.debug("Could not list gateway models at startup: %s", e)
 
     capabilities = AgentCapabilities(
         streaming=True,

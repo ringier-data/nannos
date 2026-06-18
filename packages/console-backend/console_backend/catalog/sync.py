@@ -37,7 +37,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 from uuid import uuid4
 
 import aiobotocore.session
-import boto3
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStore
 from ringier_a2a_sdk.embeddings import GeminiEmbeddings
@@ -46,7 +45,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..catalog.adapters.base import CatalogSourceAdapter, ExtractedPage, ExtractionResourceError, SourceFile
 from ..catalog.adapters.google_drive import _PPTX_THUMBNAILS_ENABLED, PPTX_MIME, ExportTimeoutError
-from ..catalog.executor import get_io_executor, run_in_sync_executor
+from ..catalog.executor import get_io_executor
+from ..services.llm_gateway import gateway_chat
 from ..catalog.task_queue import (
     FileTaskPayload,
     FileTaskProcessor,
@@ -460,8 +460,25 @@ class CatalogSyncPipeline:
         self._render_budget = _WeightedSemaphore(RENDER_SLIDE_BUDGET)
         # Per-job state — keyed by sync_job_id to isolate concurrent syncs
         self._job_state: dict[str, _SyncJobState] = {}
-        # Bedrock client for summarization (Claude Haiku)
-        self._bedrock_client = boto3.client("bedrock-runtime", region_name=_AWS_REGION)
+        # Document summarization goes through the Model Gateway (see gateway_chat).
+
+    async def resolve_embedding_alias(self) -> str | None:
+        """The configured default embedding model alias (multimodal preferred, then text),
+        or None when no default is set — in which case indexing must be disabled gracefully
+        (an admin sets the default in the console: Admin → Model Gateway → Make default)."""
+        from sqlalchemy import text
+
+        async with self._db_session_factory() as db:
+            rows = (
+                await db.execute(
+                    text(
+                        "SELECT role, model_alias FROM model_defaults "
+                        "WHERE role IN ('multimodal_embedding', 'embedding')"
+                    )
+                )
+            ).mappings().all()
+        by_role = {r["role"]: r["model_alias"] for r in rows}
+        return by_role.get("multimodal_embedding") or by_role.get("embedding")
 
     def setup_job(
         self,
@@ -469,30 +486,33 @@ class CatalogSyncPipeline:
         user_sub: str | None = None,
         catalog_id: str | None = None,
         progress_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        embedding_model: str | None = None,
     ) -> None:
         """Register per-job state (cost attribution, embeddings, progress callback).
 
         Must be called before ``run_full_sync`` / ``run_incremental_sync`` /
         ``reindex_unindexed_pages`` and cleaned up via ``teardown_job()``
-        when the sync finishes.
+        when the sync finishes. `embedding_model` is the resolved default alias
+        (see ``resolve_embedding_alias``).
         """
+
+        def _emb(role: str) -> GeminiEmbeddings:
+            kwargs: dict[str, Any] = {
+                "role": role,
+                "cost_logger": self._cost_logger,
+                "user_sub": user_sub,
+                "catalog_id": catalog_id,
+                "executor": get_io_executor(),
+            }
+            if embedding_model:
+                kwargs["model_id"] = embedding_model
+            return GeminiEmbeddings(**kwargs)
+
         self._job_state[sync_job_id] = _SyncJobState(
             user_sub=user_sub,
             catalog_id=catalog_id,
-            index_embeddings=GeminiEmbeddings(
-                role="document",
-                cost_logger=self._cost_logger,
-                user_sub=user_sub,
-                catalog_id=catalog_id,
-                executor=get_io_executor(),
-            ),
-            query_embeddings=GeminiEmbeddings(
-                role="query",
-                cost_logger=self._cost_logger,
-                user_sub=user_sub,
-                catalog_id=catalog_id,
-                executor=get_io_executor(),
-            ),
+            index_embeddings=_emb("document"),
+            query_embeddings=_emb("query"),
             progress_callback=progress_callback,
         )
 
@@ -1873,40 +1893,16 @@ class CatalogSyncPipeline:
 
         model_id = config.catalog.summarization_model_id
 
-        def _invoke() -> str:
-            response = self._bedrock_client.invoke_model(
-                modelId=model_id,
-                body=json.dumps(
-                    {
-                        "anthropic_version": "bedrock-2023-05-31",
-                        "max_tokens": 200,
-                        "messages": [{"role": "user", "content": prompt}],
-                    }
-                ),
-            )
-            result = json.loads(response["body"].read())
-
-            # Log Bedrock summarization cost
-            if self._cost_logger and job_user_sub:
-                usage = result.get("usage", {})
-                billing: dict[str, int] = {}
-                if usage.get("input_tokens"):
-                    billing["base_input_tokens"] = usage["input_tokens"]
-                if usage.get("output_tokens"):
-                    billing["base_output_tokens"] = usage["output_tokens"]
-                if billing:
-                    self._cost_logger.log_cost_async(
-                        user_sub=job_user_sub,
-                        billing_unit_breakdown=billing,
-                        provider="bedrock_converse",
-                        model_name=model_id,
-                        catalog_id=job_catalog_id,
-                    )
-
-            return result["content"][0]["text"].strip()
-
+        # Summarize via the Model Gateway (ADR-0001). Cost is captured proxy-side from
+        # the spend_logs_metadata below (ADR-0002) — no in-app cost logging needed.
         try:
-            return await run_in_sync_executor(_invoke)
+            text = await gateway_chat(
+                prompt,
+                model=model_id,
+                max_tokens=200,
+                metadata={"user_sub": job_user_sub, "catalog_id": job_catalog_id},
+            )
+            return text.strip()
         except Exception:
             logger.warning("Failed to generate summary for %s, using fallback", file.name)
             return f"Document: {file.name}"

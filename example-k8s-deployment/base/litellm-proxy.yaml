@@ -1,0 +1,133 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litellm-proxy
+  labels:
+    app: litellm-proxy
+    app.kubernetes.io/part-of: nannos
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  labels:
+    app: litellm-proxy
+    app.kubernetes.io/part-of: nannos
+spec:
+  # ≥2 replicas: the gateway is the sole path for all LLM traffic (no app fallback).
+  replicas: 2
+  selector:
+    matchLabels:
+      app: litellm-proxy
+  template:
+    metadata:
+      labels:
+        app: litellm-proxy
+    spec:
+      serviceAccountName: litellm-proxy   # EKS Pod Identity → Bedrock invoke (infra repo)
+      containers:
+      - name: litellm-proxy
+        # image patched per-env by the gitops overlay (image-patch.yaml)
+        image: ghcr.io/ringier-data/nannos-litellm-proxy:latest
+        ports:
+        - containerPort: 4000
+        env:
+        - name: AWS_REGION
+          value: "eu-central-1"
+        - name: AWS_BEDROCK_REGION
+          value: "eu-central-1"
+        - name: AZURE_OPENAI_ENDPOINT
+          value: "https://YOUR_AZURE.openai.azure.com"
+        - name: GCP_PROJECT_ID
+          value: "YOUR_GCP_PROJECT"
+        # Prisma store on the shared RDS, dedicated litellm user + schema.
+        - name: DATABASE_URL
+          value: "postgresql://litellm@${POSTGRES_HOST}:5432/nannos?schema=litellm"
+        # Cost ingestion target (Phase 2).
+        - name: CONSOLE_BACKEND_URL
+          value: "https://console.${BASE_DOMAIN}"
+        # LITELLM_MASTER_KEY, AZURE_OPENAI_API_KEY, GCP_KEY, DATABASE_URL password,
+        # GATEWAY_INGEST_TOKEN (shared secret for cost ingestion) → litellm-proxy-secrets.
+        # The same GATEWAY_INGEST_TOKEN must also be in console-secrets.
+        envFrom:
+        - secretRef:
+            name: litellm-proxy-secrets
+        volumeMounts:
+        - name: config
+          mountPath: /etc/litellm/config.yaml   # subPath so it doesn't hide the baked custom_logger.py
+          subPath: config.yaml
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /health/liveliness
+            port: 4000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/readiness
+            port: 4000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: config
+        configMap:
+          name: litellm-proxy-config
+---
+# Settings-only gateway config (no model_list — models are provisioned at runtime
+# via the console and stored in the proxy DB; see ADR-0001 / Q6).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-proxy-config
+  labels:
+    app: litellm-proxy
+    app.kubernetes.io/part-of: nannos
+data:
+  config.yaml: |
+    litellm_settings:
+      callbacks: custom_logger.proxy_handler_instance
+      request_timeout: 600
+      drop_params: true
+      num_retries: 0
+      # Structured (JSON) logs so cluster log aggregation can parse proxy output.
+      json_logs: true
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: os.environ/DATABASE_URL
+      store_model_in_db: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-proxy
+  labels:
+    app: litellm-proxy
+    app.kubernetes.io/part-of: nannos
+spec:
+  # ClusterIP only — inference + management routes are in-cluster (ADR-0005).
+  # No HTTPRoute / public ingress. Apps reach it at litellm-proxy.nannos.svc:80.
+  selector:
+    app: litellm-proxy
+  ports:
+    - port: 80
+      targetPort: 4000
+      protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: litellm-proxy
+  labels:
+    app: litellm-proxy
+    app.kubernetes.io/part-of: nannos
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: litellm-proxy

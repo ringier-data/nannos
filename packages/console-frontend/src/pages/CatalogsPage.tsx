@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { Plus, LibraryBig, Users } from 'lucide-react';
+import { Plus, LibraryBig, Users, AlertTriangle } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
+import { useEmbeddingConfigured } from '@/config/models';
 import { CatalogList } from '@/components/catalogs/CatalogList';
 import { CreateCatalogDialog } from '@/components/catalogs/CreateCatalogDialog';
 import { listCatalogsOptions } from '@/api/generated/@tanstack/react-query.gen';
@@ -34,6 +35,7 @@ export function CatalogsPage() {
   const [activeTab, setActiveTab] = useState<TabId>(getTabFromHash);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const { user } = useAuth();
+  const { embeddingConfigured } = useEmbeddingConfigured();
 
   const handleTabChange = useCallback((tab: TabId) => {
     setActiveTab(tab);
@@ -88,11 +90,23 @@ export function CatalogsPage() {
             Connect document repositories for semantic search
           </p>
         </div>
-        <Button onClick={() => setShowCreateDialog(true)}>
+        <Button onClick={() => setShowCreateDialog(true)} disabled={!embeddingConfigured}>
           <Plus className="mr-2 h-4 w-4" />
           Create Catalog
         </Button>
       </div>
+
+      {/* Embedding-dependent: catalogs need a default embedding model to index. */}
+      {!embeddingConfigured && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            Catalog indexing is disabled until a default embedding model is configured. An
+            administrator can set one in <strong>Admin → Model Gateway</strong> (register an embedding
+            model, then “Make default”).
+          </span>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 border-b">
