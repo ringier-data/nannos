@@ -12,41 +12,84 @@ import {
 import { SubAgentCard } from './SubAgentCard';
 import type { SubAgentListItem, SubAgentStatus, SubAgentType } from './types';
 
+export type ScopeFilter = 'all' | 'mine' | 'shared' | 'pending';
+
 interface SubAgentListProps {
   subAgents: SubAgentListItem[];
   onSelect: (subAgent: SubAgentListItem) => void;
   emptyMessage?: string;
   showManageAccess?: boolean;
+  currentUserId?: string;
+  scope?: ScopeFilter;
+  onScopeChange?: (scope: ScopeFilter) => void;
+  showPendingScope?: boolean;
 }
 
-export function SubAgentList({ subAgents, onSelect, emptyMessage = 'No sub-agents found', showManageAccess = false }: SubAgentListProps) {
+export function SubAgentList({
+  subAgents,
+  onSelect,
+  emptyMessage = 'No sub-agents found',
+  showManageAccess = false,
+  currentUserId,
+  scope = 'all',
+  onScopeChange,
+  showPendingScope = false,
+}: SubAgentListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<SubAgentStatus | 'all'>('all');
   const [typeFilter, setTypeFilter] = useState<SubAgentType | 'all'>('all');
+  const [activationFilter, setActivationFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
 
   const filteredSubAgents = subAgents.filter((sa) => {
     const matchesSearch =
       searchQuery === '' ||
       sa.name.toLowerCase().includes(searchQuery.toLowerCase());
 
-    const matchesStatus = statusFilter === 'all';
-    const matchesType = typeFilter === 'all' || sa.type === typeFilter;
+    // Owner facet (skipped for 'all' and the admin 'pending' approval queue)
+    const matchesScope =
+      scope === 'mine'
+        ? sa.owner_user_id === currentUserId
+        : scope === 'shared'
+          ? sa.owner_user_id !== currentUserId
+          : true;
 
-    return matchesSearch && matchesStatus && matchesType;
+    const matchesStatus =
+      statusFilter === 'all' || (sa.config_version?.status ?? 'draft') === statusFilter;
+    const matchesType = typeFilter === 'all' || sa.type === typeFilter;
+    const matchesActivation =
+      activationFilter === 'all' ||
+      (activationFilter === 'enabled' ? !!sa.is_activated : !sa.is_activated);
+
+    return matchesSearch && matchesScope && matchesStatus && matchesType && matchesActivation;
   });
 
-  const hasFilters = searchQuery !== '' || statusFilter !== 'all' || typeFilter !== 'all';
+  const hasFilters =
+    searchQuery !== '' || statusFilter !== 'all' || typeFilter !== 'all' || activationFilter !== 'all';
 
   const clearFilters = () => {
     setSearchQuery('');
     setStatusFilter('all');
     setTypeFilter('all');
+    setActivationFilter('all');
   };
 
   return (
     <div className="flex flex-col gap-4">
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
+        {onScopeChange && (
+          <Select value={scope} onValueChange={(v) => onScopeChange(v as ScopeFilter)}>
+            <SelectTrigger className="w-[170px]">
+              <SelectValue placeholder="Owner" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All owners</SelectItem>
+              <SelectItem value="mine">Mine</SelectItem>
+              <SelectItem value="shared">Shared with me</SelectItem>
+              {showPendingScope && <SelectItem value="pending">Pending approval</SelectItem>}
+            </SelectContent>
+          </Select>
+        )}
         <div className="relative flex-1 min-w-[200px]">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -77,6 +120,16 @@ export function SubAgentList({ subAgents, onSelect, emptyMessage = 'No sub-agent
             <SelectItem value="all">All Types</SelectItem>
             <SelectItem value="remote">Remote</SelectItem>
             <SelectItem value="local">Local</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={activationFilter} onValueChange={(v) => setActivationFilter(v as 'all' | 'enabled' | 'disabled')}>
+          <SelectTrigger className="w-[150px]">
+            <SelectValue placeholder="Activation" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Activation</SelectItem>
+            <SelectItem value="enabled">Enabled</SelectItem>
+            <SelectItem value="disabled">Disabled</SelectItem>
           </SelectContent>
         </Select>
         {hasFilters && (

@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Plus, Bot, Users, Clock } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
-import { SubAgentList } from '@/components/subagents/SubAgentList';
+import { SubAgentList, type ScopeFilter } from '@/components/subagents/SubAgentList';
 import {
   consoleListSubAgentsOptions,
   listPendingApprovalsApiV1SubAgentsPendingGetOptions,
@@ -11,77 +11,37 @@ import {
 import type { SubAgentListItem, SubAgentListResponse } from '@/api/generated/types.gen';
 import { useAuth } from '@/contexts/AuthContext';
 
-type TabId = 'my' | 'accessible' | 'pending';
-
-interface Tab {
-  id: TabId;
-  label: string;
-  icon: typeof Bot;
-  requiresAdmin?: boolean;
-}
-
-const tabs: Tab[] = [
-  { id: 'my', label: 'My Sub-Agents', icon: Bot },
-  { id: 'accessible', label: 'Accessible', icon: Users },
-  { id: 'pending', label: 'Pending Approval', icon: Clock, requiresAdmin: true },
-];
-
 export function SubAgentsPage() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<TabId>('my');
+  const [scope, setScope] = useState<ScopeFilter>('all');
   const { user, adminMode } = useAuth();
 
-  // Reset to 'my' tab when admin mode is disabled and currently on pending tab
-  useEffect(() => {
-    if (!adminMode && activeTab === 'pending') {
-      setActiveTab('my');
-    }
-  }, [adminMode, activeTab]);
+  // Derive the effective scope so the approval queue isn't shown once admin mode is off,
+  // without resetting state in an effect.
+  const effectiveScope: ScopeFilter = !adminMode && scope === 'pending' ? 'all' : scope;
 
-  // Fetch owned sub-agents
-  const { data: ownedData } = useQuery({
-    ...consoleListSubAgentsOptions({
-      query: { owned_only: true },
-    }),
-    enabled: activeTab === 'my',
-  });
-
-  // Fetch all accessible sub-agents (for 'accessible' tab)
-  const { data: accessibleData } = useQuery({
+  // Full list (owned + shared) — owner faceting happens client-side in SubAgentList
+  const { data: listData } = useQuery({
     ...consoleListSubAgentsOptions({}),
-    enabled: activeTab === 'accessible',
+    enabled: effectiveScope !== 'pending',
   });
 
-  // Fetch pending approvals (admin mode only)
+  // Approval queue (admin only) — a distinct dataset surfaced via the 'pending' scope
   const { data: pendingData } = useQuery({
     ...listPendingApprovalsApiV1SubAgentsPendingGetOptions(),
-    enabled: activeTab === 'pending' && adminMode,
+    enabled: effectiveScope === 'pending' && adminMode,
   });
 
-  // Show pending tab only when admin mode is active
-  const visibleTabs = tabs.filter(
-    (tab) => !tab.requiresAdmin || adminMode
-  );
-
-  const getSubAgentsForTab = (): SubAgentListItem[] => {
-    switch (activeTab) {
-      case 'my':
-        return (ownedData as SubAgentListResponse)?.items ?? [];
-      case 'accessible':
-        // Filter out owned sub-agents from accessible list
-        return ((accessibleData as SubAgentListResponse)?.items ?? []).filter((sa: any) => sa.owner_user_id !== user?.id);
-      case 'pending':
-        return (pendingData as SubAgentListResponse)?.items ?? [];
-      default:
-        return [];
-    }
-  };
+  const subAgents: SubAgentListItem[] =
+    effectiveScope === 'pending'
+      ? (pendingData as SubAgentListResponse)?.items ?? []
+      : (listData as SubAgentListResponse)?.items ?? [];
 
   const getEmptyMessage = (): string => {
-    switch (activeTab) {
-      case 'my':
+    switch (effectiveScope) {
+      case 'mine':
         return "You haven't created any sub-agents yet";
-      case 'accessible':
+      case 'shared':
         return 'No sub-agents have been shared with you';
       case 'pending':
         return 'No sub-agents are pending approval';
@@ -114,30 +74,16 @@ export function SubAgentsPage() {
         </Button>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 border-b">
-        {visibleTabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === tab.id
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground/50'
-            }`}
-          >
-            <tab.icon className="h-4 w-4" />
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
       {/* Content */}
       <SubAgentList
-        subAgents={getSubAgentsForTab()}
+        subAgents={subAgents}
         onSelect={handleSelectSubAgent}
         emptyMessage={getEmptyMessage()}
-        showManageAccess={activeTab === 'my' || adminMode}
+        showManageAccess
+        currentUserId={user?.id}
+        scope={effectiveScope}
+        onScopeChange={setScope}
+        showPendingScope={adminMode}
       />
     </div>
   );
