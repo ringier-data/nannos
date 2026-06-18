@@ -3,7 +3,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from ..models.user import (
 )
 from ..services.audit_service import AuditService
 from ..services.keycloak_admin_service import KeycloakAdminService, KeycloakSyncError
+from ..services.orchestrator_cache import schedule_orchestrator_discovery_cache_invalidation
 from ..services.phone_verification_service import PhoneVerificationService
 from ..services.session_service import SessionService
 from ..services.user_group_service import UserGroupService
@@ -210,6 +211,7 @@ async def update_current_user_settings(
     update_request: UserSettingsUpdate,
     request: Request,
     db: DbSession,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_auth),
     keycloak_admin_service: KeycloakAdminService | None = Depends(get_keycloak_admin_service),
 ) -> UserSettingsResponse:
@@ -267,6 +269,14 @@ async def update_current_user_settings(
     )
     await db.commit()
 
+    # If the user changed an entitlement field carried on the orchestrator's cached User
+    # (tool whitelist or HITL bypass rules), flush their cache so it takes effect next turn
+    # rather than after the TTL — these aren't part of the orchestrator cache key.
+    if {"mcp_tools", "tool_bypass_rules"} & update_request.model_fields_set and user.sub:
+        schedule_orchestrator_discovery_cache_invalidation(
+            background_tasks, request, f"settings change for user sub={user.sub}", [user.sub]
+        )
+
     # Sync phone override to Keycloak if it was updated
     if "phone_number_override" in update_request.model_fields_set and keycloak_admin_service is not None:
         try:
@@ -299,6 +309,7 @@ async def upsert_tool_bypass_rule(
     body: ToolBypassRuleRequest,
     request: Request,
     db: DbSession,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_auth_or_bearer_token),
 ) -> ToolBypassRuleResponse:
     """Set or remove a tool bypass rule for the current user.
@@ -331,6 +342,13 @@ async def upsert_tool_bypass_rule(
 
     await user_settings_service.upsert_settings(db, user.id, tool_bypass_rules=rules)
     await db.commit()
+
+    # Bypass rules ride on the orchestrator's cached User (not part of its cache key), so
+    # flush this user's cache to apply the change on their next turn instead of after the TTL.
+    if user.sub:
+        schedule_orchestrator_discovery_cache_invalidation(
+            background_tasks, request, f"tool bypass rule change for user sub={user.sub}", [user.sub]
+        )
 
     return ToolBypassRuleResponse(tool_bypass_rules=rules)
 

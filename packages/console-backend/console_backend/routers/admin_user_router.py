@@ -3,7 +3,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
@@ -24,6 +24,7 @@ from ..models.user import (
     UserStatusUpdate,
 )
 from ..services.audit_service import AuditService
+from ..services.orchestrator_cache import schedule_orchestrator_discovery_cache_invalidation
 from ..services.user_group_service import UserGroupService
 from ..services.user_service import UserService
 
@@ -313,6 +314,7 @@ async def update_user_role(
     request: Request,
     update_request: UserRoleUpdate,
     db: DbSession,
+    background_tasks: BackgroundTasks,
     admin: User = Depends(require_admin),
 ) -> UserDetailResponse:
     """Update a user's role.
@@ -343,6 +345,13 @@ async def update_user_role(
         )
 
     await db.commit()
+
+    # The user's system role changed → flush their (now stale) cached registry record so the
+    # new role takes effect on their next turn instead of waiting out the orchestrator TTL.
+    if current_user.sub:
+        schedule_orchestrator_discovery_cache_invalidation(
+            background_tasks, request, f"role change for user sub={current_user.sub}", [current_user.sub]
+        )
 
     # Trigger outbound SCIM push (fire-and-forget)
     if hasattr(request.app.state, "outbound_scim_push_service"):

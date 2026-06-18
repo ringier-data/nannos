@@ -19,6 +19,23 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
 
 logger = logging.getLogger(__name__)
 
+
+def _int_env(name: str, default: int) -> int:
+    """Parse an int env var, falling back to ``default`` (with a warning) on a bad value.
+
+    A misconfigured value (e.g. ``"300s"`` or an empty string) must not crash the process
+    at import time — fall back to the default instead.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.warning("Invalid int for %s=%r; using default %d", name, raw, default)
+        return default
+
+
 # Message formatting literal for type safety
 
 if TYPE_CHECKING:
@@ -299,8 +316,17 @@ class AgentSettings:
     TOOLSET_SELECTION_MODEL: ModelType = os.getenv("TOOLSET_SELECTION_MODEL", "gpt-4o-mini")  # type: ignore
     """Model to use for server and tool selection (fast, cheap model preferred)."""
 
-    # Cache configuration
-    AGENT_DISCOVERY_CACHE_TTL = 30  # seconds
+    # Cache configuration.
+    # Per-user discovery + registry cache TTL (seconds). Kept well below a typical realm
+    # access-token lifespan so a cache entry can never outlive the exchanged gatana/console
+    # tokens embedded in the discovered tools (see discovery_cache "Token-expiry safety"),
+    # and so an entitlement *revocation* that only reaches one replica (the invalidation POST
+    # is in-process / single-replica) self-heals fleet-wide within the TTL.
+    AGENT_DISCOVERY_CACHE_TTL = _int_env("AGENT_DISCOVERY_CACHE_TTL", 60)
+    # Cross-cutting invalidation lever for the discovery/registry caches: bump this (env)
+    # or call discovery_cache.invalidate_all() when a group→server/tool access policy
+    # changes without the user's own groups/config changing.
+    ENTITLEMENT_POLICY_VERSION = os.getenv("ENTITLEMENT_POLICY_VERSION", "0")
 
     # PostgreSQL checkpoint configuration.
     # The checkpointer reuses the main POSTGRES_* connection (same DB/user/schema as the

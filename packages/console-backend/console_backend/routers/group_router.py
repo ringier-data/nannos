@@ -1,6 +1,6 @@
 """Group management router for non-admin users."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 
 from ..db.session import DbSession
 from ..dependencies import (
@@ -21,6 +21,7 @@ from ..models.user_group import (
     UserGroupDetailResponse,
     UserGroupWithMembers,
 )
+from ..services.orchestrator_cache import schedule_orchestrator_discovery_cache_invalidation
 from ..services.user_group_service import UserGroupService
 
 router = APIRouter(prefix="/api/v1/groups", tags=["groups"])
@@ -292,6 +293,7 @@ async def set_group_default_agents(
     request: Request,
     db: DbSession,
     request_body: SubAgentAdd,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_auth),
 ):
     """Set (replace) default agents for a group (bulk operation).
@@ -312,6 +314,10 @@ async def set_group_default_agents(
             actor=user,
         )
         await db.commit()
+        member_subs = await user_group_service.get_group_member_subs(db, group_id)
+        schedule_orchestrator_discovery_cache_invalidation(
+            background_tasks, request, f"set default agents for group {group_id}", member_subs
+        )
 
     except ValueError as e:
         raise HTTPException(
@@ -326,6 +332,7 @@ async def add_group_default_agent(
     sub_agent_id: int,
     request: Request,
     db: DbSession,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_auth),
 ):
     """Add a single default agent to a group.
@@ -353,6 +360,10 @@ async def add_group_default_agent(
             actor=user,
         )
         await db.commit()
+        member_subs = await user_group_service.get_group_member_subs(db, group_id)
+        schedule_orchestrator_discovery_cache_invalidation(
+            background_tasks, request, f"add default agent {sub_agent_id} to group {group_id}", member_subs
+        )
 
     except ValueError as e:
         raise HTTPException(
@@ -367,6 +378,7 @@ async def remove_group_default_agent(
     sub_agent_id: int,
     request: Request,
     db: DbSession,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_auth),
 ):
     """Remove a single default agent from a group.
@@ -393,6 +405,10 @@ async def remove_group_default_agent(
             actor=user,
         )
         await db.commit()
+        member_subs = await user_group_service.get_group_member_subs(db, group_id)
+        schedule_orchestrator_discovery_cache_invalidation(
+            background_tasks, request, f"remove default agent {sub_agent_id} from group {group_id}", member_subs
+        )
 
     except ValueError as e:
         raise HTTPException(
