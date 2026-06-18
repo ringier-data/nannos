@@ -15,9 +15,14 @@ logger = logging.getLogger(__name__)
 async def get_gatana_token(request: Request, user: User) -> str:
     """Get Gatana MCP gateway token from request.
 
-    Supports two authentication patterns:
-    1. Session-based (frontend): Extracts user token from request.state, refreshes if needed, exchanges for Gatana token
-    2. Bearer token (orchestrator/A2A): Extracts already-exchanged Gatana token from Authorization header
+    Both authentication patterns end by exchanging a subject token for the Gatana
+    (MCP gateway) audience — Gatana validates the audience and rejects tokens minted
+    for any other client:
+    1. Session-based (frontend): takes the user token from request.state, refreshes it
+       if needed, then exchanges it for the Gatana audience.
+    2. Bearer token (orchestrator/A2A): takes the incoming Bearer token (minted for the
+       agent-console audience to reach console-backend) and exchanges it for the Gatana
+       audience.
 
     Args:
         request: FastAPI request object
@@ -33,14 +38,43 @@ async def get_gatana_token(request: Request, user: User) -> str:
     auth_header = request.headers.get("Authorization")
 
     if auth_header:
-        # Bearer token path: orchestrator/A2A already exchanged the token
+        # Bearer token path (orchestrator/A2A service calls).
+        #
+        # The caller authenticates to console-backend with an `agent-console`-audience
+        # token (the orchestrator exchanges user → CONSOLE_BACKEND_CLIENT_ID to reach us,
+        # see orchestrator discovery), NOT a gatana token. Gatana validates the audience
+        # and rejects an agent-console token with 401, so we must exchange the incoming
+        # token for the gatana client id here — mirroring the session path below.
         if not auth_header.startswith("Bearer "):
             logger.error("Invalid Authorization header format")
             raise HTTPException(
                 status_code=401,
                 detail="Invalid Authorization header format. Expected 'Bearer <token>'.",
             )
-        return auth_header[len("Bearer ") :].strip()
+        incoming_token = auth_header[len("Bearer ") :].strip()
+
+        oauth2_client = OidcOAuth2Client(
+            client_id=config.oidc.client_id,
+            client_secret=config.oidc.client_secret.get_secret_value(),
+            issuer=config.oidc.issuer,
+        )
+        try:
+            mcp_gateway_token = await oauth2_client.exchange_token(
+                subject_token=incoming_token,
+                target_client_id=config.mcp_gateway.client_id,
+                requested_scopes=["openid", "profile", "offline_access"],
+            )
+            logger.info(
+                f"Exchanged Bearer token for {config.mcp_gateway.client_id} audience "
+                f"(user {user.email})"
+            )
+            return mcp_gateway_token
+        except Exception as e:
+            logger.error(f"Failed to exchange Bearer token for gatana audience: {e}")
+            raise HTTPException(
+                status_code=401,
+                detail="Failed to exchange token for MCP gateway audience.",
+            )
 
     # Session-based path: need to get user token and exchange it for Gatana token
     access_token = getattr(request.state, "access_token", None)
