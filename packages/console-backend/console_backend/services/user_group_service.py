@@ -783,6 +783,28 @@ class UserGroupService:
             logger.error(f"Failed to list members: {e}")
             raise
 
+    async def get_group_member_subs(self, db: AsyncSession, group_id: int) -> list[str]:
+        """Return the OIDC subs of a group's active members.
+
+        Used to scope orchestrator discovery-cache invalidation to exactly the users whose
+        entitlements a group-level change affects (instead of flushing every user's cache).
+        """
+        query = text("""
+            SELECT u.sub
+            FROM user_group_members ugm
+            JOIN users u ON u.id = ugm.user_id
+            WHERE ugm.user_group_id = :group_id
+            AND u.deleted_at IS NULL
+            AND u.status = 'active'
+            AND u.sub IS NOT NULL
+        """)
+        try:
+            result = await db.execute(query, {"group_id": group_id})
+            return [row[0] for row in result.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to fetch member subs for group {group_id}: {e}")
+            return []
+
     async def add_members(
         self,
         db: AsyncSession,

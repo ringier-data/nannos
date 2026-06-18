@@ -3,6 +3,8 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
+import jwt
+
 # Load .env BEFORE any agent_common imports (MODEL_CONFIG is built at import time)
 from dotenv import load_dotenv
 
@@ -36,7 +38,7 @@ from a2a.types import (
     SecurityScheme,
     StringList,
 )
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from google.protobuf.json_format import MessageToDict
 from agent_common.core.model_factory import MODEL_CONFIG, get_available_models_metadata, get_default_model
@@ -61,7 +63,12 @@ from app.core.a2a_extensions import (
 )
 from app.core.agent import OrchestratorDeepAgent
 from app.core.budget_guard import init_budget_guard
-from app.core.discovery_cache import invalidate_all as invalidate_discovery_caches
+from app.core.discovery_cache import (
+    invalidate_all as invalidate_discovery_caches,
+)
+from app.core.discovery_cache import (
+    invalidate_users as invalidate_discovery_for_users,
+)
 from app.core.executor import OrchestratorDeepAgentExecutor
 from app.core.risk_score_api_client import HttpRiskScoreAPIClient
 from app.core.task_store import create_task_store
@@ -417,27 +424,70 @@ async def list_available_models():
     return metadata
 
 
+def _caller_azp(request: Request) -> str | None:
+    """Read the validated bearer's ``azp`` (authorized party) claim, or None.
+
+    The JWT was already verified by ``JWTValidatorMiddleware`` (signature/issuer/expiry),
+    which stores the raw token on ``request.state.user``; here we only read a claim, so
+    decoding without re-verifying is fine.
+    """
+    user = getattr(request.state, "user", None)
+    token = user.get("token") if isinstance(user, dict) else None
+    if not token:
+        return None
+    try:
+        return jwt.decode(token, options={"verify_signature": False}).get("azp")
+    except Exception:
+        return None
+
+
 @app.post("/internal/discovery-cache/invalidate")
-async def invalidate_discovery_cache() -> JSONResponse:
-    """Flush this replica's per-user discovery + registry caches.
+async def invalidate_discovery_cache(request: Request) -> JSONResponse:
+    """Flush per-user discovery + registry caches on this replica.
 
-    console-backend calls this when an admin changes a group→MCP-server or
-    group→default-agent mapping, so the affected users' entitlements take effect on their
-    next turn instead of waiting out the cache TTL. Idempotent and cheap.
+    console-backend calls this when a group→MCP-server / group→default-agent mapping or a
+    per-user entitlement (role, tool whitelist, bypass rules) changes, so the affected
+    users' entitlements take effect on their next turn instead of waiting out the TTL.
 
-    Auth: protected by the orchestrator's standard OIDC JWT middleware (this is not a
-    public path). The admin gate lives in console-backend — the calling routes require an
-    admin, and console-backend exchanges that admin's token for this service's audience
-    before calling. The action only clears an in-memory cache, so the blast radius of an
-    unexpected authenticated call is a brief cache rebuild.
+    Scope: the body may carry ``{"user_subs": [...]}`` to flush only those users' entries
+    (the normal path — console-backend computes the affected set, e.g. the members of the
+    changed group). An empty/absent body flushes everything (unscoped admin/maintenance
+    flush). Scoping keeps a single group edit from evicting every active user's cache and
+    triggering a re-discovery storm.
+
+    Auth: behind the orchestrator's OIDC JWT middleware (not a public path) AND restricted
+    here to the console-backend service client — the validated token's ``azp`` must equal
+    ``CONSOLE_BACKEND_CLIENT_ID``. This stops any other authenticated principal (e.g. an
+    end-user token) from flushing caches. When the auth middleware is disabled (no OIDC
+    issuer configured, dev only) there is no token to check and the call is allowed.
 
     Multi-replica note: the cache is in-process, so one call flushes one replica. Behind a
-    load balancer the other replicas fall back to the TTL (or bump
-    ``ENTITLEMENT_POLICY_VERSION`` for a fleet-wide flush). A fan-out/pub-sub broadcast is
-    the follow-up for instant fleet-wide invalidation.
+    load balancer the other replicas fall back to the TTL (kept short for this reason) or a
+    ``ENTITLEMENT_POLICY_VERSION`` bump for a fleet-wide flush. A fan-out/pub-sub broadcast
+    is the follow-up for instant fleet-wide invalidation.
     """
+    azp = _caller_azp(request)
+    if azp is not None and azp != AgentSettings.CONSOLE_BACKEND_CLIENT_ID:
+        logger.warning("Rejected discovery-cache invalidation from unexpected azp=%s", azp)
+        return JSONResponse(status_code=403, content={"error": "forbidden", "message": "caller not permitted"})
+
+    user_subs: list[str] | None = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            subs = body.get("user_subs")
+            if isinstance(subs, list):
+                user_subs = [s for s in subs if isinstance(s, str)]
+    except Exception:
+        body = None  # empty/invalid body → unscoped flush
+
+    if user_subs:
+        removed = invalidate_discovery_for_users(user_subs)
+        logger.info("Scoped discovery-cache invalidation: %d users, %d entries dropped", len(user_subs), removed)
+        return JSONResponse({"status": "ok", "scope": "users", "users": len(user_subs), "removed": removed})
+
     invalidate_discovery_caches()
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "scope": "all"})
 
 
 @click.command()

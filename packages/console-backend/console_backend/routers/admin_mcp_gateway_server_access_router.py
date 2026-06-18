@@ -1,7 +1,8 @@
 """Admin router for MCP gateway server access management."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
+from ..db.session import DbSession
 from ..dependencies import require_admin
 from ..models.mcp_gateway_server_access import (
     McpGatewayGrantServerAccessRequest,
@@ -10,7 +11,7 @@ from ..models.mcp_gateway_server_access import (
 )
 from ..models.user import User
 from ..services.mcp_gateway_server_access_service import McpGatewayServerAccessService
-from ..services.orchestrator_cache import invalidate_orchestrator_discovery_cache
+from ..services.orchestrator_cache import schedule_orchestrator_discovery_cache_invalidation
 from ..utils.gatana_auth import get_gatana_token
 
 router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-mcp-gateway"])
@@ -19,6 +20,14 @@ router = APIRouter(prefix="/api/v1/admin/groups", tags=["admin-mcp-gateway"])
 def get_mcp_gateway_service(request: Request) -> McpGatewayServerAccessService:
     """Get MCP gateway server access service from app state."""
     return request.app.state.mcp_gateway_server_access_service
+
+
+async def _invalidate_group_members_cache(
+    background_tasks: BackgroundTasks, request: Request, db: DbSession, group_id: int, reason: str
+) -> None:
+    """Schedule a scoped discovery-cache invalidation for the members of ``group_id``."""
+    member_subs = await request.app.state.user_group_service.get_group_member_subs(db, group_id)
+    schedule_orchestrator_discovery_cache_invalidation(background_tasks, request, reason, member_subs)
 
 
 @router.get(
@@ -68,6 +77,8 @@ async def grant_mcp_gateway_server_access(
     server_slug: str,
     body: McpGatewayGrantServerAccessRequest,
     request: Request,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_admin),
     service: McpGatewayServerAccessService = Depends(get_mcp_gateway_service),
 ) -> None:
@@ -76,7 +87,9 @@ async def grant_mcp_gateway_server_access(
         await service.grant_server_access(gatana_token, group_id, server_slug, body.role)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    await invalidate_orchestrator_discovery_cache(f"grant server '{server_slug}' to group {group_id}")
+    await _invalidate_group_members_cache(
+        background_tasks, request, db, group_id, f"grant server '{server_slug}' to group {group_id}"
+    )
 
 
 @router.delete(
@@ -89,6 +102,8 @@ async def revoke_mcp_gateway_server_access(
     group_id: int,
     server_slug: str,
     request: Request,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
     user: User = Depends(require_admin),
     service: McpGatewayServerAccessService = Depends(get_mcp_gateway_service),
 ) -> None:
@@ -97,4 +112,6 @@ async def revoke_mcp_gateway_server_access(
         await service.revoke_server_access(gatana_token, group_id, server_slug)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    await invalidate_orchestrator_discovery_cache(f"revoke server '{server_slug}' from group {group_id}")
+    await _invalidate_group_members_cache(
+        background_tasks, request, db, group_id, f"revoke server '{server_slug}' from group {group_id}"
+    )

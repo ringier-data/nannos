@@ -7,12 +7,12 @@ import time
 from app.core import discovery_cache as dc
 from app.core.discovery_cache import (
     TtlTokenCache,
-    entitlement_key,
+    cache_key,
     get_discovery_cache,
     get_user_cache,
     invalidate_all,
+    invalidate_users,
     token_exp,
-    user_key,
 )
 
 
@@ -21,38 +21,26 @@ def _jwt_with_exp(exp: int) -> str:
     return f"header.{payload}.sig"
 
 
-class TestEntitlementKey:
-    def test_stable_across_group_and_tool_order(self):
-        a = entitlement_key("u", ["b", "a"], "cfg", ["t2", "t1"])
-        b = entitlement_key("u", ["a", "b"], "cfg", ["t1", "t2"])
-        assert a == b
+class TestCacheKey:
+    def test_stable_across_group_order(self):
+        assert cache_key("u", ["b", "a"], "cfg") == cache_key("u", ["a", "b"], "cfg")
 
     def test_changes_when_group_added(self):
-        a = entitlement_key("u", ["a", "b"], "cfg", ["t1"])
-        b = entitlement_key("u", ["a", "b", "c"], "cfg", ["t1"])
-        assert a != b
-
-    def test_changes_when_tool_names_change(self):
-        a = entitlement_key("u", ["a"], "cfg", ["t1"])
-        b = entitlement_key("u", ["a"], "cfg", ["t1", "t2"])
-        assert a != b
+        assert cache_key("u", ["a", "b"], "cfg") != cache_key("u", ["a", "b", "c"], "cfg")
 
     def test_changes_with_policy_version(self):
-        a = entitlement_key("u", ["a"], "cfg", ["t1"], policy_version="0")
-        b = entitlement_key("u", ["a"], "cfg", ["t1"], policy_version="1")
-        assert a != b
+        assert cache_key("u", ["a"], "cfg", "0") != cache_key("u", ["a"], "cfg", "1")
 
     def test_changes_with_user(self):
-        assert entitlement_key("u1", [], None, []) != entitlement_key("u2", [], None, [])
+        assert cache_key("u1", [], None) != cache_key("u2", [], None)
 
+    def test_changes_with_config_hash(self):
+        assert cache_key("u", ["a"], "cfg1") != cache_key("u", ["a"], "cfg2")
 
-class TestUserKey:
-    def test_excludes_tool_names_but_keys_groups_and_policy(self):
-        a = user_key("u", ["a"], "cfg", "0")
-        b = user_key("u", ["a"], "cfg", "0")
-        assert a == b
-        assert user_key("u", ["a"], "cfg", "0") != user_key("u", ["a", "b"], "cfg", "0")
-        assert user_key("u", ["a"], "cfg", "0") != user_key("u", ["a"], "cfg", "1")
+    def test_no_tool_names_param(self):
+        # tool_names is intentionally not part of the key (discovery is unfiltered); equal
+        # inputs always collide regardless of any per-user tool whitelist.
+        assert cache_key("u", ["a"], "cfg", "0") == cache_key("u", ["a"], "cfg", "0")
 
 
 class TestTokenExp:
@@ -105,6 +93,47 @@ class TestTtlTokenCache:
         c.put("k", "v", None)
         c.clear()
         assert c.get("k") is None
+
+    def test_invalidate_owner_drops_only_matching(self):
+        c = TtlTokenCache(300)
+        c.put("k1", "v1", None, owner="alice")
+        c.put("k2", "v2", None, owner="bob")
+        c.put("k3", "v3", None, owner="alice")
+        removed = c.invalidate_owner("alice")
+        assert removed == 2
+        assert c.get("k1") is None and c.get("k3") is None
+        assert c.get("k2") == "v2"
+
+    def test_invalidate_owner_unknown_is_noop(self):
+        c = TtlTokenCache(300)
+        c.put("k", "v", None, owner="alice")
+        assert c.invalidate_owner("nobody") == 0
+        assert c.get("k") == "v"
+
+    def test_max_entries_bounds_size(self):
+        c = TtlTokenCache(ttl_seconds=300, max_entries=3)
+        for i in range(10):
+            c.put(f"k{i}", i, None)
+        assert len(c._store) <= 3
+
+
+class TestScopedInvalidation:
+    def test_invalidate_users_targets_only_given_subs(self):
+        get_discovery_cache(300).put("d-alice", ("t", "s"), None, owner="alice")
+        get_discovery_cache().put("d-bob", ("t", "s"), None, owner="bob")
+        get_user_cache(300).put("u-alice", object(), None, owner="alice")
+        get_user_cache().put("u-bob", object(), None, owner="bob")
+
+        removed = invalidate_users(["alice"])
+        assert removed == 2  # one discovery + one user entry for alice
+        assert get_discovery_cache().get("d-alice") is None
+        assert get_user_cache().get("u-alice") is None
+        assert get_discovery_cache().get("d-bob") is not None
+        assert get_user_cache().get("u-bob") is not None
+
+    def teardown_method(self):
+        dc._discovery_cache = None
+        dc._user_cache = None
 
 
 class TestInvalidateAll:

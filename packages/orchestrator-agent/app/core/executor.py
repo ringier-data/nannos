@@ -52,7 +52,7 @@ from .a2a_extensions import (
 from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
-from .discovery_cache import entitlement_key, get_discovery_cache, get_user_cache, user_key
+from .discovery_cache import cache_key, get_discovery_cache, get_user_cache
 from .registry import RegistryService, User
 from .turn_state import TurnState, count_tool_messages
 from .steering_state import (
@@ -264,14 +264,13 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # list_tools) on every turn. Keyed by the entitlement-determining inputs so group
         # changes invalidate automatically; entries are bounded by the token expiry.
         cache = get_discovery_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
-        cache_key = entitlement_key(
+        dkey = cache_key(
             user_sub=user_config.user_sub,
             groups=user_config.groups,
             sub_agent_config_hash=user_config.sub_agent_config_hash,
-            tool_names=user.tool_names,
             policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
         )
-        cached = cache.get(cache_key)
+        cached = cache.get(dkey)
         if cached is not None:
             tools, sub_agents = cached
             logger.info(
@@ -293,7 +292,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 user_config.access_token.get_secret_value(),
                 white_list=None,  # Don't filter here - GP agent needs access to all tools
             )
-            cache.put(cache_key, (tools, sub_agents), user_config.access_token.get_secret_value())
+            cache.put(
+                dkey,
+                (tools, sub_agents),
+                user_config.access_token.get_secret_value(),
+                owner=user_config.user_sub,
+            )
             logger.info(
                 "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
                 len(tools),
@@ -456,7 +460,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # (keyed incl. groups + policy_version) to avoid the ~1s of console-backend calls
         # on every turn; entry bounded by the user token's expiry.
         ucache = get_user_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
-        ukey = user_key(
+        ukey = cache_key(
             user_sub=user_sub,
             groups=user_groups,
             sub_agent_config_hash=sub_agent_config_hash,
@@ -471,7 +475,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 access_token=user_token,
                 sub_agent_config_hash=sub_agent_config_hash,
             )
-            ucache.put(ukey, user, user_token)
+            ucache.put(ukey, user, user_token, owner=user_sub)
             logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
 
         # Extract metadata from both message-level and params-level (message takes priority)
