@@ -1457,7 +1457,7 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 raise GraphInterrupt(post_state.interrupts)
 
             # Retrieve final state (checkpointer saves it after each node)
-            final_values = retrieve_final_state(agent, standalone_config)
+            final_values = await retrieve_final_state(agent, standalone_config)
             result = self._translate_agent_result(final_values, context_id, task_id)
 
             # Yield terminal result

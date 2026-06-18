@@ -7,7 +7,7 @@ specialized subagents through natural language conversation.
 import logging
 import os
 
-from agent_common.core.model_factory import MODEL_CONFIG, _has_aws_credentials, create_model, get_default_model
+from agent_common.core.model_factory import MODEL_CONFIG, create_model, get_default_model
 from langchain_core.language_models import BaseChatModel
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from ringier_a2a_sdk.agent import LangGraphAgent
@@ -333,7 +333,8 @@ class AgentCreator(PostgreSQLCheckpointerMixin, LangGraphAgent):
     Architecture:
     - Extends LangGraphAgent base class (provider-agnostic)
     - LLM model selected dynamically based on available credentials
-    - Checkpointing: PostgreSQL when CHECKPOINT_POSTGRES_HOST is set, in-memory otherwise
+    - Checkpointing: PostgreSQL when POSTGRES_HOST is set (reuses the shared POSTGRES_*
+      connection / schema), in-memory otherwise
     - MCP tools discovered once at initialization (unauthenticated)
     - User credentials injected at runtime via TokenExchangeCredentialInjector
     """
@@ -398,7 +399,7 @@ class AgentCreator(PostgreSQLCheckpointerMixin, LangGraphAgent):
             "console": StreamableHttpConnection(
                 transport="streamable_http",
                 url=console_mcp_url,
-            )
+            ),
         }
 
     def _get_system_prompt(self) -> str:

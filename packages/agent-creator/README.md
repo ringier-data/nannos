@@ -59,7 +59,7 @@ See `.env.template` for all configuration options. Key variables:
 - `AGENT_ID`: Unique identifier for this agent (for provenance tracking)
 - `CONSOLE_BACKEND_URL`: URL of the console backend MCP endpoint
 - `AWS_BEDROCK_REGION`: AWS region for Bedrock access
-- `CHECKPOINT_POSTGRES_HOST`: PostgreSQL host for conversation state
+- `POSTGRES_HOST`: PostgreSQL host for conversation state (the checkpointer reuses the shared `POSTGRES_*` connection; tables live in `POSTGRES_SCHEMA`)
 
 ## Development
 

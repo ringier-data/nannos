@@ -276,32 +276,37 @@ class TestExtractTextFromContent:
 
 
 class TestRetrieveFinalState:
-    def test_returns_values_on_success(self):
+    # retrieve_final_state is async and uses aget_state (AsyncPostgresSaver forbids
+    # synchronous get_state from the running event loop).
+    @pytest.mark.asyncio
+    async def test_returns_values_on_success(self):
         class MockState:
             values = {"messages": ["hello"]}
 
         class MockGraph:
-            def get_state(self, config):
+            async def aget_state(self, config):
                 return MockState()
 
-        result = retrieve_final_state(MockGraph(), {"configurable": {}})
+        result = await retrieve_final_state(MockGraph(), {"configurable": {}})
         assert result == {"messages": ["hello"]}
 
-    def test_raises_on_none_state(self):
+    @pytest.mark.asyncio
+    async def test_raises_on_none_state(self):
         class MockGraph:
-            def get_state(self, config):
+            async def aget_state(self, config):
                 return None
 
         with pytest.raises(ValueError, match="could not retrieve final state"):
-            retrieve_final_state(MockGraph(), {})
+            await retrieve_final_state(MockGraph(), {})
 
-    def test_raises_on_empty_values(self):
+    @pytest.mark.asyncio
+    async def test_raises_on_empty_values(self):
         class MockState:
             values = {}
 
         class MockGraph:
-            def get_state(self, config):
+            async def aget_state(self, config):
                 return MockState()
 
         with pytest.raises(ValueError, match="could not retrieve final state"):
-            retrieve_final_state(MockGraph(), {})
+            await retrieve_final_state(MockGraph(), {})
