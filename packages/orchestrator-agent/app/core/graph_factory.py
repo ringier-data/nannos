@@ -152,9 +152,19 @@ class GraphFactory:
             from agent_common.core.model_factory import create_embeddings
 
             # Embeddings via the Model Gateway (ADR-0001); cost captured proxy-side.
-            # No AWS-creds gate any more — the gateway owns provider credentials.
-            self._embeddings_model = create_embeddings("titan-embed-text-v2")
-            logger.debug("Configured AsyncPostgresStore with gateway embeddings (lazy init)")
+            # No AWS-creds gate any more — the gateway owns provider credentials. Uses the
+            # configured default embedding model; create_embeddings() raises
+            # EmbeddingModelNotConfigured when no default is set, disabling the store.
+            try:
+                self._embeddings_model = create_embeddings()
+                logger.debug("Configured AsyncPostgresStore with gateway embeddings (lazy init)")
+            except Exception as e:
+                # No default embedding model / no gateway URL (or unreachable) → fall back to
+                # ephemeral store rather than crash graph construction at startup.
+                self._store_enabled = False
+                self._postgres_conn = None
+                self._embeddings_model = None
+                logger.warning("Gateway embeddings unavailable (%s); document store disabled", e)
         else:
             logger.info(
                 "PostgreSQL not configured – document store disabled. "
@@ -264,8 +274,12 @@ class GraphFactory:
 
             index_config = None
             if self._embeddings_model is not None:
+                from agent_common.core.model_factory import get_embedding_dimension
+
                 index_config = {
-                    "dims": 1024,  # Titan Embeddings V2 dimension
+                    # Single source of truth: same dimension create_embeddings() requests,
+                    # so the index and the produced vectors always agree.
+                    "dims": get_embedding_dimension(),
                     "embed": self._embeddings_model,
                     "fields": ["contextualized_content"],
                 }
@@ -275,7 +289,10 @@ class GraphFactory:
                 index=index_config,
             )
             if index_config:
-                logger.info("Initialized AsyncPostgresStore with Titan Embeddings V2 (1024 dims) and connection pool")
+                logger.info(
+                    "Initialized AsyncPostgresStore with gateway embeddings (%d dims) and connection pool",
+                    index_config["dims"],
+                )
             else:
                 logger.info("Initialized AsyncPostgresStore without semantic indexing (no embeddings)")
         return self._store

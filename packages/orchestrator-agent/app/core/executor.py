@@ -506,15 +506,17 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         )
 
         # No models configured on the gateway → guide the admin instead of failing deep
-        # in the graph with an opaque provider error.
+        # in the graph with an opaque provider error. Only fire when the gateway was
+        # reached and genuinely returned nothing — a transient/cold-start fetch failure
+        # leaves the cache empty too, and must NOT be reported as "no model configured".
         try:
-            from agent_common.core.model_factory import get_available_models
+            from agent_common.core.model_factory import models_known_empty
 
-            models_configured = bool(get_available_models())
+            no_models_configured = models_known_empty()
         except Exception as e:  # don't block on a transient gateway hiccup
             logger.debug(f"Gateway model availability check failed ({e}); proceeding")
-            models_configured = True
-        if not models_configured:
+            no_models_configured = False
+        if no_models_configured:
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
                 new_text_message(

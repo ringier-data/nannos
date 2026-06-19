@@ -74,7 +74,7 @@ def _to_available(model: dict, default_model: str) -> AvailableModel | None:
 
 
 @router.get("/models", response_model=list[AvailableModel])
-async def list_available_models(request: Request, _user: User = Depends(require_auth_or_bearer_token)):
+async def list_available_models(request: Request, db: DbSession, _user: User = Depends(require_auth_or_bearer_token)):
     """Return the LLM models registered on the Model Gateway (live, cached ~30s).
 
     Any authenticated user (model selection isn't admin-only — regular users pick models
@@ -93,7 +93,11 @@ async def list_available_models(request: Request, _user: User = Depends(require_
             return cached[1]
         raise HTTPException(status_code=503, detail="Model Gateway unavailable") from e
 
-    default_model = os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")
+    # The authoritative chat default is the admin-editable model_defaults store (what the
+    # apps actually resolve via agent-common); env is only the fallback. Reading env here
+    # would badge a different model than apps use whenever an admin sets the default.
+    defaults = await request.app.state.model_defaults_service.get_all(db)
+    default_model = defaults.get("chat") or os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")
     models = [m for m in (_to_available(d, default_model) for d in raw) if m is not None]
     _cache["models"] = (now, models)
     return models

@@ -1419,7 +1419,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   }, [activeConversationId, messagesMap, loadMessages]);
 
   // Default settings for auto-initialization — no model preset so the
-  // orchestrator uses its own default (which respects OPENAI_COMPATIBLE_MODEL).
+  // orchestrator uses its own default (the gateway's default-for-chat model).
   const DEFAULT_SETTINGS: Settings = {
     agentUrl: config.orchestratorUrl,
     model: '',

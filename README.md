@@ -98,14 +98,23 @@ just start-local
 
 ### Model Provider
 
-The following environment variables should be set on orchestrator, and on any agent which A2A agent using agent-common as a base.
+All LLM traffic routes through the **Model Gateway** (a LiteLLM proxy) — it is the single source of truth for which models exist. Services (orchestrator and any A2A agent built on `agent-common`) talk only to the gateway; they hold **no** provider credentials of their own:
 
-| Provider | Configuration |
+| Variable | Description |
 | - | - |
-| Local/OpenAI Compatible API | OPENAI_COMPATIBLE_BASE_URL |
-| AWS Bedrock | AWS SDK compatible environment variables |
-| AzureAI | AZURE_OPENAI_API_KEY |
-| Google | GCP_KEY |
+| `LLM_GATEWAY_URL` | URL of the LiteLLM proxy (e.g. `http://litellm-proxy:4000`) |
+| `LLM_GATEWAY_API_KEY` | Virtual key the service authenticates to the gateway with |
+
+Provider credentials live on the **gateway**, where each model is registered in its `model_list`:
+
+| Provider | Configuration (on the gateway) |
+| - | - |
+| Local / OpenAI-compatible (Ollama, LM Studio, vLLM, …) | `model: openai/<name>`, `api_base`, `api_key` |
+| AWS Bedrock | `model: bedrock/…` + AWS SDK environment variables |
+| Azure OpenAI | `model: azure/…` + `AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_ENDPOINT` |
+| Google Vertex | `model: vertex_ai/…` + `GCP_KEY` / `GCP_PROJECT_ID` |
+
+For local development, `scripts/start-local.sh` provisions the gateway for you: set `OPENAI_COMPATIBLE_BASE_URL` (and optionally `OPENAI_COMPATIBLE_MODEL` / `OPENAI_COMPATIBLE_API_KEY`) and it registers your local server as the gateway `local` model — see [Quick-Start Local](#quick-start-local).
 
 ### Tracing 
 
@@ -147,6 +156,7 @@ The following components executes SQL DB migrations on start-up and we recommend
 | Image | Purpose | Port |
 |-------|---------|:---:|
 | `ghcr.io/ringier-data/nannos-orchestrator-agent` | **Required: entry-point for requests.** A2A server powered by LangGraph. Receives tasks, plans execution, discovers sub-agents, and delegates work. | 10001 |
+| `ghcr.io/ringier-data/nannos-litellm-proxy` | **Required: the Model Gateway.** LiteLLM proxy through which all services make LLM/embedding calls; single source of truth for the model registry and cost tracking. | 4000 |
 
 ### Core
 | Image | Purpose | Port |
@@ -187,13 +197,14 @@ Full reference: [`packages/orchestrator-agent/`](packages/orchestrator-agent/)
 | `POSTGRES_PASSWORD` | Database password |
 | `POSTGRES_SCHEMA` | Schema name (required for migrations to work) |
 
-**LLM provider — provide credentials for at least one:**
+**Model Gateway — required (the sole path for LLM calls):**
 
-| Variable | Provider |
-|----------|----------|
-| `OPENAI_COMPATIBLE_BASE_URL` | Any OpenAI-compatible server (Ollama, LM Studio, vLLM, etc.) |
-| `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_BEDROCK_REGION` | Amazon Bedrock |
-| `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` + `OPENAI_API_VERSION` | Azure OpenAI |
+| Variable | Description |
+|----------|-------------|
+| `LLM_GATEWAY_URL` | URL of the LiteLLM proxy (e.g. `http://litellm-proxy:4000`) |
+| `LLM_GATEWAY_API_KEY` | Virtual key for authenticating to the gateway |
+
+Provider credentials (Bedrock/Azure/Vertex/local) are configured on the gateway, not here — see [Model Provider](#model-provider).
 
 
 ---
@@ -238,7 +249,7 @@ Full reference: [`packages/agent-creator/.env.template`](packages/agent-creator/
 | `CONSOLE_BACKEND_URL` | URL of the console-backend service (default: `http://localhost:5001`) |
 | `CONSOLE_FRONTEND_URL` | URL of the console-frontend (default: `http://localhost:5173`) |
 
-LLM provider credentials — same options as the orchestrator.
+Model Gateway — same as the orchestrator: set `LLM_GATEWAY_URL` and `LLM_GATEWAY_API_KEY`.
 
 ---
 
@@ -259,7 +270,7 @@ Full reference: [`packages/agent-runner/.env.template`](packages/agent-runner/.e
 | `POSTGRES_PASSWORD` | Database password |
 | `POSTGRES_SCHEMA` | Schema name (required for migrations to work) |
 
-LLM provider credentials — same options as the orchestrator.
+Model Gateway — same as the orchestrator: set `LLM_GATEWAY_URL` and `LLM_GATEWAY_API_KEY`.
 
 ---
 

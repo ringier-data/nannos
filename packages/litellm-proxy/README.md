@@ -62,4 +62,44 @@ Order matters because virtual keys are DB-minted:
    ```
 3. **Deploy the apps** with `LLM_GATEWAY_URL` + `LLM_GATEWAY_API_KEY` set.
 
+## Bring-your-own LiteLLM gateway
+
+If you already operate a LiteLLM proxy you can skip provisioning this pod entirely
+(toggle it off in your GitOps repo) and route Nannos at your existing endpoint via
+`LLM_GATEWAY_URL`. Cost capture still works — `custom_logger.py` is a plain LiteLLM
+`CustomLogger` with no dependency on this pod (only `litellm` + `httpx` + stdlib), so
+you carry **four things** into your proxy:
+
+1. **The callback module** — put `custom_logger.py` on the proxy's `PYTHONPATH`. LiteLLM
+   resolves a `module.attr` callback **relative to the config dir**, so it must sit next
+   to your mounted config (this image uses `/etc/litellm` + `PYTHONPATH=/etc/litellm`).
+   Mount it as a ConfigMap/volume, or bake it into your own image layer.
+2. **The config line** — `litellm_settings: { callbacks: custom_logger.proxy_handler_instance }`.
+3. **Two env vars** — `CONSOLE_BACKEND_URL` and `GATEWAY_INGEST_TOKEN` (the latter must
+   equal console-backend's `GATEWAY_INGEST_TOKEN`).
+4. **A network path** — your proxy must be able to POST to console-backend
+   `/api/v1/usage/gateway-batch-log`.
+
+Two correctness contracts must hold regardless of which proxy serves traffic:
+
+- **Alias names = rate-card patterns.** The logger bills on `metadata.model_group` (the
+  public alias the caller requested, not the resolved deployment id), and console-backend
+  matches Rate Cards against that name. If your `model_list` exposes different `model_name`s,
+  rate cards miss and calls bill at **$0**. Keep aliases aligned with the Nannos rate cards.
+- **Attribution passthrough — no app change.** Apps forward `user_sub`/`conversation_id`/etc.
+  as `spend_logs_metadata` in request metadata; the logger reads it from
+  `litellm_params.metadata.spend_logs_metadata`. Upstream LiteLLM preserves caller metadata,
+  so this works on any LiteLLM proxy. Records with no `user_sub` are skipped (can't be billed).
+
+**Caveat — LiteLLM version.** `_billing_unit_breakdown` parses LiteLLM's normalized usage
+shapes (cache-inclusive vs additive token accounting), which is why the image is pinned to
+**v1.89.2**. On a materially different version the cache/reasoning bucketing can drift →
+mis-billing. Match that version or validate the breakdown against a known call.
+
+**Escape hatch.** If touching your proxy image is off the table, skip the in-process callback
+and instead consume LiteLLM's native spend logs (DB / generic webhook), transforming them into
+the `/api/v1/usage/gateway-batch-log` payload out-of-band. This decouples you from the version
+pin but you must re-derive the billing-unit breakdown (base / cache-creation / cache-read /
+reasoning) yourself — which is most of what `custom_logger.py` does.
+
 See `docs/adr/0001..0005` and `spikes/litellm-proxy-verification/` for the design and validation harness.

@@ -98,6 +98,13 @@ def create_lifespan(
         # Startup: Initialize and start budget guard singleton
         logger.info("Starting application lifespan...")
 
+        # Fail fast if the Model Gateway isn't configured (ADR-0001): it's the sole path
+        # for LLM traffic, so surface a missing LLM_GATEWAY_URL loudly at boot rather than
+        # as an opaque per-request failure (or a misleading "no models registered").
+        from agent_common.core.model_factory import assert_gateway_configured
+
+        assert_gateway_configured()
+
         budget_guard = init_budget_guard(
             project_name=AgentSettings.get_langsmith_project(),
             token_limit=AgentSettings.get_budget_monthly_token_limit(),
@@ -385,44 +392,11 @@ app = create_app()
 async def list_available_models():
     """Return the models available on this orchestrator instance.
 
-    For local OpenAI-compatible providers (LM Studio, Ollama, vLLM) the list of
-    loaded models is fetched live from the LLM server so the frontend always sees
-    the current selection regardless of what was available at startup.
+    The Model Gateway is the single source of truth for the live model list (ADR-0001),
+    including any local OpenAI-compatible server (LM Studio, Ollama, vLLM), which is
+    registered as a gateway alias rather than probed directly.
     """
-    metadata = get_available_models_metadata()
-
-    llm_base_url = os.getenv("OPENAI_COMPATIBLE_BASE_URL", "").rstrip("/")
-    if llm_base_url:
-        v1_base = llm_base_url + "/v1" if not llm_base_url.endswith("/v1") else llm_base_url
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{v1_base}/models")
-                resp.raise_for_status()
-                data = resp.json()
-                live_ids: list[str] = [m["id"] for m in data.get("data", []) if "id" in m]
-
-            if live_ids:
-                # Strip any stale local entries that were registered at import time
-                metadata = [
-                    m
-                    for m in metadata
-                    if not m.get("value", "").startswith("local") and m.get("provider") != "OpenAI Compatible"
-                ]
-                is_default_local = not any(m.get("is_default") for m in metadata)
-                for i, model_id in enumerate(live_ids):
-                    metadata.append(
-                        {
-                            "value": model_id,
-                            "label": model_id,
-                            "provider": "OpenAI Compatible",
-                            "supports_thinking": False,
-                            "is_default": is_default_local and i == 0,
-                        }
-                    )
-        except Exception as e:
-            logger.debug("Could not fetch live models from LLM server: %s", e)
-
-    return metadata
+    return get_available_models_metadata()
 
 
 def _caller_azp(request: Request) -> str | None:

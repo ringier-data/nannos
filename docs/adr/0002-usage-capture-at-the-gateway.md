@@ -19,6 +19,7 @@ The Rate Card is **not** replaceable by LiteLLM cost data: it supports agent-spe
 
 - Attribution must reach the proxy per-request. Mechanism: ContextVars set at the request boundary + a custom httpx event hook stamping `x-litellm-spend-logs-metadata` on every outbound call (extends the existing `current_sub_agent_id` / `SubAgentIdMiddleware` pattern). Clients are cached per `(model_type, thinking_level)`, so attribution cannot be baked in at construction.
 - New ingestion path: proxy `CustomLogger` → console-backend cost-ingestion → `RateCardService`.
+- The `CustomLogger` has no dependency on our proxy pod, so a deployment that runs its **own** LiteLLM gateway can drop the callback into it and keep cost capture (callback file + config line + `CONSOLE_BACKEND_URL`/`GATEWAY_INGEST_TOKEN`; aliases must match rate-card patterns; pinned to the v1.89.2 usage shapes). See `packages/litellm-proxy/README.md` → "Bring-your-own LiteLLM gateway".
 - Spike risks: ContextVar propagation across async→threadpool (sync LangGraph tool nodes); whether `cache_creation`/`cache_read` persist as separate spend-log fields; LiteLLM `model_info` custom-pricing application bugs (issue #11975).
 
 ## Spike outcome (2026-06-18) — CONFIRMED, cache-creation worry refuted

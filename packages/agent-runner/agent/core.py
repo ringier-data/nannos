@@ -288,9 +288,18 @@ class AgentRunner(BaseAgent):
         self._store: AsyncPostgresStore | None = None
         self._connection_pool: AsyncConnectionPool | None = None
         if self._postgres_conn:
-            # Embeddings via the Model Gateway (ADR-0001); cost captured proxy-side.
-            self._embeddings_model = create_embeddings("titan-embed-text-v2")
-            logger.info("AgentRunner: document store configured (PostgreSQL, gateway embeddings)")
+            # Embeddings via the Model Gateway (ADR-0001); cost captured proxy-side. Uses
+            # the configured default embedding model; create_embeddings() raises
+            # EmbeddingModelNotConfigured when no default is set, disabling the store.
+            try:
+                self._embeddings_model = create_embeddings()
+                logger.info("AgentRunner: document store configured (PostgreSQL, gateway embeddings)")
+            except Exception as e:
+                # No default embedding model / no gateway URL (or unreachable) → degrade
+                # gracefully rather than crash the runner at startup; indexing stays disabled.
+                self._embeddings_model = None
+                self._postgres_conn = None
+                logger.warning("AgentRunner: gateway embeddings unavailable (%s); document store disabled", e)
         else:
             self._embeddings_model = None
             logger.info("AgentRunner: document store disabled (POSTGRES_HOST not set)")
@@ -318,15 +327,19 @@ class AgentRunner(BaseAgent):
                         "row_factory": dict_row,
                     },
                 )
+            from agent_common.core.model_factory import get_embedding_dimension
+
             self._store = AsyncPostgresStore(
                 conn=self._connection_pool,
                 index={
-                    "dims": 1024,  # Titan Embeddings V2
+                    # Single source of truth: same dimension create_embeddings() requests,
+                    # so the index and the produced vectors always agree.
+                    "dims": get_embedding_dimension(),
                     "embed": self._embeddings_model,
                     "fields": ["contextualized_content"],  # description + chunk text combined, ≤50k chars
                 },
             )
-            logger.info("Initialised AsyncPostgresStore (Titan Embeddings V2, 1024 dims)")
+            logger.info("Initialised AsyncPostgresStore (gateway embeddings, %d dims)", get_embedding_dimension())
         return self._store
 
     async def setup_checkpointer(self) -> None:

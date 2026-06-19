@@ -735,7 +735,9 @@ export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-nannos-local}"
 # Shared secret for proxy → console-backend cost ingestion. Exported so console-backend
 # (launched via mprocs below) accepts it on /api/v1/usage/gateway-batch-log.
 export GATEWAY_INGEST_TOKEN="${GATEWAY_INGEST_TOKEN:-sk-nannos-local-ingest}"
-_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:main-stable}"
+# Pinned to match the prod base image (packages/litellm-proxy/Dockerfile) so local
+# reproduces prod's Vertex region-resolution behavior. Override with LITELLM_IMAGE.
+_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.89.2@sha256:713e2a036aecc8f2cb24cdf0bdeffd893b4f37190d4b21eb9e26ac648939c67a}"
 _GW_CONTAINER="nannos-litellm-proxy-local"
 
 log "Starting local Model Gateway (LiteLLM proxy) on :${LLM_GATEWAY_PORT}..."
@@ -760,9 +762,13 @@ _GW_CONFIG=$(mktemp /tmp/nannos-litellm-XXXXXX).yaml
 cat > "$_GW_CONFIG" <<'EOF'
 litellm_settings:
   callbacks: custom_logger.proxy_handler_instance
+  # Total per-request bound for non-streaming calls; streaming hangs are caught by the
+  # client-side inter-chunk watchdog (ADR-0004, Bedrock ignores stream_timeout).
   request_timeout: 600
   drop_params: true
-  num_retries: 0
+  # Gateway-native retries on transient failures/timeouts (ADR-0004), replacing the
+  # per-call boto3 retries dropped in the migration. Matches the k8s ConfigMap.
+  num_retries: 2
   # Emit structured (JSON) logs instead of colorized text, so the proxy's output
   # is parseable by log aggregators (matches the k8s ConfigMap).
   json_logs: true
@@ -782,11 +788,11 @@ else
   cat >> "$_GW_CONFIG" <<'EOF'
 model_list:
   - model_name: claude-sonnet-4.5
-    litellm_params: {model: bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
+    litellm_params: {model: bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
   - model_name: claude-sonnet-4.6
-    litellm_params: {model: bedrock/global.anthropic.claude-sonnet-4-6, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
+    litellm_params: {model: bedrock/eu.anthropic.claude-sonnet-4-6, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
   - model_name: claude-haiku-4-5
-    litellm_params: {model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
+    litellm_params: {model: bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
   - model_name: gpt-4o
     litellm_params: {model: azure/chatgpt-4o, api_base: os.environ/AZURE_OPENAI_ENDPOINT, api_key: os.environ/AZURE_OPENAI_API_KEY, api_version: "2024-08-01-preview", max_retries: 0}
   - model_name: gpt-4o-mini
@@ -800,7 +806,7 @@ model_list:
     litellm_params: {model: bedrock/amazon.titan-embed-text-v2:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
   - model_name: gemini-embedding-2
     model_info: {mode: embedding, input_modes: [text, image]}
-    litellm_params: {model: vertex_ai/gemini-embedding-2-preview, vertex_project: os.environ/GCP_PROJECT_ID, vertex_credentials: os.environ/GCP_KEY, vertex_location: us-central1, max_retries: 0}
+    litellm_params: {model: vertex_ai/gemini-embedding-2, vertex_project: os.environ/GCP_PROJECT_ID, vertex_credentials: os.environ/GCP_KEY, vertex_location: eu, max_retries: 0}
 EOF
 fi
 if [[ "$_HAS_LOCAL_LLM" == true ]]; then
@@ -850,6 +856,7 @@ docker run -d --name "$_GW_CONTAINER" \
   -e AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-}" \
   -e GCP_PROJECT_ID="${GCP_PROJECT_ID:-}" \
   -e GCP_KEY="${GCP_KEY:-}" \
+  -e DEFAULT_VERTEXAI_LOCATION="${DEFAULT_VERTEXAI_LOCATION:-eu}" \
   -e CONSOLE_BACKEND_URL="http://host.docker.internal:5001" \
   -e GATEWAY_INGEST_TOKEN="$GATEWAY_INGEST_TOKEN" \
   "$_LITELLM_IMAGE" --config /etc/litellm/config.yaml --port 4000 >/dev/null
@@ -879,8 +886,11 @@ _LOG_DIR="$ROOT_DIR/logs"
 mkdir -p "$_LOG_DIR"
 
 # ── Resolve optional env vars ──
-export OPENAI_COMPATIBLE_BASE_URL="${OPENAI_COMPATIBLE_BASE_URL:-}"
-export OPENAI_COMPATIBLE_MODEL="${OPENAI_COMPATIBLE_MODEL:-}"
+# OPENAI_COMPATIBLE_* are gateway-config inputs only (a `local` model_list alias, see
+# above) — they're NOT exported to the services, which reach the local model through the
+# gateway like any other provider (ADR-0001). Kept as plain shell vars for the status line.
+OPENAI_COMPATIBLE_BASE_URL="${OPENAI_COMPATIBLE_BASE_URL:-}"
+OPENAI_COMPATIBLE_MODEL="${OPENAI_COMPATIBLE_MODEL:-}"
 export MCP_GATEWAY_URL="${MCP_GATEWAY_URL:-}"
 export MCP_GATEWAY_CLIENT_ID="${MCP_GATEWAY_CLIENT_ID:-gatana}"
 export LANGSMITH_TRACING="${LANGSMITH_TRACING:-false}"
@@ -1055,10 +1065,9 @@ procs:
       SCHEDULER_CLAIM_LIMIT: "10"
       AGENT_RUNNER_URL: "http://localhost:5005"
       LOG_LEVEL: "INFO"
-      OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
       AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
-      BEDROCK_MODEL_ID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
       FILES_S3_BUCKET: "$FILES_S3_BUCKET"
       OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
@@ -1069,7 +1078,7 @@ procs:
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
       CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
-      CATALOG_SUMMARIZATION_MODEL_ID: "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+      CATALOG_SUMMARIZATION_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
       GOOGLE_OAUTH_CLIENT_ID: "$GOOGLE_OAUTH_CLIENT_ID"
       GOOGLE_OAUTH_CLIENT_SECRET: "$GOOGLE_OAUTH_CLIENT_SECRET"
       GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:5001/api/v1/catalogs/connect/callback"
@@ -1104,7 +1113,7 @@ procs:
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
       CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
-      CATALOG_SUMMARIZATION_MODEL_ID: "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+      CATALOG_SUMMARIZATION_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
       CATALOG_AUTO_SYNC_ENABLED: "true"
       CATALOG_SYNC_INTERVAL_SECONDS: "86400"
       CATALOG_SYNC_TICK_INTERVAL_SECONDS: "300"
@@ -1117,8 +1126,7 @@ procs:
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
       AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      BEDROCK_MODEL_ID: "global.anthropic.claude-haiku-4-5-20251001-v1:0"
-      OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
+      BEDROCK_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
       LOG_LEVEL: "INFO"
 
   soffice-worker:
@@ -1147,8 +1155,6 @@ procs:
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
-      OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
-      OPENAI_COMPATIBLE_MODEL: "$OPENAI_COMPATIBLE_MODEL"
       MCP_GATEWAY_URL: "$MCP_GATEWAY_URL"
       MCP_GATEWAY_CLIENT_ID: "$MCP_GATEWAY_CLIENT_ID"
       LANGSMITH_TRACING: "$LANGSMITH_TRACING"
@@ -1161,7 +1167,7 @@ procs:
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
       AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      BEDROCK_MODEL_ID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       GCP_KEY: '$GCP_KEY'
       GCP_PROJECT_ID: "$GCP_PROJECT_ID"
       GCP_LOCATION: "$GCP_LOCATION"
@@ -1193,8 +1199,6 @@ procs:
       AGENT_BASE_URL: "http://localhost:8080"
       CONSOLE_BACKEND_URL: "http://localhost:5001"
       CONSOLE_FRONTEND_URL: "http://localhost:5173"
-      OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
-      OPENAI_COMPATIBLE_MODEL: "$OPENAI_COMPATIBLE_MODEL"
       LANGSMITH_TRACING: "$LANGSMITH_TRACING"
       LANGSMITH_API_KEY: "$LANGSMITH_API_KEY"
       LANGSMITH_PROJECT: "$LANGSMITH_PROJECT"
@@ -1203,7 +1207,7 @@ procs:
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
       AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      BEDROCK_MODEL_ID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       # Checkpointer reuses POSTGRES_* (docstore DB / public schema), like the other agents
       POSTGRES_HOST: "localhost"
       POSTGRES_PORT: "5402"
@@ -1228,8 +1232,6 @@ procs:
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
-      OPENAI_COMPATIBLE_BASE_URL: "$OPENAI_COMPATIBLE_BASE_URL"
-      OPENAI_COMPATIBLE_MODEL: "$OPENAI_COMPATIBLE_MODEL"
       MCP_GATEWAY_URL: "$MCP_GATEWAY_URL"
       MCP_GATEWAY_CLIENT_ID: "$MCP_GATEWAY_CLIENT_ID"
       LANGSMITH_TRACING: "$LANGSMITH_TRACING"
@@ -1240,7 +1242,7 @@ procs:
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
       AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      BEDROCK_MODEL_ID: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       GCP_KEY: '$GCP_KEY'
       GCP_PROJECT_ID: "$GCP_PROJECT_ID"
       GCP_LOCATION: "$GCP_LOCATION"

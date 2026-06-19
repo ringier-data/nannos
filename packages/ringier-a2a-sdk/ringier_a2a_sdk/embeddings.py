@@ -12,15 +12,16 @@ Gemini Embedding 2 has no task_type parameter; asymmetric retrieval uses text pr
 Vertex fuses every element of the request's input list into ONE embedding, so text+image
 go in a single flat list → one combined vector (one model call per item).
 
-Cost is captured proxy-side: we stamp per-request spend-logs metadata (user_sub,
-catalog_id) that the proxy's CustomLogger reads — no in-app cost logging.
+Cost is captured proxy-side: we stamp per-request spend-logs metadata via the shared
+agent-common attribution helper (the full set — user_sub, conversation_id, sub_agent_id,
+scheduled_job_id, catalog_id) that the proxy's CustomLogger reads — no in-app cost logging.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import json
+import contextvars
 import logging
 import os
 from concurrent.futures import Executor
@@ -35,7 +36,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL_ALIAS = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 _DEFAULT_DIMENSION = 1024
 _MAX_CONCURRENT = 20
-_SPEND_LOGS_HEADER = "x-litellm-spend-logs-metadata"
 
 
 def _gateway_base() -> str:
@@ -83,22 +83,29 @@ class GeminiEmbeddings(Embeddings):
             return f"task: search result | query: {text}"
         return f"title: none | text: {text}"
 
-    def _spend_metadata(self) -> dict[str, str]:
-        """Attribution for proxy-side cost capture (user_sub explicit or from ContextVar)."""
-        user_sub = self._user_sub
-        if not user_sub:
+    def _attribution_header(self) -> dict[str, str]:
+        """Spend-logs header for proxy-side cost capture (ADR-0002).
+
+        Uses the canonical agent-common attribution (the full field set: user_sub,
+        conversation_id, sub_agent_id, scheduled_job_id, catalog_id) via the shared
+        header builder, with explicit constructor overrides. Falls back to the SDK
+        request user_sub only when the canonical var is unset (an SDK-only boundary), so
+        catalog_search inside the orchestrator / sub-agents / scheduled jobs is attributed
+        with all its dimensions instead of dropping everything but user_sub+catalog_id.
+        """
+        from agent_common.core.attribution import attribution_header, current_user_sub
+
+        overrides: dict[str, Any] = {"catalog_id": self._catalog_id}
+        if self._user_sub:
+            overrides["user_sub"] = self._user_sub
+        elif current_user_sub.get() is None:
             try:
                 from ringier_a2a_sdk.cost_tracking.logger import get_request_user_sub
 
-                user_sub = get_request_user_sub()
+                overrides["user_sub"] = get_request_user_sub()
             except Exception:
-                user_sub = None
-        meta: dict[str, str] = {}
-        if user_sub:
-            meta["user_sub"] = user_sub
-        if self._catalog_id:
-            meta["catalog_id"] = self._catalog_id
-        return meta
+                pass
+        return attribution_header(**overrides)
 
     def _invoke(self, text: str, image_bytes: bytes | None = None, mime_type: str = "image/png") -> list[float]:
         """POST one item (text, or text+image fused) to the gateway and return its vector."""
@@ -110,15 +117,23 @@ class GeminiEmbeddings(Embeddings):
             "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
             "Content-Type": "application/json",
         }
-        meta = self._spend_metadata()
-        if meta:
-            headers[_SPEND_LOGS_HEADER] = json.dumps(meta)
+        headers.update(self._attribution_header())
 
         body = {"model": self.model_id, "input": inputs, "dimensions": self.dimension}
         with httpx.Client(timeout=60.0) as client:
             resp = client.post(f"{_gateway_base()}/embeddings", json=body, headers=headers)
             resp.raise_for_status()
             data = resp.json()["data"]
+        # Vertex multimodal fuses every input-list element into ONE vector, so we expect a
+        # single embedding and read data[0]. If the gateway ever returns one vector per
+        # element (the default OpenAI /embeddings contract), silently taking data[0] would
+        # drop the image — fail loudly instead (#8).
+        if len(data) != 1:
+            raise RuntimeError(
+                f"Expected a single fused embedding from {self.model_id} for a "
+                f"{len(inputs)}-element input, got {len(data)} — the gateway is returning "
+                "per-element vectors, not a fused one; multimodal embeddings would be wrong."
+            )
         return list(data[0]["embedding"])
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
@@ -136,14 +151,19 @@ class GeminiEmbeddings(Embeddings):
 
         async def _embed_one(t: str) -> list[float]:
             async with semaphore:
-                return await loop.run_in_executor(self._executor, self._invoke, t)
+                # copy the calling context so _attribution_header() still sees the attribution
+                # ContextVars inside the executor thread — a raw run_in_executor would lose
+                # them and the proxy would drop the embedding's cost.
+                ctx = contextvars.copy_context()
+                return await loop.run_in_executor(self._executor, ctx.run, self._invoke, t)
 
         return await asyncio.gather(*[_embed_one(t) for t in texts])
 
     async def aembed_query(self, text: str) -> list[float]:
         """Embed a single query text asynchronously."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self._invoke, text)
+        ctx = contextvars.copy_context()  # preserve attribution ContextVar across the executor hop
+        return await loop.run_in_executor(self._executor, ctx.run, self._invoke, text)
 
     def embed_with_image(self, text: str, image_bytes: bytes) -> list[float]:
         """Embed text + image together (multimodal). Used by the sync pipeline."""
@@ -152,4 +172,5 @@ class GeminiEmbeddings(Embeddings):
     async def aembed_with_image(self, text: str, image_bytes: bytes) -> list[float]:
         """Async version of embed_with_image."""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self._invoke, text, image_bytes)
+        ctx = contextvars.copy_context()  # preserve attribution ContextVar across the executor hop
+        return await loop.run_in_executor(self._executor, ctx.run, self._invoke, text, image_bytes)

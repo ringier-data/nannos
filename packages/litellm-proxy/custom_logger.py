@@ -47,10 +47,23 @@ def _as_dict(obj) -> dict:
 
 
 def _billing_unit_breakdown(usage: dict) -> dict[str, int]:
-    """Map native usage → Nannos billing units (same keys as the in-app callback).
+    """Map usage → Nannos billing units (same keys as the in-app callback).
 
-    cache_creation / cache_read are *additive* on Bedrock (not included in
-    prompt_tokens); reasoning is included in completion_tokens.
+    Mirrors LiteLLM's own cost_calculator (`generic_cost_per_token` in
+    litellm/litellm_core_utils/llm_cost_calc/utils.py): partition input into three priced
+    buckets — full-price base, cache-read (discounted), cache-creation (premium) — that sum
+    to the billed input. reasoning is included in completion_tokens.
+
+    The token counts arrive in two shapes and we must handle both without double-counting:
+      - LiteLLM-normalized (e.g. Anthropic via calculate_usage): prompt_tokens is
+        cache-INCLUSIVE (= base + cache_creation + cache_read); the true non-cache base is
+        exposed as prompt_tokens_details.text_tokens, and cache_read/cache_creation are
+        mirrored both top-level and under prompt_tokens_details.
+      - Native additive (Bedrock-style): cache_read_input_tokens / cache_creation_input_tokens
+        are top-level only and NOT part of prompt_tokens, so prompt_tokens is already the base.
+
+    Discriminator: the inclusive portions are exactly the ones reported under
+    prompt_tokens_details; top-level-only cache tokens are additive and must NOT be subtracted.
     """
     prompt_details = usage.get("prompt_tokens_details") or {}
     completion_details = usage.get("completion_tokens_details") or {}
@@ -58,23 +71,28 @@ def _billing_unit_breakdown(usage: dict) -> dict[str, int]:
     total_input = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
     total_output = usage.get("completion_tokens") or usage.get("output_tokens") or 0
 
-    cache_creation = (
-        usage.get("cache_creation_input_tokens")
-        or prompt_details.get("cache_creation_tokens")
-        or 0
-    )
-    cache_read = (
-        usage.get("cache_read_input_tokens")
-        or prompt_details.get("cached_tokens")
-        or 0
-    )
+    # cache_read / cache_creation for BILLING: prefer the top-level provider field, fall back
+    # to the prompt_tokens_details mirror (LiteLLM-normalized sets both to the same value).
+    inclusive_cache_read = prompt_details.get("cached_tokens") or 0
+    inclusive_cache_creation = prompt_details.get("cache_creation_tokens") or 0
+    cache_read = usage.get("cache_read_input_tokens") or inclusive_cache_read or 0
+    cache_creation = usage.get("cache_creation_input_tokens") or inclusive_cache_creation or 0
     reasoning = completion_details.get("reasoning_tokens") or 0
 
+    # Base (full-price) input. Trust text_tokens when present — it is LiteLLM's authoritative
+    # non-cache base (and avoids guessing). Otherwise reconstruct it by subtracting ONLY the
+    # inclusive (details-reported) cache portions, since additive top-level tokens were never
+    # part of total_input. This fixes the prior bug where cache_creation was billed twice on
+    # normalized Anthropic usage (folded into base AND charged as cache_creation).
+    text_tokens = prompt_details.get("text_tokens")
+    if text_tokens:
+        base_input = text_tokens
+    else:
+        base_input = total_input - inclusive_cache_read - inclusive_cache_creation
+        if base_input < 0:  # defensive: never under-bill on an unexpected shape
+            base_input = total_input
+
     breakdown: dict[str, int] = {}
-    base_input = total_input - (cache_read if cache_read else 0)
-    # On providers where cache tokens are additive, prompt_tokens IS the base.
-    if cache_read and base_input < 0:
-        base_input = total_input
     if base_input > 0:
         breakdown["base_input_tokens"] = base_input
     if cache_creation > 0:
@@ -89,6 +107,27 @@ def _billing_unit_breakdown(usage: dict) -> dict[str, int]:
         breakdown["reasoning_output_tokens"] = reasoning
 
     return {k: v for k, v in breakdown.items() if v > 0}
+
+
+def _estimate_text_token_units(kwargs: dict) -> int:
+    """Fallback ~4-chars/token estimate of an embedding request's text input length.
+
+    Some embedding providers (notably Vertex/Gemini) report 0 tokens in usage, which would
+    otherwise bill the call $0. When that happens we re-apply the pre-gateway in-app
+    heuristic (len(text) // 4) so text embeddings still carry a cost. Image/data-URI parts
+    are excluded — they're billed separately via `input_images`.
+    """
+    raw = kwargs.get("input")
+    if raw is None:
+        return 0
+    items = raw if isinstance(raw, list) else [raw]
+    chars = 0
+    for item in items:
+        parts = item if isinstance(item, list) else [item]
+        for part in parts:
+            if isinstance(part, str) and not part.startswith(("data:", "gs://")):
+                chars += len(part)
+    return chars // 4
 
 
 def _count_image_inputs(kwargs: dict) -> int:
@@ -125,20 +164,32 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
         logger.info("[cost] no user_sub in spend_logs_metadata; skipping")
         return None
 
+    # Rate cards key on the public alias (the model_group the caller requested), not the
+    # resolved deployment id that kwargs["model"] holds after routing (e.g.
+    # "bedrock/anthropic.claude-..."); using the deployment id risks a rate-card miss → $0.
+    model_name = metadata.get("model_group") or kwargs.get("model")
+
     usage = _as_dict(getattr(response_obj, "usage", None))
     breakdown = _billing_unit_breakdown(usage)
     # Multimodal embeddings report 0 tokens (Vertex), so bill images explicitly.
     images = _count_image_inputs(kwargs)
     if images:
         breakdown["input_images"] = breakdown.get("input_images", 0) + images
+    # Embedding calls whose provider reported 0 text tokens (Vertex/Gemini): estimate text
+    # tokens from input length so they aren't billed $0 (matches the `input_text_tokens`
+    # rate-card unit). Only when no token-based input unit was already captured.
+    if kwargs.get("input") is not None and "base_input_tokens" not in breakdown:
+        estimated = _estimate_text_token_units(kwargs)
+        if estimated:
+            breakdown["input_text_tokens"] = breakdown.get("input_text_tokens", 0) + estimated
     if not breakdown:
-        logger.warning("[cost] empty billing breakdown for model=%s", kwargs.get("model"))
+        logger.warning("[cost] empty billing breakdown for model=%s", model_name)
         return None
 
     return {
         "user_sub": user_sub,
         "provider": kwargs.get("custom_llm_provider") or litellm_params.get("custom_llm_provider"),
-        "model_name": kwargs.get("model"),
+        "model_name": model_name,
         "billing_unit_breakdown": breakdown,
         "conversation_id": attribution.get("conversation_id"),
         "sub_agent_id": attribution.get("sub_agent_id"),

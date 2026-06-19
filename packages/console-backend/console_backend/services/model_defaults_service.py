@@ -9,33 +9,43 @@ alias has been retired.
 """
 
 import logging
+from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..models.user import User
+
+if TYPE_CHECKING:
+    from ..repositories.model_defaults_repository import ModelDefaultsRepository
 
 logger = logging.getLogger(__name__)
 
-VALID_ROLES = ("chat", "embedding", "multimodal_embedding")
+VALID_ROLES = ("chat", "embedding", "multimodal_embedding", "indexing")
 
 
 class ModelDefaultsService:
+    def __init__(self) -> None:
+        self._repository: Optional["ModelDefaultsRepository"] = None
+
+    def set_repository(self, repository: "ModelDefaultsRepository") -> None:
+        """Inject the repository (writes go through it so audit logging is automatic)."""
+        self._repository = repository
+
+    @property
+    def repository(self) -> "ModelDefaultsRepository":
+        if self._repository is None:
+            raise RuntimeError("ModelDefaultsRepository not injected. Call set_repository() during init.")
+        return self._repository
+
     async def get_all(self, db: AsyncSession) -> dict[str, str]:
         """{role: model_alias} for every role that has a default set."""
-        result = await db.execute(text("SELECT role, model_alias FROM model_defaults"))
-        return {row.role: row.model_alias for row in result}
+        return await self.repository.get_all(db)
 
-    async def set_default(self, db: AsyncSession, role: str, model_alias: str) -> None:
-        """Upsert the default alias for a role (exactly one alias per role)."""
+    async def set_default(self, db: AsyncSession, actor: User, role: str, model_alias: str) -> None:
+        """Upsert the default alias for a role (exactly one alias per role).
+
+        Writes through the audited repository so the fleet-wide config change is recorded
+        automatically (AGENTS.md repository-pattern rule)."""
         if role not in VALID_ROLES:
             raise ValueError(f"role must be one of {VALID_ROLES}")
-        await db.execute(
-            text(
-                """
-                INSERT INTO model_defaults (role, model_alias, updated_at)
-                VALUES (:role, :alias, NOW())
-                ON CONFLICT (role) DO UPDATE
-                    SET model_alias = EXCLUDED.model_alias, updated_at = NOW()
-                """
-            ),
-            {"role": role, "alias": model_alias},
-        )
+        await self.repository.upsert_default(db, actor=actor, role=role, model_alias=model_alias)

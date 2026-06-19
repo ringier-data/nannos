@@ -51,14 +51,24 @@ def _gateway_base_url() -> str:
     return url.rstrip("/")
 
 
+def assert_gateway_configured() -> None:
+    """Fail fast at startup when the gateway URL is missing.
+
+    The gateway is the sole path for LLM traffic (ADR-0001), so a service that needs
+    models should call this in its startup hook to surface the misconfiguration loudly
+    at boot rather than as an opaque per-request failure deep in the graph."""
+    _gateway_base_url()
+
+
 def get_reasoning_effort(thinking_level: ThinkingLevel | None) -> str | None:
-    """The thinking level IS the LiteLLM `reasoning_effort` (ADR-0003) — passed through
-    faithfully (minimal/low/medium/high/xhigh). The gateway drops it for models that
-    don't accept a given level (`drop_params`); the UI only offers levels each model
-    supports, so this is a straight passthrough."""
+    """Map the app `thinking_level` (minimal/low/medium/high) to LiteLLM's unified
+    `reasoning_effort` (ADR-0003). `minimal` has no distinct provider tier, so it floors
+    to `low` (Bedrock floors at 1024 anyway); the rest pass through. The gateway drops
+    the param for models that don't support a given level (`drop_params`)."""
     if not thinking_level:
         return None
-    return thinking_level.value if isinstance(thinking_level, ThinkingLevel) else str(thinking_level)
+    value = thinking_level.value if isinstance(thinking_level, ThinkingLevel) else str(thinking_level)
+    return "low" if value == "minimal" else value
 
 
 def create_model(
@@ -111,6 +121,23 @@ class EmbeddingModelNotConfigured(RuntimeError):
     set a default embedding model in the console first)."""
 
 
+# Single source of truth for the embedding vector dimension. The pgvector document-store
+# index is created with a fixed `dims`, so the embeddings we produce MUST match it or
+# inserts/similarity-search break. We pin the request dimension here (Matryoshka-capable
+# models truncate to it) and the stores read the SAME value for their index `dims`.
+# Defaults to 1024 (the historical Titan/Gemini dimension); override only in lockstep with
+# a re-index, since changing it invalidates existing vectors.
+EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+
+
+def get_embedding_dimension() -> int:
+    """The embedding vector dimension to request and to size the pgvector index with.
+
+    Stores MUST use this for their index `dims` so the index and the produced vectors agree
+    (see create_embeddings, which forwards it as the `dimensions` request param)."""
+    return EMBEDDING_DIMENSION
+
+
 def create_embeddings(model_type: str | None = None, multimodal: bool = False):
     """Create a gateway-backed text embeddings client (ADR-0001).
 
@@ -119,6 +146,10 @@ def create_embeddings(model_type: str | None = None, multimodal: bool = False):
     "use the default when set" behavior); if no default is set, raises
     EmbeddingModelNotConfigured so callers can disable the feature gracefully. An explicit
     `model_type` is honored as-is (a retired alias still degrades to the default).
+
+    The output `dimensions` is pinned to get_embedding_dimension() so the produced vectors
+    match the pgvector index the document store is created with — otherwise a default model
+    whose native dimension differs from the index (e.g. 3072 vs 1024) breaks inserts/search.
     """
     from langchain_openai import OpenAIEmbeddings
 
@@ -136,6 +167,7 @@ def create_embeddings(model_type: str | None = None, multimodal: bool = False):
         base_url=_gateway_base_url(),
         api_key=os.getenv("LLM_GATEWAY_API_KEY", "sk-nannos-gateway"),
         model=model_type,
+        dimensions=get_embedding_dimension(),  # match the store's pgvector index dims
         http_async_client=build_attribution_http_client(),
         check_embedding_ctx_length=False,  # don't run tiktoken against a non-OpenAI model
     )
@@ -169,7 +201,9 @@ def _refresh_if_stale(cache: dict, key: str, ttl: float, lock: threading.Lock, f
     def _run():
         try:
             cache[key] = fetch()
+            cache["last_error"] = None
         except Exception as e:
+            cache["last_error"] = e
             logger.debug("Background refresh of '%s' failed: %s", key, e)
         finally:
             cache["ts"] = time.monotonic()  # set even on failure → back off a full TTL
@@ -181,7 +215,7 @@ def _refresh_if_stale(cache: dict, key: str, ttl: float, lock: threading.Lock, f
         threading.Thread(target=_run, daemon=True, name=f"refresh-{key}").start()
 
 
-_GW_CACHE: dict = {"ts": _COLD, "models": {}, "inflight": False}
+_GW_CACHE: dict = {"ts": _COLD, "models": {}, "inflight": False, "last_error": None}
 _GW_TTL = 60.0
 _GW_LOCK = threading.Lock()
 
@@ -189,7 +223,14 @@ _GW_LOCK = threading.Lock()
 def _fetch_gateway_models() -> dict[str, dict]:
     base = os.getenv("LLM_GATEWAY_URL")
     if not base:
-        return _GW_CACHE["models"]  # nothing to fetch; keep last-known
+        # An unset gateway URL is a misconfiguration, NOT an empty registry. Raise so the
+        # error is recorded in `last_error` (models_known_empty() then returns False and the
+        # orchestrator won't tell the user "no models registered"); the real cause surfaces
+        # via _gateway_base_url() raising on the next create_model call.
+        raise RuntimeError(
+            "LLM_GATEWAY_URL is not set. The Model Gateway is the sole path for LLM "
+            "calls (ADR-0001); point it at the litellm-proxy service."
+        )
     req = urllib.request.Request(
         base.rstrip("/") + "/v1/model/info",
         headers={"Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', '')}"},
@@ -210,7 +251,7 @@ def _gateway_models() -> dict[str, dict]:
 # Defaults live in console-backend (not the gateway): LiteLLM's /model/update can't
 # persist a custom flag, so console-backend is the authoritative, runtime-editable store
 # and exposes them on an unauthenticated in-cluster endpoint.
-_DEFAULTS_CACHE: dict = {"ts": _COLD, "defaults": {}, "inflight": False}
+_DEFAULTS_CACHE: dict = {"ts": _COLD, "defaults": {}, "inflight": False, "last_error": None}
 _DEFAULTS_TTL = 60.0
 _DEFAULTS_LOCK = threading.Lock()
 
@@ -298,6 +339,16 @@ def get_available_models() -> list[ModelType]:
     return list(_gateway_models().keys())  # type: ignore[return-value]
 
 
+def models_known_empty() -> bool:
+    """True only when the gateway was queried successfully and returned no models.
+
+    Distinguishes a genuinely empty registry (guide the admin to register one) from a
+    transient/cold-start fetch failure (don't block — the gateway is the authority).
+    On a failed or not-yet-completed fetch this returns False so callers fail open."""
+    models = _gateway_models()
+    return _GW_CACHE.get("last_error") is None and not models
+
+
 def is_valid_model(model_name: str) -> bool:
     """Valid if registered on the gateway. When the gateway list can't be read, don't
     reject — the gateway is the authority and will 400 on a genuinely unknown alias."""
@@ -334,17 +385,12 @@ def get_available_models_metadata() -> list[dict]:
     ]
 
 
-# Ordered preference for cheap/fast models for indexing/chunking.
-_INDEXING_MODEL_PREFERENCE: list[str] = ["claude-haiku-4-5", "gpt-4o-mini", "gemini-3-flash-preview"]
-
-
 def get_default_indexing_model() -> ModelType:
-    """Cheapest/fastest available model for semantic indexing."""
-    available = set(get_available_models())
-    for model in _INDEXING_MODEL_PREFERENCE:
-        if model in available:
-            return model  # type: ignore[return-value]
-    if available:
-        return next(iter(available))  # type: ignore[return-value]
-    # Gateway unreachable/empty — fall back to the configured default alias.
-    return get_default_model()
+    """Model for semantic indexing/chunking (generating context descriptions).
+
+    Follows the per-role default convention (ADR-0001), same as chat/embedding: use the
+    console-set "indexing" default if present, else degrade to the fleet chat default.
+    No hardcoded alias list — the gateway + model_defaults are the single source of truth,
+    so a retired/renamed alias never silently routes indexing to an arbitrary (possibly
+    expensive) model."""
+    return _default_alias_for("indexing") or get_default_model()

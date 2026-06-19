@@ -235,11 +235,13 @@ async def set_default(
     if model is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model id {model_id} not registered")
     alias = model.get("model_name") or ""
+    defaults_service = get_model_defaults_service(request)
+    # The audited repository records this fleet-wide config change and commits
+    # (AGENTS.md: admin writes go through the repository pattern → automatic audit).
     try:
-        await get_model_defaults_service(request).set_default(db, body.role, alias)
+        await defaults_service.set_default(db, actor=user, role=body.role, model_alias=alias)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    await db.commit()
     logger.info("Set '%s' (id=%s) as default for role=%s by %s", alias, model_id, body.role, user.id)
     return {"status": "ok", "model_name": alias, "default_for": body.role}
 

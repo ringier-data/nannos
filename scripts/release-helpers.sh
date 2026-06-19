@@ -15,7 +15,7 @@
 #
 
 # Mind that the order is critical for correct dependency bumping: if package A depends on package B, then A must come after B in the list so that B's version is bumped before A's.
-ALL_PACKAGES="ringier-a2a-sdk soffice-worker console-backend voice-agent agent-creator agent-runner orchestrator-agent console-frontend client-slack client-slack-frontend client-email client-google-chat"
+ALL_PACKAGES="ringier-a2a-sdk soffice-worker console-backend voice-agent agent-creator agent-runner orchestrator-agent console-frontend client-slack client-slack-frontend client-email client-google-chat litellm-proxy"
 
 # Packages that only build Docker images but share another package's version (not independently released)
 VIRTUAL_PACKAGES="catalog-worker"
@@ -37,6 +37,7 @@ pkg_dir() {
     voice-agent)            echo "packages/voice-agent" ;;
     client-google-chat)      echo "packages/client-google-chat" ;;
     soffice-worker)          echo "packages/soffice-worker" ;;
+    litellm-proxy)           echo "packages/litellm-proxy" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }
@@ -44,7 +45,7 @@ pkg_dir() {
 pkg_type() {
   case "$1" in
     console-frontend|client-slack-frontend|client-slack|client-email|client-google-chat) echo "node" ;;
-    agent-creator|agent-runner|orchestrator-agent|console-backend|catalog-worker|ringier-a2a-sdk|voice-agent|soffice-worker) echo "python" ;;
+    agent-creator|agent-runner|orchestrator-agent|console-backend|catalog-worker|ringier-a2a-sdk|voice-agent|soffice-worker|litellm-proxy) echo "python" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
   esac
 }

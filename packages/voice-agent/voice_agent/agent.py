@@ -68,7 +68,7 @@ def build_gemini_client() -> genai.Client:
     """
     gcp_key = os.getenv("GCP_KEY")
     gcp_project = os.getenv("GCP_PROJECT_ID")
-    gcp_location = os.getenv("GCP_LOCATION", "us-central1")
+    gcp_location = os.getenv("GCP_LOCATION", "europe-west1")  # prefer EU; matches the deployment default
 
     if not gcp_key:
         raise RuntimeError(

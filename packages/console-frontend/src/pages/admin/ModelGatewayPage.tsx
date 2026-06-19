@@ -457,7 +457,7 @@ export function ModelGatewayPage() {
               <Label>Gateway model id{catalog.length > 0 ? ` (${form.mode} models — type to filter)` : ''}</Label>
               <div className="relative">
                 <Input
-                  placeholder="bedrock/global.anthropic.claude-sonnet-4-6"
+                  placeholder="bedrock/eu.anthropic.claude-sonnet-4-6"
                   value={form.litellm_model}
                   autoComplete="off"
                   onFocus={() => setPickerOpen(true)}

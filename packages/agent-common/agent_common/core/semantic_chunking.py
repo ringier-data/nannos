@@ -183,11 +183,13 @@ async def chunk_with_context(
     logger.info(f"Starting semantic chunking for document with {len(content)} chars")
 
     # Initialize embeddings model if not provided — via the Model Gateway (ADR-0001),
-    # cost captured proxy-side.
+    # cost captured proxy-side. Use the configured default embedding model (not a hardcoded
+    # alias): create_embeddings() raises EmbeddingModelNotConfigured when no default is set,
+    # which the document-store feature gates on upstream (is_embeddings_configured).
     if embeddings_model is None:
         from agent_common.core.model_factory import create_embeddings
 
-        embeddings_model = create_embeddings("titan-embed-text-v2")
+        embeddings_model = create_embeddings()
 
     # Step 1: Split into sentences
     try:

@@ -66,6 +66,25 @@ def attribution_scope(**fields):
             var.reset(token)
 
 
+def attribution_header(**overrides) -> dict[str, str]:
+    """Build the `x-litellm-spend-logs-metadata` header for a manually-constructed
+    request (one that doesn't go through the hooked client below).
+
+    Merges the current attribution ContextVars with explicit overrides (overrides win;
+    None values ignored), so callers stamp the full attribution set — user_sub,
+    conversation_id, sub_agent_id, scheduled_job_id, … — not an ad-hoc subset. Returns
+    {} when there's nothing to stamp, so callers can `headers.update(attribution_header())`.
+
+    This is the single place the header name and field shape live; the embeddings adapter
+    and console-backend's gateway_chat use it instead of hand-rolling the header.
+    """
+    attrib = current_attribution()
+    for name, value in overrides.items():
+        if name in _FIELDS and value is not None:
+            attrib[name] = value
+    return {_HEADER: json.dumps(attrib)} if attrib else {}
+
+
 async def _stamp_metadata(request) -> None:
     """httpx request event hook: inject attribution as the spend-logs header."""
     attrib = current_attribution()
@@ -73,14 +92,28 @@ async def _stamp_metadata(request) -> None:
         request.headers[_HEADER] = json.dumps(attrib)
 
 
+_shared_http_client = None
+
+
 def build_attribution_http_client():
-    """A shared httpx.AsyncClient whose hook stamps per-request attribution.
+    """A process-wide shared httpx.AsyncClient whose hook stamps per-request attribution.
 
     Safe to reuse across requests: the hook reads ContextVars at send time, which
     are isolated per asyncio task (spike check 4b). `asyncio.to_thread` copies the
     context so the existing sandbox path stays correct (spike check 4c); only a raw
     `loop.run_in_executor` would drop them.
-    """
-    import httpx
 
-    return httpx.AsyncClient(event_hooks={"request": [_stamp_metadata]}, timeout=600.0)
+    Returns a single lazily-created client rather than a new one per call: create_model /
+    create_embeddings run on uncached per-request/per-sub-agent paths, so constructing a
+    fresh AsyncClient (each owning a connection pool, timeout=600s) every time leaked an
+    unclosed client per build. One shared client pools connections to the gateway and lives
+    for the process lifetime — nothing closes it, which is correct here (it is the gateway
+    client, not a per-request resource). httpx clients are loop-agnostic until first use, so
+    a module-level singleton is safe across the app's single event loop.
+    """
+    global _shared_http_client
+    if _shared_http_client is None:
+        import httpx
+
+        _shared_http_client = httpx.AsyncClient(event_hooks={"request": [_stamp_metadata]}, timeout=600.0)
+    return _shared_http_client

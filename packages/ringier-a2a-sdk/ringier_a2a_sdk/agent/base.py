@@ -156,6 +156,17 @@ class BaseAgent(CostTrackingMixin, ABC):
                 access_token = user_config.access_token.get_secret_value()
                 _set_request_access_token(access_token)
             logger.debug(f"Set request credentials for user {user_config.user_sub}")
+
+        # Bridge to the canonical agent-common attribution ContextVar so gateway calls made
+        # directly under this boundary (chat clients and the embeddings adapter) are
+        # attributed even when only the SDK request user_sub was set (ADR-0002). The graph's
+        # create_runnable_config layers the richer per-invocation dimensions on top.
+        try:
+            from agent_common.core.attribution import set_attribution
+
+            set_attribution(user_sub=user_config.user_sub)
+        except ImportError:
+            pass
         # Delegate to agent-specific implementation
         # Note: sub_agent_id is available via current_sub_agent_id ContextVar for adding to LangGraph tags
         try:

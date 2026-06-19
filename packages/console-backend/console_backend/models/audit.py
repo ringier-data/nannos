@@ -26,6 +26,7 @@ class AuditEntityType(str, Enum):
     OUTBOUND_SCIM_ENDPOINT = "outbound_scim_endpoint"  # For outbound SCIM endpoint management
     SKILL = "skill"  # For skill registry operations
     TOOL_RISK_SCORE = "tool_risk_score"  # For tool risk score operations
+    MODEL_DEFAULT = "model_default"  # For fleet default model (role → alias) changes
 
 
 class AuditAction(str, Enum):

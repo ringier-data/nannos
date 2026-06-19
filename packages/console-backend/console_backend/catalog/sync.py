@@ -1902,7 +1902,9 @@ class CatalogSyncPipeline:
                 max_tokens=200,
                 metadata={"user_sub": job_user_sub, "catalog_id": job_catalog_id},
             )
-            return text.strip()
+            # Empty content (refusal / no text) is a successful-but-useless response now that
+            # gateway_chat returns "" instead of None — fall back rather than store a blank summary.
+            return text.strip() or f"Document: {file.name}"
         except Exception:
             logger.warning("Failed to generate summary for %s, using fallback", file.name)
             return f"Document: {file.name}"

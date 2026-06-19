@@ -20,6 +20,7 @@ from .repositories.bug_report_repository import BugReportRepository
 from .repositories.catalog_repository import CatalogRepository
 from .repositories.delivery_channel_repository import DeliveryChannelRepository
 from .repositories.feedback_repository import FeedbackRepository
+from .repositories.model_defaults_repository import ModelDefaultsRepository
 from .repositories.rate_card_repository import RateCardRepository
 from .repositories.scheduled_job_repository import ScheduledJobRepository
 from .repositories.secrets_repository import SecretsRepository
@@ -206,8 +207,12 @@ async def initialize_services(app: "FastAPI") -> None:
     # Model Gateway management client (runtime model registration, Q6)
     app.state.model_gateway_service = ModelGatewayService()
 
-    # Per-role default model aliases (graceful degradation, ADR-0001)
+    # Per-role default model aliases (graceful degradation, ADR-0001). Writes go through the
+    # audited repository so "set fleet default model" is recorded automatically.
+    app.state.model_defaults_repository = ModelDefaultsRepository()
+    app.state.model_defaults_repository.set_audit_service(app.state.audit_service)
     app.state.model_defaults_service = ModelDefaultsService()
+    app.state.model_defaults_service.set_repository(app.state.model_defaults_repository)
 
     app.state.usage_service = UsageService()
     app.state.usage_service.set_repository(app.state.usage_repository)

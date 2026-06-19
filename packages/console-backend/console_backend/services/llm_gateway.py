@@ -29,6 +29,13 @@ async def gateway_chat(
 
     `metadata` (e.g. {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the
     proxy attributes the cost (ADR-0002). Without a user_sub the proxy logs nothing.
+
+    Note: the canonical attribution-header builder lives in agent-common
+    (`attribution.attribution_header`, used by the chat client + embeddings adapter). It is
+    intentionally NOT imported here — console-backend is dependency-light (httpx only, no
+    agent-common), and gateway_chat's only callers (watch-param generation, catalog
+    summarization) run outside any sub-agent / scheduled-job context, so the richer
+    attribution dimensions would always be empty. The caller passes whatever applies.
     """
     headers = {
         "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', '')}",
@@ -45,4 +52,9 @@ async def gateway_chat(
             json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        # content is null on a refusal / tool-call-only / empty completion — that's a
+        # *successful* response with no text, not a transport failure. Return "" so callers'
+        # str ops (re.sub/.strip) don't crash; they treat empty as "no usable output" and
+        # apply their own fallback, distinct from the gateway error path (which raises above).
+        content = resp.json()["choices"][0]["message"].get("content")
+        return content or ""

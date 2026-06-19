@@ -78,7 +78,7 @@ async def generate_watch_params(
             prompt,
             model=config.scheduler.ai_model_id,
             max_tokens=1024,
-            metadata={"user_sub": current_user.id},
+            metadata={"user_sub": current_user.sub},  # OIDC subject — the gateway/proxy attributes by sub, not internal id
         )
         # Strip optional markdown fences and extract the JSON object.
         text = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")

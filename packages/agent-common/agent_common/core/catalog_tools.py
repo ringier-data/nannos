@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 _AWS_REGION = os.environ.get("AWS_REGION", "eu-central-1")
 
 
-# Module-level singletons (created once, reused across calls)
+# Module-level singletons (created once, reused across calls); rebuilt if the configured
+# default embedding alias changes (model_factory's defaults cache refreshes ~every 60s).
 _query_embeddings: Embeddings | None = None
+_query_embeddings_alias: str | None = None
 
 
 def _get_query_embeddings(
@@ -34,12 +36,26 @@ def _get_query_embeddings(
 ) -> Embeddings:
     """Lazy-init query embedding singleton (Gemini Embedding 2, query role).
 
+    Resolves the SAME default embedding alias the indexing side uses
+    (CatalogSyncPipeline.resolve_embedding_alias / get_default_embedding_model), so query
+    vectors are produced by the model the index was built with. A hardcoded alias here would
+    silently mismatch the index once an admin changes the default → meaningless similarity
+    (or a gateway 400 on a retired alias). Falls back to the adapter default only when no
+    default is configured.
+
     If cost_logger is provided on the first call, cost tracking is enabled.
     user_sub is read from ContextVar at invoke time.
     """
-    global _query_embeddings
-    if _query_embeddings is None:
-        _query_embeddings = GeminiEmbeddings(role="query", cost_logger=cost_logger)
+    global _query_embeddings, _query_embeddings_alias
+    from agent_common.core.model_factory import get_default_embedding_model
+
+    alias = get_default_embedding_model(multimodal=True)
+    if _query_embeddings is None or alias != _query_embeddings_alias:
+        kwargs: dict[str, Any] = {"role": "query", "cost_logger": cost_logger}
+        if alias:
+            kwargs["model_id"] = alias
+        _query_embeddings = GeminiEmbeddings(**kwargs)
+        _query_embeddings_alias = alias
     return _query_embeddings
 
 

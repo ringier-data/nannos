@@ -92,9 +92,14 @@ data:
   config.yaml: |
     litellm_settings:
       callbacks: custom_logger.proxy_handler_instance
+      # Total per-request bound for non-streaming calls. Streaming hangs are caught by the
+      # client-side inter-chunk watchdog (ADR-0004) since Bedrock ignores stream_timeout.
       request_timeout: 600
       drop_params: true
-      num_retries: 0
+      # Gateway-native retries on transient failures/timeouts (ADR-0004), replacing the
+      # per-call boto3 retries dropped in the migration. Applies to all providers, so a
+      # failed/timed-out non-streaming call is retried here, not at each app call site.
+      num_retries: 2
       # Structured (JSON) logs so cluster log aggregation can parse proxy output.
       json_logs: true
     general_settings:
