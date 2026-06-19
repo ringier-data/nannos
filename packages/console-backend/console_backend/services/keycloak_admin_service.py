@@ -191,7 +191,6 @@ class KeycloakAdminService:
         1. The OIDC client (agent-console) - for user login tokens
         2. The gatana client - for token exchange (critical!)
         3. The orchestrator client - for token exchange
-        4. The agent-creator client - for token exchange
 
         Token exchange copies claims from target client mappers, not source client.
         So all clients that receive tokens (via login or exchange) need the mapper.
@@ -204,7 +203,6 @@ class KeycloakAdminService:
             self.oidc_client_id,  # Web client (user login)
             "gatana",  # MCP gateway (token exchange target)
             "orchestrator",  # Orchestrator (token exchange target)
-            "agent-creator",  # Agent creator (token exchange target)
         ]
 
         for client_id in clients_to_configure:

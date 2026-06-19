@@ -1,8 +1,8 @@
 """Agent Runner A2A Server - Entry point for executing scheduled sub-agent jobs.
 
 This service is called by the agent-console scheduler engine to execute
-automated sub-agent jobs. It follows the same A2A pattern as agent-creator and
-alloy-agent for consistency and zero-trust security.
+automated sub-agent jobs. It follows the same A2A pattern as the other A2A
+agents (e.g. alloy-agent) for consistency and zero-trust security.
 """
 
 import logging

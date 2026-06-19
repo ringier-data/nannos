@@ -90,7 +90,7 @@ LangGraph-based agents support two credential injection strategies for MCP tool 
 - Used when credentials need to be exchanged for a different audience/client
 - Performs RFC 8693 OIDC token exchange at request time
 - Preserves user identity through exchange
-- Example: agent-creator exchanges user token for gatana token at tool-call time
+- Example: an agent exchanges the user token for a gatana token at tool-call time
 
 Both injectors:
 - Automatically handle credential injection at tool-call time via interceptor pipeline
@@ -121,7 +121,7 @@ LangGraph state is persisted by `PostgreSQLCheckpointerMixin`
   `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`.
 - **Thread IDs.** A top-level agent checkpoints under the bare `context_id` (empty
   `checkpoint_ns`); a sub-agent checkpoints under `{context_id}::{agent-name}` (e.g.
-  `…::agent-creator`). Each hop resumes its own checkpoint in its own namespace.
+  `…::voice-agent`). Each hop resumes its own checkpoint in its own namespace.
 - **MemorySaver fallback.** When `POSTGRES_HOST` is unset the mixin falls back to an in-memory
   saver — **local dev only**. A fallback in a real environment silently drops persisted state
   (and any pending HITL decision), so it is gated by `CHECKPOINT_ALLOW_MEMORY` outside local.

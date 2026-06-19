@@ -6,7 +6,7 @@ When implementing new features or refactoring existing code, consider if these i
 
 ## Tech Stack
 
-- Python library consumed by all agent services (orchestrator, agent-creator, agent-runner)
+- Python library consumed by all agent services (orchestrator, agent-runner, voice-agent)
 - LangGraph for agent execution graphs
 - Pydantic v2 for data validation
 - deepagents SDK (v0.5.7+) for graph building primitives

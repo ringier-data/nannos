@@ -25,17 +25,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent-creator
-spec:
-  template:
-    spec:
-      containers:
-      - name: agent-creator
-        image: ghcr.io/ringier-data/nannos-agent-creator:latest
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: agent-runner
 spec:
   template:

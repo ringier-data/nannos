@@ -92,12 +92,12 @@ class TestTokenExchange:
         assert headers["Authorization"] == "Bearer orchestrator-token"
 
     @pytest.mark.asyncio
-    async def test_oidc_auth_exchanges_token_for_agent_creator_target(self):
-        """Test that agent-creator uses its own client ID as target."""
-        agent_card = _oidc_card("agent-creator", "agent-creator")
+    async def test_oidc_auth_exchanges_token_for_voice_agent_target(self):
+        """Test that voice-agent uses its own client ID as target."""
+        agent_card = _oidc_card("voice-agent", "voice-agent")
 
         mock_oauth_client = AsyncMock()
-        mock_oauth_client.exchange_token = AsyncMock(return_value="agent-creator-token")
+        mock_oauth_client.exchange_token = AsyncMock(return_value="voice-agent-token")
         mock_oauth_client.issuer = ISSUER
 
         interceptor = SmartTokenInterceptor(user_token="user-token", oauth2_client=mock_oauth_client)
@@ -105,10 +105,10 @@ class TestTokenExchange:
 
         mock_oauth_client.exchange_token.assert_called_once_with(
             subject_token="user-token",
-            target_client_id="agent-creator",
+            target_client_id="voice-agent",
             requested_scopes=["openid", "profile", "email"],
         )
-        assert headers["Authorization"] == "Bearer agent-creator-token"
+        assert headers["Authorization"] == "Bearer voice-agent-token"
 
     @pytest.mark.asyncio
     async def test_token_exchange_caches_per_target(self):
@@ -116,7 +116,7 @@ class TestTokenExchange:
         agent_card_1 = _oidc_card("test-agent-1", "oidc")
 
         mock_oauth_client = AsyncMock()
-        mock_oauth_client.exchange_token = AsyncMock(side_effect=["orchestrator-token-1", "agent-creator-token-1"])
+        mock_oauth_client.exchange_token = AsyncMock(side_effect=["orchestrator-token-1", "voice-agent-token-1"])
         mock_oauth_client.issuer = ISSUER
 
         interceptor = SmartTokenInterceptor(user_token="user-token", oauth2_client=mock_oauth_client)
@@ -127,7 +127,7 @@ class TestTokenExchange:
         assert mock_oauth_client.exchange_token.call_count == 1
 
         # A different target triggers a second exchange
-        agent_card_2 = _oidc_card("agent-creator", "agent-creator")
+        agent_card_2 = _oidc_card("voice-agent", "voice-agent")
         await _run_before(interceptor, agent_card_2)
         assert mock_oauth_client.exchange_token.call_count == 2
 

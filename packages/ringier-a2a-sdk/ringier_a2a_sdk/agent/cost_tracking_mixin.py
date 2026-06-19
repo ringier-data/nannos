@@ -239,7 +239,7 @@ class CostTrackingMixin:
             user_sub: User sub for cost attribution
             conversation_id: Conversation ID for cost attribution and tool result scoping
             thread_id: Thread ID for checkpointing (defaults to conversation_id)
-            checkpoint_ns: Checkpoint namespace for isolation (e.g., "agent-creator")
+            checkpoint_ns: Checkpoint namespace for isolation (e.g., "voice-agent")
             checkpointer: Checkpointer instance (for __pregel_checkpointer)
             scheduled_job_id: Optional scheduled job ID — adds "scheduled_job:{id}" tag for cost attribution
             sub_agent_id: Optional sub-agent ID for cost attribution (explicit override;
@@ -257,7 +257,7 @@ class CostTrackingMixin:
                 user_sub=user_config.user_sub,
                 conversation_id=task.context_id,
                 thread_id=task.context_id,
-                checkpoint_ns="agent-creator",
+                checkpoint_ns="voice-agent",
                 checkpointer=self._checkpointer,
                 user_id=user.id,  # For user-scoped files
             )

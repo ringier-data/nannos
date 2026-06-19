@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # Flags:
 #   --debug   Start Python services with debugpy for VS Code debugging
-#             (ports: backend=5678, orchestrator=5679, creator=5680,
+#             (ports: backend=5678, orchestrator=5679,
 #              runner=5682, voice-agent=5683)
 #
 # The base URL should point to the root of your LLM server — /v1 is appended
@@ -232,7 +232,7 @@ printf "${CYAN}│${RESET}                                                      
 if [[ -n "$_DEBUG_MODE" ]]; then
   printf "${CYAN}│${RESET}  Debugging:                                            ${CYAN}│${RESET}\n"
   printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} debugpy enabled ${DIM}(attach via VS Code launch.json)${RESET}\n"
-  printf "${CYAN}│${RESET}    ${DIM}  backend=5678 orchestrator=5679 creator=5680${RESET}\n"
+  printf "${CYAN}│${RESET}    ${DIM}  backend=5678 orchestrator=5679${RESET}\n"
   printf "${CYAN}│${RESET}    ${DIM}  runner=5682 voice-agent=5683${RESET}\n"
   printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 fi
@@ -442,7 +442,6 @@ fi
 _OIDC_ISSUER="http://localhost:8180/realms/nannos"
 _OIDC_SECRET_BACKEND="local-secret"
 _OIDC_SECRET_ORCHESTRATOR="local-secret"
-_OIDC_SECRET_CREATOR="local-secret"
 _OIDC_SECRET_ADMIN="local-secret"
 _OIDC_SECRET_AGENT_RUNNER="local-secret"
 _KC_BASE_URL="http://localhost:8180"
@@ -465,12 +464,6 @@ if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
     _OIDC_SECRET_ORCHESTRATOR="$_secret"
   else
     err "Failed to fetch orchestrator OIDC secret from SSM"
-  fi
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/agent-creator-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_CREATOR="$_secret"
-  else
-    err "Failed to fetch agent-creator OIDC secret from SSM"
   fi
 
   if _secret=$(aws ssm get-parameter --name /nannos/keycloak/nannos-admin-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
@@ -501,7 +494,6 @@ elif [[ "$_OIDC_MODE" == "remote-manual" ]]; then
   fi
   _OIDC_SECRET_BACKEND="$_shared_secret"
   _OIDC_SECRET_ORCHESTRATOR="$_shared_secret"
-  _OIDC_SECRET_CREATOR="$_shared_secret"
   _OIDC_SECRET_ADMIN="$_shared_secret"
   _OIDC_SECRET_AGENT_RUNNER="$_shared_secret"
   ok "OIDC configured with shared secret"
@@ -646,7 +638,7 @@ if [[ -z "$KC_ADMIN_TOKEN" ]]; then
   err "Failed to obtain Keycloak admin token after retries. Check: docker compose logs keycloak"
 fi
 
-for CLIENT_ID in agent-console orchestrator agent-creator nannos-admin; do
+for CLIENT_ID in agent-console orchestrator nannos-admin; do
   # Get the internal UUID for this client
   CLIENT_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
     "http://localhost:8180/admin/realms/nannos/clients?clientId=$CLIENT_ID" \
@@ -709,7 +701,7 @@ log "Installing Python dependencies..."
 cd "$ROOT_DIR"
 
 # Sync all Python packages in parallel
-for pkg in orchestrator-agent agent-creator agent-runner console-backend soffice-worker; do
+for pkg in orchestrator-agent agent-runner console-backend soffice-worker; do
   (cd "packages/$pkg" && uv sync --quiet) &
 done
 (cd "packages/voice-agent" && uv sync --quiet) &
@@ -957,7 +949,6 @@ if [[ -n "$_DEBUG_MODE" ]]; then
   _DEBUG_LINES="  Debugging (debugpy):
     backend .......... localhost:5678
     orchestrator ..... localhost:5679
-    creator .......... localhost:5680
     runner ........... localhost:5682
     voice-agent ...... localhost:5683
 "
@@ -986,7 +977,6 @@ cat <<'EOF'
     Console ........... http://localhost:5173
     Backend API ....... http://localhost:5001
     Orchestrator ...... http://localhost:10001
-    Agent Creator ..... http://localhost:8080
     Agent Runner ...... http://localhost:5005
     Voice Agent ....... http://localhost:8002
     soffice-worker .... http://localhost:8090
@@ -1074,7 +1064,6 @@ procs:
       LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
       LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
       VOICE_AGENT_URL: "http://localhost:8002"
-      AGENT_CREATOR_URL: "http://localhost:8080"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
       CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
@@ -1144,7 +1133,6 @@ procs:
       OIDC_CLIENT_ID: "orchestrator"
       OIDC_CLIENT_SECRET: "$_OIDC_SECRET_ORCHESTRATOR"
       ORCHESTRATOR_CLIENT_ID: "orchestrator"
-      AGENT_CLIENT_ID: "agent-creator"
       AGENT_ID: "1"
       AGENT_BASE_URL: "http://localhost:10001"
       CONSOLE_BACKEND_URL: "http://localhost:5001"
@@ -1185,37 +1173,6 @@ procs:
       GATANA_ORG_ID: "${GATANA_ORG_ID:-}"
       GATANA_API_KEY: "${GATANA_API_KEY:-}"
       GATANA_ORG_CAPACITY: "${GATANA_ORG_CAPACITY:-}"
-
-  creator:
-    cwd: "$ROOT_DIR/packages/agent-creator"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5680} main.py --host 0.0.0.0 --port 8080 --reload 2>&1 | tee $_LOG_DIR/creator.log"
-    env:
-      OIDC_ISSUER: "$_OIDC_ISSUER"
-      OIDC_CLIENT_ID: "agent-creator"
-      OIDC_CLIENT_SECRET: "$_OIDC_SECRET_CREATOR"
-      ORCHESTRATOR_CLIENT_ID: "orchestrator"
-      AGENT_CLIENT_ID: "agent-creator"
-      AGENT_ID: "1"
-      AGENT_BASE_URL: "http://localhost:8080"
-      CONSOLE_BACKEND_URL: "http://localhost:5001"
-      CONSOLE_FRONTEND_URL: "http://localhost:5173"
-      LANGSMITH_TRACING: "$LANGSMITH_TRACING"
-      LANGSMITH_API_KEY: "$LANGSMITH_API_KEY"
-      LANGSMITH_PROJECT: "$LANGSMITH_PROJECT"
-      LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
-      LOG_LEVEL: "DEBUG"
-      AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
-      AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
-      # Checkpointer reuses POSTGRES_* (docstore DB / public schema), like the other agents
-      POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5402"
-      POSTGRES_DB: "docstore"
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "public"
-      CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
 
   runner:
     cwd: "$ROOT_DIR/packages/agent-runner"

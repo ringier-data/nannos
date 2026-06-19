@@ -206,7 +206,7 @@ class LangGraphAgent(BaseAgent):
         """Return unique checkpoint namespace for isolation.
 
         Returns:
-            Unique namespace string (e.g., "agent-creator", "alloy-agent")
+            Unique namespace string (e.g., "voice-agent", "alloy-agent")
         """
         pass
 

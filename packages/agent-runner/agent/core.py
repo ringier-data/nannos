@@ -5,7 +5,7 @@ Supports all sub-agent types:
 - **foundry**: Palantir Foundry query-API agents
 - **remote**: A2A protocol agents at external URLs
 
-Follows the same A2A pattern as agent-creator and alloy-agent:
+Follows the same A2A pattern as the other A2A agents (e.g. alloy-agent):
 - Extends BaseAgent and implements _stream_impl()
 - JWT authentication enforced at the middleware layer
 - Result is returned as JSON-encoded text in the artifact (for scheduler engine parsing)

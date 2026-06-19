@@ -35,22 +35,6 @@
       "justMyCode": false
     },
     {
-      "name": "Attach: Agent Creator",
-      "type": "debugpy",
-      "request": "attach",
-      "connect": {
-        "host": "localhost",
-        "port": 5680
-      },
-      "pathMappings": [
-        {
-          "localRoot": "${workspaceFolder}/packages/agent-creator",
-          "remoteRoot": "."
-        }
-      ],
-      "justMyCode": false
-    },
-    {
       "name": "Attach: Agent Runner",
       "type": "debugpy",
       "request": "attach",

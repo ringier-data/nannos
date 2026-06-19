@@ -5,9 +5,9 @@ and exchanges user tokens for target-specific tokens before passing to sub-agent
 
 Features:
 - Auto-detection: Examines AgentCard.security_schemes to determine auth requirements
-- Token exchange: Always exchanges user token for target-specific token (orchestrator or agent-creator)
+- Token exchange: Always exchanges user token for target-specific token (orchestrator or a specific client)
 - Scope reduction: Limits scopes to [openid, profile, email] to remove broader user permissions
-- Audience scoping: Tokens are targeted for specific services (orchestrator vs agent-creator)
+- Audience scoping: Tokens are targeted for specific services (orchestrator vs a specific service)
 - Dynamic provisioning: No per-agent client registration needed
 - User context propagation: User context preserved in JWT claims (sub, email, name, groups)
 
@@ -15,13 +15,13 @@ Token Exchange Strategy:
 1. User token (from client) → Orchestrator validates
 2. Orchestrator exchanges for target-specific token:
    - Default: audience=orchestrator with scopes [openid, profile, email]
-   - agent-creator: audience=agent-creator with scopes [openid, profile, email]
+   - voice-agent: audience=voice-agent with scopes [openid, profile, email]
 3. Orchestrator passes exchanged token to sub-agents
 4. Sub-agents validate token locally via JWTValidatorMiddleware
 
 Security Considerations:
 - ✅ Scope reduction: Removes broader scopes the user might have (e.g., console access)
-- ✅ Audience scoping: Token is for specific service (orchestrator/agent-creator), not arbitrary services
+- ✅ Audience scoping: Token is for specific service (orchestrator/voice-agent), not arbitrary services
 - ⚠️  Lateral movement: Compromised sub-agent CAN still call orchestrator (token has aud=orchestrator)
   and invoke other agents on behalf of the user. User's groups/permissions remain in token.
 - ⚠️  MCP gateway access: Sub-agents can still exchange tokens for MCP gateway access if needed
@@ -52,13 +52,13 @@ class SmartTokenInterceptor(ClientCallInterceptor):
 
     Token Exchange Targets:
     - Default: 'orchestrator' target with reduced scopes (openid, profile, email)
-    - Exception: 'agent-creator' uses its own client ID to preserve console access
+    - Exception: certain agents (e.g. 'voice-agent') use their own client ID
 
     This provides:
     - Scope reduction: Tokens have minimal scopes [openid, profile, email] instead of user's full scopes
-    - Audience scoping: Tokens targeted for orchestrator or agent-creator (not arbitrary services)
+    - Audience scoping: Tokens targeted for orchestrator or a specific service (not arbitrary services)
     - Dynamic provisioning: No per-agent client registration needed
-    - Selective access: agent-creator gets console access, others get orchestrator-scoped tokens
+    - Selective access: certain agents (e.g. voice-agent) use their own client; others get orchestrator-scoped tokens
 
     Security Note:
     - Compromised sub-agent CAN still call orchestrator with the token (aud=orchestrator)
@@ -183,7 +183,7 @@ class SmartTokenInterceptor(ClientCallInterceptor):
         Handle OIDC authentication by exchanging user token for target-specific token.
 
         Token exchange targets:
-        - agent-creator: Uses 'agent-creator' target to preserve console endpoint access
+        - voice-agent: Uses its own client ID as the target
         - All other agents: Uses 'orchestrator' target with reduced scopes
 
         This provides scope-based isolation while maintaining dynamic provisioning.
@@ -205,11 +205,11 @@ class SmartTokenInterceptor(ClientCallInterceptor):
             return
 
         # Determine target client ID based on agent requirements
-        # agent-creator needs console access, others use reduced-scope orchestrator token
-        if scheme_name in ("agent-creator", "voice-agent"):
-            # NOTE: the agent-creator client is provisioned manually to allow console access
+        # voice-agent uses its own client ID; others use a reduced-scope orchestrator token
+        if scheme_name == "voice-agent":
+            # NOTE: the voice-agent client is provisioned manually with its own audience/scopes
             target_client_id = scheme_name
-            requested_scopes = ["openid", "profile", "email"]  # Preserve console access
+            requested_scopes = ["openid", "profile", "email"]
             token_description = f"{scheme_name} token"
         elif scheme_name == "alloy-agent":
             # TOOD: shall we establish a convention that agents needing MCP gateway access should use a specific scheme name?

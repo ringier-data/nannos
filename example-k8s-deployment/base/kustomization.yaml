@@ -4,7 +4,6 @@ kind: Kustomization
 resources:
   - ./namespace.yaml
   - ./gateway.yaml
-  - ./agent-creator.yaml
   - ./agent-runner.yaml
   - ./catalog-worker.yaml
   - ./console.yaml

@@ -216,19 +216,6 @@
             "lightweight.claim": "false",
             "introspection.token.claim": "true"
           }
-        },
-        {
-          "name": "audience-agent-creator",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-audience-mapper",
-          "consentRequired": false,
-          "config": {
-            "included.client.audience": "agent-creator",
-            "id.token.claim": "false",
-            "access.token.claim": "true",
-            "lightweight.claim": "false",
-            "introspection.token.claim": "true"
-          }
         }
       ],
       "authorizationSettings": {
@@ -268,102 +255,6 @@
             "config": {
               "scopes": "[\"token-exchange\"]",
               "applyPolicies": "[\"token-exchange-policy-agent-console\"]"
-            }
-          }
-        ]
-      }
-    },
-    {
-      "clientId": "agent-creator",
-      "name": "Agent Creator",
-      "description": "Agent design assistant service",
-      "enabled": true,
-      "publicClient": false,
-      "secret": "local-secret",
-      "clientAuthenticatorType": "client-secret",
-      "directAccessGrantsEnabled": false,
-      "standardFlowEnabled": false,
-      "implicitFlowEnabled": false,
-      "serviceAccountsEnabled": true,
-      "authorizationServicesEnabled": true,
-      "protocol": "openid-connect",
-      "fullScopeAllowed": true,
-      "attributes": {
-        "use.refresh.tokens": "true",
-        "standard.token.exchange.enabled": "true"
-      },
-      "defaultClientScopes": [
-        "openid",
-        "profile",
-        "email",
-        "roles"
-      ],
-      "protocolMappers": [
-        {
-          "name": "groups",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-group-membership-mapper",
-          "consentRequired": false,
-          "config": {
-            "full.path": "false",
-            "introspection.token.claim": "true",
-            "userinfo.token.claim": "true",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "claim.name": "groups",
-            "lightweight.claim": "true"
-          }
-        },
-        {
-          "name": "audience-agent-creator",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-audience-mapper",
-          "consentRequired": false,
-          "config": {
-            "included.client.audience": "agent-creator",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "lightweight.claim": "true"
-          }
-        }
-      ],
-      "authorizationSettings": {
-        "allowRemoteResourceManagement": true,
-        "policyEnforcementMode": "ENFORCING",
-        "decisionStrategy": "AFFIRMATIVE",
-        "resources": [
-          {
-            "name": "Default Resource",
-            "type": "urn:agent-creator:resources:default",
-            "ownerManagedAccess": false,
-            "displayName": "agent-creator default resource",
-            "uris": ["/*"]
-          }
-        ],
-        "scopes": [
-          {
-            "name": "token-exchange",
-            "displayName": "Token Exchange Scope"
-          }
-        ],
-        "policies": [
-          {
-            "name": "token-exchange-policy-orchestrator",
-            "type": "client",
-            "logic": "POSITIVE",
-            "decisionStrategy": "UNANIMOUS",
-            "config": {
-              "clients": "[\"orchestrator\"]"
-            }
-          },
-          {
-            "name": "token-exchange-permission",
-            "type": "scope",
-            "logic": "POSITIVE",
-            "decisionStrategy": "UNANIMOUS",
-            "config": {
-              "scopes": "[\"token-exchange\"]",
-              "applyPolicies": "[\"token-exchange-policy-orchestrator\"]"
             }
           }
         ]

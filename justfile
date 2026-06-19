@@ -27,7 +27,6 @@ default:
 registry := "ghcr.io/ringier-data"
 
 # Per-package image names (only packages with Dockerfiles)
-img_agent_creator    := registry + "/nannos-agent-creator"
 img_agent_runner     := registry + "/nannos-agent-runner"
 img_orchestrator     := registry + "/nannos-orchestrator-agent"
 img_console_backend  := registry + "/nannos-console-backend"
@@ -48,7 +47,7 @@ platform := "linux/arm64"
 build_ts := `date -u +%Y%m%d%H%M%S`
 
 # Packages that have Dockerfiles (used by build recipes)
-_buildable_packages := "agent-creator agent-runner orchestrator-agent console-backend catalog-worker console-frontend client-slack client-slack-frontend client-email voice-agent client-google-chat soffice-worker litellm-proxy"
+_buildable_packages := "agent-runner orchestrator-agent console-backend catalog-worker console-frontend client-slack client-slack-frontend client-email voice-agent client-google-chat soffice-worker litellm-proxy"
 
 # Build flags (override on CLI, e.g. just push=true build)
 push := ""
@@ -70,7 +69,6 @@ pkg-version pkg:
 pkg-image pkg:
     #!/usr/bin/env bash
     case "{{ pkg }}" in
-      agent-creator)      echo "{{ img_agent_creator }}" ;;
       agent-runner)       echo "{{ img_agent_runner }}" ;;
       orchestrator-agent) echo "{{ img_orchestrator }}" ;;
       console-backend)    echo "{{ img_console_backend }}" ;;

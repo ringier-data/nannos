@@ -144,10 +144,10 @@ class TokenExchangeCredentialInjector(BaseCredentialInjector):
         requested_scopes: List of scopes to request in the exchanged token
 
     Example:
-        For agent-creator with OIDC token exchange:
+        For an A2A agent with OIDC token exchange:
         ```python
         oauth2_client = OidcOAuth2Client(
-            client_id="agent-creator",
+            client_id="my-agent",
             client_secret="...",
             issuer="https://keycloak.example.com/realms/alloy",
         )

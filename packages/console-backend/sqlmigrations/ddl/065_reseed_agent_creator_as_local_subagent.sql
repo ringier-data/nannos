@@ -1,63 +1,47 @@
-"""Agent Creator - Designs and creates specialized AI agents.
+-- rambler up
 
-This module implements an A2A agent that helps users create and configure
-specialized subagents through natural language conversation.
-"""
+-- ============================================================================
+-- Re-seed agent-creator as a built-in LOCAL sub-agent (was a standalone pod).
+--
+-- agent-creator no longer runs as a separate A2A pod. It is now a normal
+-- pre-seeded local (langgraph) sub-agent: system-owned, public, and approved,
+-- so the orchestrator discovers it for every user and instantiates it in-process
+-- via create_dynamic_local_subagent (like general-purpose / skill-assessor).
+-- Its console_* MCP tools are discovered from the console backend MCP using the
+-- caller's token exchange — no dedicated pod or OIDC client required.
+--
+-- Step 1: remove the old REMOTE agent-creator seed (from migration 041). A
+-- lingering remote row of the same name would otherwise be discovered alongside
+-- (and conflict with) the local one.
+-- Step 2: seed the LOCAL agent-creator (name reused, type flipped to 'local').
+-- ============================================================================
 
-import logging
-import os
+-- Step 1 — drop the remote seed and its dependents.
+DELETE FROM user_sub_agent_activations
+WHERE sub_agent_id IN (
+    SELECT id FROM sub_agents WHERE owner_user_id = 'system' AND name = 'agent-creator'
+);
+DELETE FROM sub_agent_permissions
+WHERE sub_agent_id IN (
+    SELECT id FROM sub_agents WHERE owner_user_id = 'system' AND name = 'agent-creator'
+);
+DELETE FROM sub_agent_config_versions
+WHERE sub_agent_id IN (
+    SELECT id FROM sub_agents WHERE owner_user_id = 'system' AND name = 'agent-creator'
+);
+DELETE FROM sub_agents WHERE owner_user_id = 'system' AND name = 'agent-creator';
 
-from agent_common.core.model_factory import create_model, get_default_model
-from langchain_core.language_models import BaseChatModel
-from langchain_mcp_adapters.sessions import StreamableHttpConnection
-from ringier_a2a_sdk.agent import LangGraphAgent
-from ringier_a2a_sdk.agent.postgres_checkpointer_mixin import PostgreSQLCheckpointerMixin
-from ringier_a2a_sdk.middleware.credential_injector import TokenExchangeCredentialInjector
-from ringier_a2a_sdk.oauth import OidcOAuth2Client
+-- Step 2 — seed the local agent-creator.
+INSERT INTO sub_agents (name, owner_user_id, type, is_public, current_version, default_version)
+VALUES ('agent-creator', 'system', 'local', TRUE, 1, 1)
+ON CONFLICT DO NOTHING;
 
-logger = logging.getLogger(__name__)
-
-# Model descriptions for the agent-creator system prompt.
-# NOTE: legacy static list. The Model Gateway (DB-backed, Q6) is the source of truth
-# for models; this only seeds the creator's prompt. Follow-up: make it live from the
-# gateway model list so newly-registered models are offered here too.
-_MODEL_DESCRIPTIONS: dict[str, tuple[str, str]] = {
-    # model_id: (display_name, description)
-    "gpt-4o": ("GPT-4o", "Best for general-purpose tasks, faster responses, strong coding capabilities"),
-    "gpt-4o-mini": (
-        "GPT-4o Mini",
-        "Cost-effective option for simpler tasks, faster responses, good for routine operations",
-    ),
-    "claude-sonnet-4.5": (
-        "Claude Sonnet 4.5",
-        "Best for detailed analysis, longer context understanding, nuanced communication, supports thinking mode",
-    ),
-    "claude-sonnet-4.6": (
-        "Claude Sonnet 4.6",
-        "Improved reasoning and creativity over 4.5, ideal for complex problem-solving and creative tasks, supports thinking mode",
-    ),
-    "claude-haiku-4-5": ("Claude Haiku 4.5", "Ultra-fast and cost-efficient for high-volume, low-latency tasks"),
-    "gemini-3.1-pro-preview": (
-        "Gemini 3.1 Pro (Preview)",
-        "Google's advanced model for complex reasoning, supports multimodal input including audio and video, supports thinking mode",
-    ),
-    "gemini-3-flash-preview": (
-        "Gemini 3 Flash (Preview)",
-        "Google's fast and efficient model, supports multimodal input including audio and video, supports thinking mode",
-    ),
-}
-
-
-def _get_models_prompt_text() -> str:
-    """Generate a prompt-ready text block describing all available models."""
-    return "\n".join(
-        f"- {display_name} ({model_id}): {description}"
-        for model_id, (display_name, description) in _MODEL_DESCRIPTIONS.items()
-    )
-
-
-# System prompt for the agent creator
-AGENT_CREATOR_SYSTEM_PROMPT = """<role>
+INSERT INTO sub_agent_config_versions (
+    sub_agent_id, version, release_number, description, system_prompt, mcp_tools, status
+)
+SELECT sa.id, 1, 1,
+       'Designs, creates, and manages specialized sub-agents from natural-language requirements. Use it to create a new sub-agent, refine an existing one, review your sub-agents, or discover MCP tools and skills to wire into an agent.',
+       '<role>
 You are an expert AI Agent Creator for the Alloy Infrastructure Agents platform. You design, create, and manage specialized subagents based on user requirements.
 </role>
 
@@ -68,6 +52,7 @@ You are an expert AI Agent Creator for the Alloy Infrastructure Agents platform.
 - console_grep_mcp_tools — Discover available MCP tools that can be assigned to agents
 - console_search_skills — Search for existing skills in the platform registry, community, or specific repos
 - console_import_skill — Import and activate a skill from a GitHub repository for a sub-agent
+- console_list_models — List the LLM models currently available on the Model Gateway and their capabilities (provider, extended-thinking support, list price per 1M tokens, platform default)
 </tools>
 
 <agent_creation_guidelines>
@@ -76,7 +61,7 @@ Before creating an agent, thoroughly understand:
 - What specific tasks or domain the agent should handle
 - What tools or capabilities it needs
 - How specialized vs. general-purpose it should be
-- What model (GPT-4o, GPT-4o-mini, Claude Sonnet 4.5, Claude Sonnet 4.6, or Claude Haiku 4.5) is most appropriate
+- What model is most appropriate (call console_list_models to see the models currently registered on the Model Gateway, their capabilities, and their cost; model is optional — omit it to inherit the platform default)
 </section>
 
 <section name="Naming Conventions">
@@ -87,8 +72,8 @@ Before creating an agent, thoroughly understand:
 </section>
 
 <section name="Writing Descriptions">
-The description is critical for the orchestrator's routing decisions. Write descriptions that:
-- Clearly state the agent's expertise and capabilities
+The description is critical for the orchestrator''s routing decisions. Write descriptions that:
+- Clearly state the agent''s expertise and capabilities
 - Use specific keywords related to the domain (e.g., "JIRA", "Python", "data analysis")
 - Mention the types of tasks it can handle
 - Be concise but comprehensive (1-3 sentences)
@@ -160,7 +145,14 @@ Guidelines:
 </section>
 
 <section name="Selecting the Right Model">
-{AVAILABLE_MODELS}
+Do NOT rely on a hardcoded model list — the available models change as they are registered on the Model Gateway. Call console_list_models to get the live set, including each model''s provider, whether it supports extended thinking (thinking_levels), its list price per 1M tokens (input_price_per_million / output_price_per_million, USD), and which is the platform default (is_default).
+
+Guidance:
+- Match the model to the task: prefer faster/cheaper models for simple, high-volume, or latency-sensitive work, and reserve stronger (usually pricier) models for genuinely complex reasoning or long-context analysis.
+- Factor cost: weigh input_price_per_million / output_price_per_million against the task. Prices may be null when the gateway has no price for a model — don''t assume free.
+- Extended thinking is only available on models whose thinking_levels is non-empty.
+- The model is OPTIONAL when creating a sub-agent. If you have no strong reason to pick a specific one, omit it so the agent inherits the platform default (is_default).
+- Use the model''s "value" (alias) when setting it on a sub-agent.
 </section>
 
 <section name="Configuring Agent Type">
@@ -193,7 +185,7 @@ Filesystem and Sandbox Tools (persistent sandboxed workspace):
 Document Store and Memory Tools (long-term persistent memory):
 - docstore_search — Semantic similarity search over indexed files in long-term storage (/memories/ or /channel_memories/)
 - docstore_export — Export persisted files from /memories/ (personal) or /channel_memories/ (shared) to S3 with presigned download URLs
-- read_personal_file — Read files from a user's personal workspace (Slack channel context, requires permission)
+- read_personal_file — Read files from a user''s personal workspace (Slack channel context, requires permission)
 
 Utility Tools:
 - get_current_time — Get current time or calculate relative dates with timezone awareness
@@ -253,8 +245,8 @@ When NOT to use skills:
 Example skill:
   name: "incident-triage"
   description: "Use this skill when handling production incidents. Provides step-by-step triage procedure."
-  body: "# Incident Triage\\n\\n1. Check monitoring dashboards\\n2. Identify affected services\\n..."
-  files: [{"path": "scripts/check_alerts.py", "content": "import requests\\n..."}]
+  body: "# Incident Triage\n\n1. Check monitoring dashboards\n2. Identify affected services\n..."
+  files: [{"path": "scripts/check_alerts.py", "content": "import requests\n..."}]
 
 Setting sandbox_enabled=true makes skill scripts executable in a secure sandbox environment
 (requires sandbox provider to be configured by the platform admin). Without sandbox, scripts
@@ -271,7 +263,7 @@ are still readable but not executable.
 <workflow>
 <step name="When a user asks you to create an agent">
 1. Discovery Phase
-   - Ask clarifying questions about the agent's purpose
+   - Ask clarifying questions about the agent''s purpose
    - Use console_list_sub_agents to check if a similar agent exists
    - If similar exists, suggest updating instead of duplicating
 
@@ -281,7 +273,7 @@ are still readable but not executable.
 
 3. Creation Phase
    - Use console_create_sub_agent with the finalized configuration
-   - Provide: confirmation, agent name and description, link to agent ({CONSOLE_FRONTEND_URL}/app/subagents/{sub_agent_id}), how to activate and use it, limitations or considerations
+   - Provide: confirmation, agent name and description, link to agent (/app/subagents/{sub_agent_id}), how to activate and use it, limitations or considerations
 
 4. Iteration Phase
    - If user wants changes, use console_update_sub_agent
@@ -305,105 +297,52 @@ are still readable but not executable.
 </workflow>
 
 <important_rules>
-- ALWAYS provide a link to the created agent: {CONSOLE_FRONTEND_URL}/subagents/{sub_agent_id}
+- ALWAYS provide a link to the created agent: /subagents/{sub_agent_id}
 - ALWAYS validate that agent names follow the pattern: /^[a-z0-9-]+$/
 - Agent descriptions are routing-critical — the orchestrator uses descriptions to decide which agent to invoke. Make them specific and keyword-rich.
 - Avoid overlap — each agent should have a clear, distinct purpose. Similar agents confuse the orchestrator.
-- Start simple — create focused agents. It's easier to expand capabilities than to narrow overly-broad agents.
+- Start simple — create focused agents. It''s easier to expand capabilities than to narrow overly-broad agents.
 - Test iteratively — create, test, refine. Use the update tool to improve agents based on real usage.
 - Consider the ecosystem — think about how this agent fits with other agents.
-- If you feel you would benefit from tools you don't have access to, communicate it clearly to the user.
+- If you feel you would benefit from tools you don''t have access to, communicate it clearly to the user.
 </important_rules>
 
 Be professional and clear. Explain your reasoning for design decisions. Ask for confirmation before creating agents. Provide actionable next steps after creation. Teach users about agent design principles. Suggest improvements proactively.
 
 You are not just creating agents — you are architecting an agent ecosystem. Think about clarity, specialization, and long-term maintainability.
-"""
+',
+       '["console_list_sub_agents", "console_create_sub_agent", "console_update_sub_agent", "console_list_mcp_servers", "console_grep_mcp_tools", "console_search_skills", "console_import_skill", "console_list_models"]'::JSONB,
+       'approved'
+FROM sub_agents sa
+WHERE sa.name = 'agent-creator' AND sa.owner_user_id = 'system'
+  AND NOT EXISTS (
+      SELECT 1 FROM sub_agent_config_versions cv
+      WHERE cv.sub_agent_id = sa.id AND cv.version = 1
+  );
 
+-- rambler down
 
-class AgentCreator(PostgreSQLCheckpointerMixin, LangGraphAgent):
-    """Agent Creator - Helps users design and create specialized AI agents.
+-- Reverse: remove the local agent-creator and restore the remote seed (matches migration 041).
+DELETE FROM sub_agent_config_versions
+WHERE sub_agent_id IN (
+    SELECT id FROM sub_agents WHERE owner_user_id = 'system' AND name = 'agent-creator'
+);
+DELETE FROM sub_agents WHERE owner_user_id = 'system' AND name = 'agent-creator';
 
-    This agent uses whichever LLM provider is available (via agent-common's
-    model_factory) and has access to console backend MCP tools for managing
-    the agent lifecycle.
+INSERT INTO sub_agents (name, owner_user_id, type, is_public, current_version, default_version)
+VALUES ('agent-creator', 'system', 'remote', TRUE, 1, 1)
+ON CONFLICT DO NOTHING;
 
-    Architecture:
-    - Extends LangGraphAgent base class (provider-agnostic)
-    - LLM model selected dynamically based on available credentials
-    - Checkpointing: PostgreSQL when POSTGRES_HOST is set (reuses the shared POSTGRES_*
-      connection / schema), in-memory otherwise
-    - MCP tools discovered once at initialization (unauthenticated)
-    - User credentials injected at runtime via TokenExchangeCredentialInjector
-    """
-
-    def __init__(self):
-        """Initialize the Agent Creator."""
-        # Store configuration before calling super().__init__()
-        self.console_backend_url = os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001")
-        self.console_frontend_url = os.getenv("CONSOLE_FRONTEND_URL", "http://localhost:5173")
-
-        # Create OIDC client for token exchange
-        oauth2_client = OidcOAuth2Client(
-            client_id=os.getenv("OIDC_CLIENT_ID", "agent-creator"),
-            client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
-            issuer=os.getenv("OIDC_ISSUER", ""),
-        )
-
-        # Create credential injection interceptor with token exchange
-        self._credential_injector = TokenExchangeCredentialInjector(
-            oidc_client=oauth2_client,
-            target_client_id=os.environ.get("CONSOLE_BACKEND_CLIENT_ID", "agent-console"),
-            requested_scopes=["openid", "profile", "offline_access"],
-        )
-
-        super().__init__()
-
-    async def startup(self):
-        """Async startup hook to be called from FastAPI lifespan/startup event."""
-        await super().startup()
-        if hasattr(self, "_cost_logger") and self._cost_logger:
-            await self._cost_logger.start()
-            logger.info("Cost logger background worker started")
-
-    async def shutdown(self):
-        """Async shutdown hook to be called from FastAPI lifespan/shutdown event."""
-        await super().shutdown()
-        if hasattr(self, "_cost_logger") and self._cost_logger:
-            await self._cost_logger.shutdown()
-            logger.info("Cost logger shutdown complete")
-
-    # --- LangGraphAgent abstract method implementations ---
-
-    def _create_model(self) -> BaseChatModel:
-        """Create the Agent Creator's LLM via the Model Gateway (ADR-0001).
-
-        Uses the configured default alias; the gateway validates/routes it.
-        """
-        model_type = get_default_model()
-        logger.info(f"Agent Creator using model: {model_type}")
-        return create_model(model_type)
-
-    async def _get_mcp_connections(self) -> dict[str, StreamableHttpConnection]:
-        """Return MCP server connection for console backend."""
-        console_mcp_url = f"{self.console_backend_url}/mcp"
-        return {
-            "console": StreamableHttpConnection(
-                transport="streamable_http",
-                url=console_mcp_url,
-            ),
-        }
-
-    def _get_system_prompt(self) -> str:
-        """Return agent creator system prompt with configured frontend URL and model list."""
-        return AGENT_CREATOR_SYSTEM_PROMPT.replace("{CONSOLE_FRONTEND_URL}", self.console_frontend_url).replace(
-            "{AVAILABLE_MODELS}", _get_models_prompt_text()
-        )
-
-    def _get_checkpoint_namespace(self) -> str:
-        """Return checkpoint namespace for agent-creator."""
-        return "agent-creator"
-
-    def _get_tool_interceptors(self) -> list:
-        """Return credential injector for MCP tool calls."""
-        return [self._credential_injector]
+INSERT INTO sub_agent_config_versions (
+    sub_agent_id, version, release_number, description, agent_url, status
+)
+SELECT sa.id, 1, 1,
+       'Agent Creator for building and managing sub-agents',
+       'http://placeholder-agent-creator',
+       'approved'
+FROM sub_agents sa
+WHERE sa.name = 'agent-creator' AND sa.owner_user_id = 'system'
+  AND NOT EXISTS (
+      SELECT 1 FROM sub_agent_config_versions cv
+      WHERE cv.sub_agent_id = sa.id AND cv.version = 1
+  );

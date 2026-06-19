@@ -47,6 +47,16 @@ def _thinking_levels(info: dict) -> list[str]:
     return [e for e in _EFFORT_ORDER if e in levels]
 
 
+def _price_per_million(cost_per_token: object) -> float | None:
+    """Gateway cost-per-token → list price per 1M tokens (USD), or None if unpriced."""
+    if cost_per_token is None:
+        return None
+    try:
+        return round(float(cost_per_token) * 1_000_000, 4)
+    except (TypeError, ValueError):
+        return None
+
+
 class AvailableModel(BaseModel):
     value: str
     label: str
@@ -54,6 +64,11 @@ class AvailableModel(BaseModel):
     supports_thinking: bool = False
     thinking_levels: list[str] | None = None
     is_default: bool = False
+    # Gateway list price per 1M tokens (USD), or None when the gateway has no price for
+    # the model. Informational — for model-selection guidance, not authoritative billing
+    # (rate cards remain the billing source of truth).
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
 
 
 def _to_available(model: dict, default_model: str) -> AvailableModel | None:
@@ -70,15 +85,26 @@ def _to_available(model: dict, default_model: str) -> AvailableModel | None:
         supports_thinking=bool(levels),
         thinking_levels=levels or None,
         is_default=(name == default_model),
+        input_price_per_million=_price_per_million(info.get("input_cost_per_token")),
+        output_price_per_million=_price_per_million(info.get("output_cost_per_token")),
     )
 
 
-@router.get("/models", response_model=list[AvailableModel])
+@router.get("/models", response_model=list[AvailableModel], tags=["MCP"], operation_id="console_list_models")
 async def list_available_models(request: Request, db: DbSession, _user: User = Depends(require_auth_or_bearer_token)):
-    """Return the LLM models registered on the Model Gateway (live, cached ~30s).
+    """List the LLM models currently registered on the Model Gateway, with capabilities.
 
-    Any authenticated user (model selection isn't admin-only — regular users pick models
-    when creating sub-agents); management (register/edit/delete) stays admin-only."""
+    Returns, per model: ``value`` (the model alias to use), ``label``, ``provider``,
+    ``supports_thinking`` / ``thinking_levels`` (extended-thinking support),
+    ``is_default`` (the platform default chat model), and ``input_price_per_million`` /
+    ``output_price_per_million`` (the gateway list price in USD per 1M tokens, or null when
+    unpriced — informational, for model selection, not authoritative billing). Read live
+    from the gateway (cached ~30s), so it always reflects the models actually available —
+    use it to pick an appropriate model when creating or updating a sub-agent.
+
+    Also exposed as the ``console_list_models`` MCP tool. Any authenticated user may read it
+    (model selection isn't admin-only — regular users pick models when creating sub-agents);
+    management (register/edit/delete) stays admin-only."""
     now = time.monotonic()
     cached = _cache.get("models")
     if cached and now - cached[0] < _CACHE_TTL_SECONDS:

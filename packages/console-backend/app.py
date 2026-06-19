@@ -156,7 +156,6 @@ async def shutdown_handler() -> None:
 # Maps env var → agent name seeded in migration 040.
 _REMOTE_AGENT_ENV_MAP: dict[str, str] = {
     "VOICE_AGENT_URL": "voice-agent",
-    "AGENT_CREATOR_URL": "agent-creator",
 }
 
 

@@ -98,7 +98,7 @@ Agents that share a schema also share the checkpoint tables; isolation is achiev
 through the existing thread_id naming convention — no changes required:
 
     orchestrator  →  {context_id}::orchestrator
-    agent-creator →  {context_id}::agent-creator
+    voice-agent   →  {context_id}::voice-agent
     alloy-agent   →  {context_id}::alloy-agent
     dynamic agent →  {context_id}::dynamic-{agent_name}
 
