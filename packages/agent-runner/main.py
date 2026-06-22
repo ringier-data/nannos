@@ -35,7 +35,6 @@ from a2a.types import (
     StringList,
 )
 from dotenv import load_dotenv
-from starlette.applications import Starlette
 from langsmith.middleware import TracingMiddleware
 from rcplus_alloy_common.logging import configure_existing_logger, configure_logger
 from ringier_a2a_sdk.middleware import (
@@ -45,6 +44,7 @@ from ringier_a2a_sdk.middleware import (
 )
 from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
+from starlette.applications import Starlette
 
 from agent import AgentRunner
 
@@ -144,6 +144,10 @@ def create_app():
 
     # Build the Starlette app with A2A routes (A2A v1.0+ replaces A2AFastAPIApplication;
     # a2a-sdk no longer pulls FastAPI, and the route factories return Starlette routes).
+    # agent-runner speaks native a2a-sdk v1.1.0 only — all its callers (the console-backend
+    # scheduler engine, debug-agent, and skill-security services) dispatch via the a2a SDK
+    # client (SendStreamingMessage), so no v0.3 backward-compat shim is needed here. (The
+    # orchestrator still enables it for the external slack/google-chat/email clients.)
     app = Starlette(
         routes=[
             *create_agent_card_routes(agent_card),

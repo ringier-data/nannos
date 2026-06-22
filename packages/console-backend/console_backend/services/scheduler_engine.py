@@ -4,7 +4,7 @@ The engine runs inside the agent-console backend process as a background asyncio
 It owns:
   - Job claiming (FOR UPDATE SKIP LOCKED)
   - User token resolution (KMS → Keycloak refresh)
-  - Dispatching to agent-runner via A2A message/send
+  - Dispatching to agent-runner via the native a2a-sdk v1.1.0 streaming client
   - Recording outcomes in scheduled_job_runs
   - Advancing or disabling jobs based on results
 """
@@ -12,7 +12,6 @@ It owns:
 import asyncio
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,6 +23,7 @@ from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 from ..repositories.scheduled_job_repository import ScheduledJobRepository, compute_next_run
 from ..services.scheduler_token_service import SchedulerTokenService
 from ..services.socket_notification_manager import SocketNotificationManager
+from ..utils.a2a_dispatch import dispatch_streaming
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +169,18 @@ class SchedulerEngine:
                     )
                     return
 
-                # Build A2A message payload for agent-runner
-                payload = await self._build_a2a_payload(job, run_id, access_token, db)
+                # Build the A2A message args for agent-runner
+                parts, metadata, push_config = await self._build_message_args(job, run_id, access_token, db)
 
-            # Dispatch to agent-runner via SSE streaming to avoid CloudFront 60s
-            # idle timeout: the first SSE byte ("working" status) arrives within ms,
-            # resetting the timeout clock for each subsequent event.
-            result_data = await self._send_streaming_request(payload, access_token)
+            # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client. SSE keeps
+            # bytes flowing so CloudFront/ALB idle-timeout never fires for long-running jobs.
+            result_data = await dispatch_streaming(
+                agent_url=self._agent_runner_url,
+                access_token=access_token,
+                parts=parts,
+                metadata=metadata,
+                push_config=push_config,
+            )
 
             # Parse execution result from agent-runner response
             status, result_summary, error_msg, conversation_id = self._parse_result(result_data)
@@ -218,8 +223,10 @@ class SchedulerEngine:
             except Exception:
                 logger.exception("Failed to finalize run %s for job %d after dispatch error", run_id, job.id)
 
-    async def _build_a2a_payload(self, job: ScheduledJob, run_id: int, access_token: str, db: Any) -> dict[str, Any]:
-        """Build the JSON-RPC A2A message/send payload for agent-runner."""
+    async def _build_message_args(
+        self, job: ScheduledJob, run_id: int, access_token: str, db: Any
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, str] | None]:
+        """Build the (message parts, metadata, push_config) for the A2A SDK dispatch."""
         metadata: dict[str, Any] = {
             "scheduled_job_id": job.id,
             "scheduled_job_run_id": run_id,
@@ -267,34 +274,17 @@ class SchedulerEngine:
         else:
             parts = [{"kind": "text", "text": message_text}]
 
-        params: dict[str, Any] = {
-            "message": {
-                "messageId": str(uuid.uuid4()),
-                "role": "user",
-                "parts": parts,
-                "metadata": metadata,
-            }
-        }
-
         # Fetch delivery channel and attach push notification config so the A2A SDK
         # registers it for the task and BasePushNotificationSender can deliver it
         # upon completion.  The channel secret is sent as X-A2A-Notification-Token
         # so the webhook receiver can verify ownership of the notification.
+        push_config: dict[str, str] | None = None
         if job.delivery_channel_id is not None:
             channel = await self._delivery_channel_repo.get_channel_for_dispatch(db, job.delivery_channel_id)
             if channel:
-                push_config: dict[str, Any] = {
-                    "url": channel["webhook_url"],
-                    "token": channel["secret"],
-                }
-                params["configuration"] = {"pushNotificationConfig": push_config}
+                push_config = {"url": channel["webhook_url"], "token": channel["secret"]}
 
-        return {
-            "jsonrpc": "2.0",
-            "method": "message/stream",
-            "id": f"scheduler-job-{job.id}",
-            "params": params,
-        }
+        return parts, metadata, push_config
 
     async def _resolve_voice_agent_id(self, db: Any) -> int | None:
         """Look up the voice-agent sub_agent_id from the DB (system-owned)."""
@@ -305,86 +295,6 @@ class SchedulerEngine:
         )
         row = result.scalar_one_or_none()
         return row
-
-    async def _send_streaming_request(self, payload: dict[str, Any], access_token: str) -> dict[str, Any]:
-        """POST to agent-runner using message/stream (SSE), consume events, return a
-        synthetic pseudo-task dict that _parse_result already understands.
-
-        SSE keeps bytes flowing so CloudFront/ALB idle-timeout never fires, even
-        for long-running jobs.  The first 'working' status-update event arrives
-        within milliseconds of the request being accepted.
-        """
-        last_artifact_text: str | None = None
-        context_id: str | None = None
-        final_state: str = "completed"
-
-        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=5.0)) as client:
-            async with client.stream(
-                "POST",
-                f"{self._agent_runner_url}/",
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "text/event-stream",
-                },
-            ) as response:
-                if response.is_error:
-                    # Read the streamed body before raising so the exception
-                    # handler can access e.response.text — otherwise httpx raises
-                    # ResponseNotRead and masks the real HTTP error.
-                    await response.aread()
-                    response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    raw = line[len("data:") :].strip()
-                    if not raw:
-                        continue
-                    try:
-                        event = json.loads(raw)
-                    except json.JSONDecodeError:
-                        logger.warning("Skipping non-JSON SSE line: %s", raw[:120])
-                        continue
-
-                    # JSON-RPC error (e.g. "Streaming is not supported by the
-                    # agent") — surface as a real exception so the caller marks
-                    # the run as FAILED rather than silently succeeding.
-                    if "error" in event and "result" not in event:
-                        err = event["error"]
-                        raise RuntimeError(
-                            f"A2A JSON-RPC error from agent-runner "
-                            f"(code={err.get('code')}): {err.get('message', 'unknown error')}"
-                        )
-
-                    result = event.get("result", {})
-                    kind = result.get("kind")
-
-                    if kind == "artifact-update":
-                        context_id = result.get("contextId") or context_id
-                        artifact = result.get("artifact", {})
-                        for part in artifact.get("parts", []):
-                            if isinstance(part, dict) and part.get("kind") == "text":
-                                last_artifact_text = part.get("text", "")
-                                break
-
-                    elif kind == "status-update":
-                        context_id = result.get("contextId") or context_id
-                        state = result.get("status", {}).get("state", "working")
-                        if state in ("completed", "failed"):
-                            final_state = state
-
-        # Build a synthetic response in the same shape _parse_result already
-        # handles (A2A Task format with artifacts list).
-        task_obj: dict[str, Any] = {
-            "kind": "task",
-            "contextId": context_id,
-            "status": {"state": final_state},
-            "artifacts": [],
-        }
-        if last_artifact_text is not None:
-            task_obj["artifacts"] = [{"parts": [{"kind": "text", "text": last_artifact_text}]}]
-        return {"result": task_obj}
 
     def _parse_result(self, data: dict[str, Any]) -> tuple[JobRunStatus, str | None, str | None, str | None]:
         """Extract structured result fields from agent-runner A2A response.

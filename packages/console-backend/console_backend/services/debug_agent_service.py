@@ -1,18 +1,17 @@
 """Service for dispatching debug agent requests via agent-runner."""
 
 import asyncio
-import json
 import logging
 import uuid
 from typing import Any
 
-import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.bug_report import BugReportResponse, BugReportStatus
 from ..models.user import User
 from ..services.bug_report_service import BugReportService
+from ..utils.a2a_dispatch import dispatch_streaming
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +114,16 @@ class DebugAgentService:
                 subject_token=user_access_token,
                 target_client_id="agent-runner",
             )
-            payload = self._build_a2a_payload(report_id, sub_agent_id, bug_report, context_id)
-            await self._send_streaming_request(payload, access_token)
+            # Dispatch to agent-runner via the native a2a-sdk v1.1.0 streaming client and drive
+            # the stream to completion (the debug agent updates the bug report via MCP tools).
+            await dispatch_streaming(
+                agent_url=self._agent_runner_url,
+                access_token=access_token,
+                parts=self._build_message_parts(report_id, bug_report),
+                metadata={"sub_agent_id": sub_agent_id},
+                context_id=context_id,
+                timeout_read=float(DEBUG_AGENT_TIMEOUT_SECONDS),
+            )
             logger.info(f"Debug agent completed for bug report {report_id}")
         except Exception:
             logger.exception(f"Debug agent failed for bug report {report_id}")
@@ -137,98 +144,26 @@ class DebugAgentService:
             except Exception:
                 logger.exception(f"Failed to revert bug report {report_id} status after debug agent completion")
 
-    def _build_a2a_payload(
-        self,
-        report_id: str,
-        sub_agent_id: str,
-        bug_report: BugReportResponse,
-        context_id: str,
-    ) -> dict[str, Any]:
-        """Build JSON-RPC A2A message/stream payload for agent-runner."""
-        # DataPart with structured context
-        data_part: dict[str, Any] = {
-            "kind": "data",
-            "data": {
-                "bug_report_id": report_id,
-                "conversation_id": bug_report.conversation_id,
-                "message_id": bug_report.message_id,
-                "task_id": bug_report.task_id,
-                "description": bug_report.description,
-            },
-            "metadata": {"mimeType": "application/json"},
-        }
-
-        # TextPart with natural language instructions
-        text_part: dict[str, Any] = {
-            "kind": "text",
-            "text": (
-                f"Investigate bug report {report_id}. "
-                f"Analyze LangSmith traces for the given task and conversation, "
-                f"check for duplicate GitHub issues, create one if needed, "
-                f"then update the bug report status and external link using the provided tools."
-            ),
-        }
-
-        return {
-            "jsonrpc": "2.0",
-            "method": "message/stream",
-            "id": f"debug-{report_id}",
-            "params": {
-                "message": {
-                    "messageId": str(uuid.uuid4()),
-                    "contextId": context_id,
-                    "role": "user",
-                    "parts": [data_part, text_part],
-                    "metadata": {
-                        "sub_agent_id": sub_agent_id,
-                    },
+    def _build_message_parts(self, report_id: str, bug_report: BugReportResponse) -> list[dict[str, Any]]:
+        """Build the A2A message parts (structured context DataPart + instruction TextPart)."""
+        return [
+            {
+                "kind": "data",
+                "data": {
+                    "bug_report_id": report_id,
+                    "conversation_id": bug_report.conversation_id,
+                    "message_id": bug_report.message_id,
+                    "task_id": bug_report.task_id,
+                    "description": bug_report.description,
                 },
             },
-        }
-
-    async def _send_streaming_request(self, payload: dict[str, Any], access_token: str) -> None:
-        """POST to agent-runner using message/stream (SSE), consume until completion."""
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=float(DEBUG_AGENT_TIMEOUT_SECONDS),
-                write=30.0,
-                pool=5.0,
-            )
-        ) as client:
-            async with client.stream(
-                "POST",
-                f"{self._agent_runner_url}/",
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "text/event-stream",
-                },
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    raw = line[len("data:") :].strip()
-                    if not raw:
-                        continue
-                    try:
-                        event = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # Check for JSON-RPC error
-                    if "error" in event and "result" not in event:
-                        err = event["error"]
-                        raise RuntimeError(
-                            f"A2A JSON-RPC error from agent-runner "
-                            f"(code={err.get('code')}): {err.get('message', 'unknown error')}"
-                        )
-
-                    result = event.get("result", {})
-                    kind = result.get("kind")
-                    if kind == "status-update":
-                        state = result.get("status", {}).get("state", "working")
-                        if state == "failed":
-                            raise RuntimeError("Debug agent reported failure")
+            {
+                "kind": "text",
+                "text": (
+                    f"Investigate bug report {report_id}. "
+                    f"Analyze LangSmith traces for the given task and conversation, "
+                    f"check for duplicate GitHub issues, create one if needed, "
+                    f"then update the bug report status and external link using the provided tools."
+                ),
+            },
+        ]

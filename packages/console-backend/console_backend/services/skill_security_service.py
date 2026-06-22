@@ -10,12 +10,10 @@ configured or agent-runner is unavailable (e.g., local dev).
 
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any
 
-import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +23,7 @@ from console_backend.models.skills_registry import (
     SkillSecurityIndicator,
     SkillSecurityVerdict,
 )
+from console_backend.utils.a2a_dispatch import dispatch_streaming
 
 logger = logging.getLogger(__name__)
 
@@ -153,119 +152,40 @@ class SkillSecurityService:
             target_client_id="agent-runner",
         )
 
-        # Build the assessment payload
-        payload = self._build_assessment_payload(assessor_id, files)
+        # Dispatch to the assessor via the native a2a-sdk v1.1.0 streaming client and collect
+        # the final artifact text (the assessor's JSON verdict).
+        file_summary = ", ".join(f.path for f in files[:10])
+        parts: list[dict[str, Any]] = [
+            {"kind": "data", "data": {"files": [{"path": f.path, "content": f.content} for f in files]}},
+            {
+                "kind": "text",
+                "text": (
+                    f"Assess the eligibility of this skill for the registry. "
+                    f"Files: {file_summary}. "
+                    f"The skill files are provided in the data part. "
+                    f"Return your assessment as a JSON object with verdict, reasoning, and indicators."
+                ),
+            },
+        ]
+        result_data = await dispatch_streaming(
+            agent_url=self._agent_runner_url,
+            access_token=access_token,
+            parts=parts,
+            metadata={"sub_agent_id": assessor_id},
+            timeout_read=float(ASSESSOR_TIMEOUT_SECONDS),
+        )
 
-        # Send to agent-runner and collect the response
-        response_text = await self._send_assessment_request(payload, access_token)
+        artifacts = result_data["result"].get("artifacts", [])
+        response_text = ""
+        if artifacts:
+            for part in artifacts[-1].get("parts", []):
+                if part.get("kind") == "text":
+                    response_text += part.get("text", "")
+        if not response_text:
+            raise RuntimeError("Assessor agent returned no artifact")
 
         # Parse the agent's structured response
         return self._parse_assessment_response(response_text, content_hash, registry_audit)
-
-    def _build_assessment_payload(
-        self,
-        assessor_id: str,
-        files: list[SkillFile],
-    ) -> dict[str, Any]:
-        """Build A2A message payload for the assessor agent."""
-        # DataPart with skill files
-        data_part: dict[str, Any] = {
-            "kind": "data",
-            "data": {
-                "files": [{"path": f.path, "content": f.content} for f in files],
-            },
-            "metadata": {"mimeType": "application/json"},
-        }
-
-        # TextPart with assessment instructions
-        file_summary = ", ".join(f.path for f in files[:10])
-        text_part: dict[str, Any] = {
-            "kind": "text",
-            "text": (
-                f"Assess the eligibility of this skill for the registry. "
-                f"Files: {file_summary}. "
-                f"The skill files are provided in the data part. "
-                f"Return your assessment as a JSON object with verdict, reasoning, and indicators."
-            ),
-        }
-
-        return {
-            "jsonrpc": "2.0",
-            "method": "message/stream",
-            "id": f"assess-{uuid.uuid4()}",
-            "params": {
-                "message": {
-                    "messageId": str(uuid.uuid4()),
-                    "contextId": str(uuid.uuid4()),
-                    "role": "user",
-                    "parts": [data_part, text_part],
-                    "metadata": {
-                        "sub_agent_id": assessor_id,
-                    },
-                },
-            },
-        }
-
-    async def _send_assessment_request(self, payload: dict[str, Any], access_token: str) -> str:
-        """POST to agent-runner, consume SSE stream, return the final artifact text."""
-        artifact_text = ""
-
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=10.0,
-                read=float(ASSESSOR_TIMEOUT_SECONDS),
-                write=30.0,
-                pool=5.0,
-            )
-        ) as client:
-            async with client.stream(
-                "POST",
-                f"{self._agent_runner_url}/",
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "text/event-stream",
-                },
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    raw = line[len("data:") :].strip()
-                    if not raw:
-                        continue
-                    try:
-                        event = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # Check for JSON-RPC error
-                    if "error" in event and "result" not in event:
-                        err = event["error"]
-                        raise RuntimeError(
-                            f"Assessor agent error (code={err.get('code')}): {err.get('message', 'unknown')}"
-                        )
-
-                    result = event.get("result", {})
-                    kind = result.get("kind")
-
-                    if kind == "status-update":
-                        state = result.get("status", {}).get("state", "working")
-                        if state == "failed":
-                            raise RuntimeError("Assessor agent reported failure")
-
-                    elif kind == "artifact-update":
-                        # Collect artifact text parts
-                        artifact = result.get("artifact", {})
-                        for part in artifact.get("parts", []):
-                            if part.get("kind") == "text":
-                                artifact_text += part.get("text", "")
-
-        if not artifact_text:
-            raise RuntimeError("Assessor agent returned no artifact")
-
-        return artifact_text
 
     def _parse_assessment_response(
         self,

@@ -128,7 +128,7 @@ def test_supports_image_fusion(litellm_model, expected):
 
 def test_invoke_reuses_one_pooled_client(monkeypatch):
     """_invoke must share one process-wide httpx.Client, not build one per call (#8)."""
-    monkeypatch.setattr(emb_mod, "_gateway_base", lambda: "http://gateway")
+    monkeypatch.setattr(emb_mod, "gateway_base_url", lambda: "http://gateway")
     constructed = {"n": 0}
 
     class _FakeResp:
