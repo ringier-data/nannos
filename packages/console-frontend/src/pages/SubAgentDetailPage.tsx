@@ -49,7 +49,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -70,7 +70,8 @@ import { ConfigSection } from '@/components/subagents/ConfigSection';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
-import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
+import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, MODEL_TIER_OPTIONS } from '@/config/models';
+import { ModelStatusText } from '@/components/models/ModelStatusText';
 import {
   getSubAgentApiV1SubAgentsSubAgentIdGetOptions,
   getSubAgentVersionsApiV1SubAgentsSubAgentIdVersionsGetOptions,
@@ -87,7 +88,7 @@ import {
   updateActivationApiV1SkillsActivationsActivationIdUpdatePostMutation,
   listMyGroupsApiV1GroupsGetOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinition, McpSkillFile, SkillSearchResult, SkillActivationWithStatus } from '@/api/generated/types.gen';
+import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinition, McpSkillFile, SkillSearchResult, SkillActivationWithStatus, ModelTier } from '@/api/generated/types.gen';
 import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
@@ -516,6 +517,19 @@ export function SubAgentDetailPage() {
   const displayedModel = isViewingHistoricalVersion
     ? (viewedVersion?.model ?? subAgent?.config_version?.model ?? '')
     : (subAgent?.config_version?.model ?? '');
+  // Model lifecycle, resolved by console-backend (single source of truth for retirement).
+  const displayedConfigVersion = isViewingHistoricalVersion
+    ? (viewedVersion ?? subAgent?.config_version)
+    : subAgent?.config_version;
+  const displayedModelRetired = displayedConfigVersion?.model_retired ?? false;
+  const displayedEffectiveModel = displayedConfigVersion?.effective_model ?? null;
+  // Tier binding (mutually exclusive with a concrete model). When set, the agent shows/runs
+  // the tier's current default rather than a fixed alias.
+  const displayedModelTier = displayedConfigVersion?.model_tier ?? null;
+  // The inline editor stores model OR tier in one value: a tier is `tier:<tier>`.
+  const editIsTier = editModel.startsWith('tier:');
+  const editModelAlias = editIsTier ? '' : editModel;
+  const editModelTier = editIsTier ? editModel.slice('tier:'.length) : null;
   const displayedSystemPrompt = isViewingHistoricalVersion
     ? (viewedVersion?.system_prompt ?? subAgent?.config_version?.system_prompt ?? '')
     : (subAgent?.config_version?.system_prompt ?? '');
@@ -674,7 +688,7 @@ export function SubAgentDetailPage() {
     setEditName(sa.name);
     setEditIsPublic(sa.is_public ?? false);
     setEditDescription(sa.config_version?.description || '');
-    setEditModel(sa.config_version?.model || '');
+    setEditModel(sa.config_version?.model_tier ? `tier:${sa.config_version.model_tier}` : (sa.config_version?.model || ''));
     if (sa.type === 'remote') {
       setEditAgentUrl(String(sa.config_version?.agent_url ?? ''));
     } else if (sa.type === 'foundry') {
@@ -787,7 +801,8 @@ export function SubAgentDetailPage() {
         name: editName,
         is_public: editIsPublic,
         description: editDescription,
-        model: editModel || undefined,
+        model: editIsTier ? undefined : (editModelAlias || undefined),
+        model_tier: editIsTier ? (editModelTier as ModelTier) : undefined,
         ...typeSpecificConfig,
         change_summary: summary || 'Updated configuration from playground',
       },
@@ -1740,7 +1755,8 @@ export function SubAgentDetailPage() {
                             value={editModel}
                             onValueChange={(value) => {
                               setEditModel(value);
-                              if (!modelSupportsThinking(value, availableModels)) {
+                              // Tier selections have no concrete alias to check capabilities against.
+                              if (!value.startsWith('tier:') && !modelSupportsThinking(value, availableModels)) {
                                 setEditEnableThinking(false);
                                 setEditThinkingLevel(null);
                               }
@@ -1748,41 +1764,78 @@ export function SubAgentDetailPage() {
                             }}
                           >
                             <SelectTrigger id="model" className="h-8 text-sm">
-                              <SelectValue placeholder="Select a model" />
+                              <SelectValue placeholder="Select a model or tier" />
                             </SelectTrigger>
                             <SelectContent>
-                              {availableModels.map((option) => (
-                                <SelectItem key={option.value} value={option.value}>
-                                  {option.label}
-                                </SelectItem>
-                              ))}
+                              <SelectGroup>
+                                <SelectLabel>Tier (follows the fleet default for that tier)</SelectLabel>
+                                {MODEL_TIER_OPTIONS.map((opt) => (
+                                  <SelectItem key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                              <SelectSeparator />
+                              <SelectGroup>
+                                <SelectLabel>Specific model</SelectLabel>
+                                {modelSelectOptions(editModelAlias, availableModels, displayedModelRetired).options.map((option) => (
+                                  <SelectItem key={option.value} value={option.value}>
+                                    {option.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
                             </SelectContent>
                           </Select>
+                        ) : displayedModelTier ? (
+                          <span className="text-sm text-foreground">
+                            {displayedModelTier} tier
+                            {displayedEffectiveModel ? (
+                              <span className="text-muted-foreground"> → {displayedEffectiveModel}</span>
+                            ) : null}
+                          </span>
                         ) : (
-                          <p className="text-sm">{displayedModel || 'Default'}</p>
+                          <ModelStatusText
+                            value={displayedModel}
+                            modelRetired={displayedModelRetired}
+                            effectiveModel={displayedEffectiveModel}
+                          />
+                        )}
+                        {isEditing && !editIsTier && modelSelectOptions(editModelAlias, availableModels, displayedModelRetired).retiredValue && (
+                          <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                            This model was retired. Select a replacement to update the agent.
+                          </p>
+                        )}
+                        {isEditing && editIsTier && (
+                          <p className="text-[11px] text-muted-foreground">
+                            Runs on the current default for this tier — survives model upgrades.
+                          </p>
                         )}
                       </div>
 
-                      {/* Extended Thinking */}
+                      {/* Extended Thinking — only offered for models the gateway reports as
+                          thinking-capable, so we never let the user enable a config the
+                          backend would silently drop on save. */}
                       {isEditing ? (
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <span className="text-xs font-medium text-foreground">Extended Thinking</span>
-                            <p className="text-[11px] text-muted-foreground">Enable extended thinking for complex reasoning tasks</p>
+                        modelSupportsThinking(editModelAlias, availableModels) && (
+                          <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                              <span className="text-xs font-medium text-foreground">Extended Thinking</span>
+                              <p className="text-[11px] text-muted-foreground">Enable extended thinking for complex reasoning tasks</p>
+                            </div>
+                            <Switch
+                              checked={editEnableThinking}
+                              onCheckedChange={(checked) => {
+                                setEditEnableThinking(checked);
+                                if (!checked) {
+                                  setEditThinkingLevel(null);
+                                } else if (editThinkingLevel === null) {
+                                  setEditThinkingLevel('low');
+                                }
+                                handleFieldChange();
+                              }}
+                            />
                           </div>
-                          <Switch
-                            checked={editEnableThinking}
-                            onCheckedChange={(checked) => {
-                              setEditEnableThinking(checked);
-                              if (!checked) {
-                                setEditThinkingLevel(null);
-                              } else if (editThinkingLevel === null) {
-                                setEditThinkingLevel('low');
-                              }
-                              handleFieldChange();
-                            }}
-                          />
-                        </div>
+                        )
                       ) : (
                         displayedEnableThinking && (
                           <div className="flex items-center justify-between">
@@ -1794,7 +1847,7 @@ export function SubAgentDetailPage() {
                         )
                       )}
 
-                      {isEditing && editEnableThinking && (
+                      {isEditing && editEnableThinking && modelSupportsThinking(editModelAlias, availableModels) && (
                         <div className="space-y-1.5 pl-1">
                           <span className="text-[11px] text-muted-foreground">Thinking Level</span>
                           <Select
@@ -1808,7 +1861,7 @@ export function SubAgentDetailPage() {
                               <SelectValue placeholder="Select level" />
                             </SelectTrigger>
                             <SelectContent>
-                              {getAvailableThinkingLevels(editModel, availableModels).map((option) => (
+                              {getAvailableThinkingLevels(editModelAlias, availableModels).map((option) => (
                                 <SelectItem key={option.value} value={option.value}>
                                   {option.label}
                                 </SelectItem>

@@ -109,7 +109,7 @@ class MCPGatewayConfig(BaseModel):
 
 
 class ModelGatewayConfig(BaseModel):
-    """LiteLLM Model Gateway — admin/management access (ADR-0001/0005).
+    """LiteLLM Model Gateway — admin/management access.
 
     console-backend is the sole writer of the proxy's /model/* management API and
     holds the master key (kept server-side, never exposed to the frontend).

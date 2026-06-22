@@ -30,6 +30,7 @@ from ..models.sub_agent import (
     SubAgentVersionApproval,
 )
 from ..models.user import User
+from ..services.model_status import annotate_models
 from ..services.sub_agent_service import SubAgentService
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,8 @@ async def list_activated_sub_agents(
 
         # Resolve skill references with full body content
         await sub_agent_service.resolve_imported_skills_bulk(db, sub_agents)
+        # Resolve model lifecycle so the orchestrator runs effective_model directly.
+        await annotate_models(request, db, [sa.config_version for sa in sub_agents])
 
         return SubAgentListFullResponse(items=sub_agents, total=len(sub_agents))
     except Exception as e:
@@ -162,6 +165,7 @@ async def get_sub_agent_by_config_hash(
             raise HTTPException(status_code=403, detail="Access denied")
 
         await sub_agent_service.resolve_imported_skills(db, sub_agent)
+        await annotate_models(request, db, [sub_agent.config_version])
         return sub_agent
     except HTTPException:
         raise
@@ -196,6 +200,7 @@ async def get_sub_agent_by_config_version(
             raise HTTPException(status_code=403, detail="Access denied")
 
         await sub_agent_service.resolve_imported_skills(db, sub_agent)
+        await annotate_models(request, db, [sub_agent.config_version])
         return sub_agent
     except HTTPException:
         raise
@@ -259,6 +264,7 @@ async def get_sub_agent(
                 raise HTTPException(status_code=403, detail="Access denied")
 
         await sub_agent_service.resolve_imported_skills(db, sub_agent)
+        await annotate_models(request, db, [sub_agent.config_version])
         return sub_agent
     except HTTPException:
         raise
@@ -515,7 +521,9 @@ async def get_sub_agent_versions(
             if not any(sa.id == sub_agent_id for sa in accessible):
                 raise HTTPException(status_code=403, detail="Access denied")
 
-        return await sub_agent_service.get_config_versions(db, sub_agent_id)
+        versions = await sub_agent_service.get_config_versions(db, sub_agent_id)
+        await annotate_models(request, db, list(versions))
+        return versions
     except HTTPException:
         raise
     except Exception as e:

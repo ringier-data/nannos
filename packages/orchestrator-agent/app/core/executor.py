@@ -366,14 +366,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if context.call_context and hasattr(context.call_context, "state"):
             caller_sub = context.call_context.state.get("user_sub")
 
-        # Attribute this request's gateway LLM calls so the proxy CostLogger can bill them
-        # (ADR-0002). The orchestrator's own (top-level) model calls reach the gateway via
+        # Attribute this request's gateway LLM calls so the proxy CostLogger can bill them.
+        # The orchestrator's own (top-level) model calls reach the gateway via
         # the attribution http client, which stamps these ContextVars onto
         # x-litellm-spend-logs-metadata at send time. Without this they arrive with no
         # user_sub and the proxy drops them. (Sub-agents set their own via
         # create_runnable_config.) ContextVars propagate to the graph's async tasks.
         if caller_sub:
-            from agent_common.core.attribution import set_attribution
+            from ringier_a2a_sdk.cost_tracking.attribution import set_attribution
 
             set_attribution(user_sub=caller_sub, conversation_id=context_id)
         # Extract caller's channel ID from message metadata (for multi-user conversations)
@@ -534,12 +534,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             status = budget_guard.get_status()
             logger.warning(
                 f"Request rejected due to budget lock. "
-                f"Usage: {status.current_usage:,}/{status.token_limit:,} tokens. "
-                f"Reason: {status.lock_reason}"
+                f"Spend: ${status.spend_usd}/${status.limit_usd} ({status.usage_percentage:.1f}%)."
             )
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
-                new_text_message("Service temporarily unavailable: Monthly token budget has been exceeded. "
+                new_text_message("Service temporarily unavailable: the monthly spending budget has been exceeded. "
                     "Please contact an administrator to increase the budget or wait until next month.", context_id=task.context_id, task_id=task.id),
             )
             return

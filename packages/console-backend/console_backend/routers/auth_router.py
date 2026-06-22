@@ -26,6 +26,7 @@ from ..services.phone_verification_service import PhoneVerificationService
 from ..services.session_service import SessionService
 from ..services.user_group_service import UserGroupService
 from ..services.user_service import UserService
+from ..services.model_status import annotate_user_settings
 from ..services.user_settings_service import _UNSET, UserSettingsService
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,7 @@ async def get_current_user_settings(
     """
     user_settings_service = get_user_settings_service(request)
     settings = await user_settings_service.get_settings(db, user.id)
+    await annotate_user_settings(request, db, settings)
     return UserSettingsResponse(data=settings)
 
 
@@ -285,6 +287,7 @@ async def update_current_user_settings(
             logger.warning(f"Failed to sync phone override to Keycloak for user {user.id}: {e}")
             # Non-blocking: log but don't fail the request
 
+    await annotate_user_settings(request, db, settings)
     return UserSettingsResponse(data=settings)
 
 

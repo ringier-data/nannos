@@ -1,7 +1,7 @@
 """Model factory — creates LangChain clients pointed at the Nannos Model Gateway.
 
-All LLM traffic routes through the LiteLLM proxy (ADR-0001). The **gateway is the
-single source of truth** for which models exist (runtime registration, Q6) — the app
+All LLM traffic routes through the LiteLLM proxy. The **gateway is the
+single source of truth** for which models exist (runtime registration) — the app
 keeps NO static model registry. `create_model` builds one OpenAI-compatible
 `ChatOpenAI` per alias; validity comes from the live gateway list; extended thinking
 is the unified `reasoning_effort`, always sent (the gateway drops it for non-reasoning
@@ -46,15 +46,22 @@ def _gateway_base_url() -> str:
     if not url:
         raise RuntimeError(
             "LLM_GATEWAY_URL is not set. The Model Gateway is the sole path for LLM "
-            "calls (ADR-0001); point it at the litellm-proxy service."
+            "calls; point it at the litellm-proxy service."
         )
     return url.rstrip("/")
+
+
+def _gateway_api_key() -> str:
+    """The virtual/master key apps present to the gateway. Single resolver so every gateway
+    caller (chat, embeddings, the model-info fetch) sends the SAME credential — they used to
+    disagree (some defaulted to '' → silent 401s when the env was unset)."""
+    return os.getenv("LLM_GATEWAY_API_KEY", "sk-nannos-gateway")
 
 
 def assert_gateway_configured() -> None:
     """Fail fast at startup when the gateway URL is missing.
 
-    The gateway is the sole path for LLM traffic (ADR-0001), so a service that needs
+    The gateway is the sole path for LLM traffic, so a service that needs
     models should call this in its startup hook to surface the misconfiguration loudly
     at boot rather than as an opaque per-request failure deep in the graph."""
     _gateway_base_url()
@@ -62,7 +69,7 @@ def assert_gateway_configured() -> None:
 
 def get_reasoning_effort(thinking_level: ThinkingLevel | None) -> str | None:
     """Map the app `thinking_level` (minimal/low/medium/high) to LiteLLM's unified
-    `reasoning_effort` (ADR-0003). `minimal` has no distinct provider tier, so it floors
+    `reasoning_effort`. `minimal` has no distinct provider tier, so it floors
     to `low` (Bedrock floors at 1024 anyway); the rest pass through. The gateway drops
     the param for models that don't support a given level (`drop_params`)."""
     if not thinking_level:
@@ -86,11 +93,11 @@ def create_model(
     """
     from langchain_openai import ChatOpenAI
 
-    from agent_common.core.attribution import build_attribution_http_client
+    from ringier_a2a_sdk.cost_tracking.attribution import build_attribution_http_client
 
     model_type = resolve_chat_model(model_type)
-    # The proxy CostLogger is the single source of cost for all gateway traffic
-    # (ADR-0002). Drop any in-app CostTrackingCallback some call sites still pass, or the
+    # The proxy CostLogger is the single source of cost for all gateway traffic.
+    # Drop any in-app CostTrackingCallback some call sites still pass, or the
     # call is double-counted — once proxy-side (correct provider) and once in-app (which
     # sees the OpenAI-compatible client and mislabels the provider as "openai").
     if callbacks:
@@ -104,12 +111,12 @@ def create_model(
     logger.info("Creating gateway model alias=%s thinking=%s streaming=%s", model_type, effort, streaming)
     return ChatOpenAI(
         base_url=_gateway_base_url(),
-        api_key=os.getenv("LLM_GATEWAY_API_KEY", "sk-nannos-gateway"),
+        api_key=_gateway_api_key(),
         model=model_type,
         streaming=streaming,
         stream_usage=True,  # usage in the final chunk so cost callbacks see usage_metadata
         callbacks=callbacks,
-        http_async_client=build_attribution_http_client(),  # per-request attribution (ADR-0002)
+        http_async_client=build_attribution_http_client(),  # per-request attribution
         model_kwargs=model_kwargs,
     )
 
@@ -139,9 +146,9 @@ def get_embedding_dimension() -> int:
 
 
 def create_embeddings(model_type: str | None = None, multimodal: bool = False):
-    """Create a gateway-backed text embeddings client (ADR-0001).
+    """Create a gateway-backed text embeddings client.
 
-    Cost is captured proxy-side (ADR-0002) via the attribution http client. When
+    Cost is captured proxy-side via the attribution http client. When
     `model_type` is omitted, the configured **default** embedding model is used (the
     "use the default when set" behavior); if no default is set, raises
     EmbeddingModelNotConfigured so callers can disable the feature gracefully. An explicit
@@ -153,7 +160,7 @@ def create_embeddings(model_type: str | None = None, multimodal: bool = False):
     """
     from langchain_openai import OpenAIEmbeddings
 
-    from agent_common.core.attribution import build_attribution_http_client
+    from ringier_a2a_sdk.cost_tracking.attribution import build_attribution_http_client
 
     if model_type is None:
         model_type = get_default_embedding_model(multimodal)
@@ -165,7 +172,7 @@ def create_embeddings(model_type: str | None = None, multimodal: bool = False):
         model_type = resolve_embedding_model(model_type, multimodal=multimodal)
     return OpenAIEmbeddings(
         base_url=_gateway_base_url(),
-        api_key=os.getenv("LLM_GATEWAY_API_KEY", "sk-nannos-gateway"),
+        api_key=_gateway_api_key(),
         model=model_type,
         dimensions=get_embedding_dimension(),  # match the store's pgvector index dims
         http_async_client=build_attribution_http_client(),
@@ -179,7 +186,7 @@ def create_embeddings(model_type: str | None = None, multimodal: bool = False):
 
 # Cached snapshot of the gateway registry: {model_name: model_info}. model_info
 # carries capabilities (input_modes, supports_reasoning, …) set at registration.
-# Fetched with the app's virtual key (no master key needed — ADR-0005). ts starts
+# Fetched with the app's virtual key (no master key needed). ts starts
 # far in the past so the first call fetches; every path updates ts so failures are
 # cached too (no per-call refetch storm).
 # These caches are read from sync `create_model`/resolution helpers that run inside the
@@ -221,19 +228,12 @@ _GW_LOCK = threading.Lock()
 
 
 def _fetch_gateway_models() -> dict[str, dict]:
-    base = os.getenv("LLM_GATEWAY_URL")
-    if not base:
-        # An unset gateway URL is a misconfiguration, NOT an empty registry. Raise so the
-        # error is recorded in `last_error` (models_known_empty() then returns False and the
-        # orchestrator won't tell the user "no models registered"); the real cause surfaces
-        # via _gateway_base_url() raising on the next create_model call.
-        raise RuntimeError(
-            "LLM_GATEWAY_URL is not set. The Model Gateway is the sole path for LLM "
-            "calls (ADR-0001); point it at the litellm-proxy service."
-        )
+    # _gateway_base_url() raises when LLM_GATEWAY_URL is unset — a misconfiguration, NOT an
+    # empty registry. The error is recorded in `last_error` (models_known_empty() then
+    # returns False so the orchestrator won't tell the user "no models registered").
     req = urllib.request.Request(
-        base.rstrip("/") + "/v1/model/info",
-        headers={"Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', '')}"},
+        _gateway_base_url() + "/v1/model/info",
+        headers={"Authorization": f"Bearer {_gateway_api_key()}"},
     )
     with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310 (internal cluster URL)
         data = json.loads(resp.read()).get("data", [])
@@ -274,7 +274,7 @@ def _model_defaults() -> dict[str, str]:
 
 def _default_alias_for(role: str) -> ModelType | None:
     """The alias the console has set as default for a role (chat/embedding/
-    multimodal_embedding), so a retired alias degrades gracefully (ADR-0001)."""
+    multimodal_embedding), so a retired alias degrades gracefully."""
     return _model_defaults().get(role)  # type: ignore[return-value]
 
 
@@ -368,15 +368,30 @@ def get_model_input_capabilities(model_type: ModelType) -> list[str]:
     return list(modes) if modes else ["text", "image"]
 
 
+def get_model_provider(model_type: ModelType) -> str:
+    """The LiteLLM provider family for a model, from the gateway model_info
+    (e.g. ``'bedrock_converse'``, ``'openai'``, ``'azure'``, ``'vertex_ai'``); ``''`` when
+    the model is unknown or the gateway snapshot is unavailable.
+
+    Gateway-native replacement for branching on hardcoded alias strings: the
+    request strategy a model needs (tool-based vs native structured output, Gemini's
+    text-embedded JSON, built-in tools) follows from its provider/capabilities, not from
+    its name — so a renamed/re-registered alias (e.g. ``claude-sonnet-4-6`` vs
+    ``claude-sonnet-4.6``) can't silently route into the wrong branch.
+    """
+    info = _gateway_models().get(model_type) or {}
+    return info.get("litellm_provider") or ""
+
+
 def get_default_model() -> ModelType:
     """Fleet default chat model: the gateway's default-for-chat flag if set, else the
-    configured DEFAULT_MODEL env (DB-stored default wins, ADR-0001)."""
+    configured DEFAULT_MODEL env (DB-stored default wins)."""
     return _default_alias_for("chat") or get_resolved_default_model()
 
 
 def get_available_models_metadata() -> list[dict]:
     """Minimal picker metadata from the live list. Rich capability/label data is
-    served by console-backend directly from the gateway `/model/info` (Q6); this
+    served by console-backend directly from the gateway `/model/info`; this
     orchestrator-side view is intentionally minimal."""
     default_model = get_default_model()
     return [
@@ -388,7 +403,7 @@ def get_available_models_metadata() -> list[dict]:
 def get_default_indexing_model() -> ModelType:
     """Model for semantic indexing/chunking (generating context descriptions).
 
-    Follows the per-role default convention (ADR-0001), same as chat/embedding: use the
+    Follows the per-role default convention, same as chat/embedding: use the
     console-set "indexing" default if present, else degrade to the fleet chat default.
     No hardcoded alias list — the gateway + model_defaults are the single source of truth,
     so a retired/renamed alias never silently routes indexing to an arbitrary (possibly

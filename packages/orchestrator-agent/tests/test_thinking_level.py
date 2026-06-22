@@ -12,7 +12,7 @@ _GW_ENV = {"LLM_GATEWAY_URL": "http://litellm-proxy.test", "LLM_GATEWAY_API_KEY"
 
 
 class TestGetReasoningEffort:
-    """thinking_level → unified reasoning_effort (ADR-0003)."""
+    """thinking_level → unified reasoning_effort."""
 
     def test_mapping(self):
         assert get_reasoning_effort(ThinkingLevel.minimal) == "low"  # no distinct tier; Bedrock floors at 1024
@@ -42,7 +42,7 @@ class TestCreateModelGateway:
     def test_effort_always_forwarded(self, mock_chat):
         # No per-model capability table in the app: reasoning_effort is always
         # forwarded when a thinking_level is set; the gateway drops it for
-        # non-reasoning models via drop_params (ADR-0003).
+        # non-reasoning models via drop_params.
         create_model("gpt-4o", thinking_level=ThinkingLevel.low)
         kwargs = mock_chat.call_args[1]
         assert kwargs["model_kwargs"]["reasoning_effort"] == "low"

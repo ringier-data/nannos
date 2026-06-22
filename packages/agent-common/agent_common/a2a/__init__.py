@@ -63,6 +63,7 @@ from .structured_response import (
     StructuredResponseMixin,
     SubAgentResponseSchema,
     get_response_format,
+    select_response_format,
 )
 
 __all__ = [
@@ -89,6 +90,7 @@ __all__ = [
     "A2A_PROTOCOL_ADDENDUM",
     "StructuredResponseMixin",
     "get_response_format",
+    "select_response_format",
     # Stream events
     "TaskUpdate",
     "ArtifactUpdate",

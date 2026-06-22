@@ -160,7 +160,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting';
 
 /**
  * AuditLog
@@ -223,7 +223,10 @@ export type AutomatedSubAgentConfig = {
      * Short description of the sub-agent's skill, max 200 chars.
      */
     description: string;
-    model: ModelEnum;
+    /**
+     * Model
+     */
+    model: string;
     /**
      * System Prompt
      *
@@ -271,6 +274,14 @@ export type AvailableModel = {
      * Is Default
      */
     is_default?: boolean;
+    /**
+     * Input Price Per Million
+     */
+    input_price_per_million?: number | null;
+    /**
+     * Output Price Per Million
+     */
+    output_price_per_million?: number | null;
 };
 
 /**
@@ -325,6 +336,111 @@ export type BodyUploadFilesApiV1FilesUploadPost = {
      * Conversation Id
      */
     conversation_id?: string | null;
+};
+
+/**
+ * BudgetSettings
+ *
+ * Current Budget Guard configuration (the single `budget_settings` row).
+ */
+export type BudgetSettings = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Monthly Limit Usd
+     */
+    monthly_limit_usd: string;
+    /**
+     * Warning Thresholds
+     */
+    warning_thresholds: Array<number>;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+};
+
+/**
+ * BudgetSettingsUpdate
+ *
+ * Partial update to the Budget Guard configuration (admin-only).
+ *
+ * Every field is optional so the admin form can PATCH-style update a subset.
+ */
+export type BudgetSettingsUpdate = {
+    /**
+     * Enabled
+     */
+    enabled?: boolean | null;
+    /**
+     * Monthly Limit Usd
+     *
+     * Monthly spend ceiling in USD
+     */
+    monthly_limit_usd?: number | string | null;
+    /**
+     * Warning Thresholds
+     *
+     * Fractions of the limit (0..1] at which to warn, e.g. [0.8, 0.9, 0.95]
+     */
+    warning_thresholds?: Array<number> | null;
+};
+
+/**
+ * BudgetStatus
+ *
+ * Live budget snapshot: month-to-date spend vs limit, plus the lock decision.
+ *
+ * Served to both the admin page (to render the gauge) and the orchestrator poll (to
+ * drive enforcement). `is_locked` is the single source of truth for enforcement.
+ */
+export type BudgetStatus = {
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Spend Usd
+     *
+     * Month-to-date global spend in USD
+     */
+    spend_usd: string;
+    /**
+     * Limit Usd
+     */
+    limit_usd: string;
+    /**
+     * Usage Percentage
+     *
+     * spend / limit as a percentage
+     */
+    usage_percentage: number;
+    /**
+     * Is Locked
+     *
+     * True when enabled and spend >= limit (fail-closed)
+     */
+    is_locked: boolean;
+    /**
+     * Warnings
+     *
+     * Warning thresholds crossed at the current spend
+     */
+    warnings?: Array<number>;
+    /**
+     * Period Start
+     *
+     * Start of the current calendar month (UTC)
+     */
+    period_start: string;
+    /**
+     * Period End
+     *
+     * When this snapshot was computed (UTC)
+     */
+    period_end: string;
 };
 
 /**
@@ -1536,13 +1652,17 @@ export type GatewayModel = {
      */
     input_modes?: Array<string>;
     /**
-     * Default For
+     * Default Roles
      */
-    default_for?: string | null;
+    default_roles?: Array<string>;
     /**
      * Db Model
      */
     db_model?: boolean;
+    /**
+     * Base Model
+     */
+    base_model?: string | null;
     /**
      * Input Cost Per Token
      */
@@ -1578,7 +1698,7 @@ export type GatewayUsageLogBatchCreate = {
 /**
  * GatewayUsageLogCreate
  *
- * A usage log posted by the Model Gateway (trusted service, ADR-0002).
+ * A usage log posted by the Model Gateway (trusted service).
  *
  * Unlike UsageLogCreate (where the endpoint derives the user from the caller's
  * token), the gateway batches across many users, so each record carries its own
@@ -2560,7 +2680,7 @@ export type MessageFeedbackResponse = {
  *
  * Register a model: routing/capability go to the gateway, billing to the Rate Card.
  *
- * Per ADR-0002/Q6a the Rate Card is written first (a model must be billable before
+ * The Rate Card is written first (a model must be billable before
  * it is usable), then the deployment is registered on the gateway.
  */
 export type ModelRegistrationRequest = {
@@ -2639,6 +2759,16 @@ export type ModelRegistrationResponse = {
      */
     status?: string;
 };
+
+/**
+ * ModelTier
+ *
+ * Capability tier a sub-agent binds to instead of a concrete model alias. Resolves to
+ * the chat:<tier> model_defaults slot at read time ('standard' → the plain 'chat' default),
+ * so retiring/upgrading a model is one slot repoint. Mutually exclusive with an
+ * explicit model.
+ */
+export type ModelTier = 'low' | 'standard' | 'premium';
 
 /**
  * NotificationListResponse
@@ -4157,7 +4287,7 @@ export type SetDefaultRequest = {
     /**
      * Role
      *
-     * One of: chat, embedding, multimodal_embedding
+     * One of: chat, chat:low, chat:premium, embedding, multimodal_embedding, indexing
      */
     role: string;
 };
@@ -5082,6 +5212,7 @@ export type SubAgentConfigVersion = {
      * Model
      */
     model?: string | null;
+    model_tier?: ModelTier | null;
     /**
      * System Prompt
      */
@@ -5178,6 +5309,14 @@ export type SubAgentConfigVersion = {
      * Skills
      */
     skills?: Array<SkillDefinition>;
+    /**
+     * Model Retired
+     */
+    model_retired?: boolean;
+    /**
+     * Effective Model
+     */
+    effective_model?: string | null;
 };
 
 /**
@@ -5214,6 +5353,7 @@ export type SubAgentConfigVersionSummary = {
      * Model
      */
     model?: string | null;
+    model_tier?: ModelTier | null;
     /**
      * System Prompt
      */
@@ -5334,7 +5474,8 @@ export type SubAgentCreate = {
     /**
      * Model
      */
-    model?: ModelEnum | null;
+    model?: string | null;
+    model_tier?: ModelTier | null;
     /**
      * System Prompt
      */
@@ -5653,7 +5794,8 @@ export type SubAgentUpdate = {
     /**
      * Model
      */
-    model?: ModelEnum | null;
+    model?: string | null;
+    model_tier?: ModelTier | null;
     /**
      * System Prompt
      */
@@ -6554,6 +6696,14 @@ export type UserSettings = {
      */
     preferred_model?: string | null;
     /**
+     * Preferred Model Retired
+     */
+    preferred_model_retired?: boolean;
+    /**
+     * Effective Preferred Model
+     */
+    effective_preferred_model?: string | null;
+    /**
      * Enable Thinking
      */
     enable_thinking?: boolean | null;
@@ -6857,11 +7007,6 @@ export type GranularityEnum2 = 'day' | 'week' | 'month';
  * 'personal' or 'group'
  */
 export type ScopeEnum = 'personal' | 'group' | 'sub-agent';
-
-/**
- * Model
- */
-export type ModelEnum = 'gpt-4o' | 'gpt-4o-mini' | 'claude-sonnet-4.5' | 'claude-sonnet-4.6' | 'claude-haiku-4-5' | 'gemini-3.1-pro-preview' | 'gemini-3-flash-preview';
 
 /**
  * Action
@@ -10273,23 +10418,100 @@ export type SetDefaultApiV1AdminModelGatewayModelsModelIdDefaultPostResponses = 
     200: unknown;
 };
 
-export type ListAvailableModelsApiV1ModelsGetData = {
+export type GetBudgetSettingsApiV1AdminBudgetSettingsGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/budget/settings';
+};
+
+export type GetBudgetSettingsApiV1AdminBudgetSettingsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: BudgetSettings;
+};
+
+export type GetBudgetSettingsApiV1AdminBudgetSettingsGetResponse = GetBudgetSettingsApiV1AdminBudgetSettingsGetResponses[keyof GetBudgetSettingsApiV1AdminBudgetSettingsGetResponses];
+
+export type UpdateBudgetSettingsApiV1AdminBudgetSettingsPutData = {
+    body: BudgetSettingsUpdate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/budget/settings';
+};
+
+export type UpdateBudgetSettingsApiV1AdminBudgetSettingsPutErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateBudgetSettingsApiV1AdminBudgetSettingsPutError = UpdateBudgetSettingsApiV1AdminBudgetSettingsPutErrors[keyof UpdateBudgetSettingsApiV1AdminBudgetSettingsPutErrors];
+
+export type UpdateBudgetSettingsApiV1AdminBudgetSettingsPutResponses = {
+    /**
+     * Successful Response
+     */
+    200: BudgetSettings;
+};
+
+export type UpdateBudgetSettingsApiV1AdminBudgetSettingsPutResponse = UpdateBudgetSettingsApiV1AdminBudgetSettingsPutResponses[keyof UpdateBudgetSettingsApiV1AdminBudgetSettingsPutResponses];
+
+export type GetBudgetStatusApiV1AdminBudgetStatusGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/budget/status';
+};
+
+export type GetBudgetStatusApiV1AdminBudgetStatusGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: BudgetStatus;
+};
+
+export type GetBudgetStatusApiV1AdminBudgetStatusGetResponse = GetBudgetStatusApiV1AdminBudgetStatusGetResponses[keyof GetBudgetStatusApiV1AdminBudgetStatusGetResponses];
+
+export type GetSystemStatusApiV1AdminSystemStatusGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/system-status';
+};
+
+export type GetSystemStatusApiV1AdminSystemStatusGetResponses = {
+    /**
+     * Response Get System Status Api V1 Admin System Status Get
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type GetSystemStatusApiV1AdminSystemStatusGetResponse = GetSystemStatusApiV1AdminSystemStatusGetResponses[keyof GetSystemStatusApiV1AdminSystemStatusGetResponses];
+
+export type ConsoleListModelsData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/models';
 };
 
-export type ListAvailableModelsApiV1ModelsGetResponses = {
+export type ConsoleListModelsResponses = {
     /**
-     * Response List Available Models Api V1 Models Get
+     * Response Console List Models
      *
      * Successful Response
      */
     200: Array<AvailableModel>;
 };
 
-export type ListAvailableModelsApiV1ModelsGetResponse = ListAvailableModelsApiV1ModelsGetResponses[keyof ListAvailableModelsApiV1ModelsGetResponses];
+export type ConsoleListModelsResponse = ConsoleListModelsResponses[keyof ConsoleListModelsResponses];
 
 export type ModelDefaultsApiV1ModelsDefaultsGetData = {
     body?: never;
@@ -10310,6 +10532,26 @@ export type ModelDefaultsApiV1ModelsDefaultsGetResponses = {
 };
 
 export type ModelDefaultsApiV1ModelsDefaultsGetResponse = ModelDefaultsApiV1ModelsDefaultsGetResponses[keyof ModelDefaultsApiV1ModelsDefaultsGetResponses];
+
+export type EmbeddingStatusApiV1ModelsEmbeddingsStatusGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/models/embeddings/status';
+};
+
+export type EmbeddingStatusApiV1ModelsEmbeddingsStatusGetResponses = {
+    /**
+     * Response Embedding Status Api V1 Models Embeddings Status Get
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type EmbeddingStatusApiV1ModelsEmbeddingsStatusGetResponse = EmbeddingStatusApiV1ModelsEmbeddingsStatusGetResponses[keyof EmbeddingStatusApiV1ModelsEmbeddingsStatusGetResponses];
 
 export type GetNotificationsApiV1NotificationsGetData = {
     body?: never;

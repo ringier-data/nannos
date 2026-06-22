@@ -1,5 +1,5 @@
 /**
- * Model Gateway admin API (runtime model registration, Q6).
+ * Model Gateway admin API (runtime model registration).
  *
  * Hand-written wrappers for the console-backend admin endpoints
  * (`/api/v1/admin/model-gateway/*`) which the generated SDK doesn't describe yet.
@@ -16,7 +16,15 @@ export interface RateCardPricingEntry {
   flow_direction: FlowDirection;
 }
 
-export type DefaultRole = 'chat' | 'embedding' | 'multimodal_embedding';
+// Canonical fleet-default roles — mirrors console-backend VALID_ROLES (models/model_gateway.py).
+// 'chat' is the standard chat tier; 'chat:low'/'chat:premium' are the low/premium tiers.
+export type DefaultRole =
+  | 'chat'
+  | 'chat:low'
+  | 'chat:premium'
+  | 'embedding'
+  | 'multimodal_embedding'
+  | 'indexing';
 
 export interface GatewayModel {
   model_name: string;
@@ -27,6 +35,7 @@ export interface GatewayModel {
   input_modes?: string[];
   default_roles?: DefaultRole[];
   db_model?: boolean;
+  base_model?: string | null;
   input_cost_per_token?: number | null;
   output_cost_per_token?: number | null;
   supports_reasoning?: boolean | null;
@@ -96,6 +105,41 @@ export async function listModelDefaults(): Promise<Record<string, string>> {
   const { data, error } = await (client as any).get({ url: '/api/v1/models/defaults' });
   if (error) throw error;
   return (data ?? {}) as Record<string, string>;
+}
+
+export interface EmbeddingStatus {
+  ready: boolean;
+  status: 'ready' | 'degraded' | 'disabled';
+  model: string | null;
+  reason: string | null;
+}
+
+/** Whether catalog embedding is usable: default set AND registered on the gateway. */
+export async function getEmbeddingStatus(): Promise<EmbeddingStatus> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (client as any).get({ url: '/api/v1/models/embeddings/status' });
+  if (error) throw error;
+  return data as EmbeddingStatus;
+}
+
+export type FeatureStatusLevel = 'ready' | 'limited' | 'degraded' | 'disabled';
+
+export interface FeatureStatus {
+  key: string;
+  name: string;
+  status: FeatureStatusLevel;
+  detail: string;
+  remediation: string | null;
+  /** A capability caveat for a 'limited' feature (works, but with a known limitation). */
+  caveat: string | null;
+}
+
+/** Admin system-status: per-feature readiness with remediation hints. */
+export async function getSystemStatus(): Promise<FeatureStatus[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (client as any).get({ url: '/api/v1/admin/system-status' });
+  if (error) throw error;
+  return ((data as { features?: FeatureStatus[] })?.features ?? []) as FeatureStatus[];
 }
 
 export async function listModelCatalog(): Promise<CatalogModel[]> {

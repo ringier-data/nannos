@@ -18,10 +18,11 @@ Used by:
 import logging
 from typing import Any, Dict, List, Literal, Optional
 
-from langchain.agents.structured_output import AutoStrategy, ToolStrategy
-from langchain_core.language_models import BaseChatModel
+from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
+
+from agent_common.core.model_factory import get_model_provider
 
 from .stream_events import (
     TaskResponseData,
@@ -70,57 +71,85 @@ Do not leave the task state ambiguous.
 """
 
 
+def select_response_format(
+    model_type: Optional[str],
+    schema: type,
+    *,
+    thinking_enabled: bool = False,
+    has_builtin_tools: bool = False,
+) -> tuple[Optional[Any], bool]:
+    """Pick the structured-output strategy for a gateway-served model.
+
+    Single source of truth for the provider -> strategy decision, shared by the
+    sub-agent path (``get_response_format``) and the orchestrator main graph. The
+    decision follows from the model's *provider* (gateway model_info via
+    ``get_model_provider``), NOT the client class — every client is now a
+    ``ChatOpenAI`` talking to the LiteLLM gateway.
+
+    Returns ``(response_format, requires_response_tool)``:
+      - ``(ToolStrategy(schema), False)`` — force the model to emit ``schema`` via a
+        tool call. langchain binds structured-output tools with ``tool_choice="any"``.
+      - ``(None, True)`` — don't force; the caller must bind ``schema`` as an ordinary
+        tool and let the model call it on its own.
+
+    ``ToolStrategy`` is the right default: the gateway normalizes provider responses
+    (including Gemini's text-embedded JSON) into OpenAI-shape ``tool_calls``, and
+    ``AutoStrategy`` would instead resolve to the native ``.parse()`` path, which
+    requires every bound tool to be strict — dynamic MCP tools are not. Two situations
+    can't tolerate the forced ``tool_choice="any"`` and so use the bind-as-tool path:
+      - Extended thinking on a provider not known to allow forced tool use with
+        thinking. Anthropic/Bedrock explicitly reject it ("Thinking may not be enabled
+        when tool_choice forces tool use"); only OpenAI/Azure are known-safe to force.
+        Anything else — Gemini, or an unknown/cold-cache provider (``""``) — is treated
+        as unsafe, so a stale gateway snapshot can never force a forbidden combination.
+      - Models with server-side built-in tools (e.g. Gemini google_search /
+        code_execution): a forced function-call ``tool_choice`` can't coexist with
+        built-in tools, which must be free to run before the final response.
+
+    Args:
+        model_type: The model alias (gateway-registered name), or None if unknown
+        schema: The structured-output schema (e.g. SubAgentResponseSchema, FinalResponseSchema)
+        thinking_enabled: Whether extended thinking is enabled
+        has_builtin_tools: Whether server-side built-in tools will be bound to the model
+
+    Returns:
+        ``(response_format, requires_response_tool)``
+    """
+    provider = get_model_provider(model_type) if model_type else ""
+    is_openai_like = "openai" in provider or provider.startswith("azure")
+
+    if has_builtin_tools or (thinking_enabled and not is_openai_like):
+        return None, True
+    return ToolStrategy(schema=schema), False
+
+
 def get_response_format(
-    model: BaseChatModel,
+    model_type: Optional[str],
     tools: List[BaseTool],
     thinking_enabled: bool = False,
 ) -> Optional[Any]:
-    """Get the appropriate response_format strategy for a model.
+    """Structured-output strategy for a sub-agent's model (SubAgentResponseSchema).
 
-    Encapsulates the model-specific logic for structured output:
-    - OpenAI (Azure or direct ChatOpenAI): ToolStrategy (avoids .parse() API that requires strict tools)
-    - Bedrock without thinking: AutoStrategy
-    - Bedrock with thinking: None + SubAgentResponseSchema added as a tool
-    - Others (Gemini, etc.): AutoStrategy
-
-    When thinking is enabled on Bedrock, the response_format is set to None and
-    a SubAgentResponseSchema StructuredTool is appended to the tools list in-place.
-    The caller should pass the tools list BEFORE calling create_agent so the tool
-    is included in the graph.
+    Thin wrapper over ``select_response_format``: sub-agents never bind server-side
+    built-in tools, so ``has_builtin_tools=False``. When the schema must be bound as a
+    plain tool (Anthropic/Bedrock + thinking), it is appended to ``tools`` in place —
+    the caller must pass the tools list BEFORE building the graph so it's included.
 
     Args:
-        model: The LangChain model instance
-        tools: The tools list (may be mutated for Bedrock+thinking)
+        model_type: The model alias (gateway-registered name), or None if unknown
+        tools: The tools list (mutated in place when the schema is bound as a tool)
         thinking_enabled: Whether extended thinking is enabled
 
     Returns:
-        The response_format strategy, or None for Bedrock+thinking
+        The response_format strategy, or None when the schema is bound as a tool
     """
-    model_class = model.__class__.__name__
-
-    if model_class == "AzureChatOpenAI" or model_class == "ChatOpenAI":
-        return ToolStrategy(schema=SubAgentResponseSchema)
-    elif model_class == "ChatBedrockConverse":
-        if thinking_enabled:
-            # AWS Bedrock doesn't allow forcing tool usage via 'tool_choice = "any"' when
-            # thinking is enabled, so we softly enforce it by adding the response tool
-            # directly to the tools list while setting response_format to None
-            tools.append(
-                StructuredTool.from_function(
-                    func=lambda **kwargs: SubAgentResponseSchema(**kwargs),
-                    name="SubAgentResponseSchema",
-                    description="ALWAYS use this tool to format your final response to the user.",
-                    args_schema=SubAgentResponseSchema,
-                    return_direct=True,
-                )
-            )
-            return None
-        else:
-            return AutoStrategy(schema=SubAgentResponseSchema)
-    elif model_class == "ChatGoogleGenerativeAI":
-        # Gemini models: use explicit SubAgentResponseSchema tool instead of AutoStrategy
-        # because Gemini outputs structured JSON in content text rather than via tool_call_chunks,
-        # causing raw JSON to be streamed to the client
+    response_format, requires_response_tool = select_response_format(
+        model_type,
+        SubAgentResponseSchema,
+        thinking_enabled=thinking_enabled,
+        has_builtin_tools=False,
+    )
+    if requires_response_tool:
         tools.append(
             StructuredTool.from_function(
                 func=lambda **kwargs: SubAgentResponseSchema(**kwargs),
@@ -130,9 +159,7 @@ def get_response_format(
                 return_direct=True,
             )
         )
-        return None
-    else:
-        return AutoStrategy(schema=SubAgentResponseSchema)
+    return response_format
 
 
 class StructuredResponseMixin:

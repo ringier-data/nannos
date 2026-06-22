@@ -60,6 +60,8 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   outbound_scim_endpoint: 'Outbound SCIM Endpoint',
   skill: 'Skill',
   tool_risk_score: 'Tool Risk Score',
+  model_default: 'Model Default',
+  budget_setting: 'Budget Setting',
 };
 
 export function AuditPage() {

@@ -160,7 +160,7 @@ class TestGraphCreationWithThinking:
             mock_factory.get_graph.return_value = mock_graph
 
             # Get graph with specific thinking level
-            graph = await agent.get_or_create_graph(
+            await agent.get_or_create_graph(
                 model_type="claude-sonnet-4.5",
                 thinking_level=ThinkingLevel.medium,
             )
@@ -172,6 +172,7 @@ class TestGraphCreationWithThinking:
             )
 
     @pytest.mark.asyncio
+    @patch.dict(os.environ, {"LLM_GATEWAY_URL": "http://litellm-proxy.test"})
     async def test_graph_caching_by_thinking_level(self):
         """Test that graphs are cached separately by thinking level."""
         from app.core.graph_factory import GraphFactory
@@ -189,22 +190,30 @@ class TestGraphCreationWithThinking:
         mock_config.BACKOFF_FACTOR = 2
         mock_config.get_bedrock_region.return_value = "eu-central-1"
 
-        with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
-            with patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent:
-                mock_create_deep_agent.return_value = Mock()
+        # Graph creation resolves the model's provider via the gateway. Keep it hermetic:
+        # LLM_GATEWAY_URL lets create_model build its client, and get_model_provider is
+        # mocked in both namespaces that call it (graph_factory + structured_response's
+        # select_response_format) so no network fetch is attempted.
+        with (
+            patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"),
+            patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent,
+            patch("app.core.graph_factory.get_model_provider", return_value="bedrock_converse"),
+            patch("agent_common.a2a.structured_response.get_model_provider", return_value="bedrock_converse"),
+        ):
+            mock_create_deep_agent.return_value = Mock()
 
-                factory = GraphFactory(mock_config)
+            factory = GraphFactory(mock_config)
 
-                # Create graphs with different thinking levels
-                graph_low = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.low)
-                graph_high = factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.high)
-                graph_none = factory.get_graph("claude-sonnet-4.5", thinking_level=None)
+            # Create graphs with different thinking levels (cached on factory._graphs)
+            factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.low)
+            factory.get_graph("claude-sonnet-4.5", thinking_level=ThinkingLevel.high)
+            factory.get_graph("claude-sonnet-4.5", thinking_level=None)
 
-                # Should have created 3 separate graphs
-                assert len(factory._graphs) == 3
-                assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._graphs
-                assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._graphs
-                assert ("claude-sonnet-4.5", None) in factory._graphs
+            # Should have created 3 separate graphs
+            assert len(factory._graphs) == 3
+            assert ("claude-sonnet-4.5", ThinkingLevel.low) in factory._graphs
+            assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._graphs
+            assert ("claude-sonnet-4.5", None) in factory._graphs
 
 
 class TestExecutorThinkingFlow:

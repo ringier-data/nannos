@@ -328,3 +328,6 @@ pnpm-debug.log*
 .local-db-data
 alloy-infra-agents
 gitops
+
+# Local LiteLLM gateway model_list (deployment-specific; example template is committed)
+litellm-local-models.yaml

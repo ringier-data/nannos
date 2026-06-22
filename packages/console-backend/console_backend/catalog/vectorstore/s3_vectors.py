@@ -148,15 +148,16 @@ class MultimodalS3Vectors(AmazonS3Vectors):
 
 def create_s3_vector_store(
     catalog_id: str,
-    index_embedding: Embeddings,
-    query_embedding: Embeddings,
+    index_embedding: Embeddings | None,
+    query_embedding: Embeddings | None,
 ) -> MultimodalS3Vectors:
     """Create a MultimodalS3Vectors instance for a specific catalog.
 
     Args:
         catalog_id: Catalog ID used for the index name.
-        index_embedding: Embeddings with document role (for add_documents).
-        query_embedding: Embeddings with query role (for similarity_search).
+        index_embedding: Embeddings with document role (for add_documents), or None for a
+                         delete-only store — adelete removes by vector ID and never embeds.
+        query_embedding: Embeddings with query role (for similarity_search), or None (delete-only).
     """
     return MultimodalS3Vectors(
         vector_bucket_name=config.catalog.vector_bucket_name,

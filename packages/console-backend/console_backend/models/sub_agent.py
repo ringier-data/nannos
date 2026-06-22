@@ -87,6 +87,17 @@ class ThinkingLevel(str, Enum):
     XHIGH = "xhigh"
 
 
+class ModelTier(str, Enum):
+    """Capability tier a sub-agent binds to instead of a concrete model alias. Resolves to
+    the chat:<tier> model_defaults slot at read time ('standard' → the plain 'chat' default),
+    so retiring/upgrading a model is one slot repoint. Mutually exclusive with an
+    explicit model."""
+
+    LOW = "low"
+    STANDARD = "standard"
+    PREMIUM = "premium"
+
+
 class FoundryAgentConfiguration(BaseModel):
     """Configuration for Foundry agents."""
 
@@ -212,6 +223,9 @@ class SubAgentConfigVersionBase(BaseModel):
     release_number: int | None = None
     description: str  # Agent skill set description - crucial for orchestrator routing
     model: str | None = None
+    # Capability tier the agent binds to instead of `model` (mutually exclusive). Resolved to
+    # the chat:<tier> default at read time → effective_model (see services/model_status.py).
+    model_tier: ModelTier | None = None
     system_prompt: str | None = None
     agent_url: str | None = None
     mcp_tools: list[str] = Field(default_factory=list)
@@ -271,6 +285,15 @@ class SubAgentConfigVersion(SubAgentConfigVersionBase):
 
     skills: list[SkillDefinition] = Field(default_factory=list)
 
+    # Derived, not persisted — computed on the read path from the live gateway registry +
+    # the chat default (see services/model_status.py). This is the single source of truth
+    # for model-retirement handling: clients render "<model> (retired) -> <effective_model>"
+    # and the orchestrator runs `effective_model` directly, neither re-deriving the rule.
+    model_retired: bool = False
+    # The alias the agent actually runs on: `model` when still registered, the chat default
+    # when `model` has been retired, or None when no model was set (inherit the orchestrator).
+    effective_model: str | None = None
+
 
 class SubAgentBase(BaseModel):
     """Base fields shared between SubAgent (detail) and SubAgentListItem (list)."""
@@ -308,15 +331,13 @@ class SubAgent(SubAgentBase):
     config_version: SubAgentConfigVersion | None = None  # Joined version data
 
 
-ModelName = Literal[
-    "gpt-4o",
-    "gpt-4o-mini",
-    "claude-sonnet-4.5",
-    "claude-sonnet-4.6",
-    "claude-haiku-4-5",
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-]
+# Any alias registered on the Model Gateway (the gateway is the source of truth
+# for which models exist). Deliberately NOT a hardcoded Literal — that goes stale the moment
+# a model is added/retired and rejects valid, freshly-registered aliases on the write path.
+# Selection is constrained to live models by the console UI dropdown (GET /api/v1/models);
+# a genuinely unknown alias is caught downstream (the gateway 400s) and surfaced as a retired
+# model on the read path (see services/model_status.py).
+ModelName = str
 
 
 class SubAgentCreate(BaseModel):
@@ -329,6 +350,8 @@ class SubAgentCreate(BaseModel):
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
     model: ModelName | None = None
+    # Bind to a capability tier instead of a concrete model (mutually exclusive with `model`).
+    model_tier: ModelTier | None = None
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] | None = None  # MCP tool names enabled for this version
@@ -366,6 +389,12 @@ class SubAgentCreate(BaseModel):
             raise ValueError("sandbox_enabled is only supported for local agents")
         return self
 
+    @model_validator(mode="after")
+    def _validate_model_xor_tier(self) -> "SubAgentCreate":
+        if self.model is not None and self.model_tier is not None:
+            raise ValueError("set either model or model_tier, not both")
+        return self
+
 
 class SubAgentUpdate(BaseModel):
     """Request model for updating a sub-agent."""
@@ -376,6 +405,8 @@ class SubAgentUpdate(BaseModel):
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
     model: ModelName | None = None  # LLM model to use
+    # Bind to a capability tier instead of a concrete model (mutually exclusive with `model`).
+    model_tier: ModelTier | None = None
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] | None = None  # MCP tool names enabled for this version
@@ -408,6 +439,12 @@ class SubAgentUpdate(BaseModel):
     sandbox_enabled: bool | None = None
 
     change_summary: str | None = None  # For version history
+
+    @model_validator(mode="after")
+    def _validate_model_xor_tier(self) -> "SubAgentUpdate":
+        if self.model is not None and self.model_tier is not None:
+            raise ValueError("set either model or model_tier, not both")
+        return self
 
 
 class SubAgentApproval(BaseModel):

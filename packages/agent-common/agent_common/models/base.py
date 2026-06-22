@@ -1,21 +1,15 @@
 import logging
 import os
 from enum import Enum
-from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-# Model type literal for type safety
-ModelType = Literal[
-    "gpt-4o",
-    "gpt-4o-mini",
-    "claude-sonnet-4.5",
-    "claude-sonnet-4.6",
-    "claude-haiku-4-5",
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-    "local",
-]
+# Model aliases are owned by the Model Gateway — the single source of truth for
+# which models exist and what they can do. The app keeps NO static enumeration: `ModelType`
+# is just a readable name for "a gateway model alias". Validity is checked against the live
+# gateway (is_valid_model / resolve_chat_model) and per-model behavior is derived from the
+# gateway's model_info (get_model_provider / capabilities), never from the alias string.
+ModelType = str
 
 
 # Thinking level literal for extended thinking configuration.
@@ -32,7 +26,7 @@ class ThinkingLevel(str, Enum):
 def _resolve_default_model() -> ModelType:
     """The configured default model alias.
 
-    The Model Gateway is the source of truth for which models exist (ADR-0001), so we
+    The Model Gateway is the source of truth for which models exist, so we
     simply trust the configured DEFAULT_MODEL alias; the gateway validates it at call
     time. No static registry to check against.
     """

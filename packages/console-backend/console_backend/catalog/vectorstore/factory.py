@@ -18,16 +18,17 @@ class CatalogVectorStoreFactory:
     @staticmethod
     def create(
         catalog_id: str,
-        index_embedding: Embeddings,
-        query_embedding: Embeddings,
+        index_embedding: Embeddings | None,
+        query_embedding: Embeddings | None,
         backend: str | None = None,
     ) -> VectorStore:
         """Create a VectorStore instance for a catalog.
 
         Args:
             catalog_id: The catalog ID (used to name the vector index).
-            index_embedding: Embeddings instance with document role.
-            query_embedding: Embeddings instance with query role.
+            index_embedding: Embeddings instance with document role, or None for a
+                             delete-only store (adelete by ID never embeds).
+            query_embedding: Embeddings instance with query role, or None (delete-only).
             backend: Vector store backend ("s3_vectors", "pgvector", etc.).
                      Defaults to config.catalog.vector_store_backend.
         """

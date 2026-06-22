@@ -1,0 +1,42 @@
+# Local gateway model_list — deployment-specific, NOT committed.
+#
+# start-local.sh appends this block to the ephemeral LiteLLM proxy config. The settings
+# block (callbacks, db, master key) is managed by the script; only the model_list lives here
+# because model ids, regions and provider deployments differ per stack.
+#
+# Setup:
+#   cp litellm-local-models.yaml.example litellm-local-models.yaml   # then edit
+# The script auto-loads ./litellm-local-models.yaml (gitignored). Point elsewhere with
+# LITELLM_LOCAL_MODELS_FILE=/path/to/models.yaml.
+#
+# Credentials/regions are referenced as os.environ/* and supplied via .env — never inline
+# secrets here.
+#
+# Azure note: a deployment name that isn't a known model (e.g. a deployment called
+# "chatgpt-4o") breaks LiteLLM cost tracking + max-tokens. Map it with
+# model_info.base_model: azure/<known-model> (see gpt-4o below).
+
+model_list:
+  # --- Chat (Bedrock) ---
+  - model_name: claude-sonnet-4.6
+    litellm_params: {model: bedrock/eu.anthropic.claude-sonnet-4-6, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
+  - model_name: claude-haiku-4-5
+    litellm_params: {model: bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
+
+  # --- Chat (Azure OpenAI) ---
+  # `model` is your Azure *deployment* name; base_model maps it to a known model for cost/metadata.
+  - model_name: gpt-4o
+    model_info: {base_model: azure/gpt-4o}
+    litellm_params: {model: azure/<your-gpt-4o-deployment>, api_base: os.environ/AZURE_API_BASE, api_key: os.environ/AZURE_OPENAI_API_KEY, api_version: "2024-08-01-preview", max_retries: 0}
+
+  # --- Chat (Vertex AI) ---
+  - model_name: gemini-3.1-pro-preview
+    litellm_params: {model: vertex_ai/gemini-3.1-pro-preview, vertex_project: os.environ/GCP_PROJECT_ID, vertex_location: global, vertex_credentials: os.environ/GCP_KEY, temperature: 1.0, max_retries: 0}
+
+  # --- Embeddings ---
+  - model_name: titan-embed-text-v2
+    model_info: {mode: embedding}
+    litellm_params: {model: bedrock/amazon.titan-embed-text-v2:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
+  - model_name: gemini-embedding-2
+    model_info: {mode: embedding, input_modes: [text, image]}
+    litellm_params: {model: vertex_ai/gemini-embedding-2, vertex_project: os.environ/GCP_PROJECT_ID, vertex_credentials: os.environ/GCP_KEY, vertex_location: eu, max_retries: 0}

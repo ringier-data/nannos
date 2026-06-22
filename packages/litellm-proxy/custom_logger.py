@@ -1,4 +1,4 @@
-"""Proxy-side usage/cost capture for the Nannos Model Gateway (ADR-0002).
+"""Proxy-side usage/cost capture for the Nannos Model Gateway.
 
 On every successful LLM call the proxy sees the *native* provider usage — base /
 cache_creation / cache_read / reasoning tokens and the real provider+model — before
@@ -7,7 +7,7 @@ in-app CostTrackingCallback used, so existing Rate Cards match) and POST it to
 console-backend's existing ingestion endpoint, carrying the attribution the app
 forwarded as `spend_logs_metadata`.
 
-Validated end-to-end in the spike (SPIKE-FINDINGS.md, checks 3 & 4).
+Validated end-to-end against Bedrock: cache/cost fidelity and attribution round-trip.
 
 Phase status:
   - Extraction + billing-unit mapping + per-event POST: implemented.
@@ -15,6 +15,7 @@ Phase status:
     orchestrator_cache): TODO(phase-2) — currently uses CONSOLE_BACKEND_TOKEN if set.
 """
 
+import asyncio
 import logging
 import os
 
@@ -24,11 +25,28 @@ from litellm.integrations.custom_logger import CustomLogger
 logger = logging.getLogger("nannos.litellm.custom_logger")
 
 CONSOLE_BACKEND_URL = os.environ.get("CONSOLE_BACKEND_URL", "").rstrip("/")
-# Shared service secret (ADR-0005 style): the gateway-only ingestion route on
+# Shared service secret: the gateway-only ingestion route on
 # console-backend accepts this bearer and trusts each record's user_sub.
 GATEWAY_INGEST_TOKEN = os.environ.get("GATEWAY_INGEST_TOKEN", "")
 _INGEST_PATH = "/api/v1/usage/gateway-batch-log"
 _HTTP_TIMEOUT = 5.0
+# Batching: records are enqueued (non-blocking) on the LLM hot path and flushed by a
+# background worker over a single shared connection pool. Coalescing is natural — records
+# that arrive while a batch is in flight ship together on the next flush.
+_FLUSH_MAX_BATCH = 100  # ship at most this many records per POST
+_MAX_BUFFER = 10_000  # hard cap so a console-backend outage can't grow memory unbounded
+
+# One process-wide client (a connection pool to console-backend) reused across all events,
+# instead of building+tearing down a pool per LLM call. Bound to the proxy's event loop on
+# first use.
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+    return _client
 
 
 def _as_dict(obj) -> dict:
@@ -70,6 +88,12 @@ def _billing_unit_breakdown(usage: dict) -> dict[str, int]:
 
     total_input = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
     total_output = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+    # Some providers (embeddings especially) report only `total_tokens` — no prompt/input split.
+    # With neither an input field nor any output, the total IS the input, so bill it as real
+    # tokens rather than falling through to the char estimate (or $0). Guarded on output being
+    # absent so a chat call's total (= input + output) is never miscounted as input.
+    if not total_input and not total_output:
+        total_input = usage.get("total_tokens") or 0
 
     # cache_read / cache_creation for BILLING: prefer the top-level provider field, fall back
     # to the prompt_tokens_details mirror (LiteLLM-normalized sets both to the same value).
@@ -115,19 +139,25 @@ def _estimate_text_token_units(kwargs: dict) -> int:
     Some embedding providers (notably Vertex/Gemini) report 0 tokens in usage, which would
     otherwise bill the call $0. When that happens we re-apply the pre-gateway in-app
     heuristic (len(text) // 4) so text embeddings still carry a cost. Image/data-URI parts
-    are excluded — they're billed separately via `input_images`.
+    are excluded — they're billed separately via `input_images`. Pre-tokenized input (lists
+    of integer token ids) is counted directly — one id is one token — so it isn't billed $0.
     """
     raw = kwargs.get("input")
     if raw is None:
         return 0
     items = raw if isinstance(raw, list) else [raw]
     chars = 0
+    token_ids = 0
     for item in items:
         parts = item if isinstance(item, list) else [item]
         for part in parts:
+            if isinstance(part, bool):
+                continue  # bool is an int subclass; never a token id
             if isinstance(part, str) and not part.startswith(("data:", "gs://")):
                 chars += len(part)
-    return chars // 4
+            elif isinstance(part, int):
+                token_ids += 1
+    return chars // 4 + token_ids
 
 
 def _count_image_inputs(kwargs: dict) -> int:
@@ -200,6 +230,23 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
 
 
 class NannosCostLogger(CustomLogger):
+    """Captures usage off the LLM hot path: each success event builds its record and
+    enqueues it (non-blocking); a background worker batches enqueued records and POSTs them
+    over the shared client. This keeps the per-call critical path free of a TCP/TLS
+    handshake and a synchronous round-trip to console-backend.
+    """
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[dict] | None = None
+        self._worker: asyncio.Task | None = None
+
+    def _ensure_worker(self) -> None:
+        """Lazily create the queue + worker on the running proxy loop (first event)."""
+        if self._queue is None:
+            self._queue = asyncio.Queue(maxsize=_MAX_BUFFER)
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._run())
+
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         try:
             record = _build_record(kwargs, response_obj)
@@ -208,18 +255,46 @@ class NannosCostLogger(CustomLogger):
             if not CONSOLE_BACKEND_URL:
                 logger.info("[cost] (no CONSOLE_BACKEND_URL) %s", record)
                 return
-            headers = {"Content-Type": "application/json"}
-            if GATEWAY_INGEST_TOKEN:
-                headers["Authorization"] = f"Bearer {GATEWAY_INGEST_TOKEN}"
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{CONSOLE_BACKEND_URL}{_INGEST_PATH}",
-                    json={"logs": [record]},
-                    headers=headers,
-                )
-                resp.raise_for_status()
+            self._ensure_worker()
+            try:
+                self._queue.put_nowait(record)  # type: ignore[union-attr]
+            except asyncio.QueueFull:
+                # console-backend unreachable long enough to fill the buffer; drop rather
+                # than grow memory. We never break the LLM call on a logging failure.
+                logger.error("[cost] ingest buffer full (%d); dropping usage record", _MAX_BUFFER)
         except Exception as e:  # never break the LLM call on a logging failure
-            logger.error("[cost] failed to report usage: %s", e, exc_info=True)
+            logger.error("[cost] failed to enqueue usage: %s", e, exc_info=True)
+
+    async def _run(self) -> None:
+        """Drain the queue and POST records in batches until cancelled."""
+        assert self._queue is not None
+        while True:
+            batch = [await self._queue.get()]
+            # Opportunistically coalesce whatever else is already queued.
+            while len(batch) < _FLUSH_MAX_BATCH:
+                try:
+                    batch.append(self._queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                await self._flush(batch)
+            finally:
+                for _ in batch:
+                    self._queue.task_done()
+
+    async def _flush(self, batch: list[dict]) -> None:
+        headers = {"Content-Type": "application/json"}
+        if GATEWAY_INGEST_TOKEN:
+            headers["Authorization"] = f"Bearer {GATEWAY_INGEST_TOKEN}"
+        try:
+            resp = await _get_client().post(
+                f"{CONSOLE_BACKEND_URL}{_INGEST_PATH}",
+                json={"logs": batch},
+                headers=headers,
+            )
+            resp.raise_for_status()
+        except Exception as e:  # a flush failure must not kill the worker
+            logger.error("[cost] failed to report %d usage record(s): %s", len(batch), e, exc_info=True)
 
 
 proxy_handler_instance = NannosCostLogger()

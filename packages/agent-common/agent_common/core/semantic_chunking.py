@@ -182,7 +182,7 @@ async def chunk_with_context(
     """
     logger.info(f"Starting semantic chunking for document with {len(content)} chars")
 
-    # Initialize embeddings model if not provided — via the Model Gateway (ADR-0001),
+    # Initialize embeddings model if not provided — via the Model Gateway,
     # cost captured proxy-side. Use the configured default embedding model (not a hardcoded
     # alias): create_embeddings() raises EmbeddingModelNotConfigured when no default is set,
     # which the document-store feature gates on upstream (is_embeddings_configured).

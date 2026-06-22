@@ -25,16 +25,18 @@ from a2a.types import Role as A2ARole
 from agent_common.a2a.client_runnable import A2AClientRunnable as _ClientRunnable
 from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
 from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
+from agent_common.a2a.structured_response import select_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.graph_utils import (
     build_code_interpreter_middlewares,
     build_common_middleware_stack,
     create_indexing_backend_factory,
 )
-from agent_common.core.model_factory import _has_aws_credentials, create_model
+from agent_common.core.model_factory import _has_aws_credentials, create_model, get_model_provider
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
+from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
@@ -42,9 +44,6 @@ from agent_common.models.base import ModelType, ThinkingLevel, get_resolved_defa
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
-from langchain.agents.structured_output import AutoStrategy, ToolStrategy
-from langchain_aws import ChatBedrockConverse
-from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -151,7 +150,7 @@ class GraphFactory:
             )
             from agent_common.core.model_factory import create_embeddings
 
-            # Embeddings via the Model Gateway (ADR-0001); cost captured proxy-side.
+            # Embeddings via the Model Gateway; cost captured proxy-side.
             # No AWS-creds gate any more — the gateway owns provider credentials. Uses the
             # configured default embedding model; create_embeddings() raises
             # EmbeddingModelNotConfigured when no default is set, disabling the store.
@@ -410,7 +409,7 @@ class GraphFactory:
         Returns:
             BaseChatModel: The created model instance
         """
-        # LLM cost is captured at the Model Gateway now (proxy CustomLogger, ADR-0002);
+        # LLM cost is captured at the Model Gateway now (proxy CustomLogger);
         # the in-app CostTrackingCallback is intentionally NOT attached here to avoid
         # double-counting. (cost_logger remains for the embeddings path until Phase 5.)
         return create_model(model_type, self.config.get_bedrock_region(), thinking_level, callbacks=None)
@@ -494,9 +493,9 @@ class GraphFactory:
         # DynamicToolDispatch[0] → StoragePaths → PromptCaching → Steering
         # → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo[9]
         #
-        # BedrockPromptCaching places cache point after all static content (system prompt + storage paths),
-        # so that the cache is shared across all users. StoragePaths is included in the cache.
-        # Steering comes after caching so follow-up messages aren't cached.
+        # LiteLLMPromptCaching places the cache breakpoint after all static content (system prompt
+        # + storage paths), so the cache is shared across all users. StoragePaths is included in the
+        # cache. Steering comes after caching so follow-up messages aren't cached.
         # LoopDetection comes before Auth/Retry to catch loops early.
 
         async def _forward_to_active_subagents(context_id: str, messages: list) -> None:
@@ -575,14 +574,15 @@ class GraphFactory:
             context_gate_middleware,
             dynamic_tool_middleware,
             storage_paths_middleware,
-        ]
-        # BedrockPromptCachingMiddleware injects Bedrock-specific cache point
-        # hints. Only attach it for actual Bedrock models — on OpenAI, Gemini
-        # or local models it is at best a no-op and at worst confuses the
-        # provider with unknown request fields.
-        if isinstance(model, ChatBedrockConverse):
-            middleware_stack.append(BedrockPromptCachingMiddleware())
-        middleware_stack += [
+            # Place the cache breakpoint right after the static system prefix
+            # (system prompt + storage paths) and before the per-user content
+            # appended below (steering, user preferences, playbook). The marker is
+            # injected as an OpenAI-format cache_control content block, which LiteLLM
+            # translates to the provider's native format (Bedrock cachePoint /
+            # Anthropic ephemeral) and ignores for non-caching providers — so no
+            # provider gate is needed under the gateway architecture,
+            # where the client is always ChatOpenAI rather than ChatBedrockConverse.
+            LiteLLMPromptCachingMiddleware(),
             steering_middleware,
             user_preferences_middleware,
             playbook_middleware,
@@ -675,38 +675,29 @@ class GraphFactory:
 
         backend = self.backend_factory
 
-        # Use ToolStrategy for OpenAI models (avoids .parse() API that requires strict tools)
-        # Use AutoStrategy for Bedrock without extended thinking (efficient, handles structured output natively)
-        # For Bedrock with extended thinking and Gemini models: use response_format=None and add
-        # FinalResponseSchema as an explicit static tool. Gemini's AutoStrategy resolves to ToolStrategy
-        # but the model embeds the structured JSON in text content instead of tool_call_chunks,
-        # causing raw JSON to be streamed to the client. The explicit tool approach ensures proper
-        # tool_call_chunks streaming detection.
-        requires_response_tool = False
-        if model_type in ("gpt-4o", "gpt-4o-mini", "local"):
-            response_format = ToolStrategy(schema=FinalResponseSchema)
-        elif model_type in ("claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5"):
-            # if thinking is enabled we need to set response_format to None since the bedrock api can't handle
-            # forcing structured output when enabling thinking
-            if thinking_level:
-                response_format = None
-                requires_response_tool = True
-            else:
-                response_format = AutoStrategy(schema=FinalResponseSchema)
-        elif model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
-            # Gemini models: use explicit FinalResponseSchema tool instead of AutoStrategy/ToolStrategy
-            # because Gemini outputs structured JSON in content text rather than via tool_call_chunks
-            response_format = None
-            requires_response_tool = True
-        else:
-            response_format = AutoStrategy(schema=FinalResponseSchema)
+        # Gemini/Vertex models get Google's server-side built-in tools (google_search,
+        # code_execution), which can't coexist with a forced tool_choice — so they drive
+        # both the built-in-tools binding below and the structured-output strategy.
+        provider = get_model_provider(model_type)
+        is_gemini = "gemini" in provider or "vertex" in provider
+
+        # Single source of truth for the provider -> structured-output strategy decision,
+        # shared with the sub-agent path (agent_common.a2a.structured_response). Picks
+        # ToolStrategy unless forcing tool_choice is unsafe (Anthropic+thinking, or
+        # built-in tools present), in which case FinalResponseSchema is bound as a tool.
+        response_format, requires_response_tool = select_response_format(
+            model_type,
+            FinalResponseSchema,
+            thinking_enabled=bool(thinking_level),
+            has_builtin_tools=is_gemini,
+        )
         middleware = self._create_middleware_stack(model=model)
         static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
 
         # Add Google built-in tools for Gemini models
         # These are passed via the tools parameter so create_deep_agent can bind them
         # (bind_tools on the model directly returns a RunnableBinding which isn't a BaseChatModel)
-        if model_type in ("gemini-3.1-pro-preview", "gemini-3-flash-preview"):
+        if is_gemini:
             logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
             static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 
@@ -771,7 +762,7 @@ class GraphFactory:
         1. DynamicToolDispatchMiddleware: Injects scheduler/console tools from SYSTEM_TOOLS,
            handles tool execution for MCP tools
         2-8. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
-           AnthropicPromptCachingMiddleware, BedrockPromptCachingMiddleware,
+           LiteLLMPromptCachingMiddleware,
            PatchToolCallsMiddleware,
            ToolRetryMiddleware, RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware
 
@@ -810,7 +801,7 @@ class GraphFactory:
         # Enables task-scheduler to explicitly set task_state
         static_tools_list = self.get_static_tools(with_response_tool=False)
         response_format = get_sub_agent_response_format(
-            model=model,
+            model_type=model_type,
             tools=static_tools_list,
             thinking_enabled=False,  # Task-scheduler doesn't use thinking
         )

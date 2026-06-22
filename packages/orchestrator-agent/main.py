@@ -98,7 +98,7 @@ def create_lifespan(
         # Startup: Initialize and start budget guard singleton
         logger.info("Starting application lifespan...")
 
-        # Fail fast if the Model Gateway isn't configured (ADR-0001): it's the sole path
+        # Fail fast if the Model Gateway isn't configured: it's the sole path
         # for LLM traffic, so surface a missing LLM_GATEWAY_URL loudly at boot rather than
         # as an opaque per-request failure (or a misleading "no models registered").
         from agent_common.core.model_factory import assert_gateway_configured
@@ -106,11 +106,10 @@ def create_lifespan(
         assert_gateway_configured()
 
         budget_guard = init_budget_guard(
-            project_name=AgentSettings.get_langsmith_project(),
-            token_limit=AgentSettings.get_budget_monthly_token_limit(),
+            base_url=os.getenv("CONSOLE_BACKEND_URL", "http://localhost:5001"),
+            oauth2_client=agent_executor.agent.oauth2_client,
+            audience=os.getenv("CONSOLE_BACKEND_CLIENT_ID", "agent-console"),
             check_interval_seconds=AgentSettings.get_budget_check_interval(),
-            warning_thresholds=AgentSettings.get_budget_warning_thresholds(),
-            enabled=AgentSettings.get_budget_enabled(),
         )
 
         # Start background polling
@@ -235,7 +234,7 @@ def create_lifespan(
 def create_app():
     """Factory function to create the FastAPI app instance."""
 
-    # Models live on the Model Gateway (ADR-0001); log the default + the live list
+    # Models live on the Model Gateway; log the default + the live list
     # (best-effort — the gateway is the source of truth).
     logger.info("Default model: %s; gateway: %s", get_default_model(), os.getenv("LLM_GATEWAY_URL", "<unset>"))
     try:
@@ -392,7 +391,7 @@ app = create_app()
 async def list_available_models():
     """Return the models available on this orchestrator instance.
 
-    The Model Gateway is the single source of truth for the live model list (ADR-0001),
+    The Model Gateway is the single source of truth for the live model list,
     including any local OpenAI-compatible server (LM Studio, Ollama, vLLM), which is
     registered as a gateway alias rather than probed directly.
     """

@@ -1,4 +1,4 @@
-"""Client-side streaming watchdog (ADR-0004, the gated 3-C escalation).
+"""Client-side streaming watchdog (the gated 3-C escalation).
 
 The spike proved the gateway silently ignores `stream_timeout` on Bedrock streaming
 (#23375), so proxy timeouts are not sufficient. This wraps an async stream and

@@ -86,6 +86,17 @@ def json_schema_to_ts(
             return " | ".join(dict.fromkeys(parts)) or "unknown"
 
     t = prop.get("type")
+    if isinstance(t, list):
+        # JSON Schema allows ``type`` to be a list of type names (e.g.
+        # ``["string", "null"]`` for nullable fields, common in MCP tool
+        # schemas). Render each as a TS union, recursing so that ``array`` /
+        # ``object`` members still resolve ``items`` / ``properties``.
+        parts = [
+            json_schema_to_ts({**prop, "type": member}, defs, _depth=_depth, _seen=_seen)
+            for member in t
+        ]
+        # Dedup while preserving order (e.g. ``string | null``).
+        return " | ".join(dict.fromkeys(parts)) or "unknown"
     if t == "string":
         return "string"
     if t in {"integer", "number"}:

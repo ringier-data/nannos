@@ -806,6 +806,7 @@ class SubAgentRepository(AuditedRepository):
         status: str,
         description: str | None = None,
         model: str | None = None,
+        model_tier: str | None = None,
         system_prompt: str | None = None,
         agent_url: str | None = None,
         mcp_tools: list[str] | None = None,
@@ -859,14 +860,14 @@ class SubAgentRepository(AuditedRepository):
 
         query = text("""
             INSERT INTO sub_agent_config_versions
-            (sub_agent_id, version, version_hash, description, model, system_prompt, agent_url, mcp_tools, 
-             foundry_hostname, foundry_client_id, foundry_client_secret_ref, foundry_ontology_rid, 
-             foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, enable_thinking, 
+            (sub_agent_id, version, version_hash, description, model, model_tier, system_prompt, agent_url, mcp_tools,
+             foundry_hostname, foundry_client_id, foundry_client_secret_ref, foundry_ontology_rid,
+             foundry_query_api_name, foundry_scopes, foundry_version, pricing_config, enable_thinking,
              thinking_level, skills, sandbox_enabled, change_summary, status, created_at)
-            VALUES (:sub_agent_id, :version, :version_hash, :description, :model, :system_prompt, :agent_url, 
-                    CAST(:mcp_tools AS jsonb), :foundry_hostname, :foundry_client_id, :foundry_client_secret_ref, 
-                    :foundry_ontology_rid, :foundry_query_api_name, CAST(:foundry_scopes AS text[]), 
-                    :foundry_version, CAST(:pricing_config AS jsonb), :enable_thinking, 
+            VALUES (:sub_agent_id, :version, :version_hash, :description, :model, :model_tier, :system_prompt, :agent_url,
+                    CAST(:mcp_tools AS jsonb), :foundry_hostname, :foundry_client_id, :foundry_client_secret_ref,
+                    :foundry_ontology_rid, :foundry_query_api_name, CAST(:foundry_scopes AS text[]),
+                    :foundry_version, CAST(:pricing_config AS jsonb), :enable_thinking,
                     CAST(:thinking_level AS thinking_level), CAST(:skills AS jsonb), :sandbox_enabled,
                     :change_summary, :status, :now)
             RETURNING id
@@ -879,6 +880,7 @@ class SubAgentRepository(AuditedRepository):
                 "version_hash": version_hash,
                 "description": description,
                 "model": model,
+                "model_tier": model_tier,
                 "system_prompt": system_prompt,
                 "agent_url": agent_url,
                 "mcp_tools": json.dumps(mcp_tools_list),
@@ -908,6 +910,7 @@ class SubAgentRepository(AuditedRepository):
             "version_hash": version_hash,
             "description": description,
             "model": model,
+            "model_tier": model_tier,
             "system_prompt": system_prompt,
             "agent_url": agent_url,
             "mcp_tools": mcp_tools_list,

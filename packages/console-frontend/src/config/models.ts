@@ -7,7 +7,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 
-import { listAvailableModels, listModelDefaults } from '@/api/model-gateway';
+import { getEmbeddingStatus, listAvailableModels } from '@/api/model-gateway';
 
 export interface ModelOption {
   value: string;
@@ -34,10 +34,11 @@ export const MODEL_OPTIONS: ModelOption[] = [
 ] as const;
 
 /**
- * Get model label by value.
+ * Get model label by value, preferring the live gateway list (when provided) over the
+ * static fallback. Returns the raw value when no label is known (e.g. a retired model).
  */
-export function getModelLabel(value: string): string {
-  return MODEL_OPTIONS.find(m => m.value === value)?.label || value;
+export function getModelLabel(value: string, models?: ModelOption[]): string {
+  return (models ?? MODEL_OPTIONS).find(m => m.value === value)?.label || value;
 }
 
 /**
@@ -66,6 +67,18 @@ export const THINKING_LEVEL_OPTIONS = [
   { value: 'medium', label: 'Medium', description: 'Deeper reasoning for complex tasks' },
   { value: 'high', label: 'High', description: 'Thorough reasoning' },
   { value: 'xhigh', label: 'Extra high', description: 'Maximum reasoning depth' },
+] as const;
+
+/**
+ * Capability-tier choices for a sub-agent's model selector. The `tier:` prefix distinguishes
+ * a tier selection from a concrete alias in the single model Select; on submit the form maps
+ * it to the `model_tier` field (the suffix is the ModelTier value). A tier binds the agent to
+ * the fleet default for that tier rather than a fixed alias.
+ */
+export const MODEL_TIER_OPTIONS = [
+  { value: 'tier:standard', label: 'Standard tier' },
+  { value: 'tier:low', label: 'Low tier — cheaper / faster' },
+  { value: 'tier:premium', label: 'Premium tier — highest capability' },
 ] as const;
 
 /**
@@ -106,15 +119,39 @@ export function useAvailableModels() {
 }
 
 /**
+ * Options for a model <Select> that keep a retired model selectable. console-backend is the
+ * source of truth for `modelRetired` (a model no longer registered on the gateway); when set,
+ * this prepends a "<label> (retired)" option so the trigger shows it instead of an empty field,
+ * and returns `retiredValue` so callers can render a "pick a replacement" hint.
+ */
+export function modelSelectOptions(
+  value: string | null | undefined,
+  models: ModelOption[],
+  modelRetired: boolean,
+): { options: ModelOption[]; retiredValue: string | null } {
+  if (!modelRetired || !value || models.some((m) => m.value === value)) {
+    return { options: models, retiredValue: null };
+  }
+  return {
+    options: [{ value, label: `${getModelLabel(value, models)} (retired)` }, ...models],
+    retiredValue: value,
+  };
+}
+
+/**
  * Whether a default embedding model is configured (text or multimodal). Embedding-dependent
  * features (catalog indexing) are disabled until an admin sets one in Admin → Model Gateway.
+ *
+ * Stricter than "a default row exists": the backend validates the default embedding alias is
+ * also registered on the Model Gateway, so a stale default pointing at a retired/unregistered
+ * model correctly reads as not-configured (otherwise a catalog looks healthy while
+ * indexing/search can't actually run).
  */
 export function useEmbeddingConfigured() {
   const { data, isLoading } = useQuery({
-    queryKey: ['model-defaults'],
-    queryFn: listModelDefaults,
+    queryKey: ['embedding-status'],
+    queryFn: getEmbeddingStatus,
     staleTime: 30_000,
   });
-  const embeddingConfigured = !!(data && (data['embedding'] || data['multimodal_embedding']));
-  return { embeddingConfigured, isLoading };
+  return { embeddingConfigured: !!data?.ready, embeddingStatus: data, isLoading };
 }

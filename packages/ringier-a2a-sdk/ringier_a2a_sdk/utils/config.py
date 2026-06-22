@@ -118,19 +118,16 @@ def create_runnable_config(
         tags.append(f"scheduled_job:{scheduled_job_id}")
 
     # Set request-scoped attribution ContextVars so the Model Gateway transport
-    # (agent-common attribution client) stamps them onto x-litellm-spend-logs-metadata.
+    # (the attribution http hook) stamps them onto x-litellm-spend-logs-metadata.
     # These are the same dimensions carried in the cost-tracking tags above.
-    try:
-        from agent_common.core.attribution import set_attribution
+    from ringier_a2a_sdk.cost_tracking.attribution import set_attribution
 
-        set_attribution(
-            user_sub=user_sub,
-            conversation_id=conversation_id,
-            sub_agent_id=resolved_sub_agent_id,
-            scheduled_job_id=scheduled_job_id,
-        )
-    except ImportError:
-        logger.debug("agent_common.core.attribution unavailable; gateway attribution not set")
+    set_attribution(
+        user_sub=user_sub,
+        conversation_id=conversation_id,
+        sub_agent_id=resolved_sub_agent_id,
+        scheduled_job_id=scheduled_job_id,
+    )
 
     # Build configurable dict
     configurable = extra_configurable.copy()
@@ -150,8 +147,8 @@ def create_runnable_config(
         "assistant_id": assistant_id,  # For channel-scoped files (channel_id or user_id)
     }
 
-    # LLM cost is now captured at the Model Gateway (proxy CustomLogger → console-backend,
-    # ADR-0002). The in-app CostTrackingCallback is intentionally NOT wired here to avoid
+    # LLM cost is now captured at the Model Gateway (proxy CustomLogger → console-backend).
+    # The in-app CostTrackingCallback is intentionally NOT wired here to avoid
     # double-counting. cost_logger is retained for non-LLM cost (e.g. embeddings) which
     # still report directly until Phase 5.
     callbacks: list = []

@@ -51,9 +51,6 @@ from deepagents.middleware.summarization import compute_summarization_defaults
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ToolRetryMiddleware
 from langchain.agents.middleware.types import PrivateStateAttr
-from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
-from langchain_aws import ChatBedrockConverse
-from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_quickjs import CodeInterpreterMiddleware
@@ -75,6 +72,7 @@ from agent_common.middleware.conversation_context_tools_middleware import (
     ConversationContextToolsMiddleware,
 )
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.core.ptc_discovery import (
     PTC_DESCRIBE_TOOL_NAME,
     PTC_SEARCH_TOOL_NAME,
@@ -1135,12 +1133,10 @@ def build_common_middleware_stack(
     2. ``SummarizationMiddleware`` - summarises old messages to stay within the
        model's context-window limit.  Trigger / keep values are computed from
        the model's token profile via ``compute_summarization_defaults``.
-    3. ``AnthropicPromptCachingMiddleware`` - enables Anthropic prompt caching;
-       silently ignored for non-Anthropic models
-       (``unsupported_model_behavior="ignore"``).
-    4. ``BedrockPromptCachingMiddleware`` - enables Bedrock prompt caching;
-       silently ignored for non-Bedrock models
-       (``unsupported_model_behavior="ignore"``).
+    3. ``LiteLLMPromptCachingMiddleware`` - injects an OpenAI-format
+       ``cache_control`` breakpoint on the system prefix that survives the
+       ChatOpenAI → LiteLLM gateway; LiteLLM translates it to the
+       provider's native format and ignores it for non-caching providers.
     6. ``PatchToolCallsMiddleware`` - normalises tool-call format across
        providers (Bedrock, OpenAI, Gemini, \u2026).
     7. ``ToolRetryMiddleware`` - retries failed tool calls with exponential
@@ -1205,14 +1201,15 @@ def build_common_middleware_stack(
                 trim_tokens_to_summarize=None,
                 truncate_args_settings=summarization_defaults["truncate_args_settings"],
             ),
-            AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+            # Inject the cache_control breakpoint as an OpenAI-format content-block
+            # marker so it survives the ChatOpenAI → LiteLLM gateway and is
+            # translated to the provider's native format (Bedrock cachePoint / Anthropic
+            # ephemeral); LiteLLM ignores it for non-caching providers. The vendored
+            # provider-specific middlewares can't fire here — the client is never a
+            # ChatBedrockConverse/ChatAnthropic instance, and their model_settings path
+            # is a no-op for ChatOpenAI.
+            LiteLLMPromptCachingMiddleware(),
         ]
-        # BedrockPromptCachingMiddleware injects Bedrock-specific cache point hints
-        # into requests. Only attach it for actual Bedrock models — on OpenAI,
-        # Gemini, or local models it is at best a no-op and at worst confuses
-        # the provider with unknown fields.
-        if isinstance(model, ChatBedrockConverse):
-            middleware.append(BedrockPromptCachingMiddleware(unsupported_model_behavior="ignore"))
         middleware += [
             PatchToolCallsMiddleware(),
             ToolRetryMiddleware(

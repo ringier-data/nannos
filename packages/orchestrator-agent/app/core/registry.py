@@ -55,6 +55,11 @@ class SubAgentConfigVersion(BaseModel):
     version: int
     description: str | None = None  # Agent skill set description - crucial for orchestrator routing
     model: str | None = None  # LLM model to use (e.g., 'gpt-4', 'claude-3-opus')
+    # Model lifecycle, resolved by console-backend (single source of truth): effective_model
+    # is what to actually run on — equals `model` when registered, the chat default when
+    # `model` has been retired. model_retired flags that a substitution happened (for logs).
+    model_retired: bool = False
+    effective_model: str | None = None
     enable_thinking: bool | None = None  # Enable extended thinking mode
     thinking_level: ThinkingLevel | None = None  # Thinking depth level
 
@@ -398,13 +403,22 @@ class RegistryService:
                 mcp_tools = cv.mcp_tools or []
 
                 if sa.name and system_prompt:
+                    # Run the backend-resolved effective model. When it differs from the
+                    # configured model the alias was retired and console-backend degraded it
+                    # to the chat default; log it so the substitution is visible.
+                    effective_model = cv.effective_model or cv.model
+                    if cv.model_retired and effective_model != cv.model:
+                        logger.info(
+                            f"Sub-agent '{sa.name}' model '{cv.model}' is retired; "
+                            f"running on chat default '{effective_model}' (resolved by console-backend)"
+                        )
                     local_subagents.append(
                         LocalLangGraphSubAgentConfig(
                             name=sa.name,
                             description=cv.description or f"Local agent: {sa.name}",
                             system_prompt=system_prompt,
                             mcp_tools=mcp_tools if mcp_tools else None,
-                            model_name=cv.model,
+                            model_name=effective_model,
                             enable_thinking=cv.enable_thinking,
                             thinking_level=cv.thinking_level,
                             sub_agent_id=sa.id,  # Include console backend ID for tracking

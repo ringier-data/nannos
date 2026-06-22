@@ -34,6 +34,7 @@ from ..models.catalog import (
 )
 from ..models.user import User
 from ..services.catalog_service import CatalogService
+from ..services.feature_status import is_embedding_ready
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,26 @@ _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 def get_catalog_service(request: Request) -> CatalogService:
     """Get catalog service from app state."""
     return request.app.state.catalog_service
+
+
+async def require_embeddings_configured(request: Request, db: DbSession) -> None:
+    """422 unless a default embedding model is configured AND registered on the gateway.
+
+    Catalog creation and indexing have nowhere to embed without a usable model, so this gate
+    blocks them at the API boundary — mirroring the frontend's `useEmbeddingConfigured` check
+    so non-UI clients (and races where the default is removed after a page loads) can't start
+    work that would only fail in the worker. Read and delete stay open: existing catalogs must
+    remain viewable and cleanable even when no model is configured. Validating against the
+    gateway registry (not just "a default row exists") catches the stale-default case where a
+    catalog looks healthy but its embedding model is no longer registered.
+    """
+    if not await is_embedding_ready(request, db):
+        raise HTTPException(
+            status_code=422,
+            detail="No usable default embedding model is configured. An administrator must set a default "
+            "embedding model that is registered on the Model Gateway (Admin → Model Gateway) before "
+            "catalogs can be created or indexed.",
+        )
 
 
 @router.get("", response_model=CatalogListResponse, operation_id="list_catalogs")
@@ -73,6 +94,7 @@ async def create_catalog(
     db: DbSession,
     data: CatalogCreate,
     user: User = Depends(require_auth),
+    _: None = Depends(require_embeddings_configured),
 ) -> Catalog:
     """Create a new catalog."""
     service = get_catalog_service(request)
@@ -458,6 +480,7 @@ async def add_catalog_source(
     catalog_id: str,
     body: AddSourceRequest,
     user: User = Depends(require_auth),
+    _: None = Depends(require_embeddings_configured),
 ) -> CatalogSource:
     """Add a new source (shared drive, drive folder, or shared folder) to a catalog."""
     service = get_catalog_service(request)
@@ -544,6 +567,7 @@ async def reindex_catalog(
     db: DbSession,
     catalog_id: str,
     user: User = Depends(require_auth),
+    _: None = Depends(require_embeddings_configured),
 ) -> CatalogSyncJob:
     """Trigger re-indexing of pages with indexed_at = NULL. Runs in background."""
     service = get_catalog_service(request)
@@ -568,6 +592,7 @@ async def trigger_catalog_sync(
     db: DbSession,
     catalog_id: str,
     user: User = Depends(require_auth),
+    _: None = Depends(require_embeddings_configured),
 ) -> CatalogSyncJob:
     """Trigger a sync for a catalog."""
     service = get_catalog_service(request)

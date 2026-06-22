@@ -49,6 +49,7 @@ from console_backend.middleware import SessionMiddleware as CustomSessionMiddlew
 from console_backend.models.socket_session import SocketSession
 from console_backend.models.user import User
 from console_backend.routers.admin_audit_router import router as admin_audit_router
+from console_backend.routers.admin_budget_router import router as admin_budget_router
 from console_backend.routers.admin_group_router import router as admin_group_router
 from console_backend.routers.admin_mcp_gateway_server_access_router import (
     router as admin_mcp_gateway_server_access_router,
@@ -71,6 +72,7 @@ from console_backend.routers.notification_router import router as notification_r
 from console_backend.routers.outbound_scim_router import router as outbound_scim_router
 from console_backend.routers.playbook_router import router as playbook_router
 from console_backend.routers.admin_model_gateway_router import router as admin_model_gateway_router
+from console_backend.routers.admin_system_status_router import router as admin_system_status_router
 from console_backend.routers.rate_card_router import router as rate_card_router
 from console_backend.routers.scheduler_router import router as scheduler_router
 from console_backend.routers.scim_router import router as scim_router
@@ -326,6 +328,8 @@ app.include_router(usage_router)
 app.include_router(analytics_router)
 app.include_router(rate_card_router)
 app.include_router(admin_model_gateway_router)
+app.include_router(admin_budget_router)
+app.include_router(admin_system_status_router)
 app.include_router(models_router)
 app.include_router(notification_router)
 # Scheduler router MUST be registered before FastApiMCP instantiation below

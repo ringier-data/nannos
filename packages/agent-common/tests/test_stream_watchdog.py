@@ -1,4 +1,4 @@
-"""Tests for the client-side streaming watchdog (ADR-0004)."""
+"""Tests for the client-side streaming watchdog."""
 
 import asyncio
 

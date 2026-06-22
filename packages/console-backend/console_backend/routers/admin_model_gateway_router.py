@@ -1,9 +1,9 @@
-"""Admin router for runtime model registration via the Model Gateway (Q6 / ADR-0001).
+"""Admin router for runtime model registration via the Model Gateway.
 
 console-backend is the single front door for adding/editing models: it writes the
 billing Rate Card (authoritative billed rate) and registers routing+capability on
-the LiteLLM proxy. Per ADR-0002/Q6a the Rate Card is written FIRST so a model is
-never usable before it is billable. Master-key access stays server-side (ADR-0005).
+the LiteLLM proxy. The Rate Card is written FIRST so a model is
+never usable before it is billable. Master-key access stays server-side.
 """
 
 import logging
@@ -75,6 +75,7 @@ async def list_models(request: Request, db: DbSession, user: User = Depends(requ
                 input_modes=info.get("input_modes") or [],
                 default_roles=alias_to_roles.get(name, []),
                 db_model=bool(info.get("db_model")),
+                base_model=info.get("base_model"),
                 input_cost_per_token=info.get("input_cost_per_token"),
                 output_cost_per_token=info.get("output_cost_per_token"),
                 supports_reasoning=info.get("supports_reasoning"),
@@ -125,7 +126,7 @@ async def register_model(
     db: DbSession,
     user: User = Depends(require_admin),
 ):
-    """Register a model: Rate Card first (Q6a), then gateway routing/capability."""
+    """Register a model: Rate Card first, then gateway routing/capability."""
     svc = get_model_gateway_service(request)
     rate_card_service = request.app.state.rate_card_service
 
@@ -173,7 +174,7 @@ async def edit_model(
 ):
     """Edit a registered model's routing/capabilities/cost (db-backed models only).
 
-    Mirrors registration: a new Rate Card version is written (ADR-0002 keeps pricing
+    Mirrors registration: a new Rate Card version is written (pricing is kept
     time-versioned), then the gateway deployment is updated. LiteLLM rejects updates to
     config-defined models, so this only works for runtime-registered ones.
     """
@@ -209,9 +210,9 @@ async def edit_model(
 
 @router.post("/models/{model_name}/test")
 async def test_model(model_name: str, request: Request, user: User = Depends(require_admin)):
-    """Run a cheap completion to validate a registered model end to end."""
+    """Run a cheap call (chat or embedding, per the model's mode) to validate it end to end."""
     try:
-        await get_model_gateway_service(request).test_completion(model_name)
+        await get_model_gateway_service(request).test_model(model_name)
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Test call failed: {e}")
     return {"status": "ok", "model_name": model_name}
@@ -225,7 +226,7 @@ async def set_default(
     db: DbSession,
     user: User = Depends(require_admin),
 ):
-    """Set a model as the fleet default for its role (graceful degradation, ADR-0001).
+    """Set a model as the fleet default for its role (graceful degradation).
 
     The default (role → alias) is stored in our DB — not the gateway — because LiteLLM's
     /model/update can't persist a custom flag. The apps read it from /api/v1/models/defaults

@@ -14,8 +14,11 @@ UPDATE rate_cards SET provider = 'azure'
 
 -- Claude on Bedrock: the gateway routes via `bedrock/...`, which LiteLLM reports as
 -- `bedrock` (not `bedrock_converse`, which the old in-app ChatBedrockConverse used).
+-- Scoped to `claude-%` to mirror the down migration exactly (every bedrock_converse seed is
+-- claude-*, so this is identical on real data) — a blanket UPDATE couldn't be reversed, since
+-- the down couldn't tell a converted row from one that was always `bedrock`.
 UPDATE rate_cards SET provider = 'bedrock'
- WHERE provider = 'bedrock_converse';
+ WHERE provider = 'bedrock_converse' AND model_name LIKE 'claude-%';
 
 -- rambler down
 UPDATE rate_cards SET provider = 'bedrock_converse'

@@ -4,10 +4,9 @@
 # callback). The `config.yaml` (model_list, regions, costs) is deployment-specific
 # and is mounted at runtime (a ConfigMap in k8s, a bind-mount locally) — never baked.
 #
-# Base is the upstream LiteLLM image validated in the spike (SPIKE-FINDINGS.md).
-# Pinned to an exact version+digest (was the moving `main-stable` tag, which resolved
-# to v1.89.2 — this is that same image). Reproducible builds matter here: Vertex `eu`
-# multi-region routing is version-dependent (see LITELLM_PROXY_BOOTSTRAP.md "Vertex region").
+# Base is the upstream LiteLLM image, pinned to an exact version+digest (was the moving
+# `main-stable` tag, which resolved to v1.89.2 — this is that same image). Reproducible
+# builds matter here: Vertex `eu` multi-region routing is version-dependent.
 FROM ghcr.io/berriai/litellm:v1.89.2@sha256:713e2a036aecc8f2cb24cdf0bdeffd893b4f37190d4b21eb9e26ac648939c67a
 
 WORKDIR /app

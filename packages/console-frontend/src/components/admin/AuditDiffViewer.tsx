@@ -19,9 +19,17 @@ export function AuditDiffViewer({ changes }: AuditDiffViewerProps) {
     return <span className="text-muted-foreground">-</span>;
   }
 
+  const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+
   const hasBeforeAfter = 'before' in changes || 'after' in changes;
-  const changeCount = hasBeforeAfter 
-    ? Object.keys((changes.after as Record<string, unknown>) || {}).length
+  // before/after may be plain objects (per-field diff) or scalar values (e.g. "gpt-4o").
+  const scalarBeforeAfter =
+    hasBeforeAfter && !isPlainObject(changes.before) && !isPlainObject(changes.after);
+  const changeCount = hasBeforeAfter
+    ? scalarBeforeAfter
+      ? 1
+      : Object.keys((changes.after as Record<string, unknown>) || {}).length
     : Object.keys(changes).length;
 
   const renderValue = (value: unknown): string => {
@@ -32,9 +40,36 @@ export function AuditDiffViewer({ changes }: AuditDiffViewerProps) {
   };
 
   const renderDiff = () => {
+    if (scalarBeforeAfter) {
+      const beforeValue = changes.before;
+      const afterValue = changes.after;
+      return (
+        <div className="border rounded-lg overflow-hidden shadow-sm">
+          <div className="divide-y">
+            {'before' in changes && (
+              <div className="flex items-start gap-2 px-3 py-2 bg-red-50/50 dark:bg-red-950/20">
+                <span className="text-red-600 dark:text-red-400 font-mono text-xs font-bold mt-0.5 select-none">−</span>
+                <pre className="text-xs flex-1 overflow-x-auto text-red-700 dark:text-red-300 font-mono">
+                  {renderValue(beforeValue)}
+                </pre>
+              </div>
+            )}
+            {'after' in changes && (
+              <div className="flex items-start gap-2 px-3 py-2 bg-green-50/50 dark:bg-green-950/20">
+                <span className="text-green-600 dark:text-green-400 font-mono text-xs font-bold mt-0.5 select-none">+</span>
+                <pre className="text-xs flex-1 overflow-x-auto text-green-700 dark:text-green-300 font-mono">
+                  {renderValue(afterValue)}
+                </pre>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     if (hasBeforeAfter) {
-      const before = (changes.before as Record<string, unknown>) || {};
-      const after = (changes.after as Record<string, unknown>) || {};
+      const before = isPlainObject(changes.before) ? changes.before : {};
+      const after = isPlainObject(changes.after) ? changes.after : {};
       const allKeys = new Set([...Object.keys(before), ...Object.keys(after)]);
 
       return (
@@ -124,7 +159,11 @@ export function AuditDiffViewer({ changes }: AuditDiffViewerProps) {
         </CollapsibleTrigger>
         {!isOpen && (
           <div className="flex gap-1 flex-wrap">
-            {hasBeforeAfter ? (
+            {scalarBeforeAfter ? (
+              <Badge variant="secondary" className="text-xs">
+                {renderValue(changes.after ?? changes.before)}
+              </Badge>
+            ) : hasBeforeAfter ? (
               Object.keys((changes.after as Record<string, unknown>) || {}).slice(0, 3).map((key) => (
                 <Badge key={key} variant="secondary" className="text-xs">
                   {key}

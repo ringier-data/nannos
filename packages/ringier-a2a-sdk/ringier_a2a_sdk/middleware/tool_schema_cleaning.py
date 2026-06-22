@@ -19,7 +19,7 @@ Progressive Retry Strategy:
 - On INVALID_ARGUMENT error, retry with AGGRESSIVE (+ format/min/max/array constraints)
 - Log which level succeeds to track patterns (usually succeeds at MODERATE for 80+ tools)
 
-Schema cleaning utilities are in agent_common (imported below).
+Schema cleaning utilities live in this SDK's utils.schema_cleaning (imported below).
 """
 
 import logging

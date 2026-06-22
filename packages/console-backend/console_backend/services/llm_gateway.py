@@ -1,7 +1,7 @@
 """Minimal chat helper for console-backend's own LLM calls via the Model Gateway.
 
 console-backend's utility LLM calls (watch-param generation, catalog summarization)
-used raw boto3 `invoke_model`. They now go through the gateway (ADR-0001) like all
+used raw boto3 `invoke_model`. They now go through the gateway like all
 other LLM traffic — one OpenAI-compatible call with the app's virtual key. Kept
 dependency-light (httpx only; no langchain in console-backend).
 """
@@ -28,7 +28,7 @@ async def gateway_chat(
     """Single-turn completion through the gateway; returns the assistant text.
 
     `metadata` (e.g. {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the
-    proxy attributes the cost (ADR-0002). Without a user_sub the proxy logs nothing.
+    proxy attributes the cost. Without a user_sub the proxy logs nothing.
 
     Note: the canonical attribution-header builder lives in agent-common
     (`attribution.attribution_header`, used by the chat client + embeddings adapter). It is
@@ -38,7 +38,10 @@ async def gateway_chat(
     attribution dimensions would always be empty. The caller passes whatever applies.
     """
     headers = {
-        "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', '')}",
+        # Match the default every other gateway caller uses (agent-common._gateway_api_key,
+        # the embeddings adapter): a consistent key avoids silent 401s when the env is unset.
+        # console-backend is dependency-light (no agent-common), so the value is duplicated.
+        "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
         "Content-Type": "application/json",
     }
     if metadata:

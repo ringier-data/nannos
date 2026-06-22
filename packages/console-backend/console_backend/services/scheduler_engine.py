@@ -329,7 +329,12 @@ class SchedulerEngine:
                     "Accept": "text/event-stream",
                 },
             ) as response:
-                response.raise_for_status()
+                if response.is_error:
+                    # Read the streamed body before raising so the exception
+                    # handler can access e.response.text — otherwise httpx raises
+                    # ResponseNotRead and masks the real HTTP error.
+                    await response.aread()
+                    response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue

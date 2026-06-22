@@ -14,6 +14,7 @@ export type {
   FoundryScope,
   SkillDefinition,
   SkillFile,
+  ModelTier,
 } from '@/api/generated/types.gen';
 
 // Local type aliases for backward compatibility
@@ -60,7 +61,8 @@ export interface SubAgentPermission {
 export interface SubAgentFormData {
   name: string;
   description: string;
-  model?: string;  // LLM model to use (e.g., 'gpt-4', 'claude-3-opus')
+  model?: string;  // Concrete LLM alias (e.g. 'claude-sonnet-4.6'); mutually exclusive with model_tier
+  model_tier?: import('@/api/generated/types.gen').ModelTier;  // Capability tier (low/standard/premium) instead of a fixed alias
   type: 'remote' | 'local' | 'foundry' | 'automated';
   is_public?: boolean;  // If true, accessible to all users without group permissions
   configuration: SubAgentConfiguration;

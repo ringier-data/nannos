@@ -32,10 +32,28 @@ from langchain_core.embeddings import Embeddings
 
 logger = logging.getLogger(__name__)
 
-# Gateway alias for the embedding model (registered on the proxy; overridable per env).
-_DEFAULT_MODEL_ALIAS = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-2")
 _DEFAULT_DIMENSION = 1024
 _MAX_CONCURRENT = 20
+
+# Model aliases already warned about for lacking text+image fusion. The per-instance latch
+# (_image_fusion_unsupported) skips the wasted fused call for the rest of a sync; this set
+# keeps the log to one line per alias for the life of the process, across sync jobs/instances.
+_FUSION_WARNED: set[str] = set()
+
+
+def supports_image_fusion(litellm_model: str | None) -> bool:
+    """Whether this client can fuse text+image into one vector for the given gateway model.
+
+    Only Gemini Embedding 2 (Vertex) honours the fused-input-list → single-vector contract
+    GeminiEmbeddings speaks; every other embedding model (Bedrock Nova/Titan, …) embeds text
+    only and its image bytes are dropped (see _embed_with_image_or_degrade). ``litellm_model``
+    is the gateway's ``litellm_params.model`` (e.g. ``vertex_ai/gemini-embedding-2``), not the
+    public alias, since aliases are admin-chosen and not a reliable capability signal.
+
+    Keep this in lockstep with the runtime degradation so the System Status note and what the
+    sync actually does never disagree. When provider-aware adapters land (option 3), widen this.
+    """
+    return bool(litellm_model) and "gemini-embedding" in litellm_model.lower()
 
 
 def _gateway_base() -> str:
@@ -62,7 +80,8 @@ class GeminiEmbeddings(Embeddings):
         self,
         role: str = "document",
         dimension: int = _DEFAULT_DIMENSION,
-        model_id: str = _DEFAULT_MODEL_ALIAS,
+        *,
+        model_id: str,
         cost_logger: Any | None = None,
         user_sub: str | None = None,
         catalog_id: str | None = None,
@@ -76,6 +95,10 @@ class GeminiEmbeddings(Embeddings):
         self._user_sub = user_sub
         self._catalog_id = catalog_id
         self._executor = executor
+        # Latches True the first time a text+image call proves the model can't fuse, so the
+        # rest of this instance's image-bearing docs skip straight to text-only (see
+        # _embed_with_image_or_degrade).
+        self._image_fusion_unsupported = False
 
     def _format_text(self, text: str) -> str:
         """Apply Gemini Embedding 2 task prefix for asymmetric retrieval."""
@@ -84,16 +107,16 @@ class GeminiEmbeddings(Embeddings):
         return f"title: none | text: {text}"
 
     def _attribution_header(self) -> dict[str, str]:
-        """Spend-logs header for proxy-side cost capture (ADR-0002).
+        """Spend-logs header for proxy-side cost capture.
 
-        Uses the canonical agent-common attribution (the full field set: user_sub,
+        Uses the canonical attribution helper (the full field set: user_sub,
         conversation_id, sub_agent_id, scheduled_job_id, catalog_id) via the shared
         header builder, with explicit constructor overrides. Falls back to the SDK
         request user_sub only when the canonical var is unset (an SDK-only boundary), so
         catalog_search inside the orchestrator / sub-agents / scheduled jobs is attributed
         with all its dimensions instead of dropping everything but user_sub+catalog_id.
         """
-        from agent_common.core.attribution import attribution_header, current_user_sub
+        from ringier_a2a_sdk.cost_tracking.attribution import attribution_header, current_user_sub
 
         overrides: dict[str, Any] = {"catalog_id": self._catalog_id}
         if self._user_sub:
@@ -165,12 +188,49 @@ class GeminiEmbeddings(Embeddings):
         ctx = contextvars.copy_context()  # preserve attribution ContextVar across the executor hop
         return await loop.run_in_executor(self._executor, ctx.run, self._invoke, text)
 
+    def _embed_with_image_or_degrade(self, text: str, image_bytes: bytes) -> list[float]:
+        """Fused text+image embedding, degrading to text-only when the model can't fuse.
+
+        Only Gemini Embedding 2 (Vertex) honours the fused-input-list → single-vector
+        contract this client speaks; the multimodal default may now be a model that doesn't
+        (e.g. Bedrock Nova/Titan), which would otherwise fail every image-bearing doc. On the
+        first capability error we latch to text-only for the rest of this instance so the
+        sync indexes the doc's text instead of crashing. The image then contributes nothing
+        to the vector, but indexing proceeds. (Proper fix: a provider-aware adapter — option 3.)
+        """
+        if self._image_fusion_unsupported:
+            return self._invoke(text=text)
+        try:
+            return self._invoke(text=text, image_bytes=image_bytes)
+        except (RuntimeError, httpx.HTTPStatusError) as e:
+            # RuntimeError → gateway returned per-element vectors (no fusion).
+            # 400/422 → the provider rejected the fused image input shape.
+            # Anything else (timeout, 5xx) is transient — re-raise rather than mask it as a
+            # capability gap, so a real outage isn't silently downgraded for the whole sync.
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code not in (400, 422):
+                raise
+            self._image_fusion_unsupported = True
+            if self.model_id not in _FUSION_WARNED:
+                _FUSION_WARNED.add(self.model_id)
+                logger.warning(
+                    "Embedding model %r does not support multimodal text+image fusion (%s); "
+                    "degrading image-bearing documents to text-only. Set a fusion-capable "
+                    "model (Gemini Embedding 2) as the multimodal_embedding default, or add a "
+                    "provider-aware adapter, to embed images.",
+                    self.model_id,
+                    type(e).__name__,
+                )
+            return self._invoke(text=text)
+
     def embed_with_image(self, text: str, image_bytes: bytes) -> list[float]:
-        """Embed text + image together (multimodal). Used by the sync pipeline."""
-        return self._invoke(text=text, image_bytes=image_bytes)
+        """Embed text + image together (multimodal). Used by the sync pipeline.
+
+        Degrades to text-only when the configured model can't fuse text+image
+        (see _embed_with_image_or_degrade)."""
+        return self._embed_with_image_or_degrade(text, image_bytes)
 
     async def aembed_with_image(self, text: str, image_bytes: bytes) -> list[float]:
-        """Async version of embed_with_image."""
+        """Async version of embed_with_image (same text-only degradation)."""
         loop = asyncio.get_running_loop()
         ctx = contextvars.copy_context()  # preserve attribution ContextVar across the executor hop
-        return await loop.run_in_executor(self._executor, ctx.run, self._invoke, text, image_bytes)
+        return await loop.run_in_executor(self._executor, ctx.run, self._embed_with_image_or_degrade, text, image_bytes)

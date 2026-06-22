@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from console_backend.models.notification import NotificationType
 from console_backend.models.sub_agent import (
     FoundryScope,
+    ModelTier,
     SubAgent,
     SubAgentCreate,
     SubAgentStatus,
@@ -128,6 +129,43 @@ class TestSubAgentVersionCreation:
         assert agent.config_version.change_summary == "Initial version"
         assert agent.config_version.version_hash is not None
         assert len(agent.config_version.version_hash) == 12  # 12-char hash
+
+    @pytest.mark.asyncio
+    async def test_create_with_model_tier_round_trips(
+        self,
+        sub_agent_service: SubAgentService,
+        pg_session: AsyncSession,
+        test_user_db: User,
+    ):
+        """A tier-bound sub-agent persists model_tier and leaves model null."""
+        data = SubAgentCreate(
+            name="Tiered Agent",
+            type=SubAgentType.LOCAL,
+            description="Test description",
+            model_tier=ModelTier.LOW,
+            system_prompt="You are a helpful assistant",
+        )
+        agent = await sub_agent_service.create_sub_agent(pg_session, data, test_user_db)
+
+        refetched = await sub_agent_service.get_sub_agent_by_id(pg_session, agent.id)
+        assert refetched.config_version.model is None
+        assert refetched.config_version.model_tier == ModelTier.LOW
+
+    @pytest.mark.asyncio
+    async def test_update_model_to_tier_clears_model(
+        self,
+        sub_agent_service: SubAgentService,
+        pg_session: AsyncSession,
+        test_user_db: User,
+    ):
+        """Switching a concrete-model agent to a tier clears model (mutually exclusive)."""
+        agent = await _create_sub_agent(pg_session, test_user_db, "Switcher", sub_agent_service)
+        # _create_sub_agent sets a concrete model; switch it to a tier.
+        updated = await sub_agent_service.update_sub_agent(
+            pg_session, agent.id, SubAgentUpdate(model_tier=ModelTier.PREMIUM), actor=test_user_db
+        )
+        assert updated.config_version.model is None
+        assert updated.config_version.model_tier == ModelTier.PREMIUM
 
     @pytest.mark.asyncio
     async def test_update_sub_agent_creates_new_version(

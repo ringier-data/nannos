@@ -37,7 +37,7 @@ spec:
           value: "eu-central-1"
         - name: AWS_BEDROCK_REGION
           value: "eu-central-1"
-        - name: AZURE_OPENAI_ENDPOINT
+        - name: AZURE_API_BASE
           value: "https://YOUR_AZURE.openai.azure.com"
         - name: GCP_PROJECT_ID
           value: "YOUR_GCP_PROJECT"
@@ -80,7 +80,7 @@ spec:
           name: litellm-proxy-config
 ---
 # Settings-only gateway config (no model_list — models are provisioned at runtime
-# via the console and stored in the proxy DB; see ADR-0001 / Q6).
+# via the console and stored in the proxy DB).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -93,10 +93,10 @@ data:
     litellm_settings:
       callbacks: custom_logger.proxy_handler_instance
       # Total per-request bound for non-streaming calls. Streaming hangs are caught by the
-      # client-side inter-chunk watchdog (ADR-0004) since Bedrock ignores stream_timeout.
+      # client-side inter-chunk watchdog since Bedrock ignores stream_timeout.
       request_timeout: 600
       drop_params: true
-      # Gateway-native retries on transient failures/timeouts (ADR-0004), replacing the
+      # Gateway-native retries on transient failures/timeouts, replacing the
       # per-call boto3 retries dropped in the migration. Applies to all providers, so a
       # failed/timed-out non-streaming call is retried here, not at each app call site.
       num_retries: 2
@@ -115,7 +115,7 @@ metadata:
     app: litellm-proxy
     app.kubernetes.io/part-of: nannos
 spec:
-  # ClusterIP only — inference + management routes are in-cluster (ADR-0005).
+  # ClusterIP only — inference + management routes are in-cluster.
   # No HTTPRoute / public ingress. Apps reach it at litellm-proxy.nannos.svc:80.
   selector:
     app: litellm-proxy

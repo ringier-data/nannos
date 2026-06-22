@@ -9,6 +9,7 @@ Tests cover HTTP-level integration:
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 
 # --- Helpers ---
 
@@ -29,6 +30,42 @@ async def _create_catalog_via_api(client: AsyncClient, name: str = "Test Catalog
 
 
 # --- Tests ---
+
+
+class TestCatalogEmbeddingGate:
+    """Catalog create/indexing is disabled (422) when no default embedding model is set."""
+
+    @pytest.mark.asyncio
+    async def test_create_blocked_without_embedding_default(self, client_with_db: AsyncClient, pg_session):
+        # Remove the embedding defaults seeded by the fixture → feature disabled.
+        await pg_session.execute(
+            text("DELETE FROM model_defaults WHERE role IN ('embedding', 'multimodal_embedding')")
+        )
+        await pg_session.commit()
+
+        response = await client_with_db.post(
+            "/api/v1/catalogs",
+            json={
+                "name": "Blocked Catalog",
+                "description": "Test description",
+                "source_type": "google_drive",
+                "source_config": {},
+            },
+        )
+        assert response.status_code == 422, response.text
+        assert "embedding model" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_reindex_blocked_without_embedding_default(self, client_with_db: AsyncClient, pg_session):
+        # Create while configured, then remove the default and attempt to re-index.
+        created = await _create_catalog_via_api(client_with_db, "Reindex Gate")
+        await pg_session.execute(
+            text("DELETE FROM model_defaults WHERE role IN ('embedding', 'multimodal_embedding')")
+        )
+        await pg_session.commit()
+
+        response = await client_with_db.post(f"/api/v1/catalogs/{created['id']}/reindex")
+        assert response.status_code == 422, response.text
 
 
 class TestCatalogEndpoints:

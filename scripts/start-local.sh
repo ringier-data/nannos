@@ -36,7 +36,7 @@ set -euo pipefail
 #
 # Cloud LLM providers (fetched from SSM when AWS_PROFILE is set):
 #   AZURE_OPENAI_API_KEY     - Azure OpenAI API key
-#   AZURE_OPENAI_ENDPOINT    - Azure OpenAI endpoint URL
+#   AZURE_API_BASE    - Azure OpenAI endpoint URL
 #   GCP_KEY                  - GCP service account key JSON (Vertex AI / Gemini)
 #   GCP_PROJECT_ID           - GCP project ID (defaults to "rcplus-alloy-gcp")
 #   GCP_LOCATION             - GCP region (defaults to "global")
@@ -338,7 +338,7 @@ fi
 
 # ── AWS secrets & cloud providers ──
 AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-}"
-AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
+AZURE_API_BASE="${AZURE_API_BASE:-}"
 AWS_BEDROCK_REGION="${AWS_BEDROCK_REGION:-}"
 GCP_KEY="${GCP_KEY:-}"
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-}"
@@ -361,7 +361,7 @@ if [[ "$_HAS_AWS" == true ]]; then
   log "Fetching secrets from AWS SSM (profile: $AWS_PROFILE)..."
 
   if AZURE_OPENAI_API_KEY=$(aws ssm get-parameter --name /nannos/openai-api-key-chatgpt-4o --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    AZURE_OPENAI_ENDPOINT="https://rcplus-alloy-eu-prod.openai.azure.com"
+    AZURE_API_BASE="https://rcplus-alloy-eu-prod.openai.azure.com"
     ok "Azure OpenAI configured"
   else
     warn "Could not fetch AZURE_OPENAI_API_KEY from SSM — Azure OpenAI disabled"
@@ -714,14 +714,14 @@ npm install --silent 2>/dev/null
 ok "Frontend dependencies installed"
 
 # ─── 7b. Local Model Gateway (LiteLLM proxy) ───────────────────────
-# Gateway-only architecture (ADR-0001): all LLM calls route through the proxy,
+# Gateway-only architecture: all LLM calls route through the proxy,
 # there is no per-provider fallback. Auto-launch a local proxy fronting whatever
 # creds / local LLM are available, and point the services at it.
 LLM_GATEWAY_PORT="${LLM_GATEWAY_PORT:-4000}"
 export LLM_GATEWAY_URL="http://localhost:${LLM_GATEWAY_PORT}"
 export LLM_GATEWAY_API_KEY="sk-nannos-local"
 # Master key for the proxy management API (/model/*). Locally it equals the app key;
-# in real envs they differ (ADR-0005: master key only on proxy + console-backend).
+# in real envs they differ (master key only on proxy + console-backend).
 # Exported so console-backend (launched via mprocs below) can register/list models.
 export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-nannos-local}"
 # Shared secret for proxy → console-backend cost ingestion. Exported so console-backend
@@ -755,10 +755,10 @@ cat > "$_GW_CONFIG" <<'EOF'
 litellm_settings:
   callbacks: custom_logger.proxy_handler_instance
   # Total per-request bound for non-streaming calls; streaming hangs are caught by the
-  # client-side inter-chunk watchdog (ADR-0004, Bedrock ignores stream_timeout).
+  # client-side inter-chunk watchdog (Bedrock ignores stream_timeout).
   request_timeout: 600
   drop_params: true
-  # Gateway-native retries on transient failures/timeouts (ADR-0004), replacing the
+  # Gateway-native retries on transient failures/timeouts, replacing the
   # per-call boto3 retries dropped in the migration. Matches the k8s ConfigMap.
   num_retries: 2
   # Emit structured (JSON) logs instead of colorized text, so the proxy's output
@@ -770,36 +770,22 @@ general_settings:
   database_url: os.environ/LITELLM_DATABASE_URL
 EOF
 
-# model_list: bring your own via LITELLM_LOCAL_MODELS_FILE (a YAML file containing a
-# `model_list:` block) — this config is specific to your stack's models/regions. The
-# default below is just a convenience for zero-config local dev.
-if [[ -n "${LITELLM_LOCAL_MODELS_FILE:-}" && -f "${LITELLM_LOCAL_MODELS_FILE}" ]]; then
-  cat "${LITELLM_LOCAL_MODELS_FILE}" >> "$_GW_CONFIG"
-  ok "Gateway model_list from \$LITELLM_LOCAL_MODELS_FILE (${LITELLM_LOCAL_MODELS_FILE})"
+# model_list: deployment-specific (model ids, regions, provider deployments), so it lives in
+# a gitignored YAML file rather than this committed script. Resolution order:
+#   1. $LITELLM_LOCAL_MODELS_FILE if set, else ./litellm-local-models.yaml (gitignored)
+#   2. ./litellm-local-models.example.yaml (committed template) as a fallback
+#   3. empty model_list (register models at runtime via the Model Gateway admin UI)
+_LITELLM_MODELS_FILE="${LITELLM_LOCAL_MODELS_FILE:-$ROOT_DIR/litellm-local-models.yaml}"
+if [[ -f "$_LITELLM_MODELS_FILE" ]]; then
+  cat "$_LITELLM_MODELS_FILE" >> "$_GW_CONFIG"
+  ok "Gateway model_list from ${_LITELLM_MODELS_FILE}"
+elif [[ -f "$ROOT_DIR/litellm-local-models.example.yaml" ]]; then
+  cat "$ROOT_DIR/litellm-local-models.example.yaml" >> "$_GW_CONFIG"
+  warn "No litellm-local-models.yaml — using the example template. Copy it and customize:"
+  warn "  cp litellm-local-models.example.yaml litellm-local-models.yaml"
 else
-  cat >> "$_GW_CONFIG" <<'EOF'
-model_list:
-  - model_name: claude-sonnet-4.5
-    litellm_params: {model: bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
-  - model_name: claude-sonnet-4.6
-    litellm_params: {model: bedrock/eu.anthropic.claude-sonnet-4-6, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
-  - model_name: claude-haiku-4-5
-    litellm_params: {model: bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
-  - model_name: gpt-4o
-    litellm_params: {model: azure/chatgpt-4o, api_base: os.environ/AZURE_OPENAI_ENDPOINT, api_key: os.environ/AZURE_OPENAI_API_KEY, api_version: "2024-08-01-preview", max_retries: 0}
-  - model_name: gpt-4o-mini
-    litellm_params: {model: azure/gpt-4o-mini, api_base: os.environ/AZURE_OPENAI_ENDPOINT, api_key: os.environ/AZURE_OPENAI_API_KEY, api_version: "2025-01-01-preview", max_retries: 0}
-  - model_name: gemini-3.1-pro-preview
-    litellm_params: {model: vertex_ai/gemini-3.1-pro-preview, vertex_project: os.environ/GCP_PROJECT_ID, vertex_location: global, vertex_credentials: os.environ/GCP_KEY, temperature: 1.0, max_retries: 0}
-  - model_name: gemini-3-flash-preview
-    litellm_params: {model: vertex_ai/gemini-3-flash-preview, vertex_project: os.environ/GCP_PROJECT_ID, vertex_location: global, vertex_credentials: os.environ/GCP_KEY, temperature: 1.0, max_retries: 0}
-  - model_name: titan-embed-text-v2
-    model_info: {mode: embedding}
-    litellm_params: {model: bedrock/amazon.titan-embed-text-v2:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
-  - model_name: gemini-embedding-2
-    model_info: {mode: embedding, input_modes: [text, image]}
-    litellm_params: {model: vertex_ai/gemini-embedding-2, vertex_project: os.environ/GCP_PROJECT_ID, vertex_credentials: os.environ/GCP_KEY, vertex_location: eu, max_retries: 0}
-EOF
+  printf 'model_list: []\n' >> "$_GW_CONFIG"
+  warn "No local model_list — register models at runtime via the Model Gateway admin UI."
 fi
 if [[ "$_HAS_LOCAL_LLM" == true ]]; then
   # The container reaches the host LLM server via host.docker.internal.
@@ -844,7 +830,7 @@ docker run -d --name "$_GW_CONTAINER" \
   -e AWS_BEDROCK_REGION="${AWS_BEDROCK_REGION:-eu-central-1}" \
   -e AWS_REGION="${AWS_BEDROCK_REGION:-eu-central-1}" \
   "${_GW_AWS_ENV[@]}" \
-  -e AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}" \
+  -e AZURE_API_BASE="${AZURE_API_BASE:-}" \
   -e AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-}" \
   -e GCP_PROJECT_ID="${GCP_PROJECT_ID:-}" \
   -e GCP_KEY="${GCP_KEY:-}" \
@@ -880,7 +866,7 @@ mkdir -p "$_LOG_DIR"
 # ── Resolve optional env vars ──
 # OPENAI_COMPATIBLE_* are gateway-config inputs only (a `local` model_list alias, see
 # above) — they're NOT exported to the services, which reach the local model through the
-# gateway like any other provider (ADR-0001). Kept as plain shell vars for the status line.
+# gateway like any other provider. Kept as plain shell vars for the status line.
 OPENAI_COMPATIBLE_BASE_URL="${OPENAI_COMPATIBLE_BASE_URL:-}"
 OPENAI_COMPATIBLE_MODEL="${OPENAI_COMPATIBLE_MODEL:-}"
 export MCP_GATEWAY_URL="${MCP_GATEWAY_URL:-}"
@@ -1056,7 +1042,7 @@ procs:
       AGENT_RUNNER_URL: "http://localhost:5005"
       LOG_LEVEL: "INFO"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
+      AZURE_API_BASE: "$AZURE_API_BASE"
       BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
       FILES_S3_BUCKET: "$FILES_S3_BUCKET"
@@ -1113,7 +1099,7 @@ procs:
       GCP_KEY: '$GCP_KEY'
       GCP_PROJECT_ID: "$GCP_PROJECT_ID"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
+      AZURE_API_BASE: "$AZURE_API_BASE"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
       BEDROCK_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
       LOG_LEVEL: "INFO"
@@ -1150,10 +1136,9 @@ procs:
       LANGSMITH_PROJECT: "$LANGSMITH_PROJECT"
       LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
       LOG_LEVEL: "INFO"
-      BUDGET_ENABLED: "false"
       USE_SHORT_PROMPTS: "true"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
+      AZURE_API_BASE: "$AZURE_API_BASE"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
       BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       GCP_KEY: '$GCP_KEY'
@@ -1197,7 +1182,7 @@ procs:
       LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
       LOG_LEVEL: "INFO"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_OPENAI_ENDPOINT: "$AZURE_OPENAI_ENDPOINT"
+      AZURE_API_BASE: "$AZURE_API_BASE"
       AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
       BEDROCK_MODEL_ID: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
       GCP_KEY: '$GCP_KEY'

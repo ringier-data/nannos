@@ -584,7 +584,7 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         Returns:
             Transformed content blocks ready for the provider's API
         """
-        # Gateway-only (ADR-0001): the app no longer knows the provider, and the
+        # Gateway-only: the app no longer knows the provider, and the
         # LiteLLM gateway normalizes content for the target provider (image
         # fetch/encode for Bedrock, MIME inference for Gemini). So this is a
         # passthrough. (Provider-specific content handling is now the gateway's

@@ -12,7 +12,7 @@ import { AlertCircle, Sparkles, Info } from 'lucide-react';
 import { useChat } from '../contexts';
 import { useSessionId } from '../hooks/useLocalStorage';
 import type { Settings } from '../types';
-import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
+import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, getModelLabel } from '@/config/models';
 import { config } from '@/config';
 
 interface SettingsModalProps {
@@ -129,14 +129,21 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     <SelectValue placeholder="Select model" />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableModels.map((option) => (
+                    {modelSelectOptions(model, availableModels, userSettings?.preferred_model_retired ?? false).options.map((option) => (
                       <SelectItem key={option.value} value={option.value}>
                         {option.label}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">Select the LLM model for the orchestrator to use</p>
+                {userSettings?.preferred_model_retired && model === userSettings.preferred_model ? (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    This model was retired — the orchestrator now uses{' '}
+                    {userSettings.effective_preferred_model ? getModelLabel(userSettings.effective_preferred_model, availableModels) : 'the default'}. Pick a replacement to update it.
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">Select the LLM model for the orchestrator to use</p>
+                )}
               </div>
 
               {/* Extended Thinking Configuration */}

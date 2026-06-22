@@ -26,6 +26,8 @@ interface ChatContextType {
   settings: Settings | null;
   userSettings: {
     preferred_model?: string | null;
+    preferred_model_retired?: boolean;
+    effective_preferred_model?: string | null;
     enable_thinking?: boolean | null;
     thinking_level?: string | null;
   } | null;

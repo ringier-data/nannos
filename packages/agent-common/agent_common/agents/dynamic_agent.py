@@ -979,9 +979,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
             system_prompt += self_improvement_addendum
             logger.debug(f"Added self-improvement addendum to {self.name} system prompt")
 
-        # Get model-specific response_format strategy (may mutate tools list for Bedrock+thinking)
+        # Get provider-specific response_format strategy (may mutate tools list for Bedrock/Anthropic+thinking)
         response_format = get_response_format(
-            model=self.model,
+            model_type=self.get_model_type(),
             tools=tools,
             thinking_enabled=bool(self.config.thinking_level),
         )

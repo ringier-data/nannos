@@ -21,12 +21,12 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
+import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, MODEL_TIER_OPTIONS } from '@/config/models';
 import type { SubAgent, SubAgentType, SubAgentFormData, SkillDefinition } from './types';
 import type { OrchestratorThinkingLevel, SkillSearchResult } from '@/api/generated/types.gen';
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
@@ -54,7 +54,14 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
 
   const [name, setName] = useState(subAgent?.name ?? '');
   const [description, setDescription] = useState(config?.description ?? '');
-  const [model, setModel] = useState(config?.model ?? '');
+  // A local agent binds to EITHER a concrete model alias OR a capability tier. The Select
+  // holds both in one value: a tier is encoded as `tier:<tier>`, anything else is an alias.
+  const [modelSelection, setModelSelection] = useState<string>(
+    config?.model_tier ? `tier:${config.model_tier}` : (config?.model ?? '')
+  );
+  const isTierSelected = modelSelection.startsWith('tier:');
+  const modelAlias = isTierSelected ? '' : modelSelection;  // '' when a tier is chosen
+  const modelTier = isTierSelected ? modelSelection.slice('tier:'.length) : null;
   const [type, setType] = useState<SubAgentType>(subAgent?.type ?? ('local' as SubAgentType));
   const [isPublic, setIsPublic] = useState(subAgent?.is_public ?? false);
   const [isMcpToolsOpen, setIsMcpToolsOpen] = useState(false);
@@ -178,20 +185,22 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
     }
   };
 
-  // Automatically disable thinking when model doesn't support it
+  // Automatically disable thinking when the chosen concrete model doesn't support it.
+  // A tier selection has no concrete alias here (modelAlias === ''), so we skip these
+  // capability checks — thinking is resolved against the tier's actual model at runtime.
   useEffect(() => {
-    if (model && !modelSupportsThinking(model, availableModels)) {
+    if (modelAlias && !modelSupportsThinking(modelAlias, availableModels)) {
       setEnableThinking(false);
     }
     // Reset thinking level to 'low' if current level is not available for this model
-    if (model && enableThinking) {
-      const availableLevels = getAvailableThinkingLevels(model, availableModels);
+    if (modelAlias && enableThinking) {
+      const availableLevels = getAvailableThinkingLevels(modelAlias, availableModels);
       const isCurrentLevelAvailable = availableLevels.some((opt) => opt.value === thinkingLevel);
       if (!isCurrentLevelAvailable) {
         setThinkingLevel('low'); // Default to 'low' which is supported by all models
       }
     }
-  }, [model, enableThinking, thinkingLevel]);
+  }, [modelAlias, enableThinking, thinkingLevel]);
 
   const validate = (): string | null => {
     if (!name.trim()) {
@@ -216,8 +225,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       }
     }
     if (type === 'local') {
-      if (!model.trim()) {
-        return 'Model is required for local agents';
+      if (!modelSelection.trim()) {
+        return 'Model or tier is required for local agents';
       }
       if (!systemPrompt.trim()) {
         return 'System prompt is required for local agents';
@@ -329,7 +338,8 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
       await onSubmit({
         name: name.trim(),
         description: description.trim(),
-        model: type === 'local' ? model.trim() : undefined,
+        model: type === 'local' && !isTierSelected ? modelAlias.trim() : undefined,
+        model_tier: type === 'local' && isTierSelected ? (modelTier as SubAgentFormData['model_tier']) : undefined,
         type,
         is_public: isPublic,
         configuration: configuration!,
@@ -741,19 +751,41 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
                 <>
                   <div className="space-y-2">
                     <Label htmlFor="model">Model *</Label>
-                    <Select value={model} onValueChange={setModel} disabled={isSubmitting}>
+                    <Select value={modelSelection} onValueChange={setModelSelection} disabled={isSubmitting}>
                       <SelectTrigger id="model">
-                        <SelectValue placeholder="Select a model" />
+                        <SelectValue placeholder="Select a model or tier" />
                       </SelectTrigger>
                       <SelectContent>
-                        {availableModels.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
+                        <SelectGroup>
+                          <SelectLabel>Tier (follows the fleet default for that tier)</SelectLabel>
+                          {MODEL_TIER_OPTIONS.map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                        <SelectSeparator />
+                        <SelectGroup>
+                          <SelectLabel>Specific model</SelectLabel>
+                          {modelSelectOptions(modelAlias, availableModels, config?.model_retired ?? false).options.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
                       </SelectContent>
                     </Select>
-                    <p className="text-xs text-muted-foreground">The LLM model to use for this agent</p>
+                    {modelSelectOptions(modelAlias, availableModels, config?.model_retired ?? false).retiredValue ? (
+                      <p className="text-xs text-amber-600 dark:text-amber-400">
+                        This model was retired. Select a replacement to update the agent.
+                      </p>
+                    ) : isTierSelected ? (
+                      <p className="text-xs text-muted-foreground">
+                        Runs on whichever model is the current default for this tier — survives model upgrades.
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">The LLM model to use for this agent</p>
+                    )}
                   </div>
 
                   <div className="space-y-2">
@@ -775,7 +807,7 @@ export function SubAgentForm({ subAgent, onSubmit, onCancel, isSubmitting = fals
 
                   {/* Extended Thinking Configuration */}
                   <ExtendedThinkingConfig
-                    model={model}
+                    model={modelAlias}
                     enableThinking={enableThinking}
                     thinkingLevel={thinkingLevel}
                     onEnableThinkingChange={(checked) => {

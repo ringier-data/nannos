@@ -111,7 +111,7 @@ class CostTrackingMixin:
         # Note: Worker will be started lazily on first request (when event loop is running)
 
         # No in-app LangChain cost callback: all LLM traffic goes through the Model
-        # Gateway, whose proxy-side CostLogger is the single source of cost (ADR-0002).
+        # Gateway, whose proxy-side CostLogger is the single source of cost.
         # Attaching CostTrackingCallback here would double-count every sub-agent call
         # (once proxy-side with the real provider, once in-app mislabeled as "openai").
         self._langchain_callbacks = []

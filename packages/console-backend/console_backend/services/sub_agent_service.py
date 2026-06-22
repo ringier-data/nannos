@@ -29,23 +29,16 @@ from ..models.sub_agent import (
 )
 from ..models.user import User
 from ..repositories.sub_agent_repository import ApprovalContext
+from ..services.model_gateway_service import ModelGatewayError
 from ..services.notification_service import NotificationService
 
 if TYPE_CHECKING:
     from ..repositories.sub_agent_repository import SubAgentRepository
+    from ..services.model_gateway_service import ModelGatewayService
     from ..services.skill_registry_service import SkillRegistryService
 
 
 logger = logging.getLogger(__name__)
-
-# Models that support Extended Thinking
-MODELS_SUPPORTING_THINKING = {
-    "claude-sonnet-4.5",
-    "claude-sonnet-4.6",
-    "claude-haiku-4-5",
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-}
 
 
 def _validate_automated_constraints(
@@ -97,26 +90,34 @@ def _normalize_thinking_config(
     model: str | None,
     enable_thinking: bool | None,
     thinking_level: ThinkingLevel | None,
+    supported_models: set[str] | None,
 ) -> tuple[bool | None, ThinkingLevel | None]:
-    """Normalize Extended Thinking configuration based on model support.
+    """Normalize Extended Thinking configuration against live model support.
 
     Returns (enable_thinking, thinking_level) with automatic nullification:
-    - If model doesn't support thinking: both set to None
+    - If no model is set (agent inherits the orchestrator's model): both None
+    - If the model is known NOT to support thinking: both None
     - If enable_thinking is False: thinking_level set to None
     - Otherwise: preserve the provided values
 
     Args:
-        model: The model identifier (e.g., 'claude-sonnet-4.5')
-        enable_thinking: Whether Extended Thinking is enabled
-        thinking_level: The thinking level ('minimal', 'low', 'medium', 'high')
+        model: The model alias (e.g., 'claude-sonnet-4.6'), or None to inherit.
+        enable_thinking: Whether Extended Thinking is enabled.
+        thinking_level: The thinking level ('minimal', 'low', 'medium', 'high', ...).
+        supported_models: Aliases the gateway reports as thinking-capable — the source of
+            truth (see ModelGatewayService.thinking_capable_aliases). Pass None when the
+            capability set couldn't be determined (e.g. gateway unreachable): the caller's
+            choice is then preserved rather than silently dropped.
 
     Returns:
         Tuple of (normalized_enable_thinking, normalized_thinking_level)
     """
     if model is None:
         return (None, None)
-    # If model doesn't support thinking, force both to None
-    if model and model not in MODELS_SUPPORTING_THINKING:
+    # Drop thinking only when we positively know the model doesn't support it. When
+    # supported_models is None the capability is unknown — preserve the user's choice
+    # instead of silently nullifying it (the gateway is the source of truth).
+    if supported_models is not None and model not in supported_models:
         return (None, None)
 
     # If thinking is explicitly disabled, set level to None
@@ -155,6 +156,7 @@ class SubAgentService:
         self._repo = sub_agent_repository
         self._notification_service = notification_service
         self._skill_registry_service: "SkillRegistryService | None" = None
+        self._model_gateway_service: "ModelGatewayService | None" = None
 
     def set_repository(self, sub_agent_repository: "SubAgentRepository") -> None:
         """Set the sub-agent repository (dependency injection)."""
@@ -170,6 +172,25 @@ class SubAgentService:
     def set_notification_service(self, notification_service: NotificationService) -> None:
         """Set the notification service (dependency injection)."""
         self._notification_service = notification_service
+
+    def set_model_gateway_service(self, service: "ModelGatewayService") -> None:
+        """Set the model gateway client (dependency injection)."""
+        self._model_gateway_service = service
+
+    async def _thinking_capable_models(self) -> set[str] | None:
+        """Live set of thinking-capable model aliases, or None if it can't be determined.
+
+        Returning None signals "unknown" so _normalize_thinking_config preserves the user's
+        choice rather than dropping it — a transient gateway hiccup must not silently wipe a
+        valid Extended Thinking config.
+        """
+        if self._model_gateway_service is None:
+            return None
+        try:
+            return await self._model_gateway_service.thinking_capable_aliases()
+        except ModelGatewayError as e:
+            logger.warning("Could not fetch thinking-capable models from gateway: %s", e)
+            return None
 
     def set_skill_registry_service(self, service: "SkillRegistryService") -> None:
         """Set the skill registry service (dependency injection)."""
@@ -210,7 +231,7 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.model as cv_model, cv.model_tier as cv_model_tier, cv.system_prompt as cv_system_prompt,
                    cv.enable_thinking as cv_enable_thinking,
                    cv.thinking_level as cv_thinking_level,
                    cv.agent_url as cv_agent_url,
@@ -275,7 +296,7 @@ class SubAgentService:
                        cv.id as cv_id, cv.version as cv_version,
                        cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                        cv.description as cv_description,
-                       cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                       cv.model as cv_model, cv.model_tier as cv_model_tier, cv.system_prompt as cv_system_prompt,
                        cv.enable_thinking as cv_enable_thinking,
                        cv.thinking_level as cv_thinking_level,
                        cv.agent_url as cv_agent_url,
@@ -348,7 +369,7 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.model as cv_model, cv.model_tier as cv_model_tier, cv.system_prompt as cv_system_prompt,
                    cv.enable_thinking as cv_enable_thinking,
                    cv.thinking_level as cv_thinking_level,
                    cv.agent_url as cv_agent_url,
@@ -402,7 +423,7 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.model as cv_model, cv.model_tier as cv_model_tier, cv.system_prompt as cv_system_prompt,
                    cv.enable_thinking as cv_enable_thinking,
                    cv.thinking_level as cv_thinking_level,
                    cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
@@ -455,7 +476,7 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.model as cv_model, cv.model_tier as cv_model_tier, cv.system_prompt as cv_system_prompt,
                    cv.enable_thinking as cv_enable_thinking,
                    cv.thinking_level as cv_thinking_level,
                    cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
@@ -506,7 +527,7 @@ class SubAgentService:
                    cv.id as cv_id, cv.version as cv_version,
                    cv.version_hash as cv_version_hash, cv.release_number as cv_release_number,
                    cv.description as cv_description,
-                   cv.model as cv_model, cv.system_prompt as cv_system_prompt,
+                   cv.model as cv_model, cv.model_tier as cv_model_tier, cv.system_prompt as cv_system_prompt,
                    cv.enable_thinking as cv_enable_thinking,
                    cv.thinking_level as cv_thinking_level,
                    cv.agent_url as cv_agent_url, cv.mcp_tools as cv_mcp_tools,
@@ -555,7 +576,7 @@ class SubAgentService:
         if include_deleted:
             query = text("""
                 SELECT cv.id, cv.sub_agent_id, cv.version, cv.version_hash, cv.release_number,
-                       cv.description, cv.model, cv.system_prompt, cv.agent_url, cv.mcp_tools, 
+                       cv.description, cv.model, cv.model_tier, cv.system_prompt, cv.agent_url, cv.mcp_tools,
                        cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
@@ -572,7 +593,7 @@ class SubAgentService:
         else:
             query = text("""
                 SELECT cv.id, cv.sub_agent_id, cv.version, cv.version_hash, cv.release_number,
-                       cv.description, cv.model, cv.system_prompt, cv.agent_url, cv.mcp_tools, 
+                       cv.description, cv.model, cv.model_tier, cv.system_prompt, cv.agent_url, cv.mcp_tools,
                        cv.foundry_hostname, cv.foundry_client_id, cv.foundry_client_secret_ref, 
                        s.ssm_parameter_name as foundry_client_secret_ssmkey,
                        cv.foundry_ontology_rid, cv.foundry_query_api_name, cv.foundry_scopes, cv.foundry_version,
@@ -699,11 +720,12 @@ class SubAgentService:
             returning="id",
         )
 
-        # Normalize Extended Thinking configuration based on model support
+        # Normalize Extended Thinking configuration against live model support
         normalized_enable_thinking, normalized_thinking_level = _normalize_thinking_config(
             data.model,
             data.enable_thinking,
             data.thinking_level,
+            await self._thinking_capable_models(),
         )
 
         # Create initial version with all configuration data
@@ -715,6 +737,7 @@ class SubAgentService:
             "Initial version",
             description=data.description,
             model=data.model,
+            model_tier=data.model_tier.value if data.model_tier else None,
             system_prompt=data.system_prompt,
             agent_url=data.agent_url,
             mcp_tools=data.mcp_tools,
@@ -808,6 +831,7 @@ class SubAgentService:
             or data.agent_url is not None
             or data.description is not None
             or data.model is not None
+            or data.model_tier is not None
             or data.mcp_tools is not None
             or data.foundry_hostname is not None
             or data.foundry_client_id is not None
@@ -871,9 +895,17 @@ class SubAgentService:
                     if data.system_prompt is not None
                     else (current_config.system_prompt if current_config else None)
                 )
-                version_model = (
-                    data.model if data.model is not None else (current_config.model if current_config else None)
-                )
+                # model and model_tier are mutually exclusive: setting one clears the other,
+                # otherwise the merge keeps whichever the current version had.
+                if data.model is not None:
+                    version_model = data.model
+                    version_model_tier = None
+                elif data.model_tier is not None:
+                    version_model = None
+                    version_model_tier = data.model_tier.value
+                else:
+                    version_model = current_config.model if current_config else None
+                    version_model_tier = current_config.model_tier.value if (current_config and current_config.model_tier) else None
                 version_mcp_tools = (
                     data.mcp_tools
                     if data.mcp_tools is not None
@@ -907,6 +939,7 @@ class SubAgentService:
 
                 version_system_prompt = None
                 version_model = None
+                version_model_tier = None
                 version_thinking_level = None
                 version_enable_thinking = None
                 version_mcp_tools = None
@@ -930,6 +963,7 @@ class SubAgentService:
 
                 version_system_prompt = None
                 version_model = None
+                version_model_tier = None
                 version_thinking_level = None
                 version_enable_thinking = None
                 version_mcp_tools = None
@@ -1007,11 +1041,12 @@ class SubAgentService:
                 else (current_config.description if current_config else "")
             )
 
-            # Normalize Extended Thinking configuration based on model support
+            # Normalize Extended Thinking configuration against live model support
             version_enable_thinking, version_thinking_level = _normalize_thinking_config(
                 version_model,
                 version_enable_thinking,
                 version_thinking_level,
+                await self._thinking_capable_models(),
             )
 
             # Create new version
@@ -1023,6 +1058,7 @@ class SubAgentService:
                 data.change_summary or f"Updated to version {new_version}",
                 description=version_description,
                 model=version_model,
+                model_tier=version_model_tier,
                 system_prompt=version_system_prompt,
                 agent_url=version_agent_url,
                 mcp_tools=version_mcp_tools,
@@ -2180,6 +2216,7 @@ class SubAgentService:
             f"Reverted to version {version}",
             description=target.config_version.description,
             model=target.config_version.model,
+            model_tier=(target.config_version.model_tier.value if target.config_version.model_tier else None),
             system_prompt=target.config_version.system_prompt,
             agent_url=target.config_version.agent_url,
             mcp_tools=target.config_version.mcp_tools,
@@ -2844,6 +2881,7 @@ class SubAgentService:
         status: SubAgentStatus = SubAgentStatus.DRAFT,
         description: str | None = None,
         model: str | None = None,
+        model_tier: str | None = None,
         system_prompt: str | None = None,
         agent_url: str | None = None,
         mcp_tools: list[str] | None = None,
@@ -2883,6 +2921,7 @@ class SubAgentService:
             status=status.value,
             description=description,
             model=model,
+            model_tier=model_tier,
             system_prompt=system_prompt,
             agent_url=agent_url,
             mcp_tools=mcp_tools_list,
@@ -2972,6 +3011,7 @@ class SubAgentService:
                 release_number=row.get("cv_release_number"),
                 description=row["cv_description"],
                 model=row["cv_model"],
+                model_tier=row.get("cv_model_tier"),
                 system_prompt=row.get("cv_system_prompt"),
                 enable_thinking=row.get("cv_enable_thinking"),
                 thinking_level=row.get("cv_thinking_level"),
@@ -3033,6 +3073,7 @@ class SubAgentService:
             release_number=row.get("release_number"),
             description=row["description"],
             model=row["model"],
+            model_tier=row.get("model_tier"),
             system_prompt=row.get("system_prompt"),
             agent_url=row.get("agent_url"),
             mcp_tools=row.get("mcp_tools", []),

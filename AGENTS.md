@@ -64,7 +64,15 @@ ringier-a2a-sdk → agent-common → { orchestrator-agent, agent-creator, agent-
 
 - **Zero-trust auth**: Every service validates JWT tokens independently via JWKS. No implicit trust between services.
 - **A2A protocol**: All inter-agent communication uses authenticated A2A messages, not direct function calls.
-- **LLM abstraction**: `agent-common` provides a unified model factory — switch providers (Bedrock, Azure, OpenAI, Google) via env vars without code changes.
+- **Model Gateway**: All LLM traffic routes through a single **LiteLLM Proxy pod** (the "Model Gateway"), which holds provider routing/credentials and exposes an OpenAI-compatible inference API plus a management API for runtime model CRUD. App-side, every client is therefore a `ChatOpenAI` pointed at the proxy — the app never names a provider model id or branches on provider. `agent-common`'s model factory builds these gateway-backed clients. Provider-specific client checks and in-process caching middleware are effectively no-ops (everything is `ChatOpenAI`). Vocabulary:
+  - **Model Alias** — the stable, provider-agnostic name an app requests (e.g. `claude-sonnet-4.6`); the Gateway resolves it to a concrete provider + provider model id.
+  - **Capability** — what a model can do (input modalities, extended-thinking support/levels, context window); drives the model-picker UI. Stored in the Gateway's `model_info`.
+  - **model_info** — per-model metadata on the proxy (Capability + base cost); source of truth for routing + capability. Written/edited *exclusively* through console-backend, never hand-edited on the proxy.
+  - **Rate Card** — console-backend's billing record keyed on `(provider, model_name, billing_unit)`. Richer than the Gateway's cost map: supports per-sub-agent pricing and time-versioned rates. A Rate Card must exist before a model goes `active`. (`model_name` stores the Model Alias.)
+  - **Usage Event** — one LLM call's measured consumption (token breakdown + model + Cost Attribution), captured proxy-side via a LiteLLM `CustomLogger`; costed against the Rate Card.
+  - **Cost Attribution** — who to bill (user / sub-agent / conversation / scheduled job); travels to the proxy per-request as `spend_logs_metadata`.
+- **Reasoning effort**: extended thinking uses LiteLLM's unified `reasoning_effort`; the app keeps only a small `thinking_level → reasoning_effort` map (budgets are provider-determined).
+- **Streaming watchdog**: a mandatory client-side inter-chunk watchdog bounds streaming, because the proxy silently ignores `stream_timeout` on Bedrock streaming (LiteLLM #23375); proxy timeouts are a best-effort outer bound only.
 - **Stateless services**: All conversation/checkpoint state persists in DynamoDB + PostgreSQL, enabling horizontal scaling.
 - **MCP for tools**: Model Context Protocol pattern allows dynamic tool discovery and composition at runtime.
 - **Multi-stage Docker builds**: Python services use `uv` for fast cached installs; shared libs (`ringier-a2a-sdk`, `agent-common`) are passed as Docker build contexts.
@@ -107,6 +115,15 @@ Local URLs/ports: Console `http://localhost:5173`, Backend API `:5001`, Orchestr
 1. **Full local**: `OPENAI_COMPATIBLE_BASE_URL` set → local LLM + local Keycloak
 2. **Local + AWS**: `AWS_PROFILE` set → cloud models (Bedrock/Azure/GCP) + local Keycloak
 3. **Local + AWS + Remote OIDC**: `AWS_PROFILE` + `OIDC_ISSUER` set → cloud models + remote Keycloak (skips local Keycloak)
+
+**Starting it non-interactively (from an agent):** the script execs **mprocs** (a TUI) and has a `Proceed? [Y/n]` prompt, so it needs a real TTY — piping `yes |` fails with `Error: Stdin is not a tty`. Run it inside a detached tmux session and answer the prompt via send-keys, then poll for readiness:
+```bash
+aws sso login --profile "$AWS_PROFILE"   # if using AWS; SSO sessions expire
+tmux new-session -d -s nannos -x 220 -y 50 "./scripts/start-local.sh"
+sleep 4 && tmux send-keys -t nannos "y" Enter            # answer Proceed?
+# wait ~30s for frontend, ~2-3 min for full stack; inspect with: tmux capture-pane -t nannos -p
+```
+Service status is the left column of `tmux capture-pane -t nannos -p` (`UP`/`DOWN`).
 
 **The `.env` file is gitignored and per-checkout** — it exists at the main repo root but **NOT in fresh git worktrees**. If `scripts/start-local.sh` reports no LLM provider / missing config, or `.env` is absent, **STOP and ask the user to provide it — never fabricate secrets, AWS profiles, or OIDC URLs.** Ask only for the *minimal subset the task needs*, not the whole file. Variables group by what they unlock:
 

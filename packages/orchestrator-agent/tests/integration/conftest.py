@@ -2,7 +2,7 @@
 
 These tests require actual cloud credentials to run:
 - Bedrock: AWS credentials (via boto3 default chain)
-- Azure OpenAI: AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY
+- Azure OpenAI: AZURE_API_BASE + AZURE_OPENAI_API_KEY
 - Vertex AI: GCP_KEY (JSON service account) + GCP_PROJECT_ID
 
 Setup credentials (recommended):
@@ -89,7 +89,7 @@ def _restore_real_credentials() -> None:
         # Only inject credential-related vars, not all orchestrator config
         credential_keys = {
             "AZURE_OPENAI_API_KEY",
-            "AZURE_OPENAI_ENDPOINT",
+            "AZURE_API_BASE",
             "GCP_KEY",
             "GCP_PROJECT_ID",
             "GCP_LOCATION",
@@ -172,7 +172,7 @@ def _has_bedrock_credentials() -> bool:
 
 def _has_azure_credentials() -> bool:
     """Check if Azure OpenAI credentials are available."""
-    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+    endpoint = os.getenv("AZURE_API_BASE", "")
     api_key = os.getenv("AZURE_OPENAI_API_KEY", "")
     return bool(endpoint) and "openai.azure.com" in endpoint and bool(api_key) and api_key != "test-key"
 

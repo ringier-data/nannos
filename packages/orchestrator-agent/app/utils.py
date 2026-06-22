@@ -120,7 +120,7 @@ def build_runtime_context(
     from agent_common.agents.dynamic_agent import create_dynamic_local_subagent
     from agent_common.agents.foundry_agent import create_foundry_local_subagent
     from agent_common.core.document_store_tools import create_document_store_tools
-    from agent_common.core.model_factory import create_model, get_default_model, is_valid_model
+    from agent_common.core.model_factory import create_model, get_default_model, resolve_chat_model
     from deepagents import CompiledSubAgent
     from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
@@ -342,16 +342,22 @@ def build_runtime_context(
                     # Determine which model to use for this sub-agent
                     # If config.model_name is set, use it; otherwise inherit orchestrator model
                     if config.model_name:
-                        # Validate and use the specified model
-                        if is_valid_model(config.model_name):
-                            subagent_model_type = config.model_name
-                            logger.info(f"Sub-agent '{config.name}' using custom model: {config.model_name}")
-                        else:
+                        # config.model_name is already the backend-resolved effective model:
+                        # console-backend is the single source of truth for retirement and
+                        # degrades a retired alias to the chat default on the read path (see
+                        # registry.py / console-backend services/model_status.py).
+                        #
+                        # resolve_chat_model here is only a safety net for the narrow window
+                        # where a model is retired *between* that read and now: it re-checks
+                        # the live gateway and degrades again rather than calling a dead alias.
+                        subagent_model_type = resolve_chat_model(config.model_name)
+                        if subagent_model_type != config.model_name:
                             logger.warning(
-                                f"Sub-agent '{config.name}' has invalid model_name '{config.model_name}'. "
-                                f"Falling back to orchestrator model: {orchestrator_model_type}"
+                                f"Sub-agent '{config.name}' model '{config.model_name}' was retired after "
+                                f"config resolution; safety-net degraded to '{subagent_model_type}'"
                             )
-                            subagent_model_type = orchestrator_model_type
+                        else:
+                            logger.info(f"Sub-agent '{config.name}' using model: {config.model_name}")
                     else:
                         # Inherit orchestrator model
                         subagent_model_type = orchestrator_model_type

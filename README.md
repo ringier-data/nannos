@@ -111,7 +111,7 @@ Provider credentials live on the **gateway**, where each model is registered in 
 | - | - |
 | Local / OpenAI-compatible (Ollama, LM Studio, vLLM, …) | `model: openai/<name>`, `api_base`, `api_key` |
 | AWS Bedrock | `model: bedrock/…` + AWS SDK environment variables |
-| Azure OpenAI | `model: azure/…` + `AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_ENDPOINT` |
+| Azure OpenAI | `model: azure/…` + `AZURE_OPENAI_API_KEY` / `AZURE_API_BASE` |
 | Google Vertex | `model: vertex_ai/…` + `GCP_KEY` / `GCP_PROJECT_ID` |
 
 For local development, `scripts/start-local.sh` provisions the gateway for you: set `OPENAI_COMPATIBLE_BASE_URL` (and optionally `OPENAI_COMPATIBLE_MODEL` / `OPENAI_COMPATIBLE_API_KEY`) and it registers your local server as the gateway `local` model — see [Quick-Start Local](#quick-start-local).

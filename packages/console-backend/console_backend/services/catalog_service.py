@@ -237,7 +237,7 @@ class CatalogService:
         # If excluding, remove file's pages from vector store
         if indexing_excluded and self._sync_pipeline:
             try:
-                vector_store = self._sync_pipeline._get_vector_store(catalog_id)
+                vector_store = self._sync_pipeline._get_vector_store(catalog_id, for_delete=True)
                 # Get all page numbers for this file to build document IDs
                 pages = await self.repo.get_file_pages(db, file_id)
                 if pages:

@@ -193,7 +193,7 @@ class UsageLogBatchCreate(BaseModel):
 
 
 class GatewayUsageLogCreate(UsageLogCreate):
-    """A usage log posted by the Model Gateway (trusted service, ADR-0002).
+    """A usage log posted by the Model Gateway (trusted service).
 
     Unlike UsageLogCreate (where the endpoint derives the user from the caller's
     token), the gateway batches across many users, so each record carries its own

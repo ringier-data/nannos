@@ -1,11 +1,30 @@
-"""Schemas for runtime model registration via the Model Gateway (Q6 / ADR-0001)."""
+"""Schemas for runtime model registration via the Model Gateway."""
 
 from pydantic import BaseModel, Field, field_validator
 
 from .usage import RateCardPricingEntry
 
 
-DEFAULT_ROLES = ("chat", "embedding", "multimodal_embedding")
+# Canonical fleet-default roles — the single source of truth, imported by both the
+# admin API validator (below) and ModelDefaultsService. A role is a model_defaults slot
+# apps resolve at runtime, falling back to it when a referenced alias retires:
+#   chat / chat:low / chat:premium — chat tiers ("chat" IS the standard tier). Sub-agents
+#     may bind to a tier instead of a concrete alias, so retiring/upgrading a model is one
+#     slot repoint rather than a fleet-wide reclassification.
+#   embedding / multimodal_embedding — vector models.
+#   indexing — the chat model used for semantic chunking / contextual descriptions.
+VALID_ROLES = (
+    "chat",
+    "chat:low",
+    "chat:premium",
+    "embedding",
+    "multimodal_embedding",
+    "indexing",
+)
+
+# The chat tiers ("chat" = standard). Assignments to these roles are remembered per alias
+# (model_alias_tiers) so a retired concrete model degrades to its tier's successor.
+CHAT_TIER_ROLES = ("chat", "chat:low", "chat:premium")
 
 
 class GatewayModel(BaseModel):
@@ -23,6 +42,9 @@ class GatewayModel(BaseModel):
     # True only for models registered at runtime (in the gateway DB). Config-defined
     # models can't be edited/deleted/defaulted — LiteLLM rejects /model/update on them.
     db_model: bool = False
+    # Azure deployments map to a known model via model_info.base_model (cost/metadata). Surfaced
+    # so the admin edit form can round-trip it instead of silently dropping it on update.
+    base_model: str | None = None
     input_cost_per_token: float | None = None
     output_cost_per_token: float | None = None
     supports_reasoning: bool | None = None
@@ -32,13 +54,13 @@ class GatewayModel(BaseModel):
 class SetDefaultRequest(BaseModel):
     """Mark a model as the fleet default for a role (graceful degradation when an alias retires)."""
 
-    role: str = Field(..., description="One of: chat, embedding, multimodal_embedding")
+    role: str = Field(..., description=f"One of: {', '.join(VALID_ROLES)}")
 
     @field_validator("role")
     @classmethod
     def _role_known(cls, v: str) -> str:
-        if v not in DEFAULT_ROLES:
-            raise ValueError(f"role must be one of {DEFAULT_ROLES}")
+        if v not in VALID_ROLES:
+            raise ValueError(f"role must be one of {VALID_ROLES}")
         return v
 
 
@@ -73,7 +95,7 @@ class CostPrefill(BaseModel):
 class ModelRegistrationRequest(BaseModel):
     """Register a model: routing/capability go to the gateway, billing to the Rate Card.
 
-    Per ADR-0002/Q6a the Rate Card is written first (a model must be billable before
+    The Rate Card is written first (a model must be billable before
     it is usable), then the deployment is registered on the gateway.
     """
 

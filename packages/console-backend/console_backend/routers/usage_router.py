@@ -73,7 +73,7 @@ async def log_usage(
 
 
 def _verify_gateway_token(authorization: str) -> None:
-    """Validate the shared service secret used by the Model Gateway (ADR-0002/0005)."""
+    """Validate the shared service secret used by the Model Gateway."""
     expected = os.getenv("GATEWAY_INGEST_TOKEN", "")
     token = authorization.removeprefix("Bearer ").strip() if authorization else ""
     if not expected or not hmac.compare_digest(token, expected):
@@ -87,7 +87,7 @@ async def gateway_batch_log_usage(
     db: DbSession,
     authorization: str = Header(default=""),
 ):
-    """Batch-log usage from the Model Gateway (trusted service; ADR-0002).
+    """Batch-log usage from the Model Gateway (trusted service).
 
     Authenticated by a shared service secret, NOT a user token. Each record is
     attributed to its own `user_sub` (the proxy batches across many users), unlike

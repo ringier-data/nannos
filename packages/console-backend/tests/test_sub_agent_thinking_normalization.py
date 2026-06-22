@@ -1,49 +1,68 @@
 """Unit tests for sub-agent thinking configuration normalization."""
 
 from console_backend.models.sub_agent import ThinkingLevel
-from console_backend.services.sub_agent_service import (
-    MODELS_SUPPORTING_THINKING,
-    _normalize_thinking_config,
-)
+from console_backend.services.sub_agent_service import _normalize_thinking_config
+
+# A representative live capability set, as ModelGatewayService.thinking_capable_aliases()
+# would return it. The set is the source of truth — not a hardcoded module constant.
+SUPPORTED = {"claude-sonnet-4.5", "claude-sonnet-4.6", "claude-haiku-4-5", "gemini-3.1-pro-preview"}
 
 
 class TestNormalizeThinkingConfig:
     """Test _normalize_thinking_config() function."""
 
     def test_claude_sonnet_supports_thinking(self):
-        """Test that Claude Sonnet 4.5 supports thinking."""
+        """A model present in the live set keeps its thinking config."""
         enable, level = _normalize_thinking_config(
             model="claude-sonnet-4.5",
             enable_thinking=True,
             thinking_level=ThinkingLevel.MEDIUM,
+            supported_models=SUPPORTED,
         )
 
         assert enable is True
         assert level == "medium"
 
-    def test_gemini_models_support_thinking(self):
-        """Test that Gemini models support thinking."""
-        for model in ["gemini-3.1-pro-preview", "gemini-3-flash-preview"]:
-            enable, level = _normalize_thinking_config(
-                model=model,
-                enable_thinking=True,
-                thinking_level=ThinkingLevel.HIGH,
-            )
+    def test_gemini_model_supports_thinking(self):
+        """A Gemini model in the live set keeps its thinking config."""
+        enable, level = _normalize_thinking_config(
+            model="gemini-3.1-pro-preview",
+            enable_thinking=True,
+            thinking_level=ThinkingLevel.HIGH,
+            supported_models=SUPPORTED,
+        )
 
-            assert enable is True
-            assert level == "high"
+        assert enable is True
+        assert level == "high"
 
     def test_unsupported_model_returns_none(self):
-        """Test that unsupported models return None for thinking config."""
+        """A model absent from the live set has its thinking config cleared."""
         for model in ["gpt-4o", "gpt-4o-mini", "unsupported-model"]:
             enable, level = _normalize_thinking_config(
                 model=model,
                 enable_thinking=True,
                 thinking_level=ThinkingLevel.LOW,
+                supported_models=SUPPORTED,
             )
 
             assert enable is None
             assert level is None
+
+    def test_unknown_capability_preserves_choice(self):
+        """When the live set is unavailable (None), the user's choice is preserved, not dropped.
+
+        Regression guard: a transient gateway failure must never silently wipe a valid
+        Extended Thinking config (the original bug).
+        """
+        enable, level = _normalize_thinking_config(
+            model="some-newly-registered-alias",
+            enable_thinking=True,
+            thinking_level=ThinkingLevel.HIGH,
+            supported_models=None,
+        )
+
+        assert enable is True
+        assert level == "high"
 
     def test_disabled_thinking_returns_false_and_none(self):
         """Test that disabled thinking returns False and None for level."""
@@ -51,6 +70,7 @@ class TestNormalizeThinkingConfig:
             model="claude-sonnet-4.5",
             enable_thinking=False,
             thinking_level=ThinkingLevel.MEDIUM,
+            supported_models=SUPPORTED,
         )
 
         assert enable is False
@@ -62,6 +82,7 @@ class TestNormalizeThinkingConfig:
             model="claude-sonnet-4.5",
             enable_thinking=None,
             thinking_level=None,
+            supported_models=SUPPORTED,
         )
 
         assert enable is None
@@ -73,6 +94,7 @@ class TestNormalizeThinkingConfig:
             model="claude-sonnet-4.5",
             enable_thinking=True,
             thinking_level=ThinkingLevel.LOW,
+            supported_models=SUPPORTED,
         )
 
         assert enable is True
@@ -85,40 +107,23 @@ class TestNormalizeThinkingConfig:
             model="claude-sonnet-4.5",
             enable_thinking=True,
             thinking_level="high",
+            supported_models=SUPPORTED,
         )
 
         assert enable is True
         assert level == "high"
 
     def test_none_model_with_thinking_enabled(self):
-        """Test None model with thinking enabled."""
-        # When model is None, we don't know if it supports thinking
-        # So we should return None for both
+        """A None model (inherit the orchestrator) clears thinking regardless of the set."""
         enable, level = _normalize_thinking_config(
             model=None,
             enable_thinking=True,
             thinking_level=ThinkingLevel.MEDIUM,
+            supported_models=SUPPORTED,
         )
 
-        # Model doesn't support thinking (None is not in MODELS_SUPPORTING_THINKING)
         assert enable is None
         assert level is None
-
-
-class TestModelsSupportingThinking:
-    """Test MODELS_SUPPORTING_THINKING constant."""
-
-    def test_supported_models_set_contains_expected_models(self):
-        """Test that the supported models set contains the expected models."""
-        assert "claude-sonnet-4.5" in MODELS_SUPPORTING_THINKING
-        assert "claude-haiku-4-5" in MODELS_SUPPORTING_THINKING
-        assert "gemini-3.1-pro-preview" in MODELS_SUPPORTING_THINKING
-        assert "gemini-3-flash-preview" in MODELS_SUPPORTING_THINKING
-
-    def test_unsupported_models_not_in_set(self):
-        """Test that unsupported models are not in the set."""
-        assert "gpt-4o" not in MODELS_SUPPORTING_THINKING
-        assert "gpt-4o-mini" not in MODELS_SUPPORTING_THINKING
 
 
 class TestThinkingConfigScenarios:
@@ -126,12 +131,9 @@ class TestThinkingConfigScenarios:
 
     def test_create_local_agent_with_thinking(self):
         """Test creating a local agent with thinking enabled."""
-        # Simulate creating a local agent with Claude Sonnet and thinking
-        model = "claude-sonnet-4.5"
-        enable_thinking = True
-        thinking_level = ThinkingLevel.LOW
-
-        normalized_enable, normalized_level = _normalize_thinking_config(model, enable_thinking, thinking_level)
+        normalized_enable, normalized_level = _normalize_thinking_config(
+            "claude-sonnet-4.5", True, ThinkingLevel.LOW, SUPPORTED
+        )
 
         # Should preserve thinking configuration
         assert normalized_enable is True
@@ -140,11 +142,9 @@ class TestThinkingConfigScenarios:
     def test_create_remote_agent_ignores_thinking(self):
         """Test that remote agents don't have thinking config (no model field)."""
         # Remote agents don't have model field, so thinking config should be None
-        model = None
-        enable_thinking = True
-        thinking_level = ThinkingLevel.MEDIUM
-
-        normalized_enable, normalized_level = _normalize_thinking_config(model, enable_thinking, thinking_level)
+        normalized_enable, normalized_level = _normalize_thinking_config(
+            None, True, ThinkingLevel.MEDIUM, SUPPORTED
+        )
 
         # Should return None for both (no model = no thinking support)
         assert normalized_enable is None
@@ -152,17 +152,9 @@ class TestThinkingConfigScenarios:
 
     def test_switch_from_thinking_to_non_thinking_model(self):
         """Test switching from Claude to GPT-4o clears thinking config."""
-        # Start with Claude + thinking
-        model_before = "claude-sonnet-4.5"
-        enable_before = True
-        level_before = ThinkingLevel.MEDIUM
-
-        # Switch to GPT-4o (doesn't support thinking)
-        model_after = "gpt-4o"
-        enable_after = True
-        level_after = ThinkingLevel.MEDIUM
-
-        normalized_enable, normalized_level = _normalize_thinking_config(model_after, enable_after, level_after)
+        normalized_enable, normalized_level = _normalize_thinking_config(
+            "gpt-4o", True, ThinkingLevel.MEDIUM, SUPPORTED
+        )
 
         # Should clear thinking config
         assert normalized_enable is None
@@ -170,11 +162,9 @@ class TestThinkingConfigScenarios:
 
     def test_default_thinking_disabled_on_create(self):
         """Test that thinking is disabled by default when creating agents."""
-        model = "claude-sonnet-4.5"
-        enable_thinking = None  # Not specified
-        thinking_level = None  # Not specified
-
-        normalized_enable, normalized_level = _normalize_thinking_config(model, enable_thinking, thinking_level)
+        normalized_enable, normalized_level = _normalize_thinking_config(
+            "claude-sonnet-4.5", None, None, SUPPORTED
+        )
 
         # Should preserve None values (defaults will be applied in database)
         assert normalized_enable is None

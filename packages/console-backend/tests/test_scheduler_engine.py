@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+import respx
 from console_backend.models.scheduled_job import (
     JobRunStatus,
     JobType,
@@ -521,3 +523,52 @@ class TestFinalizeJobState:
         socket_manager.send_notification.assert_awaited_once()
         call_args = socket_manager.send_notification.call_args
         assert call_args[0][0] == "notify-user"  # correct user_id
+
+
+class TestSendStreamingRequest:
+    """Tests for SchedulerEngine._send_streaming_request() HTTP error handling."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_http_error_body_is_readable(self):
+        """A non-2xx streamed response must raise HTTPStatusError whose response body
+        is readable. Regression: the body was not read before raise_for_status, so
+        accessing e.response.text raised httpx.ResponseNotRead and masked the real error.
+        """
+        engine = _make_engine()
+        respx.post("http://agent-runner:8000/").mock(
+            return_value=httpx.Response(404, text="Not Found")
+        )
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await engine._send_streaming_request({"jsonrpc": "2.0"}, "token-xyz")
+
+        # Must not raise ResponseNotRead — the handler relies on this working.
+        assert exc_info.value.response.status_code == 404
+        assert exc_info.value.response.text == "Not Found"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_dispatch_records_failure_on_http_error(self):
+        """A 404 from agent-runner must be finalized as FAILED with the body in the
+        error message — not crash _finalize via ResponseNotRead and leave the run stuck.
+        """
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run = AsyncMock(return_value=99)
+        repo.complete_run = AsyncMock()
+        repo.complete_job = AsyncMock()
+        token_service = AsyncMock(spec=SchedulerTokenService)
+        token_service.get_access_token = AsyncMock(return_value="token-xyz")
+
+        engine = _make_engine(repo=repo, token_service=token_service)
+        respx.post("http://agent-runner:8000/").mock(
+            return_value=httpx.Response(404, text="Not Found")
+        )
+
+        await engine._dispatch_job(_make_job(), run_id=99)
+
+        repo.complete_run.assert_awaited_once()
+        kwargs = repo.complete_run.await_args.kwargs
+        assert kwargs["status"] == JobRunStatus.FAILED
+        assert "404" in (kwargs["error_message"] or "")
+        assert "Not Found" in (kwargs["error_message"] or "")

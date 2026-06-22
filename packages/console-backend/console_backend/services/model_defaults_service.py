@@ -1,4 +1,4 @@
-"""Per-role default model aliases (graceful degradation, ADR-0001).
+"""Per-role default model aliases (graceful degradation).
 
 Authoritative store for the fleet default chat / embedding / multimodal-embedding
 model. Lives here (not in the gateway model_info) because LiteLLM's /model/update
@@ -13,14 +13,13 @@ from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..models.model_gateway import VALID_ROLES  # single source of truth for role keys
 from ..models.user import User
 
 if TYPE_CHECKING:
     from ..repositories.model_defaults_repository import ModelDefaultsRepository
 
 logger = logging.getLogger(__name__)
-
-VALID_ROLES = ("chat", "embedding", "multimodal_embedding", "indexing")
 
 
 class ModelDefaultsService:
@@ -40,6 +39,10 @@ class ModelDefaultsService:
     async def get_all(self, db: AsyncSession) -> dict[str, str]:
         """{role: model_alias} for every role that has a default set."""
         return await self.repository.get_all(db)
+
+    async def get_alias_tiers(self, db: AsyncSession) -> dict[str, str]:
+        """{alias: chat-tier role} — the most-recent chat tier each alias served as default."""
+        return await self.repository.get_alias_tiers(db)
 
     async def set_default(self, db: AsyncSession, actor: User, role: str, model_alias: str) -> None:
         """Upsert the default alias for a role (exactly one alias per role).

@@ -884,6 +884,20 @@ async def app_with_db(app, pg_session, test_user_model):
             "role": test_user_model.role,
         },
     )
+    # A default embedding model is the precondition for catalog create/indexing
+    # (require_embeddings_configured). Seed one so catalog endpoints aren't gated off;
+    # gate-negative behaviour is covered explicitly in test_catalog_router.
+    await pg_session.execute(
+        text(
+            """
+            INSERT INTO model_defaults (role, model_alias, updated_at)
+            VALUES ('embedding', 'gemini-embedding-2', NOW()),
+                   ('multimodal_embedding', 'gemini-embedding-2', NOW())
+            ON CONFLICT (role) DO UPDATE
+                SET model_alias = EXCLUDED.model_alias, updated_at = NOW()
+            """
+        )
+    )
     await pg_session.commit()
 
     yield app

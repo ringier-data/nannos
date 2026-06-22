@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditAction, AuditEntityType
+from ..models.model_gateway import CHAT_TIER_ROLES
 from ..models.user import User
 from .base import AuditedRepository
 
@@ -33,6 +34,18 @@ class ModelDefaultsRepository(AuditedRepository):
         """{role: model_alias} for every role that has a default set."""
         result = await db.execute(text("SELECT role, model_alias FROM model_defaults"))
         return {row.role: row.model_alias for row in result}
+
+    async def get_alias_tiers(self, db: AsyncSession) -> dict[str, list[str]]:
+        """{alias: [chat-tier roles]} — every chat tier each alias has served as default.
+
+        Used to degrade a retired concrete-model sub-agent to its tier's successor instead of
+        the standard chat default (model_alias_tiers, migration 069). An alias can serve several
+        tiers at once, so each maps to a list."""
+        result = await db.execute(text("SELECT alias, role FROM model_alias_tiers"))
+        tiers: dict[str, list[str]] = {}
+        for row in result:
+            tiers.setdefault(row.alias, []).append(row.role)
+        return tiers
 
     async def upsert_default(
         self,
@@ -55,6 +68,21 @@ class ModelDefaultsRepository(AuditedRepository):
             ),
             {"role": role, "alias": model_alias},
         )
+
+        # Remember which chat tier this alias served, so a retired concrete-model sub-agent
+        # can later degrade to the tier's successor (migration 069). Most-recent role wins.
+        if role in CHAT_TIER_ROLES:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO model_alias_tiers (alias, role, updated_at)
+                    VALUES (:alias, :role, NOW())
+                    ON CONFLICT (alias, role) DO UPDATE
+                        SET updated_at = NOW()
+                    """
+                ),
+                {"alias": model_alias, "role": role},
+            )
 
         changes: dict[str, Any] = {"before": before, "after": model_alias}
         await self.audit_service.log_action(

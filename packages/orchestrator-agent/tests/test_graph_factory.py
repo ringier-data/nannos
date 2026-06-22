@@ -13,6 +13,7 @@ Graph creation with actual models should be tested in integration tests.
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain_aws import ChatBedrockConverse
@@ -117,7 +118,10 @@ class TestMiddlewareStack:
         assert stack[0].__class__.__name__ == "ConversationContextToolsMiddleware"
         assert isinstance(stack[1], DynamicToolDispatchMiddleware)
         assert isinstance(stack[2], StoragePathsInstructionMiddleware)
-        assert isinstance(stack[3], BedrockPromptCachingMiddleware)
+        # Provider-agnostic caching under the gateway: the cache breakpoint
+        # is injected as an OpenAI-format cache_control block that LiteLLM translates
+        # per provider, replacing the old Bedrock-only BedrockPromptCachingMiddleware.
+        assert isinstance(stack[3], LiteLLMPromptCachingMiddleware)
         # stack[4] = SteeringMiddleware (from ringier_a2a_sdk)
         assert stack[4].__class__.__name__ == "SteeringMiddleware"
         assert isinstance(stack[5], UserPreferencesMiddleware)
@@ -142,19 +146,27 @@ class TestMiddlewareStack:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
-    def test_middleware_stack_excludes_bedrock_caching_for_non_bedrock_models(
-        self, mock_pg_store, _mock_creds, mock_config
-    ):
-        """BedrockPromptCachingMiddleware must NOT be attached for non-Bedrock models."""
+    def test_middleware_stack_caching_is_provider_agnostic(self, mock_pg_store, _mock_creds, mock_config):
+        """Caching is provider-agnostic under the gateway: the LiteLLM caching middleware
+        is attached for every model (no Bedrock gate), and the legacy Bedrock-only
+        middleware is gone.
+
+        The cache marker is an OpenAI-format cache_control block that LiteLLM translates
+        to the provider's native format (or ignores for non-caching providers),
+        so the stack is identical regardless of model type.
+        """
         factory = GraphFactory(config=mock_config)
 
         # Non-Bedrock model (e.g. OpenAI / Gemini): plain Mock that is NOT a ChatBedrockConverse
         non_bedrock_model = Mock()
         stack = factory._create_middleware_stack(model=non_bedrock_model)
 
+        # The legacy Bedrock-only caching middleware must be fully removed.
         assert not any(isinstance(m, BedrockPromptCachingMiddleware) for m in stack)
-        # One fewer middleware than the Bedrock case (cache middleware skipped)
-        assert len(stack) == 16
+        # LiteLLM caching is present even for non-Bedrock models...
+        assert any(isinstance(m, LiteLLMPromptCachingMiddleware) for m in stack)
+        # ...and the stack matches the Bedrock case (no provider-conditional branch).
+        assert len(stack) == 17
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")

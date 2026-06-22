@@ -117,7 +117,7 @@ Edit `.env` with your credentials:
 # LLM Configuration
 model_source=azure  # or "openai" or "google"
 AZURE_OPENAI_API_KEY=your-key
-AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
+AZURE_API_BASE=https://your-endpoint.openai.azure.com/
 AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
 AZURE_OPENAI_API_VERSION=2024-08-01-preview
 

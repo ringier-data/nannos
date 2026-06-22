@@ -31,7 +31,7 @@ import random
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 from uuid import uuid4
@@ -425,16 +425,16 @@ class SyncCancelled(Exception):
 
 @dataclass
 class _SyncJobState:
-    """Per-sync-job state — isolates concurrent syncs from each other."""
+    """Per-sync-job state — isolates concurrent syncs from each other.
 
+    Embeddings are required and always built by ``setup_job`` from the resolved default
+    alias — there is no default-constructed fallback (indexing without a configured model
+    is blocked upstream, not silently embedded with a guessed alias)."""
+
+    index_embeddings: GeminiEmbeddings
+    query_embeddings: GeminiEmbeddings
     user_sub: str | None = None
     catalog_id: str | None = None
-    index_embeddings: GeminiEmbeddings = field(
-        default_factory=lambda: GeminiEmbeddings(role="document", executor=get_io_executor())
-    )
-    query_embeddings: GeminiEmbeddings = field(
-        default_factory=lambda: GeminiEmbeddings(role="query", executor=get_io_executor())
-    )
     progress_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
 
 
@@ -483,30 +483,29 @@ class CatalogSyncPipeline:
     def setup_job(
         self,
         sync_job_id: str,
+        embedding_model: str,
         user_sub: str | None = None,
         catalog_id: str | None = None,
         progress_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
-        embedding_model: str | None = None,
     ) -> None:
         """Register per-job state (cost attribution, embeddings, progress callback).
 
         Must be called before ``run_full_sync`` / ``run_incremental_sync`` /
-        ``reindex_unindexed_pages`` and cleaned up via ``teardown_job()``
-        when the sync finishes. `embedding_model` is the resolved default alias
-        (see ``resolve_embedding_alias``).
+        ``reindex_unindexed_pages`` and cleaned up via ``teardown_job()`` when the sync
+        finishes. `embedding_model` is the resolved default alias (see
+        ``resolve_embedding_alias``) and is required — callers must block the job when no
+        default embedding model is configured rather than relying on a fallback.
         """
 
         def _emb(role: str) -> GeminiEmbeddings:
-            kwargs: dict[str, Any] = {
-                "role": role,
-                "cost_logger": self._cost_logger,
-                "user_sub": user_sub,
-                "catalog_id": catalog_id,
-                "executor": get_io_executor(),
-            }
-            if embedding_model:
-                kwargs["model_id"] = embedding_model
-            return GeminiEmbeddings(**kwargs)
+            return GeminiEmbeddings(
+                role=role,
+                model_id=embedding_model,
+                cost_logger=self._cost_logger,
+                user_sub=user_sub,
+                catalog_id=catalog_id,
+                executor=get_io_executor(),
+            )
 
         self._job_state[sync_job_id] = _SyncJobState(
             user_sub=user_sub,
@@ -573,15 +572,33 @@ class CatalogSyncPipeline:
                 logger.warning("Sync job %s has unexpected status '%s', treating as cancelled", sync_job_id, status)
                 raise SyncCancelled()
 
-    def _get_vector_store(self, catalog_id: str, sync_job_id: str | None = None) -> VectorStore:
-        """Get or create a vector store for a catalog."""
+    def _get_vector_store(
+        self, catalog_id: str, sync_job_id: str | None = None, *, for_delete: bool = False
+    ) -> VectorStore:
+        """Get or create a vector store for a catalog.
+
+        Indexing/search callers pass a ``sync_job_id`` whose job state carries embeddings
+        resolved from the configured default alias (built in ``setup_job``).
+
+        Delete-only callers pass ``for_delete=True`` to get an embedding-less store:
+        ``adelete`` removes by vector ID and never invokes an embedding model, so file/vector
+        cleanup keeps working even when no default embedding model is configured. The store
+        raises if anyone tries to add through it.
+        """
+        if for_delete:
+            return CatalogVectorStoreFactory.create(
+                catalog_id=catalog_id, index_embedding=None, query_embedding=None
+            )
         state = self._job_state.get(sync_job_id) if sync_job_id else None
-        index_emb = state.index_embeddings if state else GeminiEmbeddings(role="document", executor=get_io_executor())
-        query_emb = state.query_embeddings if state else GeminiEmbeddings(role="query", executor=get_io_executor())
+        if state is None:
+            raise RuntimeError(
+                f"No embedding job state for sync_job_id={sync_job_id!r}; setup_job must run "
+                "before indexing (requires a configured default embedding model)."
+            )
         return CatalogVectorStoreFactory.create(
             catalog_id=catalog_id,
-            index_embedding=index_emb,
-            query_embedding=query_emb,
+            index_embedding=state.index_embeddings,
+            query_embedding=state.query_embeddings,
         )
 
     async def run_full_sync(
@@ -1764,7 +1781,7 @@ class CatalogSyncPipeline:
         # Remove vectors for deleted files
         if vector_ids_to_delete:
             try:
-                vector_store = self._get_vector_store(catalog_id)
+                vector_store = self._get_vector_store(catalog_id, for_delete=True)
                 await vector_store.adelete(ids=vector_ids_to_delete)
                 logger.info("Deleted %d vectors for removed files in catalog %s", len(vector_ids_to_delete), catalog_id)
             except Exception:
@@ -1793,7 +1810,7 @@ class CatalogSyncPipeline:
 
         if vector_ids:
             try:
-                vector_store = self._get_vector_store(catalog_id)
+                vector_store = self._get_vector_store(catalog_id, for_delete=True)
                 await vector_store.adelete(ids=vector_ids)
                 logger.info("Deleted %d vectors for file %s in catalog %s", len(vector_ids), source_file_id, catalog_id)
             except Exception:
@@ -1893,8 +1910,8 @@ class CatalogSyncPipeline:
 
         model_id = config.catalog.summarization_model_id
 
-        # Summarize via the Model Gateway (ADR-0001). Cost is captured proxy-side from
-        # the spend_logs_metadata below (ADR-0002) — no in-app cost logging needed.
+        # Summarize via the Model Gateway. Cost is captured proxy-side from
+        # the spend_logs_metadata below — no in-app cost logging needed.
         try:
             text = await gateway_chat(
                 prompt,

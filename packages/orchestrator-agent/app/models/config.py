@@ -595,38 +595,18 @@ class AgentSettings:
         """Get AWS Bedrock region."""
         return os.environ.get("AWS_REGION", "eu-central-1")
 
-    # Budget guard configuration
-    @classmethod
-    def get_budget_enabled(cls) -> bool:
-        """Check if budget enforcement is enabled."""
-        return os.environ.get("BUDGET_ENABLED", "true").lower() == "true"
-
-    @classmethod
-    def get_budget_monthly_token_limit(cls) -> int:
-        """Get monthly token limit for budget enforcement.
-
-        Default: 100 million tokens (~$300 for Claude on Bedrock)
-        """
-        return int(os.environ.get("BUDGET_MONTHLY_TOKEN_LIMIT", "100000000"))
-
+    # Budget guard configuration.
+    #
+    # The budget — monthly USD limit, warning thresholds, AND the enforcement on/off switch
+    # — lives entirely in console-backend's admin-editable `budget_settings` (toggled from
+    # the console UI) and is computed from the gateway usage logs. The orchestrator polls
+    # GET /api/v1/admin/budget/status and enforces the returned lock; there is deliberately
+    # no env override for enabling/disabling it. The only local knob is how often to poll.
+    # Console URL/client-id reuse CONSOLE_BACKEND_URL / CONSOLE_BACKEND_CLIENT_ID.
     @classmethod
     def get_budget_check_interval(cls) -> int:
-        """Get budget check interval in seconds.
+        """Get budget poll interval in seconds.
 
         Default: 300 seconds (5 minutes)
         """
         return int(os.environ.get("BUDGET_CHECK_INTERVAL_SECONDS", "300"))
-
-    @classmethod
-    def get_budget_warning_thresholds(cls) -> tuple[float, ...]:
-        """Get warning thresholds as percentages (0.0-1.0).
-
-        Default: 80%, 90%, 95%
-        """
-        thresholds_str = os.environ.get("BUDGET_WARNING_THRESHOLDS", "0.80,0.90,0.95")
-        return tuple(float(t.strip()) for t in thresholds_str.split(","))
-
-    @classmethod
-    def get_langsmith_project(cls) -> str:
-        """Get LangSmith project name for budget tracking."""
-        return os.environ.get("LANGSMITH_PROJECT", "dev-nannos-agent-framework")

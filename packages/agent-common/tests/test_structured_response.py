@@ -1,84 +1,89 @@
-"""Tests for get_response_format strategy selection."""
+"""Tests for get_response_format strategy selection.
 
-from unittest.mock import MagicMock
+Strategy now follows from the model's gateway *provider*, not the client class —
+every client is a ChatOpenAI talking to the LiteLLM gateway, so we patch
+``get_model_provider`` to drive the branch.
+"""
 
+from unittest.mock import patch
+
+import pytest
 from agent_common.a2a.structured_response import (
     SubAgentResponseSchema,
     get_response_format,
 )
-from langchain.agents.structured_output import AutoStrategy, ToolStrategy
+from langchain.agents.structured_output import ToolStrategy
+
+_PATCH_TARGET = "agent_common.a2a.structured_response.get_model_provider"
 
 
-def _model_with_class(class_name: str) -> MagicMock:
-    model = MagicMock()
-    model.__class__ = type(class_name, (), {})
-    return model
+def _with_provider(provider: str):
+    return patch(_PATCH_TARGET, return_value=provider)
 
 
-def test_chat_openai_uses_tool_strategy():
-    """Plain ChatOpenAI (real OpenAI endpoint) must use ToolStrategy.
+@pytest.mark.parametrize(
+    "provider",
+    ["openai", "azure", "vertex_ai", "gemini", "bedrock_converse", ""],
+)
+def test_no_thinking_always_uses_tool_strategy(provider: str):
+    """Without thinking, every provider uses ToolStrategy and leaves tools untouched.
 
-    AutoStrategy would resolve to the Responses API .parse() path, which
-    requires every bound tool to be strict — dynamic MCP tools are not.
+    The gateway normalizes provider responses (incl. Gemini) into OpenAI-shape
+    tool_calls, so ToolStrategy works uniformly. AutoStrategy would resolve to the
+    native .parse() path, which requires every bound tool to be strict — dynamic
+    MCP tools are not.
     """
-    model = _model_with_class("ChatOpenAI")
     tools: list = []
-
-    fmt = get_response_format(model, tools)
+    with _with_provider(provider):
+        fmt = get_response_format("some-model", tools, thinking_enabled=False)
 
     assert isinstance(fmt, ToolStrategy)
     assert fmt.schema is SubAgentResponseSchema
     assert tools == []
 
 
-def test_azure_chat_openai_uses_tool_strategy():
-    model = _model_with_class("AzureChatOpenAI")
-    tools: list = []
+@pytest.mark.parametrize(
+    "provider",
+    ["bedrock_converse", "bedrock", "anthropic", "gemini", "vertex_ai", ""],
+)
+def test_thinking_on_non_openai_provider_binds_tool(provider: str):
+    """Thinking forces the bind-as-tool fallback on every provider NOT known to allow
+    forced tool_choice with thinking.
 
-    fmt = get_response_format(model, tools)
+    Anthropic/Bedrock explicitly reject it; Gemini/Vertex and an unknown/cold-cache
+    provider ("") are treated as unsafe so a stale gateway snapshot can't force a
+    forbidden combination.
+    """
+    tools: list = []
+    with _with_provider(provider):
+        fmt = get_response_format("some-model", tools, thinking_enabled=True)
+
+    assert fmt is None
+    assert len(tools) == 1
+    assert tools[0].name == "SubAgentResponseSchema"
+
+
+@pytest.mark.parametrize("provider", ["openai", "azure"])
+def test_thinking_on_openai_like_keeps_tool_strategy(provider: str):
+    """OpenAI/Azure are the only providers known-safe to force tool_choice with thinking,
+    so they keep ToolStrategy."""
+    tools: list = []
+    with _with_provider(provider):
+        fmt = get_response_format("some-model", tools, thinking_enabled=True)
 
     assert isinstance(fmt, ToolStrategy)
-    assert fmt.schema is SubAgentResponseSchema
-
-
-def test_bedrock_without_thinking_uses_auto_strategy():
-    model = _model_with_class("ChatBedrockConverse")
-    tools: list = []
-
-    fmt = get_response_format(model, tools, thinking_enabled=False)
-
-    assert isinstance(fmt, AutoStrategy)
     assert fmt.schema is SubAgentResponseSchema
     assert tools == []
 
 
-def test_bedrock_with_thinking_returns_none_and_appends_tool():
-    model = _model_with_class("ChatBedrockConverse")
+def test_none_model_type_uses_tool_strategy_without_calling_provider():
+    """A None alias short-circuits without a gateway lookup. Without thinking it stays
+    ToolStrategy (the safe default for the common path)."""
     tools: list = []
+    with patch(_PATCH_TARGET) as mock_provider:
+        fmt = get_response_format(None, tools, thinking_enabled=False)
 
-    fmt = get_response_format(model, tools, thinking_enabled=True)
-
-    assert fmt is None
-    assert len(tools) == 1
-    assert tools[0].name == "SubAgentResponseSchema"
-
-
-def test_gemini_returns_none_and_appends_tool():
-    model = _model_with_class("ChatGoogleGenerativeAI")
-    tools: list = []
-
-    fmt = get_response_format(model, tools)
-
-    assert fmt is None
-    assert len(tools) == 1
-    assert tools[0].name == "SubAgentResponseSchema"
-
-
-def test_unknown_model_falls_back_to_auto_strategy():
-    model = _model_with_class("SomeOtherModel")
-    tools: list = []
-
-    fmt = get_response_format(model, tools)
-
-    assert isinstance(fmt, AutoStrategy)
+    mock_provider.assert_not_called()
+    assert isinstance(fmt, ToolStrategy)
     assert fmt.schema is SubAgentResponseSchema
+    assert tools == []

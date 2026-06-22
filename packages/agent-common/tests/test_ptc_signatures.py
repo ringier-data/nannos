@@ -142,3 +142,16 @@ def test_json_schema_to_ts_scalars_and_arrays():
     assert json_schema_to_ts({"enum": ["a", "b"]}, {}) == '"a" | "b"'
     # Unresolvable ref → unknown
     assert json_schema_to_ts({"$ref": "#/$defs/Missing"}, {}) == "unknown"
+
+
+def test_json_schema_to_ts_list_type_renders_union():
+    # JSON Schema allows ``type`` to be a list (nullable fields in MCP tool
+    # schemas, e.g. GitHub). This must not raise ``unhashable type: 'list'``.
+    assert json_schema_to_ts({"type": ["string", "null"]}, {}) == "string | null"
+    assert json_schema_to_ts({"type": ["integer", "null"]}, {}) == "number | null"
+    # ``array`` member still resolves ``items``.
+    assert (
+        json_schema_to_ts({"type": ["array", "null"], "items": {"type": "string"}}, {})
+        == "string[] | null"
+    )
+    assert json_schema_to_ts({"type": []}, {}) == "unknown"

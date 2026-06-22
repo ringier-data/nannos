@@ -1,6 +1,18 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, FlaskConical, Cpu, Eye, Brain, Star, Pencil, Loader2, Lock } from 'lucide-react';
+import {
+  Plus,
+  Trash2,
+  FlaskConical,
+  Cpu,
+  Eye,
+  Brain,
+  Star,
+  Pencil,
+  Loader2,
+  Lock,
+  ChevronDown,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 import {
@@ -30,6 +42,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
 import {
   AlertDialog,
@@ -77,6 +90,9 @@ interface FormState {
   litellm_model: string;
   provider: string;
   aws_region_name: string;
+  vertex_location: string;
+  vertex_project: string;
+  base_model: string; // Azure only: maps a deployment name to a known model for cost/metadata
   mode: 'chat' | 'embedding';
   input_modes: string[];
   prices: Record<string, string>; // unit -> price string
@@ -87,27 +103,77 @@ const EMPTY_FORM: FormState = {
   litellm_model: '',
   provider: '',
   aws_region_name: '',
+  vertex_location: '',
+  vertex_project: '',
+  base_model: '',
   mode: 'chat',
   input_modes: ['text', 'image'],
   prices: {},
 };
 
+// Credential fields are provider-specific: Bedrock takes an AWS region, Vertex AI takes
+// vertex_project/vertex_location. Other providers (azure, gemini, …) take neither here.
+const isVertexProvider = (provider: string) => provider.startsWith('vertex_ai');
+const isBedrockProvider = (provider: string) => provider.startsWith('bedrock');
+// Azure deployment names are arbitrary and not in LiteLLM's cost map, so cost tracking +
+// max-tokens metadata need a base_model mapping to a known model (e.g. azure/gpt-4o).
+const isAzureProvider = (provider: string) => provider.startsWith('azure');
+
+// Region/account/vendor qualifiers we strip when suggesting an alias from a model id.
+const ALIAS_QUALIFIERS =
+  /^(eu|us|apac|global|anthropic|amazon|meta|cohere|mistral|google|ai21|deepseek|qwen|stability|writer|luma|twelvelabs)$/i;
+
+// Suggest a request alias from a gateway model id: drop the provider prefix and any
+// leading region/vendor qualifiers, e.g. "bedrock/eu.anthropic.claude-sonnet-4-6" → "claude-sonnet-4-6".
+function deriveAlias(modelId: string): string {
+  const tail = modelId.includes('/') ? modelId.slice(modelId.lastIndexOf('/') + 1) : modelId;
+  const parts = tail.split('.');
+  while (parts.length > 1 && ALIAS_QUALIFIERS.test(parts[0])) parts.shift();
+  return parts.join('.');
+}
+
 const CATALOG_LIMIT = 50; // cap the rendered match list; the rest surface as you keep typing
 
-// Which default roles a model can hold: chat models → chat; embedding models → text
-// embedding, plus multimodal embedding when they accept images (graceful degradation).
+// Which default roles a model can hold: chat models → the standard chat default plus the
+// low/premium capability tiers (sub-agents bind to a tier; the slot picks the model);
+// embedding models → text embedding, plus multimodal embedding when they accept images.
 function defaultRolesFor(m: GatewayModel): DefaultRole[] {
   if (m.mode === 'embedding') {
     return (m.input_modes ?? []).includes('image') ? ['embedding', 'multimodal_embedding'] : ['embedding'];
   }
-  return ['chat'];
+  return ['chat', 'chat:low', 'chat:premium'];
 }
+
+// Embedding-role switches trigger a re-index, so they go through a confirmation dialog;
+// chat/tier defaults apply immediately.
+const isEmbeddingRole = (role: DefaultRole): boolean => role === 'embedding' || role === 'multimodal_embedding';
+
+// Per-million price (advisory — helps decide which model to assign to a tier; rate cards
+// remain the billing source of truth). Gateway costs are per-token.
+const perMillion = (v?: number | null): string | null =>
+  v && v > 0 ? `$${(v * 1_000_000).toFixed(2)}/M` : null;
+
+// Human label for a default role / tier slot.
+const roleLabel = (role: DefaultRole): string =>
+  ({
+    chat: 'chat',
+    'chat:low': 'low tier',
+    'chat:premium': 'premium tier',
+    embedding: 'embedding',
+    multimodal_embedding: 'multimodal embedding',
+    indexing: 'indexing',
+  })[role] ?? role;
 
 export function ModelGatewayPage() {
   const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Provider credential overrides (region/project) are hidden by default — the gateway's
+  // env defaults are the norm; only collapse-open them when overriding per model.
+  const [credsOpen, setCredsOpen] = useState(false);
+  // Once the alias is hand-edited, stop auto-filling it from the picked model.
+  const [aliasEdited, setAliasEdited] = useState(false);
   // null = registering a new model; a gateway id = editing that model.
   const [editingId, setEditingId] = useState<string | null>(null);
   // Pending embedding-default switch awaiting confirmation (re-index implication).
@@ -154,6 +220,8 @@ export function ModelGatewayPage() {
     setForm((f) => ({
       ...f,
       litellm_model: entry.model_id,
+      // Pre-fill the alias from the model unless the user has already typed their own.
+      model_name: !editingId && !aliasEdited ? deriveAlias(entry.model_id) : f.model_name,
       provider: entry.provider ?? f.provider,
       mode: isEmbedding ? 'embedding' : 'chat',
       input_modes: isEmbedding ? ['text'] : modes,
@@ -175,16 +243,23 @@ export function ModelGatewayPage() {
   const openCreate = () => {
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setCredsOpen(false);
+    setAliasEdited(false);
     setDialogOpen(true);
   };
 
   const openEdit = async (m: GatewayModel) => {
     setEditingId(m.model_id ?? null);
+    setCredsOpen(false);
+    setAliasEdited(true); // existing alias is fixed (input is disabled on edit)
     setForm({
       model_name: m.model_name,
       litellm_model: m.litellm_model ?? '',
       provider: m.provider ?? '',
       aws_region_name: '',
+      vertex_location: '',
+      vertex_project: '',
+      base_model: m.base_model ?? '',
       mode: m.mode === 'embedding' ? 'embedding' : 'chat',
       input_modes: m.input_modes && m.input_modes.length ? m.input_modes : ['text', 'image'],
       prices: {},
@@ -201,25 +276,91 @@ export function ModelGatewayPage() {
     }
   };
 
-  const registerMutation = useMutation({
-    mutationFn: registerGatewayModel,
-    onSuccess: (res) => {
-      toast.success(`Registered ${res.model_name}`);
-      closeDialog();
-      invalidate();
+  // Save = persist, then validate with a live ping before we consider the model usable.
+  // A newly-registered model that fails the test is deleted again, so a failed save never
+  // leaves a broken alias behind. Edits apply first and aren't rolled back (we hold no
+  // snapshot of the prior params) — the admin is told the change landed but failed its test.
+  const saveMutation = useMutation({
+    mutationFn: async (body: ModelRegistrationRequest) => {
+      if (editingId) {
+        await updateGatewayModel(editingId, body);
+        await testGatewayModel(body.model_name); // throws on a failed ping
+        return { name: body.model_name, created: null as GatewayModel | null };
+      }
+      const res = await registerGatewayModel(body);
+      try {
+        await testGatewayModel(res.model_name); // throws on a failed ping
+      } catch (testErr) {
+        if (res.gateway_model_id) {
+          // Best-effort rollback; surface the original test error regardless of cleanup outcome.
+          await deleteGatewayModel(res.gateway_model_id).catch(() => {});
+        }
+        throw testErr;
+      }
+      // Build the card from what we just submitted so the page can reflect the write
+      // immediately — a refetch here is unreliable (see onSuccess).
+      const created: GatewayModel = {
+        model_name: res.model_name,
+        model_id: res.gateway_model_id ?? null,
+        provider: body.provider,
+        litellm_model: (body.litellm_params.model as string | undefined) ?? null,
+        mode: body.mode ?? 'chat',
+        input_modes: body.input_modes,
+        default_roles: [],
+        db_model: true,
+        supports_vision: (body.input_modes ?? []).includes('image'),
+      };
+      // First model to serve a role becomes the fleet default automatically, so a fresh
+      // system always has a fallback without a separate "Make default" click. Only fill
+      // roles that nothing already holds (config or db model) — never steal an existing
+      // default. Capability tiers are EXCLUDED from auto-assignment: which model is the
+      // low/premium tier is an explicit admin decision, not something a new model silently
+      // grabs. Best-effort: a failed set must not roll back the good registration, and it
+      // runs after the test so we never default an alias we're about to delete.
+      const autoRoles = defaultRolesFor(created).filter(
+        (role) => role !== 'chat:low' && role !== 'chat:premium',
+      ).filter(
+        (role) => !models.some((m) => (m.default_roles ?? []).includes(role)),
+      );
+      if (res.gateway_model_id && autoRoles.length) {
+        for (const role of autoRoles) {
+          await setGatewayModelDefault(res.gateway_model_id, role).catch(() => {});
+        }
+        created.default_roles = autoRoles;
+      }
+      return { name: res.model_name, created };
     },
-    onError: (e: unknown) => toast.error(`Registration failed: ${errMsg(e)}`),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ modelId, body }: { modelId: string; body: ModelRegistrationRequest }) =>
-      updateGatewayModel(modelId, body),
-    onSuccess: (res) => {
-      toast.success(`Updated ${res.model_name}`);
+    onSuccess: ({ name, created }) => {
+      const auto = created?.default_roles ?? [];
+      toast.success(
+        auto.length
+          ? `Saved & tested ${name} — set as default ${auto.map((r) => r.replace('_', ' ')).join(' & ')}`
+          : `Saved & tested ${name}`,
+      );
       closeDialog();
-      invalidate();
+      if (created) {
+        // The gateway runs multiple replicas and serves /model/info from per-pod memory,
+        // so an immediate refetch usually lands on a replica that hasn't picked up the new
+        // model yet (it propagates on each pod's DB reload). Insert it optimistically so the
+        // page reflects the write right away; the next natural refetch reconciles once the
+        // gateway propagates. We deliberately don't invalidate ['gateway-models'] here —
+        // that would refetch the still-stale list and wipe this card.
+        queryClient.setQueryData<GatewayModel[]>(['gateway-models'], (old = []) =>
+          old.some((m) => m.model_name === created.model_name) ? old : [...old, created],
+        );
+        queryClient.invalidateQueries({ queryKey: ['available-models'] }); // refresh every picker
+      } else {
+        invalidate(); // edit landed in place — reflect the gateway's real state
+      }
     },
-    onError: (e: unknown) => toast.error(`Update failed: ${errMsg(e)}`),
+    onError: (e: unknown) => {
+      toast.error(
+        editingId
+          ? `Update applied but its test failed — please verify: ${errMsg(e)}`
+          : `Test failed — registration rolled back: ${errMsg(e)}`,
+      );
+      invalidate(); // an edit may have landed; reflect the gateway's real state
+    },
   });
 
   const testMutation = useMutation({
@@ -280,21 +421,32 @@ export function ModelGatewayPage() {
       return;
     }
     const litellm_params: Record<string, unknown> = { model: form.litellm_model, max_retries: 0 };
-    if (form.aws_region_name) litellm_params.aws_region_name = form.aws_region_name;
+    if (isVertexProvider(form.provider)) {
+      if (form.vertex_location) litellm_params.vertex_location = form.vertex_location;
+      if (form.vertex_project) litellm_params.vertex_project = form.vertex_project;
+    } else if (isBedrockProvider(form.provider) && form.aws_region_name) {
+      litellm_params.aws_region_name = form.aws_region_name;
+    }
+
+    // base_model only matters when the routed model id isn't a known model (Azure deployments).
+    const model_info: Record<string, unknown> = {};
+    if (isAzureProvider(form.provider) && form.base_model.trim()) {
+      model_info.base_model = form.base_model.trim();
+    }
 
     const body: ModelRegistrationRequest = {
       model_name: form.model_name,
       litellm_params,
+      ...(Object.keys(model_info).length ? { model_info } : {}),
       mode: form.mode,
       input_modes: form.input_modes,
       provider: form.provider,
       pricing,
     };
-    if (editingId) updateMutation.mutate({ modelId: editingId, body });
-    else registerMutation.mutate(body);
+    saveMutation.mutate(body);
   };
 
-  const saving = registerMutation.isPending || updateMutation.isPending;
+  const saving = saveMutation.isPending;
 
   const toggleMode = (mode: string) =>
     setForm((f) => ({
@@ -344,6 +496,13 @@ export function ModelGatewayPage() {
                     {m.model_name}
                   </CardTitle>
                   <CardDescription className="font-mono text-xs break-all">{m.litellm_model}</CardDescription>
+                  {(perMillion(m.input_cost_per_token) || perMillion(m.output_cost_per_token)) && (
+                    <CardDescription className="text-xs">
+                      {perMillion(m.input_cost_per_token) && <span>in {perMillion(m.input_cost_per_token)}</span>}
+                      {perMillion(m.input_cost_per_token) && perMillion(m.output_cost_per_token) && <span> · </span>}
+                      {perMillion(m.output_cost_per_token) && <span>out {perMillion(m.output_cost_per_token)}</span>}
+                    </CardDescription>
+                  )}
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -356,7 +515,7 @@ export function ModelGatewayPage() {
                     )}
                     {(m.default_roles ?? []).map((role) => (
                       <Badge key={role}>
-                        <Star className="mr-1 h-3 w-3" /> default {role.replace('_', ' ')}
+                        <Star className="mr-1 h-3 w-3" /> default {roleLabel(role)}
                       </Badge>
                     ))}
                     {m.supports_reasoning && (
@@ -393,13 +552,13 @@ export function ModelGatewayPage() {
                           variant="ghost"
                           disabled={defaultMutation.isPending || (m.default_roles ?? []).includes(role)}
                           onClick={() =>
-                            role === 'chat'
-                              ? defaultMutation.mutate({ modelId: m.model_id!, role })
-                              : setPendingDefault({ modelId: m.model_id!, role, modelName: m.model_name })
+                            isEmbeddingRole(role)
+                              ? setPendingDefault({ modelId: m.model_id!, role, modelName: m.model_name })
+                              : defaultMutation.mutate({ modelId: m.model_id!, role })
                           }
                         >
                           <Star className="mr-1 h-3 w-3" />
-                          {role === 'chat' ? 'Make default' : `Default ${role.replace('_embedding', '')}`}
+                          {role === 'chat' ? 'Make default' : `Default ${roleLabel(role)}`}
                         </Button>
                       ))}
                     {/* Edit/Remove only for db-backed models — LiteLLM can't mutate config models. */}
@@ -445,22 +604,12 @@ export function ModelGatewayPage() {
 
           <div className="space-y-4">
             <div className="grid gap-1.5">
-              <Label>Alias (what apps request)</Label>
-              <Input
-                placeholder="claude-sonnet-4.6"
-                value={form.model_name}
-                disabled={!!editingId}
-                onChange={(e) => setForm({ ...form, model_name: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-1.5">
               <Label>Gateway model id{catalog.length > 0 ? ` (${form.mode} models — type to filter)` : ''}</Label>
               <div className="relative">
                 <Input
                   placeholder="bedrock/eu.anthropic.claude-sonnet-4-6"
                   value={form.litellm_model}
                   autoComplete="off"
-                  onFocus={() => setPickerOpen(true)}
                   onBlur={() => setTimeout(() => setPickerOpen(false), 150)}
                   onChange={(e) => {
                     setPickerOpen(true);
@@ -501,6 +650,23 @@ export function ModelGatewayPage() {
               </div>
             </div>
             <div className="grid gap-1.5">
+              <Label>Alias (what apps request)</Label>
+              <Input
+                placeholder="claude-sonnet-4.6"
+                value={form.model_name}
+                disabled={!!editingId}
+                onChange={(e) => {
+                  setAliasEdited(true);
+                  setForm({ ...form, model_name: e.target.value });
+                }}
+              />
+              {!editingId && (
+                <p className="text-[11px] text-muted-foreground">
+                  Auto-filled from the model id — edit to set a custom alias.
+                </p>
+              )}
+            </div>
+            <div className="grid gap-1.5">
               <Label>Mode</Label>
               <div className="flex gap-2">
                 {(['chat', 'embedding'] as const).map((mode) => (
@@ -522,24 +688,71 @@ export function ModelGatewayPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="grid gap-1.5">
-                <Label>Provider (rate-card key)</Label>
-                <Input
-                  placeholder="bedrock"
-                  value={form.provider}
-                  onChange={(e) => setForm({ ...form, provider: e.target.value })}
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <Label>AWS region (optional)</Label>
-                <Input
-                  placeholder="eu-central-1"
-                  value={form.aws_region_name}
-                  onChange={(e) => setForm({ ...form, aws_region_name: e.target.value })}
-                />
-              </div>
+            <div className="grid gap-1.5">
+              <Label>Provider (rate-card key)</Label>
+              <Input
+                placeholder="bedrock"
+                value={form.provider}
+                onChange={(e) => setForm({ ...form, provider: e.target.value })}
+              />
             </div>
+
+            {isAzureProvider(form.provider) && (
+              <div className="grid gap-1.5">
+                <Label>Base model (Azure)</Label>
+                <Input
+                  placeholder="azure/gpt-4o"
+                  value={form.base_model}
+                  onChange={(e) => setForm({ ...form, base_model: e.target.value })}
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  Azure deployment names aren’t recognised for cost/metadata. Map this deployment to a
+                  known model (e.g. <span className="font-mono">azure/gpt-4o</span>) so the gateway can
+                  identify it for max-tokens and native cost tracking.
+                </p>
+              </div>
+            )}
+
+            {(isVertexProvider(form.provider) || isBedrockProvider(form.provider)) && (
+              <Collapsible open={credsOpen} onOpenChange={setCredsOpen}>
+                <CollapsibleTrigger className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors [&[data-state=open]>svg]:rotate-180">
+                  <ChevronDown className="h-4 w-4 transition-transform" />
+                  Advanced — region & credentials
+                </CollapsibleTrigger>
+                <CollapsibleContent className="grid gap-3 pt-3">
+                  {isBedrockProvider(form.provider) && (
+                    <div className="grid gap-1.5">
+                      <Label>AWS region (optional)</Label>
+                      <Input
+                        placeholder="eu-central-1"
+                        value={form.aws_region_name}
+                        onChange={(e) => setForm({ ...form, aws_region_name: e.target.value })}
+                      />
+                    </div>
+                  )}
+                  {isVertexProvider(form.provider) && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="grid gap-1.5">
+                        <Label>Vertex location (optional)</Label>
+                        <Input
+                          placeholder="europe-west4"
+                          value={form.vertex_location}
+                          onChange={(e) => setForm({ ...form, vertex_location: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-1.5">
+                        <Label>Vertex project (optional)</Label>
+                        <Input
+                          placeholder="rcplus-alloy-gcp"
+                          value={form.vertex_project}
+                          onChange={(e) => setForm({ ...form, vertex_project: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </CollapsibleContent>
+              </Collapsible>
+            )}
 
             {form.mode === 'chat' && (
               <div className="grid gap-1.5">
@@ -593,10 +806,10 @@ export function ModelGatewayPage() {
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {editingId
                 ? saving
-                  ? 'Saving…'
+                  ? 'Saving & testing…'
                   : 'Save changes'
                 : saving
-                  ? 'Registering…'
+                  ? 'Registering & testing…'
                   : 'Register'}
             </Button>
           </DialogFooter>

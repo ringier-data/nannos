@@ -46,6 +46,26 @@ NEVER use heredoc (`cat << EOF`) to write files - causes fatal errors. Use incre
 
 ## Architecture Patterns
 
+### Layering: this SDK is the lowest shared layer
+
+`agent-common` and all the apps (orchestrator, agent-runner, console-backend) depend on
+this SDK — **never the reverse**. The SDK must not import `agent_common.*` (or any app
+package). A violation isn't just stylistic: console-backend uses the SDK without installing
+agent-common, so an upward import crashes it at runtime (e.g. a `ModuleNotFoundError` in the
+catalog re-index embedding path). When the SDK needs something currently sitting in
+agent-common, move the canonical copy down here and let agent-common re-export or import it.
+
+### Model Gateway / cost cluster lives here by design
+
+`cost_tracking/` (logger, callback), `embeddings.py` (`GeminiEmbeddings`), and
+`cost_tracking/attribution.py` (spend-logs ContextVars + `attribution_header` /
+`build_attribution_http_client`) are part of the SDK on purpose, not internal code that
+leaked in: remote/external agents can opt into routing LLM + embedding traffic through the
+Model Gateway to get spend-logs attribution (and, later, extra-cost reporting). This
+is why they sit behind the `google-embeddings` / `langgraph` extras rather than the core
+deps. Don't propose extracting this cluster out of the SDK. Attribution's single canonical
+import path is `ringier_a2a_sdk.cost_tracking.attribution`.
+
 ### Agent Base Class Hierarchy
 
 The SDK provides a base agent class for building A2A agents:

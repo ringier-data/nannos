@@ -1,6 +1,6 @@
 """Models router — the model picker, served live from the Model Gateway.
 
-With runtime registration (Q6) the set of models is whatever is registered on the
+With runtime registration the set of models is whatever is registered on the
 proxy (DB-backed), so we read it live from `/model/info` rather than a static list.
 A short in-process TTL cache keeps the per-request cost off the proxy.
 """
@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from ..db.session import DbSession
 from ..dependencies import require_auth_or_bearer_token
 from ..models.user import User
-from ..services.model_gateway_service import ModelGatewayError
+from ..services.model_gateway_service import ModelGatewayError, thinking_levels_for
 
 logger = logging.getLogger(__name__)
 
@@ -23,28 +23,6 @@ router: APIRouter = APIRouter(prefix="/api/v1", tags=["models"])
 
 _CACHE_TTL_SECONDS = 30.0
 _cache: dict[str, tuple[float, list]] = {}
-
-# LiteLLM reasoning_effort vocabulary in display order (minus "none" — the
-# enable-thinking toggle covers off). low/medium/high are the baseline tiers for any
-# reasoning model; minimal/xhigh are offered only when the model declares support.
-_EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"]
-
-
-def _thinking_levels(info: dict) -> list[str]:
-    """Reasoning efforts this model accepts, from LiteLLM's supports_*_reasoning_effort flags."""
-    has_reasoning = bool(info.get("supports_reasoning")) or any(
-        info.get(f"supports_{e}_reasoning_effort") for e in ("none", "minimal", "low", "xhigh", "max")
-    )
-    if not has_reasoning:
-        return []
-    levels = {"medium", "high"}  # baseline tiers
-    if info.get("supports_minimal_reasoning_effort"):
-        levels.add("minimal")
-    if info.get("supports_low_reasoning_effort") is not False:
-        levels.add("low")
-    if info.get("supports_xhigh_reasoning_effort"):
-        levels.add("xhigh")
-    return [e for e in _EFFORT_ORDER if e in levels]
 
 
 def _price_per_million(cost_per_token: object) -> float | None:
@@ -77,7 +55,7 @@ def _to_available(model: dict, default_model: str) -> AvailableModel | None:
     if info.get("mode") and info.get("mode") != "chat":
         return None
     name = model.get("model_name", "")
-    levels = _thinking_levels(info)
+    levels = thinking_levels_for(info)
     return AvailableModel(
         value=name,
         label=info.get("label") or name,
@@ -135,6 +113,20 @@ async def model_defaults(request: Request, db: DbSession) -> dict[str, str]:
 
     Read by the apps (agent-common) for graceful degradation when a referenced alias has
     been retired, and by the console to badge the default. Unauthenticated like /models —
-    the data is non-sensitive (alias names) and the route is in-cluster only (ADR-0005).
+    the data is non-sensitive (alias names) and the route is in-cluster only.
     """
     return await request.app.state.model_defaults_service.get_all(db)
+
+
+@router.get("/models/embeddings/status")
+async def embedding_status(request: Request, db: DbSession) -> dict:
+    """Whether catalog embedding is actually usable (default set AND registered on the gateway).
+
+    The catalog UI gates on this rather than on "a default row exists" — a default pointing at
+    a retired/unregistered model is the silent-misconfiguration case (a stale catalog looks
+    healthy while indexing/search can't run). See feature_status.get_embedding_readiness.
+    """
+    from ..services.feature_status import get_embedding_readiness
+
+    status, alias, reason = await get_embedding_readiness(request, db)
+    return {"ready": status == "ready", "status": status, "model": alias, "reason": reason}

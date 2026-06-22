@@ -288,7 +288,7 @@ class AgentRunner(BaseAgent):
         self._store: AsyncPostgresStore | None = None
         self._connection_pool: AsyncConnectionPool | None = None
         if self._postgres_conn:
-            # Embeddings via the Model Gateway (ADR-0001); cost captured proxy-side. Uses
+            # Embeddings via the Model Gateway; cost captured proxy-side. Uses
             # the configured default embedding model; create_embeddings() raises
             # EmbeddingModelNotConfigured when no default is set, disabling the store.
             try:
@@ -1027,8 +1027,8 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                     base_backend=StateBackend(),
                 )
 
-            # Determine structured output strategy (mutates tools in-place for Bedrock+thinking)
-            response_format = get_response_format(llm, tools, thinking_enabled=bool(thinking_level))
+            # Determine structured output strategy (mutates tools in-place for Bedrock/Anthropic+thinking)
+            response_format = get_response_format(model_name, tools, thinking_enabled=bool(thinking_level))
 
             graph = build_sub_agent_graph(
                 model=llm,

@@ -23,7 +23,7 @@ import { SecretsVaultList } from '@/components/settings/SecretsVaultList';
 import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PhoneVerificationDialog } from '@/components/settings/PhoneVerificationDialog';
 import { ToolBypassRulesList } from '@/components/settings/ToolBypassRulesList';
-import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels } from '@/config/models';
+import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, getModelLabel } from '@/config/models';
 
 const LANGUAGE_OPTIONS = [
   { value: 'en', label: 'English' },
@@ -284,16 +284,24 @@ export function SettingsPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="default">Use default (determined by agent)</SelectItem>
-                  {availableModels.map((option) => (
+                  {modelSelectOptions(preferredModel, availableModels, settings?.preferred_model_retired ?? false).options.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-sm text-muted-foreground">
-                Set your preferred LLM model for the orchestrator. Leave as default to use agent-specific configuration.
-              </p>
+              {settings?.preferred_model_retired && preferredModel === settings.preferred_model ? (
+                <p className="text-sm text-amber-600 dark:text-amber-400">
+                  This model was retired — the orchestrator now uses{' '}
+                  {settings.effective_preferred_model ? getModelLabel(settings.effective_preferred_model, availableModels) : 'the default'}.
+                  Pick a replacement to update your preference.
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Set your preferred LLM model for the orchestrator. Leave as default to use agent-specific configuration.
+                </p>
+              )}
             </div>
 
             <ExtendedThinkingConfig

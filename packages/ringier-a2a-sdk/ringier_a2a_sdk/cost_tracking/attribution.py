@@ -1,15 +1,17 @@
-"""Request-scoped cost attribution carried to the Model Gateway (ADR-0002).
+"""Request-scoped cost attribution carried to the Model Gateway.
 
 `create_model` builds gateway clients that are cached and shared across requests,
 so attribution can't be baked in at construction. Instead we set these ContextVars
 at the request boundary (and in `create_runnable_config`), and a per-request httpx
 event hook stamps them onto the `x-litellm-spend-logs-metadata` header on every
-outbound call. The proxy's CustomLogger reads them back (validated in the spike,
-SPIKE-FINDINGS.md check 4 — correct under 50-way concurrency on a shared client).
+outbound call. The proxy's CustomLogger reads them back (verified correct under
+50-way concurrency on a shared client).
 
-These ContextVars live in agent-common (the lowest shared layer) so both the
-setters (ringier-a2a-sdk request middleware / create_runnable_config) and the
-reader (the http hook here) can reach them without a circular dependency.
+These ContextVars live in ringier-a2a-sdk — the lowest shared layer (agent-common and
+the apps all depend on the SDK, never the reverse). Both the setters (the SDK's request
+middleware / create_runnable_config, the orchestrator executor) and the reader (the http
+hook here) reach them without any upward dependency on agent-common. This is the single
+canonical home; import it directly from `ringier_a2a_sdk.cost_tracking.attribution`.
 """
 
 import contextlib
