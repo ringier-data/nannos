@@ -12,7 +12,7 @@ import { A2AClientService, A2ASlackBasedRequest } from '../../services/a2aClient
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
 import { FileStorageService } from '../../services/fileStorageService.js';
 import type { IContextStore, IPendingRequestStore, IInFlightTaskStore, ContextRecord } from '../../storage/types.js';
-import { handleError, postMessage, finalizeStreamedTask, isInterruptedOrTerminated } from '../../utils/taskResponseHandler.js';
+import { handleError, postMessage, finalizeStreamedTask, isInterruptedOrTerminated, isTerminatedState } from '../../utils/taskResponseHandler.js';
 import { ThinkingStepsStreamer, type WorkPlanTodo } from '../../utils/thinkingStepsStreamer.js';
 import { FeedbackService } from '../../services/feedbackService.js';
 import _ from 'lodash';
@@ -1102,6 +1102,19 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     // than a manual flag.
     if (!isInterruptedOrTerminated(accumulatedTask?.status?.state)) {
       await streamer.discard();
+    }
+
+    // Once a task reaches a terminal state we've already posted its final
+    // response, so the in-flight record must be removed. Leaving it behind makes
+    // the periodic recovery loop treat the completed task as orphaned and re-post
+    // its answer ~5 min later (the recovery cadence). Interrupted states
+    // (input-required/auth-required) are intentionally NOT deleted — they must
+    // persist for HITL resume — and a dropped/errored "working" task is left in
+    // place so recovery can legitimately finish it.
+    if (accumulatedTask && isTerminatedState(accumulatedTask.status?.state)) {
+      await inFlightTaskStore.delete(accumulatedTask.id).catch((err) => {
+        logger.error(err, `Failed to delete completed in-flight task ${accumulatedTask?.id}: ${err}`);
+      });
     }
   }
 }
