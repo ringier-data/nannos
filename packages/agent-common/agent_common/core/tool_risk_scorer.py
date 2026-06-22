@@ -197,12 +197,12 @@ async def _score_tool_via_llm(
 ) -> ToolRiskEntry:
     """Call LLM to classify a tool's risk profile.
 
-    Uses gemini-3-flash-preview for speed and cost efficiency.
+    Uses the fleet's cheap/fast chat tier for speed and cost efficiency.
     Returns a ToolRiskEntry ready for caching.
     """
-    from agent_common.core.model_factory import create_model
+    from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 
-    model = create_model("gemini-3-flash-preview", streaming=False)
+    model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
     structured_model = model.with_structured_output(ToolRiskOutput)
 
     # Build user prompt with tool details

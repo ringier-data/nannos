@@ -1,7 +1,7 @@
 """S3 Vectors implementation with multimodal embedding support.
 
 Subclasses AmazonS3Vectors to detect image data in document metadata
-and produce text+image embeddings via GeminiEmbeddings.embed_with_image().
+and produce text+image embeddings via GatewayEmbeddings.embed_with_image().
 
 Convention: pass thumbnail PNG bytes in metadata under the ``IMAGE_METADATA_KEY``
 key. The subclass consumes and strips it before storage so raw bytes never

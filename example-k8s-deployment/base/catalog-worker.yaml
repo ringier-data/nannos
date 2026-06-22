@@ -48,8 +48,10 @@ spec:
           value: "${ENV}-nannos-infrastructure-agents-catalog-thumbnails"
         - name: CATALOG_TOKEN_KMS_KEY_ID
           value: "alias/${ENV}-nannos-sensitive-data-kms-key"
-        - name: GCP_PROJECT_ID
-          value: "YOUR_GCP_PROJECT_ID"
+        # Catalog embeddings route through the Model Gateway (LiteLLM proxy). The virtual key
+        # (LLM_GATEWAY_API_KEY) comes from console-secrets (envFrom below).
+        - name: LLM_GATEWAY_URL
+          value: "http://litellm-proxy.nannos.svc"
         - name: CONSOLE_BACKEND_URL
           value: "http://console:8080"
         # Set to "1" to enable RSS logging at key pipeline stages — useful

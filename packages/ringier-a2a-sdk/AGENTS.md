@@ -57,7 +57,7 @@ agent-common, move the canonical copy down here and let agent-common re-export o
 
 ### Model Gateway / cost cluster lives here by design
 
-`cost_tracking/` (logger, callback), `embeddings.py` (`GeminiEmbeddings`), and
+`cost_tracking/` (logger, callback), `embeddings.py` (`GatewayEmbeddings`), and
 `cost_tracking/attribution.py` (spend-logs ContextVars + `attribution_header` /
 `build_attribution_http_client`) are part of the SDK on purpose, not internal code that
 leaked in: remote/external agents can opt into routing LLM + embedding traffic through the

@@ -1529,7 +1529,7 @@ export const deleteModelApiV1AdminModelGatewayModelsModelIdDelete = <ThrowOnErro
  *
  * Edit a registered model's routing/capabilities/cost (db-backed models only).
  *
- * Mirrors registration: a new Rate Card version is written (pricing stays
+ * Mirrors registration: a new Rate Card version is written (pricing is kept
  * time-versioned), then the gateway deployment is updated. LiteLLM rejects updates to
  * config-defined models, so this only works for runtime-registered ones.
  */

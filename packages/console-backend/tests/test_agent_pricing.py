@@ -177,16 +177,19 @@ async def test_agent_pricing_fallback_to_system(pg_session: AsyncSession, caplog
     result = await pg_session.execute(text("SELECT id FROM sub_agents WHERE name = 'test-agent-3'"))
     sub_agent_id = result.scalar_one()
 
-    # Create system rate card
+    # Create system rate card. Use a test-only provider/model so it does not
+    # collide with the rate cards the migrations seed into the template DB
+    # (e.g. bedrock/claude-sonnet-4.5), which would otherwise violate uq_rate_card
+    # and shadow the rates this test sets up.
     await pg_session.execute(
         text("""
             INSERT INTO rate_cards (provider, model_name, created_at, updated_at)
-            VALUES ('bedrock', 'claude-sonnet-4.5', NOW(), NOW())
+            VALUES ('test_provider', 'test-fallback-model', NOW(), NOW())
             RETURNING id
         """)
     )
     rate_card_result = await pg_session.execute(
-        text("SELECT id FROM rate_cards WHERE provider = 'bedrock' AND model_name = 'claude-sonnet-4.5'")
+        text("SELECT id FROM rate_cards WHERE provider = 'test_provider' AND model_name = 'test-fallback-model'")
     )
     rate_card_id = rate_card_result.scalar_one()
 
@@ -236,8 +239,8 @@ async def test_agent_pricing_fallback_to_system(pg_session: AsyncSession, caplog
 
     cost = await service.calculate_cost(
         db=pg_session,
-        provider="bedrock",
-        model_name="claude-sonnet-4.5",
+        provider="test_provider",
+        model_name="test-fallback-model",
         billing_unit_breakdown=billing_unit_breakdown,
         sub_agent_config_version_id=config_version_id,
     )
@@ -257,16 +260,19 @@ async def test_no_agent_pricing_uses_system(pg_session: AsyncSession):
     """Test that system rates are used when no agent pricing is configured."""
     from sqlalchemy import text
 
-    # Create system rate card
+    # Create system rate card. Use a test-only provider/model so it does not
+    # collide with the rate cards the migrations seed into the template DB
+    # (e.g. bedrock/claude-sonnet-4.5), which would otherwise violate uq_rate_card
+    # and shadow the rates this test sets up.
     await pg_session.execute(
         text("""
             INSERT INTO rate_cards (provider, model_name, created_at, updated_at)
-            VALUES ('bedrock', 'claude-sonnet-4.5', NOW(), NOW())
+            VALUES ('test_provider', 'test-system-model', NOW(), NOW())
             RETURNING id
         """)
     )
     rate_card_result = await pg_session.execute(
-        text("SELECT id FROM rate_cards WHERE provider = 'bedrock' AND model_name = 'claude-sonnet-4.5'")
+        text("SELECT id FROM rate_cards WHERE provider = 'test_provider' AND model_name = 'test-system-model'")
     )
     rate_card_id = rate_card_result.scalar_one()
 
@@ -289,8 +295,8 @@ async def test_no_agent_pricing_uses_system(pg_session: AsyncSession):
     # Call without sub_agent_config_version_id
     cost = await service.calculate_cost(
         db=pg_session,
-        provider="bedrock",
-        model_name="claude-sonnet-4.5",
+        provider="test_provider",
+        model_name="test-system-model",
         billing_unit_breakdown=billing_unit_breakdown,
     )
 

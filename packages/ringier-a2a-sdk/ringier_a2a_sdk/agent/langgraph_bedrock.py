@@ -62,7 +62,7 @@ class LangGraphBedrockAgent(PostgreSQLCheckpointerMixin, LangGraphAgent):
     - AWS_BEDROCK_REGION: AWS region (default: eu-central-1)
     - BEDROCK_MODEL_ID: Model ID (default: claude-sonnet-4-5)
     - BEDROCK_THINKING_LEVEL: Thinking level (minimal/low/medium/high, optional)
-    - BEDROCK_READ_TIMEOUT, BEDROCK_CONNECT_TIMEOUT, etc.: Bedrock client config
+    - BEDROCK_MAX_RETRY_ATTEMPTS, BEDROCK_RETRY_MODE: Bedrock client retry config
 
     Subclasses must still implement:
     - _get_mcp_connections(): Return MCP server connection configuration
@@ -135,9 +135,13 @@ class LangGraphBedrockAgent(PostgreSQLCheckpointerMixin, LangGraphAgent):
         return model
 
     def _create_bedrock_client(self) -> boto3.client:
-        """Create configured Bedrock client from environment variables."""
-        read_timeout = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))
-        connect_timeout = int(os.getenv("BEDROCK_CONNECT_TIMEOUT", "10"))
+        """Create a configured Bedrock client.
+
+        Timeouts are fixed: a long read_timeout for slow streaming Claude responses (boto's
+        60s default is too tight) and a short connect_timeout. Subclasses that need different
+        values can override this method."""
+        read_timeout = 300
+        connect_timeout = 10
         max_attempts = int(os.getenv("BEDROCK_MAX_RETRY_ATTEMPTS", "3"))
         retry_mode = os.getenv("BEDROCK_RETRY_MODE", "adaptive")
 

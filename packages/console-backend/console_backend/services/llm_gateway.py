@@ -44,6 +44,30 @@ async def gateway_registered_aliases(timeout: float = 10.0) -> set[str] | None:
         return None
 
 
+async def gateway_model_provider(alias: str, timeout: float = 10.0) -> str | None:
+    """The ``litellm_provider`` family for a registered alias (read with the virtual key), or
+    ``None`` when unreadable / unknown.
+
+    Used to pick the embedding request profile (Gemini prefixes/fusion vs generic) without the
+    master key: ``model_info.litellm_provider`` is exposed on the virtual-key ``/v1/model/info``
+    (the same endpoint and field agent-common's ``get_model_provider`` already reads), so the
+    catalog worker can resolve it. Returns ``None`` on any failure → ``profile_for`` falls back
+    to the conservative generic profile rather than blocking the sync.
+    """
+    headers = {"Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}"}
+    url = f"{config.model_gateway.url.rstrip('/')}/v1/model/info"
+    try:
+        resp = await _client.get().get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        for m in resp.json().get("data", []):
+            if m.get("model_name") == alias:
+                return ((m.get("model_info") or {}).get("litellm_provider")) or None
+        return None
+    except Exception as e:
+        logger.warning("Gateway model list unreadable (%s); embedding provider unknown for %r", e, alias)
+        return None
+
+
 async def gateway_chat(
     prompt: str,
     *,

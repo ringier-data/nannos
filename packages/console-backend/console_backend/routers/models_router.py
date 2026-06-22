@@ -6,7 +6,6 @@ A short in-process TTL cache keeps the per-request cost off the proxy.
 """
 
 import logging
-import os
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -49,7 +48,7 @@ class AvailableModel(BaseModel):
     output_price_per_million: float | None = None
 
 
-def _to_available(model: dict, default_model: str) -> AvailableModel | None:
+def _to_available(model: dict, default_model: str | None) -> AvailableModel | None:
     """Map a gateway /model/info entry → picker model. Skips non-chat (e.g. embeddings)."""
     info = model.get("model_info") or {}
     if info.get("mode") and info.get("mode") != "chat":
@@ -97,11 +96,12 @@ async def list_available_models(request: Request, db: DbSession, _user: User = D
             return cached[1]
         raise HTTPException(status_code=503, detail="Model Gateway unavailable") from e
 
-    # The authoritative chat default is the admin-editable model_defaults store (what the
-    # apps actually resolve via agent-common); env is only the fallback. Reading env here
-    # would badge a different model than apps use whenever an admin sets the default.
+    # The chat default is the admin-editable model_defaults store ("chat" role) — the single
+    # source of truth the apps resolve via agent-common. None when no default is set yet; that's
+    # expected (nothing gets badged is_default) and must NOT error, so an admin can still load
+    # this list to pick a model and configure the default in the first place.
     defaults = await request.app.state.model_defaults_service.get_all(db)
-    default_model = defaults.get("chat") or os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")
+    default_model = defaults.get("chat")
     models = [m for m in (_to_available(d, default_model) for d in raw) if m is not None]
     _cache["models"] = (now, models)
     return models

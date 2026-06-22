@@ -146,9 +146,11 @@ def _estimate_text_token_units(kwargs: dict) -> int:
 
     Some embedding providers (notably Vertex/Gemini) report 0 tokens in usage, which would
     otherwise bill the call $0. When that happens we re-apply the pre-gateway in-app
-    heuristic (len(text) // 4) so text embeddings still carry a cost. Image/data-URI parts
-    are excluded — they're billed separately via `input_images`. Pre-tokenized input (lists
-    of integer token ids) is counted directly — one id is one token — so it isn't billed $0.
+    heuristic (~len(text) / 4) so text embeddings still carry a cost. Any non-empty text
+    rounds UP to at least 1 token (ceil division), so a 1-3 char input isn't floored to 0 and
+    billed $0. Image/data-URI parts are excluded — they're billed separately via
+    `input_images`. Pre-tokenized input (lists of integer token ids) is counted directly —
+    one id is one token — so it isn't billed $0.
     """
     raw = kwargs.get("input")
     if raw is None:
@@ -165,16 +167,23 @@ def _estimate_text_token_units(kwargs: dict) -> int:
                 chars += len(part)
             elif isinstance(part, int):
                 token_ids += 1
-    return chars // 4 + token_ids
+    # Ceil division: any non-empty text bills at least 1 token (a 1-3 char input must not
+    # floor to 0 and get billed $0).
+    return -(-chars // 4) + token_ids
 
 
 def _count_image_inputs(kwargs: dict) -> int:
     """Count image inputs in an embedding request.
 
     Multimodal (text+image) embeddings report 0 tokens on Vertex, so token-based
-    billing misses them — we bill each image explicitly via the `input_images` unit.
-    Images arrive as data-URI / gs:// strings (possibly nested in fused-input lists)
+    billing misses them — we bill each binary part explicitly via the `input_images` unit.
+    Binary parts arrive as data-URI / gs:// strings (possibly nested in fused-input lists)
     or as dicts.
+
+    The accepted prefixes mirror the exclusion in _estimate_text_token_units exactly: any
+    ``data:``/``gs://`` part the text estimator drops as non-text is billed here instead, so a
+    non-image data URI (e.g. ``data:application/pdf``, ``data:text/...``) is never counted by
+    neither and billed $0.
     """
     raw = kwargs.get("input")
     if raw is None:
@@ -184,7 +193,7 @@ def _count_image_inputs(kwargs: dict) -> int:
     for item in items:
         parts = item if isinstance(item, list) else [item]
         for part in parts:
-            if isinstance(part, str) and part.startswith(("data:image", "gs://")):
+            if isinstance(part, str) and part.startswith(("data:", "gs://")):
                 count += 1
             elif isinstance(part, dict) and ("image" in part or part.get("type") == "image"):
                 count += 1
@@ -207,6 +216,18 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
     # "bedrock/anthropic.claude-..."); using the deployment id risks a rate-card miss → $0.
     model_name = metadata.get("model_group") or kwargs.get("model")
 
+    # Provider is required for system rate-card resolution; LiteLLM does not always populate
+    # custom_llm_provider on passthrough/routed calls. Fall back to the provider prefix of the
+    # resolved deployment id ("bedrock/anthropic.claude-..." → "bedrock") so the record stays
+    # priceable instead of landing at $0 and silently under-counting budget spend.
+    provider = kwargs.get("custom_llm_provider") or litellm_params.get("custom_llm_provider")
+    if not provider:
+        deployment_id = kwargs.get("model") or ""
+        if "/" in deployment_id:
+            provider = deployment_id.split("/", 1)[0]
+    if not provider:
+        logger.warning("[cost] could not resolve provider for model=%s; cost may not resolve", model_name)
+
     usage = _as_dict(getattr(response_obj, "usage", None))
     breakdown = _billing_unit_breakdown(usage)
     # Multimodal embeddings report 0 tokens (Vertex), so bill images explicitly.
@@ -226,7 +247,7 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
 
     return {
         "user_sub": user_sub,
-        "provider": kwargs.get("custom_llm_provider") or litellm_params.get("custom_llm_provider"),
+        "provider": provider,
         "model_name": model_name,
         "billing_unit_breakdown": breakdown,
         "conversation_id": attribution.get("conversation_id"),

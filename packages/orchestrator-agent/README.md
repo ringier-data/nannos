@@ -114,12 +114,10 @@ cp .env.template .env
 Edit `.env` with your credentials:
 
 ```bash
-# LLM Configuration
-model_source=azure  # or "openai" or "google"
-AZURE_OPENAI_API_KEY=your-key
-AZURE_API_BASE=https://your-endpoint.openai.azure.com/
-AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
-AZURE_OPENAI_API_VERSION=2024-08-01-preview
+# LLM Configuration — all LLM traffic routes through the Model Gateway (LiteLLM proxy);
+# provider credentials and model routing live on the gateway, not here.
+LLM_GATEWAY_URL=http://litellm-proxy.nannos.svc
+# LLM_GATEWAY_API_KEY=sk-...   # proxy virtual/master key (from secret in prod)
 
 # OIDC Authentication
 OIDC_DOMAIN=rcplus.oidc.com
@@ -296,9 +294,8 @@ docker run -p 10001:10001 --env-file .env orchestrator-agent
 See `.env.template` for complete list of configuration options.
 
 Key variables:
-- `model_source`: LLM provider (azure/openai/google)
+- `LLM_GATEWAY_URL`: Model Gateway (LiteLLM proxy) endpoint — all LLM traffic routes here
 - `OIDC_*`: Oidc authentication settings
-- `DYNAMODB_TABLE_NAME`: Conversation checkpoint storage
 - `AGENT_REGISTRY_URL`: Sub-agent discovery endpoint
 - `LOG_LEVEL`: Logging verbosity (DEBUG/INFO/WARNING/ERROR)
 

@@ -19,7 +19,7 @@ is **deployment-specific and not committed here** — it's mounted at runtime:
 ## Runtime configuration (env)
 - `LITELLM_MASTER_KEY` — proxy admin/master key.
 - `DATABASE_URL` — Postgres connection for the Prisma store (model registry + SpendLogs); Prisma migrates on boot.
-- Provider auth for whatever you route: AWS creds + `AWS_BEDROCK_REGION` (Bedrock), `AZURE_API_BASE`/`AZURE_OPENAI_API_KEY` (Azure), `GCP_PROJECT_ID`/`GCP_KEY` (Vertex).
+- Provider auth for whatever you route: AWS creds + `AWS_BEDROCK_REGION` (Bedrock), `AZURE_API_BASE`/`AZURE_OPENAI_API_KEY` (Azure OpenAI, `azure/*`), `AZURE_AI_API_BASE`/`AZURE_AI_API_KEY` (Azure AI Studio, `azure_ai/*`), `GCP_PROJECT_ID`/`GCP_KEY` (Vertex).
 - `CONSOLE_BACKEND_URL` + `GATEWAY_INGEST_TOKEN` — cost-ingestion target and its shared secret.
 
 ## Build

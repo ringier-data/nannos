@@ -32,7 +32,12 @@ from agent_common.core.graph_utils import (
     build_common_middleware_stack,
     create_indexing_backend_factory,
 )
-from agent_common.core.model_factory import _has_aws_credentials, create_model, is_gemini_model
+from agent_common.core.model_factory import (
+    _has_aws_credentials,
+    create_model,
+    is_gemini_model,
+    require_default_model,
+)
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
@@ -40,7 +45,7 @@ from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddlewar
 from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
-from agent_common.models.base import ModelType, ThinkingLevel, get_resolved_default_model
+from agent_common.models.base import ModelType, ThinkingLevel
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
@@ -136,34 +141,28 @@ class GraphFactory:
         self._checkpointer_pool = None
         self._checkpointer: BaseCheckpointSaver = self._create_checkpointer(config)
 
-        # Create shared document store with PostgreSQL + pgvector (optional)
-        # When PostgreSQL is not configured, the store is None and the agent
-        # falls back to ephemeral StateBackend (no persistent document storage).
+        # Shared document store (PostgreSQL + pgvector), optional. When PostgreSQL isn't
+        # configured the store is None and the agent falls back to ephemeral StateBackend.
+        #
+        # Embeddings are resolved LAZILY (see _resolve_store_mode / ensure_store_ready), NOT
+        # here: at construction the gateway/console caches can be cold (pod boots before they
+        # are reachable), and resolving eagerly would latch the store off for the whole
+        # process lifetime on a transient cold-start failure. The store self-heals instead —
+        # it retries a cold gateway and upgrades to a semantic index once an embedding default
+        # is configured, without a restart.
         self._postgres_conn: str | None = None
         self._embeddings_model = None
         self._store_enabled = bool(config.POSTGRES_HOST and config.POSTGRES_PASSWORD)
+        # Store readiness state: None = undecided/transient (retry, don't cache), "absent" =
+        # no embedding default configured (stable, store-less, watched for one), "indexed" =
+        # embeddings resolved (terminal). Drives store building and graph caching.
+        self._store_mode: str | None = None
 
         if self._store_enabled:
             self._postgres_conn = (
                 f"postgresql://{config.POSTGRES_USER}:{config.POSTGRES_PASSWORD}"
                 f"@{config.POSTGRES_HOST}:{config.POSTGRES_PORT}/{config.POSTGRES_DB}"
             )
-            from agent_common.core.model_factory import create_embeddings
-
-            # Embeddings via the Model Gateway; cost captured proxy-side.
-            # No AWS-creds gate any more — the gateway owns provider credentials. Uses the
-            # configured default embedding model; create_embeddings() raises
-            # EmbeddingModelNotConfigured when no default is set, disabling the store.
-            try:
-                self._embeddings_model = create_embeddings()
-                logger.debug("Configured AsyncPostgresStore with gateway embeddings (lazy init)")
-            except Exception as e:
-                # No default embedding model / no gateway URL (or unreachable) → fall back to
-                # ephemeral store rather than crash graph construction at startup.
-                self._store_enabled = False
-                self._postgres_conn = None
-                self._embeddings_model = None
-                logger.warning("Gateway embeddings unavailable (%s); document store disabled", e)
         else:
             logger.info(
                 "PostgreSQL not configured – document store disabled. "
@@ -239,61 +238,120 @@ class GraphFactory:
         """Get the shared checkpointer instance."""
         return self._checkpointer
 
+    def _resolve_store_mode(self) -> None:
+        """Lazily resolve the embedding model that backs the document store's semantic index.
+
+        Sets self._store_mode to one of:
+          - "indexed": a default embedding model resolved → semantic index available (terminal).
+          - "absent":  the defaults endpoint answered and no embedding default is set — a
+                       stable, supported state (indexing is optional). Cacheable, but
+                       ensure_store_ready() upgrades it to "indexed" if an admin sets one.
+          - None:      transient/cold (gateway or console not reachable yet) — the caller must
+                       NOT build/cache a store and should retry on the next readiness check.
+
+        This is the single point that turns a cold-start hiccup into a retry instead of a
+        process-lifetime latch (the bug this whole machinery fixes)."""
+        if self._store_mode == "indexed":
+            return
+        from agent_common.core.model_factory import (
+            EmbeddingModelNotConfigured,
+            create_embeddings,
+            embedding_default_known_absent,
+        )
+
+        try:
+            self._embeddings_model = create_embeddings()
+            self._store_mode = "indexed"
+            logger.info("Document store: gateway embeddings resolved; semantic index enabled")
+        except EmbeddingModelNotConfigured:
+            if embedding_default_known_absent():
+                if self._store_mode != "absent":
+                    logger.info(
+                        "Document store: no default embedding model configured; semantic index "
+                        "disabled until one is set in the console"
+                    )
+                self._store_mode = "absent"
+            else:
+                self._store_mode = None  # transient/cold — retry later
+        except Exception as e:
+            self._store_mode = None  # transient (gateway unreachable, etc.) — retry later
+            logger.debug("Document store: embeddings not resolvable yet (%s); will retry", e)
+
+    def _reset_store(self) -> None:
+        """Drop the cached store and graphs so the next readiness check rebuilds with a
+        semantic index. Used when an embedding default appears after we settled store-less.
+        The connection pool is index-agnostic and is reused."""
+        self._store = None
+        self._store_mode = None
+        self._store_setup_complete = False
+        self._embeddings_model = None
+        self._graphs.clear()
+        self._task_scheduler_graphs.clear()
+
     @property
     def store(self):
-        """Get the shared document store instance (or None when PostgreSQL is not configured).
+        """Get the shared document store instance (or None).
 
-        Lazy initialization: creates the store on first access.
-        Note: Pool connections are created asynchronously on first use.
+        Returns None when PostgreSQL is not configured, AND when embeddings are still resolving
+        on a cold start (transient): in that case nothing is built or cached, so a later access
+        (driven by ensure_store_ready) retries. Builds + caches the store once the mode is
+        decided ("indexed" → with semantic index, "absent" → store-less).
 
-        IMPORTANT: Call ensure_store_setup() once before using the store for the first time.
+        IMPORTANT: call ensure_store_ready() before relying on the store — it opens the pool
+        and runs schema setup, and is what drives the transient retry / self-heal.
         """
         if not self._store_enabled:
             return None
+        if self._store is not None:
+            return self._store
 
-        if self._store is None:
-            from langgraph.store.postgres.aio import AsyncPostgresStore
-            from psycopg.rows import dict_row
-            from psycopg_pool import AsyncConnectionPool
+        if self._store_mode not in ("indexed", "absent"):
+            self._resolve_store_mode()
+        if self._store_mode is None:
+            return None  # transient — don't build/cache; ensure_store_ready() retries
 
-            # Create connection pool for AsyncPostgresStore (create once and reuse)
-            # Pool will be opened explicitly in ensure_store_setup()
-            if self._connection_pool is None:
-                self._connection_pool = AsyncConnectionPool(
-                    self._postgres_conn,
-                    min_size=2,
-                    max_size=10,
-                    open=False,  # Don't open in constructor (deprecated)
-                    kwargs={
-                        "autocommit": True,
-                        "prepare_threshold": 0,
-                        "row_factory": dict_row,
-                    },
-                )
+        from langgraph.store.postgres.aio import AsyncPostgresStore
+        from psycopg.rows import dict_row
+        from psycopg_pool import AsyncConnectionPool
 
-            index_config = None
-            if self._embeddings_model is not None:
-                from agent_common.core.model_factory import get_embedding_dimension
-
-                index_config = {
-                    # Single source of truth: same dimension create_embeddings() requests,
-                    # so the index and the produced vectors always agree.
-                    "dims": get_embedding_dimension(),
-                    "embed": self._embeddings_model,
-                    "fields": ["contextualized_content"],
-                }
-
-            self._store = AsyncPostgresStore(
-                conn=self._connection_pool,
-                index=index_config,
+        # Create connection pool for AsyncPostgresStore (create once and reuse)
+        # Pool will be opened explicitly in ensure_store_ready()
+        if self._connection_pool is None:
+            self._connection_pool = AsyncConnectionPool(
+                self._postgres_conn,
+                min_size=2,
+                max_size=10,
+                open=False,  # Don't open in constructor (deprecated)
+                kwargs={
+                    "autocommit": True,
+                    "prepare_threshold": 0,
+                    "row_factory": dict_row,
+                },
             )
-            if index_config:
-                logger.info(
-                    "Initialized AsyncPostgresStore with gateway embeddings (%d dims) and connection pool",
-                    index_config["dims"],
-                )
-            else:
-                logger.info("Initialized AsyncPostgresStore without semantic indexing (no embeddings)")
+
+        index_config = None
+        if self._embeddings_model is not None:
+            from agent_common.core.model_factory import get_embedding_dimension
+
+            index_config = {
+                # Single source of truth: same dimension create_embeddings() requests,
+                # so the index and the produced vectors always agree.
+                "dims": get_embedding_dimension(),
+                "embed": self._embeddings_model,
+                "fields": ["contextualized_content"],
+            }
+
+        self._store = AsyncPostgresStore(
+            conn=self._connection_pool,
+            index=index_config,
+        )
+        if index_config:
+            logger.info(
+                "Initialized AsyncPostgresStore with gateway embeddings (%d dims) and connection pool",
+                index_config["dims"],
+            )
+        else:
+            logger.info("Initialized AsyncPostgresStore without semantic indexing (no embeddings)")
         return self._store
 
     @property
@@ -318,29 +376,59 @@ class GraphFactory:
         return backend
 
     async def ensure_store_setup(self) -> None:
-        """Ensure all database schemas are set up (checkpointer + document store).
+        """Startup hook: set up the checkpointer once, then attempt document-store setup.
 
-        Opens connection pools, verifies PostgreSQL version, and creates tables.
-        Safe to call multiple times — subsequent calls are no-ops.
+        The store attempt is best-effort here — if the gateway/console is cold at boot it stays
+        unready and ensure_store_ready() (called per request) retries it. Safe to call multiple
+        times; the checkpointer setup is idempotent.
         """
         await self._setup_checkpointer()
+        await self.ensure_store_ready()
 
+    async def ensure_store_ready(self) -> None:
+        """Per-request, idempotent document-store readiness check. Cheap once the store is set
+        up (an early return).
+
+        This is what makes the store self-heal without a restart:
+          - a transient cold-start (gateway/console unreachable at boot) leaves the mode
+            undecided, so this is a no-op now and retried on the next request;
+          - if we settled store-less because no embedding default was configured, but an admin
+            has since set one, the cached store-less store + graphs are dropped and rebuilt
+            with a semantic index.
+
+        Graphs built while this hasn't reached a decided mode are intentionally not cached
+        (see get_graph), so they rebuild once the store resolves.
+        """
         if not self._store_enabled:
-            logger.info("Document store not configured – skipping schema setup")
             return
 
-        if not self._store_setup_complete:
-            store = self.store  # Access property to ensure store is initialized
+        from agent_common.core.model_factory import is_embeddings_configured
 
-            # Open connection pool if not already open
-            if self._connection_pool is not None and not self._connection_pool._opened:
-                await self._connection_pool.open()
-                logger.info("Opened AsyncConnectionPool for document store")
+        # Self-heal: an embedding default appeared after we settled store-less → rebuild indexed.
+        if self._store_mode == "absent" and is_embeddings_configured():
+            logger.info("Document store: embedding default now configured; rebuilding with semantic index")
+            self._reset_store()
 
-            # Set up the schema (idempotent; safe to call repeatedly)
-            await store.setup()
-            self._store_setup_complete = True
-            logger.info("AsyncPostgresStore schema setup completed successfully")
+        if self._store_setup_complete:
+            return
+
+        self._resolve_store_mode()
+        if self._store_mode is None:
+            return  # transient/cold — retry on the next request
+
+        store = self.store  # builds the store object (indexed iff embeddings resolved)
+        if store is None:
+            return  # defensive: still not ready
+
+        # Open connection pool if not already open
+        if self._connection_pool is not None and not self._connection_pool._opened:
+            await self._connection_pool.open()
+            logger.info("Opened AsyncConnectionPool for document store")
+
+        # Set up the schema (idempotent; safe to call repeatedly)
+        await store.setup()
+        self._store_setup_complete = True
+        logger.info("Document store ready (mode=%s)", self._store_mode)
 
     async def _setup_checkpointer(self) -> None:
         """Instantiate AsyncPostgresSaver, open pool, verify PG ≥ 11, run migrations.
@@ -412,7 +500,7 @@ class GraphFactory:
         # LLM cost is captured at the Model Gateway now (proxy CustomLogger);
         # the in-app CostTrackingCallback is intentionally NOT attached here to avoid
         # double-counting. (cost_logger remains for the embeddings path until Phase 5.)
-        return create_model(model_type, self.config.get_bedrock_region(), thinking_level, callbacks=None)
+        return create_model(model_type, thinking_level, callbacks=None)
 
     def _get_or_create_model(self, model_type: ModelType, thinking_level: Optional[ThinkingLevel]) -> BaseChatModel:
         """Get or create a model instance
@@ -736,14 +824,23 @@ class GraphFactory:
         Returns:
             CompiledStateGraph: The graph instance (cached or newly created)
         """
-        effective_model: ModelType = model_type or get_resolved_default_model()
+        effective_model: ModelType = model_type or require_default_model()
 
         cache_key = (effective_model, thinking_level)
 
-        if cache_key not in self._graphs:
-            logger.info(f"Creating graph for model: {effective_model}, thinking_level={thinking_level}")
-            self._graphs[cache_key] = self._create_graph(effective_model, thinking_level)
-        return self._graphs[cache_key]
+        if cache_key in self._graphs:
+            return self._graphs[cache_key]
+
+        logger.info(f"Creating graph for model: {effective_model}, thinking_level={thinking_level}")
+        graph = self._create_graph(effective_model, thinking_level)
+        # Don't cache a graph built while the store is still resolving (transient cold-start):
+        # it binds store=None permanently. A decided mode ("indexed"/"absent") is stable and
+        # safe to cache; ensure_store_ready() busts the cache if "absent" later upgrades.
+        if self._store_enabled and self._store_mode is None:
+            logger.warning("Graph for %s built before document store is ready; not caching (will retry)", effective_model)
+            return graph
+        self._graphs[cache_key] = graph
+        return graph
 
     def _create_task_scheduler_graph(self, model_type: ModelType) -> CompiledStateGraph:
         """Create a custom task scheduler agent graph with middleware.
@@ -841,7 +938,14 @@ class GraphFactory:
         effective_model: ModelType = model_type or DEFAULT_TASK_SCHEDULER_MODEL
         cache_key = (effective_model, None)  # No thinking level for task-scheduler
 
-        if cache_key not in self._task_scheduler_graphs:
-            logger.info(f"Creating task-scheduler graph for model: {effective_model}")
-            self._task_scheduler_graphs[cache_key] = self._create_task_scheduler_graph(effective_model)
-        return self._task_scheduler_graphs[cache_key]
+        if cache_key in self._task_scheduler_graphs:
+            return self._task_scheduler_graphs[cache_key]
+
+        logger.info(f"Creating task-scheduler graph for model: {effective_model}")
+        graph = self._create_task_scheduler_graph(effective_model)
+        # See get_graph: don't cache a store-less graph built during a transient cold start.
+        if self._store_enabled and self._store_mode is None:
+            logger.warning("Task-scheduler graph for %s built before store is ready; not caching", effective_model)
+            return graph
+        self._task_scheduler_graphs[cache_key] = graph
+        return graph

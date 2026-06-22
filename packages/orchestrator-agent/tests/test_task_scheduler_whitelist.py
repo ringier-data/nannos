@@ -26,6 +26,7 @@ def test_task_scheduler_whitelist_includes_scheduler_and_console_tools():
         name="Test User",
         email="test@example.com",
         access_token=SecretStr("test-token"),
+        model="claude-sonnet-4.5",
         tools=[scheduler_tool, console_tool, github_tool],
     )
 
@@ -81,6 +82,7 @@ def test_task_scheduler_whitelist_filters_correctly():
         name="Test User",
         email="test@example.com",
         access_token=SecretStr("test-token"),
+        model="claude-sonnet-4.5",
         tools=mock_tools,
     )
 

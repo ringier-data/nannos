@@ -46,8 +46,14 @@ spec:
           value: "https://agent-runner.${BASE_DOMAIN}"
         - name: CONSOLE_BACKEND_URL
           value: "https://console.${BASE_DOMAIN}"
+        # All LLM/embedding traffic routes through the Model Gateway (LiteLLM proxy) — the
+        # sole path for LLM calls. The virtual key (LLM_GATEWAY_API_KEY) is in agent-runner-secrets.
+        - name: LLM_GATEWAY_URL
+          value: "http://litellm-proxy.nannos.svc"
         - name: MCP_GATEWAY_URL
           value: "https://YOUR_ORG_ID.gatana.ai/mcp"
+        - name: MCP_GATEWAY_CLIENT_ID
+          value: "gatana"
         - name: POSTGRES_HOST
           value: "${POSTGRES_HOST}"
         - name: POSTGRES_PORT

@@ -120,7 +120,7 @@ def build_runtime_context(
     from agent_common.agents.dynamic_agent import create_dynamic_local_subagent
     from agent_common.agents.foundry_agent import create_foundry_local_subagent
     from agent_common.core.document_store_tools import create_document_store_tools
-    from agent_common.core.model_factory import create_model, get_default_model, resolve_chat_model
+    from agent_common.core.model_factory import create_model, require_default_model, resolve_chat_model
     from deepagents import CompiledSubAgent
     from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
@@ -234,7 +234,7 @@ def build_runtime_context(
         subagent_registry["task-scheduler"] = create_task_scheduler_subagent(
             task_scheduler_graph_provider=task_scheduler_graph_provider,
             user_context=task_scheduler_context,
-            model_type=user_config.model or get_default_model(),
+            model_type=user_config.model or require_default_model(),
             user_sub=user_config.user_sub,
             cost_logger=cost_logger,
         )
@@ -317,7 +317,7 @@ def build_runtime_context(
             logger.info(
                 f"Added {len(filtered_static_tools)} static tools to orchestrator_tools for sub-agents: {tool_names}"
             )
-        orchestrator_model_type = user_config.model or get_default_model()
+        orchestrator_model_type = user_config.model or require_default_model()
 
         for config in user_config.local_subagents:
             try:
@@ -372,7 +372,6 @@ def build_runtime_context(
                         callbacks = [CostTrackingCallback(cost_logger)]
                         subagent_model = create_model(
                             subagent_model_type,
-                            agent_settings.get_bedrock_region(),
                             thinking_level=thinking_level_to_use,
                             callbacks=callbacks,
                         )
@@ -384,7 +383,6 @@ def build_runtime_context(
                         # Fallback: create model without callbacks
                         subagent_model = create_model(
                             subagent_model_type,
-                            agent_settings.get_bedrock_region(),
                             thinking_level=thinking_level_to_use,
                         )
                         logger.warning(

@@ -30,7 +30,7 @@ from agent_common.backends.attachments_store import (
 )
 from agent_common.core.stream_watchdog import watch_stream
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
-from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel, get_resolved_default_model
+from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessageChunk
 from langgraph.errors import GraphRecursionError
@@ -137,7 +137,10 @@ class OrchestratorDeepAgent:
     ):
         self.config = AgentSettings()
         self._default_thinking_level: ThinkingLevel | None = thinking_level or DEFAULT_THINKING_LEVEL
-        self._default_model_type: ModelType = model or get_resolved_default_model()
+        # Left unresolved (may be None) so construction never depends on a configured default —
+        # the concrete fallback is applied at request time in GraphFactory.get_graph (via
+        # require_default_model), keeping cold-start/boot resilient to an unset chat default.
+        self._default_model_type: ModelType | None = model
 
         # Initialize GraphFactory - centralizes all graph-related concerns
         # (model creation, checkpointer, middleware, graph caching)
@@ -242,6 +245,12 @@ class OrchestratorDeepAgent:
         Returns:
             CompiledStateGraph: The compiled LangGraph for this model type
         """
+        # Ensure the document store is ready before building/serving the graph. This is
+        # idempotent and cheap once set up; on a cold start it retries (and rebuilds a
+        # store-less graph) until the gateway/embedding default resolves, so semantic memory
+        # self-heals without a restart instead of latching off for the process lifetime.
+        await self._graph_factory.ensure_store_ready()
+
         # Get the graph (created lazily if needed)
         # Tools/subagents are NOT passed here - they come from GraphRuntimeContext at runtime
         return self._get_graph(model_type, thinking_level)

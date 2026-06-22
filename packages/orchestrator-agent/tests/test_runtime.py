@@ -229,6 +229,7 @@ class TestBuildRuntimeContext:
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
+            model="claude-sonnet-4.5",  # Avoid require_default_model() lookup
             local_subagents=[
                 LocalLangGraphSubAgentConfig(
                     name="test-subagent",
@@ -313,6 +314,7 @@ class TestBuildRuntimeContext:
             name="Test User",
             email="test@example.com",
             access_token=SecretStr("test-token"),
+            model="claude-sonnet-4.5",  # Avoid require_default_model() lookup
             local_subagents=[
                 LocalLangGraphSubAgentConfig(
                     name="failing-subagent",

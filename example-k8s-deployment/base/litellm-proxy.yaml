@@ -39,6 +39,10 @@ spec:
           value: "eu-central-1"
         - name: AZURE_API_BASE
           value: "https://YOUR_AZURE.openai.azure.com"
+        # Azure AI Studio (azure_ai/* deployments) — distinct from the Azure OpenAI (azure/*)
+        # endpoint above. LiteLLM reads api_base/api_key from these for azure_ai models.
+        - name: AZURE_AI_API_BASE
+          value: "https://YOUR_AZURE_AI.services.ai.azure.com"
         - name: GCP_PROJECT_ID
           value: "YOUR_GCP_PROJECT"
         # Prisma store on the shared RDS, dedicated litellm user + schema.
@@ -47,8 +51,8 @@ spec:
         # Cost ingestion target (Phase 2).
         - name: CONSOLE_BACKEND_URL
           value: "https://console.${BASE_DOMAIN}"
-        # LITELLM_MASTER_KEY, AZURE_OPENAI_API_KEY, GCP_KEY, DATABASE_URL password,
-        # GATEWAY_INGEST_TOKEN (shared secret for cost ingestion) → litellm-proxy-secrets.
+        # LITELLM_MASTER_KEY, AZURE_OPENAI_API_KEY, AZURE_AI_API_KEY, GCP_KEY, DATABASE_URL
+        # password, GATEWAY_INGEST_TOKEN (shared secret for cost ingestion) → litellm-proxy-secrets.
         # The same GATEWAY_INGEST_TOKEN must also be in console-secrets.
         envFrom:
         - secretRef:

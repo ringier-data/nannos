@@ -260,9 +260,6 @@ class CatalogConfig(BaseModel):
             "CATALOG_TOKEN_KMS_KEY_ID", os.getenv("KMS_VAULT_KEY_ID", "alias/dev-nannos-sensitive-data-kms-key")
         )
     )
-    summarization_model_id: str = Field(
-        default_factory=lambda: os.getenv("CATALOG_SUMMARIZATION_MODEL_ID", "claude-haiku-4-5")
-    )  # Model Gateway alias (resolved by the proxy)
     sync_interval_seconds: int = Field(default_factory=lambda: int(os.getenv("CATALOG_SYNC_INTERVAL_SECONDS", "86400")))
     sync_tick_interval_seconds: int = Field(
         default_factory=lambda: int(os.getenv("CATALOG_SYNC_TICK_INTERVAL_SECONDS", "300"))

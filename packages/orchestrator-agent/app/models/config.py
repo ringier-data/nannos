@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from agent_common.a2a.models import LocalSubAgentConfig
-from agent_common.models.base import ModelType, ThinkingLevel
+from agent_common.models.base import ThinkingLevel
 from deepagents import CompiledSubAgent
 from langchain_core.messages import ContentBlock
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SecretStr
@@ -313,8 +313,9 @@ class AgentSettings:
     TOOL_SELECTION_THRESHOLD = int(os.getenv("TOOL_SELECTION_THRESHOLD", "20"))
     """Trigger tool-level LLM selection (Phase 2) in ToolsetSelectorMiddleware when remaining tools exceed this."""
 
-    TOOLSET_SELECTION_MODEL: ModelType = os.getenv("TOOLSET_SELECTION_MODEL", "gpt-4o-mini")  # type: ignore
-    """Model to use for server and tool selection (fast, cheap model preferred)."""
+    # Tool/server selection runs on the fleet's cheap chat tier, resolved at runtime via
+    # model_factory.get_default_fast_model() (see ToolsetSelectorMiddleware._create_selection_model).
+    # No env var or hardcoded alias: models are registered at runtime.
 
     # Cache configuration.
     # Per-user discovery + registry cache TTL (seconds). Kept well below a typical realm
@@ -589,11 +590,6 @@ class AgentSettings:
     def get_oidc_issuer(cls) -> str | None:
         """Get Okta/Keycloak issuer URL (None when not configured)."""
         return os.environ.get("OIDC_ISSUER")
-
-    @classmethod
-    def get_bedrock_region(cls) -> str:
-        """Get AWS Bedrock region."""
-        return os.environ.get("AWS_REGION", "eu-central-1")
 
     # Budget guard configuration.
     #

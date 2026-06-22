@@ -16,7 +16,7 @@ import re
 from typing import Any, Optional
 
 import nltk
-from langchain_aws import ChatBedrockConverse
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from ringier_a2a_sdk.cost_tracking import CostLogger, CostTrackingCallback
 
@@ -162,7 +162,7 @@ def _create_document_summary(sentences: list[str], max_chars: int = TITAN_EMBED_
 async def chunk_with_context(
     content: str,
     metadata: dict[str, Any],
-    model: ChatBedrockConverse,
+    model: BaseChatModel,
     embeddings_model: Embeddings | None = None,
     chunk_size_chars: int = DEFAULT_CHUNK_SIZE_CHARS,
     cost_logger: Optional[CostLogger] = None,
@@ -172,7 +172,7 @@ async def chunk_with_context(
     Args:
         content: The document text to chunk
         metadata: Metadata about the document (file_path, etc.)
-        model: ChatBedrockConverse model for generating context descriptions
+        model: Chat model for generating context descriptions
         embeddings_model: CostTrackingBedrockEmbeddings model for boundary detection (optional)
         chunk_size_chars: Target chunk size in characters
         cost_logger: Optional CostLogger for reporting LLM usage costs
@@ -312,7 +312,7 @@ async def _generate_chunk_contexts_batched(
     document_summary: str,
     chunks: list[str],
     metadata: dict[str, Any],
-    model: ChatBedrockConverse,
+    model: BaseChatModel,
     cost_logger: Optional[CostLogger] = None,
 ) -> list[str]:
     """Generate contextual descriptions for all chunks, processing in char-bounded batches.
@@ -326,7 +326,7 @@ async def _generate_chunk_contexts_batched(
         document_summary: ≤TITAN_EMBED_MAX_CHARS representative summary of the full document.
         chunks: Chunked text segments to describe.
         metadata: Document metadata (file_path, type, etc.).
-        model: ChatBedrockConverse model for generation.
+        model: Chat model for generation.
         cost_logger: Optional CostLogger for reporting LLM usage costs.
 
     Returns:

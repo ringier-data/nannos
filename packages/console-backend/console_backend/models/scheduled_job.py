@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .sub_agent import ModelName, ThinkingLevel
+from .sub_agent import ModelName, ModelTier, ThinkingLevel
 
 
 class JobType(str, Enum):
@@ -102,7 +102,11 @@ class AutomatedSubAgentConfig(BaseModel):
     name: str
     description: str = Field(max_length=200, description="Short description of the sub-agent's skill, max 200 chars.")
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: ModelName
+    # Bind to either a concrete model alias or a capability tier (mutually exclusive). A tier
+    # follows the fleet default for that tier, so it survives a model retirement/upgrade —
+    # unlike a pinned alias, which can become unregistered on the gateway.
+    model: ModelName | None = None
+    model_tier: ModelTier | None = None
     system_prompt: str = Field(
         max_length=500,
         description=("System prompt describing the task for the agent."),
@@ -117,6 +121,14 @@ class AutomatedSubAgentConfig(BaseModel):
     # Extended thinking configuration (only supported for Claude Sonnet and Gemini models)
     enable_thinking: bool | None = None
     thinking_level: ThinkingLevel | None = None
+
+    @model_validator(mode="after")
+    def _validate_model_or_tier(self) -> "AutomatedSubAgentConfig":
+        if self.model is not None and self.model_tier is not None:
+            raise ValueError("set either model or model_tier, not both")
+        if self.model is None and self.model_tier is None:
+            raise ValueError("one of model or model_tier is required")
+        return self
 
 
 class ScheduledJobCreate(BaseModel):

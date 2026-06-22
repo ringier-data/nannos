@@ -87,6 +87,10 @@ spec:
           value: "https://voice-agent.${BASE_DOMAIN}"
         - name: AGENT_RUNNER_URL
           value: "https://agent-runner.${BASE_DOMAIN}"
+        # All LLM/embedding traffic (model listing, debug agent, catalog embeddings) routes
+        # through the Model Gateway (LiteLLM proxy). Virtual key (LLM_GATEWAY_API_KEY) in console-secrets.
+        - name: LLM_GATEWAY_URL
+          value: "http://litellm-proxy.nannos.svc"
         - name: LANGSMITH_ORGANIZATION_ID
           value: ""
         - name: LANGSMITH_PROJECT_ID

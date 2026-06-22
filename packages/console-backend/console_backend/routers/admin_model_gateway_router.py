@@ -40,6 +40,21 @@ _COST_FIELD_TO_UNIT = {
 }
 
 
+def _with_provider_creds(litellm_params: dict) -> dict:
+    """Inject proxy-side credential refs the registration form doesn't supply.
+
+    Runtime-registered Vertex models must carry ``vertex_credentials`` so the proxy resolves
+    GCP creds from its ``GCP_KEY`` env — ADC is intentionally not wired (it hangs the proxy's
+    startup health check). Config-defined Vertex models already set this; the registration form
+    only sends vertex_location/vertex_project, so without this a runtime Vertex model falls back
+    to ADC and its test ping fails with "default credentials were not found".
+    """
+    params = dict(litellm_params)
+    if str(params.get("model", "")).startswith("vertex_ai/") and "vertex_credentials" not in params:
+        params["vertex_credentials"] = "os.environ/GCP_KEY"
+    return params
+
+
 def get_model_gateway_service(request: Request) -> ModelGatewayService:
     return request.app.state.model_gateway_service
 
@@ -111,7 +126,9 @@ async def cost_prefill(model_name: str, request: Request, user: User = Depends(r
     pricing: dict[str, RateCardPricingEntry] = {}
     for cost_field, (unit, flow) in _COST_FIELD_TO_UNIT.items():
         val = info.get(cost_field)
-        if val:
+        # ``is not None`` (not truthiness): a genuine 0.0 cost (free tier / 0.0 cache-read
+        # rate) is a meaningful explicit-zero rate, not a "missing" value to drop.
+        if val is not None:
             pricing[unit] = RateCardPricingEntry(
                 price_per_million=Decimal(str(val)) * Decimal(1_000_000),
                 flow_direction=flow,
@@ -148,7 +165,7 @@ async def register_model(
     # mode so chat vs embedding is explicit (the chat picker filters on mode=chat).
     model_info = {**body.model_info, "input_modes": body.input_modes, "mode": body.mode}
     try:
-        result = await svc.register_model(body.model_name, body.litellm_params, model_info)
+        result = await svc.register_model(body.model_name, _with_provider_creds(body.litellm_params), model_info)
     except ModelGatewayError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -193,7 +210,7 @@ async def edit_model(
 
     model_info = {**body.model_info, "input_modes": body.input_modes, "mode": body.mode}
     try:
-        await svc.update_model(model_id, body.litellm_params, model_info)
+        await svc.update_model(model_id, _with_provider_creds(body.litellm_params), model_info)
     except ModelGatewayError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

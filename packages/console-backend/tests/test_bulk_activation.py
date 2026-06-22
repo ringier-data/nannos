@@ -312,7 +312,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession,
     await pg_session.execute(
         text("""
             INSERT INTO sub_agents (id, name, type, owner_user_id, current_version, default_version)
-            VALUES (5, 'Test Agent 5', 'remote', 'owner-123', 1, 1)
+            VALUES (9005, 'Test Agent 5', 'remote', 'owner-123', 1, 1)
         """)
     )
     await pg_session.execute(
@@ -330,7 +330,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession,
         db=pg_session,
         actor=test_user,
         user_ids=user_ids,
-        sub_agent_id=5,
+        sub_agent_id=9005,
         activated_by=ActivationSource.GROUP,
         group_id=5,
     )
@@ -341,7 +341,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession,
         db=pg_session,
         actor=test_user,
         user_ids=user_ids,
-        sub_agent_id=5,
+        sub_agent_id=9005,
         group_id=5,
     )
     await pg_session.commit()
@@ -352,7 +352,7 @@ async def test_bulk_deactivate_deletes_when_last_group(pg_session: AsyncSession,
     result = await pg_session.execute(
         text("""
             SELECT COUNT(*) FROM user_sub_agent_activations
-            WHERE sub_agent_id = 5
+            WHERE sub_agent_id = 9005
         """)
     )
     assert result.scalar() == 0

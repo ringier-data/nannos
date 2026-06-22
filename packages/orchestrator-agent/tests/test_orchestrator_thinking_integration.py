@@ -158,6 +158,7 @@ class TestGraphCreationWithThinking:
         with patch.object(agent, "_graph_factory") as mock_factory:
             mock_graph = Mock()
             mock_factory.get_graph.return_value = mock_graph
+            mock_factory.ensure_store_ready = AsyncMock()  # awaited before graph build
 
             # Get graph with specific thinking level
             await agent.get_or_create_graph(
@@ -188,16 +189,16 @@ class TestGraphCreationWithThinking:
         mock_config.POSTGRES_SCHEMA = "public"
         mock_config.MAX_RETRIES = 3
         mock_config.BACKOFF_FACTOR = 2
-        mock_config.get_bedrock_region.return_value = "eu-central-1"
 
         # Graph creation resolves the model's provider via the gateway. Keep it hermetic:
         # LLM_GATEWAY_URL lets create_model build its client, and get_model_provider is
-        # mocked in both namespaces that call it (graph_factory + structured_response's
-        # select_response_format) so no network fetch is attempted.
+        # mocked in both namespaces that resolve it — model_factory (where graph_factory's
+        # is_gemini_model looks it up) and structured_response's select_response_format —
+        # so no network fetch is attempted.
         with (
             patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"),
             patch("app.core.graph_factory.create_deep_agent") as mock_create_deep_agent,
-            patch("app.core.graph_factory.get_model_provider", return_value="bedrock_converse"),
+            patch("agent_common.core.model_factory.get_model_provider", return_value="bedrock_converse"),
             patch("agent_common.a2a.structured_response.get_model_provider", return_value="bedrock_converse"),
         ):
             mock_create_deep_agent.return_value = Mock()

@@ -318,12 +318,12 @@ def _voice_agent_feature() -> FeatureStatus:
     """Voice agent: outbound calls with a sub-agent personality, dispatched by the scheduler
     to the system-owned `voice-agent` service.
 
-    Two observable dependencies from here: the service URL must be wired (VOICE_AGENT_URL,
-    synced to the seeded voice-agent at startup), and the Gemini Live API credentials must be
-    present — the voice-agent builds its Gemini Live client from GCP_KEY (the GCP service-account
-    JSON) and won't start without it. console-backend shares GCP_KEY with that deployment; '{}'
-    is the .env.template placeholder, not real creds. The voice-agent pod additionally needs
-    Twilio Voice credentials to place calls, which we can't introspect from here.
+    The only dependency observable from console-backend is whether the service URL is wired
+    (VOICE_AGENT_URL, synced to the seeded voice-agent at startup). The voice-agent pod has its
+    own runtime credentials — GCP_KEY for the Gemini Live API and Twilio Voice creds to place
+    calls — but console-backend neither holds nor reads those, and the voice-agent builds its
+    Gemini client lazily (per call), so their presence/validity can't be introspected from here.
+    We surface that as a caveat rather than guess at a status we can't actually verify.
     """
     name = "Voice agent (outbound calls)"
     if not os.getenv("VOICE_AGENT_URL"):
@@ -332,23 +332,15 @@ def _voice_agent_feature() -> FeatureStatus:
             name=name,
             status="disabled",
             detail="VOICE_AGENT_URL not set — outbound voice calls are unavailable.",
-            remediation="Set VOICE_AGENT_URL to the deployed voice-agent service (which needs GCP_KEY "
-            "for the Gemini Live API and Twilio Voice credentials).",
-        )
-    gcp_key = (os.getenv("GCP_KEY") or "").strip()
-    if not gcp_key or gcp_key == "{}":
-        return FeatureStatus(
-            key="voice_agent",
-            name=name,
-            status="degraded",
-            detail="voice-agent endpoint is set, but GCP_KEY (Gemini Live API credentials) is missing.",
-            remediation="Set GCP_KEY to the GCP service-account JSON so the voice-agent can reach the Gemini Live API.",
+            remediation="Set VOICE_AGENT_URL to the deployed voice-agent service.",
         )
     return FeatureStatus(
         key="voice_agent",
         name=name,
         status="ready",
         detail="Outbound phone calls with a sub-agent personality are enabled.",
+        caveat="Placing calls also requires the voice-agent pod's own Gemini Live (GCP_KEY) and "
+        "Twilio Voice credentials, which run on that service and can't be verified from here.",
     )
 
 

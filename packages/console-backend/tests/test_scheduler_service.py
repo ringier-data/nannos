@@ -133,7 +133,6 @@ class TestCreateJobAutoSubAgent:
 
         # Sub-agent was created once
         mock_sub_agent_service.create_sub_agent.assert_awaited_once()
-        call_kwargs = mock_sub_agent_service.create_sub_agent.call_args
 
         # The new sub-agent's ID was passed to repo.create_job
         create_call_fields = mock_repo.create_job.call_args[1]["fields"]
@@ -175,6 +174,43 @@ class TestCreateJobAutoSubAgent:
 
         create_call_kwargs = mock_sub_agent_service.create_sub_agent.call_args[1]
         assert create_call_kwargs["data"].type == SubAgentType.AUTOMATED
+
+    @pytest.mark.asyncio
+    async def test_auto_creation_with_capability_tier(
+        self, service: SchedulerService, mock_repo: AsyncMock, mock_sub_agent_service: AsyncMock, actor: User
+    ):
+        """A tier-bound automated config creates a sub-agent with model_tier set (model None),
+        so the scheduled agent follows the fleet default instead of a pinnable alias."""
+        from console_backend.models.sub_agent import ModelTier
+
+        db = AsyncMock()
+        created_agent = MagicMock()
+        created_agent.id = 55
+        mock_sub_agent_service.create_sub_agent.return_value = created_agent
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = [created_agent]
+        mock_repo.create_job.return_value = 1
+        mock_repo.get_job.return_value = _make_job(job_id=1, sub_agent_id=55)
+
+        create_data = ScheduledJobCreate(
+            sub_agent_id=None,
+            sub_agent_parameters=AutomatedSubAgentConfig(
+                name="Tiered Auto",
+                description="Bound to the standard tier",
+                model_tier=ModelTier.STANDARD,
+                system_prompt="Do the thing.",
+            ),
+            name="Tiered Job",
+            job_type=JobType.TASK,
+            schedule_kind=ScheduleKind.INTERVAL,
+            interval_seconds=3600,
+            prompt="Run",
+        )
+
+        await service.create_job(db=db, data=create_data, actor=actor)
+
+        created = mock_sub_agent_service.create_sub_agent.call_args[1]["data"]
+        assert created.model_tier == ModelTier.STANDARD
+        assert created.model is None  # tier-bound, not a pinned alias
 
 
 class TestCreateJobAccessControl:

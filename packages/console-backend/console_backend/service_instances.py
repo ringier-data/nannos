@@ -379,6 +379,9 @@ async def cleanup_services(app: "FastAPI") -> None:
     if hasattr(app.state, "oauth_service") and app.state.oauth_service is not None:
         await app.state.oauth_service.close()
 
+    if hasattr(app.state, "model_gateway_service") and app.state.model_gateway_service is not None:
+        await app.state.model_gateway_service.aclose()
+
 
 __all__ = [
     "cleanup_services",

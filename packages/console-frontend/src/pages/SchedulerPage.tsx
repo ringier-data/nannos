@@ -30,7 +30,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { useAvailableModels } from '@/config/models';
+import { useAvailableModels, modelSelectOptions, MODEL_TIER_OPTIONS } from '@/config/models';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -44,7 +44,10 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
@@ -54,6 +57,7 @@ import {
   type JobType,
   type ScheduleKind,
   type ScheduledJobCreateExtended,
+  type AutomatedSubAgentConfig,
   getDeliveryChannels,
   generateWatchParams,
   createScheduledJob,
@@ -184,7 +188,9 @@ const defaultForm: CreateJobForm = {
   voice_call: false,
   automated_name: '',
   automated_description: '',
-  automated_model: 'claude-sonnet-4.5',
+  // Holds a unified model selection: a capability tier encoded as `tier:<tier>`, or a concrete
+  // alias. Defaults to the standard tier (follows the fleet default → never a retired alias).
+  automated_model: 'tier:standard',
   automated_system_prompt: '',
   automated_mcp_tools: [],
   automated_enable_thinking: false,
@@ -212,6 +218,21 @@ function CreateJobDialog({
   const [form, setForm] = useState<CreateJobForm>({ ...defaultForm });
   const { models: availableModels } = useAvailableModels();
   const [error, setError] = useState<string | null>(null);
+
+  // automated_model holds either a capability tier (`tier:<tier>`) or a concrete alias.
+  const isTierSelected = form.automated_model.startsWith('tier:');
+  const modelAlias = isTierSelected ? '' : form.automated_model;
+  const modelTier = isTierSelected ? form.automated_model.slice('tier:'.length) : null;
+
+  // A tier always resolves (it follows the fleet default), so only a concrete alias can go
+  // stale. If the picked alias is no longer registered on the gateway, fall back to the
+  // standard tier rather than rendering an empty picker / submitting a dead model.
+  useEffect(() => {
+    if (isTierSelected) return;
+    if (availableModels.length > 0 && !availableModels.some((m) => m.value === form.automated_model)) {
+      setForm((f) => ({ ...f, automated_model: 'tier:standard' }));
+    }
+  }, [availableModels, form.automated_model, isTierSelected]);
   const [aiQuery, setAiQuery] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
 
@@ -341,7 +362,9 @@ function CreateJobDialog({
         body.sub_agent_parameters = {
           name: form.automated_name.trim(),
           description: form.automated_description.trim(),
-          model: form.automated_model,
+          // Send exactly one of model / model_tier (backend validates the XOR).
+          model: isTierSelected ? undefined : form.automated_model,
+          model_tier: isTierSelected ? (modelTier as NonNullable<AutomatedSubAgentConfig['model_tier']>) : undefined,
           system_prompt: form.automated_system_prompt.trim(),
           mcp_tools: form.automated_mcp_tools.length > 0 ? form.automated_mcp_tools : null,
           enable_thinking: form.automated_enable_thinking || null,
@@ -539,16 +562,33 @@ function CreateJobDialog({
                         onValueChange={(v) => update('automated_model', v)}
                       >
                         <SelectTrigger>
-                          <SelectValue />
+                          <SelectValue placeholder="Select a model or tier" />
                         </SelectTrigger>
                         <SelectContent>
-                          {availableModels.map((option) => (
-                            <SelectItem key={option.value} value={option.value}>
-                              {option.label}
-                            </SelectItem>
-                          ))}
+                          <SelectGroup>
+                            <SelectLabel>Tier (follows the fleet default for that tier)</SelectLabel>
+                            {MODEL_TIER_OPTIONS.map((opt) => (
+                              <SelectItem key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                          <SelectSeparator />
+                          <SelectGroup>
+                            <SelectLabel>Specific model</SelectLabel>
+                            {modelSelectOptions(modelAlias, availableModels, false).options.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
                         </SelectContent>
                       </Select>
+                      {isTierSelected ? (
+                        <p className="text-xs text-muted-foreground">
+                          Runs on whichever model is the current default for this tier — survives model upgrades.
+                        </p>
+                      ) : null}
                     </div>
                   </div>
 

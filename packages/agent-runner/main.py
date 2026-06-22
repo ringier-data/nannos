@@ -66,6 +66,19 @@ async def lifespan(app) -> AsyncIterator[None]:
     await agent.setup_checkpointer()
     await agent.ensure_store_setup()
     await agent.init_sandbox_pool()
+
+    # Prewarm the gateway model cache at startup (best-effort). The cold-path resolution does a
+    # blocking urllib fetch; warming it here keeps that off the event loop on the first real
+    # request (agent-runner has no other prewarm, unlike the orchestrator's create_app).
+    try:
+        from agent_common.core.model_factory import get_available_models
+
+        available = get_available_models()
+        if available:
+            logger.info("Prewarmed gateway models: %s", ", ".join(available))
+    except Exception as e:
+        logger.debug("Could not prewarm gateway models at startup: %s", e)
+
     logger.info("Application startup complete")
 
     yield

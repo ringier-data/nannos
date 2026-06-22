@@ -125,7 +125,10 @@ export async function generateWatchParams(
 export interface AutomatedSubAgentConfig {
   name: string;
   description: string;
-  model: string;
+  // Exactly one of model / model_tier (backend validates the XOR). A tier follows the fleet
+  // default for that tier, so it survives a model retirement — unlike a pinned alias.
+  model?: string | null;
+  model_tier?: 'low' | 'standard' | 'premium' | null;
   system_prompt: string;
   mcp_tools?: string[] | null;
   enable_thinking?: boolean | null;

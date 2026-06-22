@@ -39,7 +39,7 @@ from uuid import uuid4
 import aiobotocore.session
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStore
-from ringier_a2a_sdk.embeddings import GeminiEmbeddings
+from ringier_a2a_sdk.embeddings import GatewayEmbeddings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -431,11 +431,15 @@ class _SyncJobState:
     alias — there is no default-constructed fallback (indexing without a configured model
     is blocked upstream, not silently embedded with a guessed alias)."""
 
-    index_embeddings: GeminiEmbeddings
-    query_embeddings: GeminiEmbeddings
+    index_embeddings: GatewayEmbeddings
+    query_embeddings: GatewayEmbeddings
     user_sub: str | None = None
     catalog_id: str | None = None
     progress_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
+    # Concrete gateway alias for document summarization, resolved once per job from the
+    # 'chat:low' fleet default (falling back to 'chat'). ``None`` when no chat tier is set,
+    # in which case summarization degrades to the filename fallback rather than failing.
+    summarization_model: str | None = None
 
 
 class CatalogSyncPipeline:
@@ -481,10 +485,41 @@ class CatalogSyncPipeline:
         registered = await gateway_registered_aliases()
         return resolve_embedding_readiness(defaults, registered)
 
+    async def resolve_embedding_provider(self, alias: str) -> str | None:
+        """The ``litellm_provider`` family for the resolved embedding alias, or ``None``.
+
+        Selects the request profile the adapter uses (Gemini prefixes/fusion vs generic) — read
+        from the virtual-key ``/model/info`` so the worker needs no master key (see
+        ``gateway_model_provider``). ``None`` (gateway unreadable / unknown) degrades to the
+        generic profile rather than blocking the job; the prior readiness check already gates a
+        genuinely missing model.
+        """
+        from ..services.llm_gateway import gateway_model_provider
+
+        return await gateway_model_provider(alias)
+
+    async def resolve_summarization_alias(self) -> str | None:
+        """Concrete gateway alias for document summarization, or ``None`` if none is set.
+
+        Summarization is high-volume and cost-sensitive, so it rides the cheap ``chat:low``
+        fleet default (falling back to standard ``chat``) — the same model_defaults source of
+        truth indexing uses (``model_factory.get_default_indexing_model``), with no env-pinned
+        alias. Unlike embeddings this is best-effort: a missing/retired alias degrades to the
+        filename-fallback summary rather than blocking the job, so no gateway registration
+        check is needed here (a dead alias surfaces as a caught gateway error downstream).
+        """
+        from ..repositories.model_defaults_repository import ModelDefaultsRepository
+
+        async with self._db_session_factory() as db:
+            defaults = await ModelDefaultsRepository().get_all(db)
+        return defaults.get("chat:low") or defaults.get("chat")
+
     def setup_job(
         self,
         sync_job_id: str,
         embedding_model: str,
+        embedding_provider: str | None = None,
+        summarization_model: str | None = None,
         user_sub: str | None = None,
         catalog_id: str | None = None,
         progress_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
@@ -495,13 +530,19 @@ class CatalogSyncPipeline:
         ``reindex_unindexed_pages`` and cleaned up via ``teardown_job()`` when the sync
         finishes. `embedding_model` is the resolved default alias (see
         ``resolve_embedding_readiness``) and is required — callers must block the job when
-        embeddings aren't ready rather than relying on a fallback.
+        embeddings aren't ready rather than relying on a fallback. `embedding_provider` is that
+        alias's ``litellm_provider`` family (see ``resolve_embedding_provider``); it selects the
+        request profile (Gemini prefixes/fusion vs generic), and ``None`` falls back to the
+        conservative generic profile. `summarization_model` is the alias resolved once via
+        ``resolve_summarization_alias`` and cached for the job (``None`` falls back to a
+        filename-only summary).
         """
 
-        def _emb(role: str) -> GeminiEmbeddings:
-            return GeminiEmbeddings(
+        def _emb(role: str) -> GatewayEmbeddings:
+            return GatewayEmbeddings(
                 role=role,
                 model_id=embedding_model,
+                provider=embedding_provider,
                 cost_logger=self._cost_logger,
                 user_sub=user_sub,
                 catalog_id=catalog_id,
@@ -514,6 +555,7 @@ class CatalogSyncPipeline:
             index_embeddings=_emb("document"),
             query_embeddings=_emb("query"),
             progress_callback=progress_callback,
+            summarization_model=summarization_model,
         )
 
     def teardown_job(self, sync_job_id: str) -> None:
@@ -1883,16 +1925,17 @@ class CatalogSyncPipeline:
     async def _generate_document_summary(
         self, file: SourceFile, pages: list[ExtractedPage], sync_job_id: str | None = None
     ) -> str:
-        """Generate a 2-3 sentence document summary using Claude Haiku (Pass 1).
+        """Generate a 2-3 sentence document summary via the cheap chat tier (Pass 1).
 
-        Concatenates page texts (capped at ~8K chars) and asks Haiku to summarize.
+        Concatenates page texts (capped at ~8K chars) and asks the per-job summarization
+        model (see ``resolve_summarization_alias``) to summarize.
         """
         # Resolve per-job cost attribution
         state = self._job_state.get(sync_job_id) if sync_job_id else None
         job_user_sub = state.user_sub if state else None
         job_catalog_id = state.catalog_id if state else None
 
-        # Concatenate page texts, capping at ~8K chars to stay within Haiku's sweet spot
+        # Concatenate page texts, capping at ~8K chars to keep the summary prompt cheap
         combined = ""
         for page in pages:
             chunk = f"--- Page {page.page_number}: {page.title} ---\n{page.text_content}\n"
@@ -1903,13 +1946,18 @@ class CatalogSyncPipeline:
         if not combined.strip():
             return f"Document: {file.name}"
 
+        # Alias resolved once per job from the chat:low/chat fleet default (see
+        # resolve_summarization_alias). None when no chat tier is set — degrade gracefully.
+        model_id = state.summarization_model if state else None
+        if not model_id:
+            logger.warning("No summarization model configured, using fallback for %s", file.name)
+            return f"Document: {file.name}"
+
         prompt = (
             "Summarize this document in 2-3 sentences. Include: document type, "
             "subject matter, time period if mentioned, and key topics covered.\n\n"
             f"Document name: {file.name}\n\n{combined}"
         )
-
-        model_id = config.catalog.summarization_model_id
 
         # Summarize via the Model Gateway. Cost is captured proxy-side from
         # the spend_logs_metadata below — no in-app cost logging needed.

@@ -18,9 +18,22 @@ import urllib.request
 
 from langchain_core.language_models import BaseChatModel
 
-from agent_common.models.base import ModelType, ThinkingLevel, get_resolved_default_model
+from agent_common.models.base import ModelType, ThinkingLevel
+
+# The gateway URL/key resolvers live in the SDK (the lowest shared layer) so the chat path
+# (here) and the embeddings path (ringier_a2a_sdk.embeddings) can never drift — notably the
+# virtual-key default, which used to be copy-pasted and silently 401'd a path when missed.
+from ringier_a2a_sdk.utils.gateway import gateway_api_key as _gateway_api_key
+from ringier_a2a_sdk.utils.gateway import gateway_base_url as _gateway_base_url
 
 logger = logging.getLogger(__name__)
+
+
+class NoDefaultModelError(RuntimeError):
+    """Raised when a runtime caller needs the fleet default chat model but none is configured.
+
+    Signals a configuration gap (no "chat" default set in the console), not a transient error
+    — retrying won't help until an admin sets the default. See require_default_model()."""
 
 
 def _has_aws_credentials() -> bool:
@@ -42,23 +55,6 @@ def _has_aws_credentials() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _gateway_base_url() -> str:
-    url = os.getenv("LLM_GATEWAY_URL")
-    if not url:
-        raise RuntimeError(
-            "LLM_GATEWAY_URL is not set. The Model Gateway is the sole path for LLM "
-            "calls; point it at the litellm-proxy service."
-        )
-    return url.rstrip("/")
-
-
-def _gateway_api_key() -> str:
-    """The virtual/master key apps present to the gateway. Single resolver so every gateway
-    caller (chat, embeddings, the model-info fetch) sends the SAME credential — they used to
-    disagree (some defaulted to '' → silent 401s when the env was unset)."""
-    return os.getenv("LLM_GATEWAY_API_KEY", "sk-nannos-gateway")
-
-
 def assert_gateway_configured() -> None:
     """Fail fast at startup when the gateway URL is missing.
 
@@ -68,32 +64,39 @@ def assert_gateway_configured() -> None:
     _gateway_base_url()
 
 
+# Reasoning-effort tiers that are NOT portable across providers: OpenAI-family models
+# accept them as distinct tiers, but Anthropic/Bedrock/Vertex reject them as invalid values.
+# Each maps to the nearest portable tier it floors to when the model doesn't declare support.
+# Gated on the gateway model_info ``supports_<tier>_reasoning_effort`` flag — the same flags
+# console-backend's ``thinking_levels_for`` uses to decide which levels to offer, so the UI and
+# this runtime mapping never disagree.
+_NON_PORTABLE_EFFORT: dict[str, str] = {"minimal": "low", "xhigh": "high"}
+
+
 def get_reasoning_effort(
     thinking_level: ThinkingLevel | None, model_type: ModelType | None = None
 ) -> str | None:
-    """Map the app `thinking_level` (minimal/low/medium/high) to LiteLLM's `reasoning_effort`.
+    """Map the app `thinking_level` to LiteLLM's `reasoning_effort`.
 
-    low/medium/high are accepted by every reasoning provider and pass through. `minimal` is
-    NOT portable — OpenAI-family models accept it as a distinct (smallest) tier, but
-    Anthropic/Bedrock/Vertex reject it as an invalid value. So `minimal` is preserved only
-    when the gateway model_info declares ``supports_minimal_reasoning_effort`` — the same
-    capability flag console-backend's ``thinking_levels_for`` uses to decide which levels to
-    offer, so the UI and this runtime mapping never disagree. Otherwise it floors to `low`,
-    including when the model is unknown or the gateway snapshot is cold. The gateway drops the
-    param entirely for non-reasoning models (`drop_params`)."""
+    low/medium/high are accepted by every reasoning provider and pass through. The
+    non-portable tiers (`minimal`, `xhigh`) are preserved only when the gateway model_info
+    declares the matching ``supports_<tier>_reasoning_effort`` capability; otherwise each
+    floors to its nearest portable tier (`minimal`→`low`, `xhigh`→`high`), including when the
+    model is unknown or the gateway snapshot is cold. The gateway drops the param entirely for
+    non-reasoning models (`drop_params`)."""
     if not thinking_level:
         return None
     value = thinking_level.value if isinstance(thinking_level, ThinkingLevel) else str(thinking_level)
-    if value == "minimal":
+    floor = _NON_PORTABLE_EFFORT.get(value)
+    if floor is not None:
         info = _gateway_models().get(model_type) if model_type else None
-        if not (info and info.get("supports_minimal_reasoning_effort")):
-            return "low"
+        if not (info and info.get(f"supports_{value}_reasoning_effort")):
+            return floor
     return value
 
 
 def create_model(
     model_type: ModelType,
-    bedrock_region: str | None = None,  # accepted for call-site compatibility; gateway owns region
     thinking_level: ThinkingLevel | None = None,
     callbacks: list | None = None,
     streaming: bool = True,
@@ -320,44 +323,53 @@ def is_embeddings_configured(multimodal: bool = False) -> bool:
     return get_default_embedding_model(multimodal) is not None
 
 
-def resolve_chat_model(model_type: ModelType) -> ModelType:
-    """Map a requested chat alias to one that's actually registered, degrading to the
-    gateway's default-for-chat model when the requested one has been retired.
+def embedding_default_known_absent(multimodal: bool = False) -> bool:
+    """True only when the model-defaults endpoint was queried SUCCESSFULLY and still has no
+    embedding default — a genuine 'an admin must set one' state.
+
+    The counterpart to models_known_empty() for the defaults cache: it lets callers tell a
+    permanently-unconfigured embedding default (disable the feature) apart from a cold or
+    failed fetch (retry later) — without it, both look identical (get_default_embedding_model
+    returns None), which is what makes a transient cold-start latch the document store off."""
+    absent = get_default_embedding_model(multimodal) is None  # triggers a defaults fetch
+    return absent and _DEFAULTS_CACHE.get("last_error") is None
+
+
+def _resolve_alias(model_type: str, roles: tuple[str, ...], kind: str) -> str:
+    """Map a requested alias to one that's actually registered, degrading to the gateway's
+    default for the first of ``roles`` that has one when the requested alias is retired.
 
     When the gateway list can't be read we pass through unchanged — the gateway is the
     authority and will 400 on a genuinely unknown alias."""
     models = _gateway_models()
     if not models or model_type in models:
         return model_type
-    default = _default_alias_for("chat")
-    if default and default != model_type:
-        logger.warning(
-            "Chat model '%s' not registered on the gateway; falling back to default '%s'", model_type, default
-        )
-        return default
-    logger.warning("Chat model '%s' not registered and no gateway chat default set; passing through", model_type)
-    return model_type
-
-
-def resolve_embedding_model(model_type: str, multimodal: bool = False) -> str:
-    """Embedding counterpart to resolve_chat_model. A multimodal request prefers the
-    default-for-multimodal_embedding model, then the plain embedding default."""
-    models = _gateway_models()
-    if not models or model_type in models:
-        return model_type
-    roles = ("multimodal_embedding", "embedding") if multimodal else ("embedding",)
     for role in roles:
         default = _default_alias_for(role)
         if default and default != model_type:
             logger.warning(
-                "Embedding model '%s' not registered; falling back to default '%s' (role=%s)",
+                "%s model '%s' not registered on the gateway; falling back to default '%s' (role=%s)",
+                kind,
                 model_type,
                 default,
                 role,
             )
             return default
-    logger.warning("Embedding model '%s' not registered and no gateway embedding default set; passing through", model_type)
+    logger.warning("%s model '%s' not registered and no gateway default set; passing through", kind, model_type)
     return model_type
+
+
+def resolve_chat_model(model_type: ModelType) -> ModelType:
+    """Map a requested chat alias to one that's actually registered, degrading to the
+    gateway's default-for-chat model when the requested one has been retired."""
+    return _resolve_alias(model_type, ("chat",), "Chat")
+
+
+def resolve_embedding_model(model_type: str, multimodal: bool = False) -> str:
+    """Embedding counterpart to resolve_chat_model. A multimodal request prefers the
+    default-for-multimodal_embedding model, then the plain embedding default."""
+    roles = ("multimodal_embedding", "embedding") if multimodal else ("embedding",)
+    return _resolve_alias(model_type, roles, "Embedding")
 
 
 def get_available_models() -> list[ModelType]:
@@ -429,10 +441,32 @@ def is_gemini_model(model_type: ModelType) -> bool:
     return False
 
 
-def get_default_model() -> ModelType:
-    """Fleet default chat model: the gateway's default-for-chat flag if set, else the
-    configured DEFAULT_MODEL env (DB-stored default wins)."""
-    return _default_alias_for("chat") or get_resolved_default_model()
+def get_default_model() -> ModelType | None:
+    """Fleet default chat model: the console's default-for-chat alias, or ``None`` when none
+    is set.
+
+    The gateway / console model_defaults store ("chat" role) is the single source of truth —
+    there is no env var or hardcoded alias fallback (models are registered at runtime, so the
+    app keeps no static default). Read-only callers (badging, logging, indexing degradation)
+    tolerate ``None``; callers that must actually run a model use require_default_model()."""
+    return _default_alias_for("chat")
+
+
+def require_default_model() -> ModelType:
+    """The fleet default chat model, raising NoDefaultModelError when none is configured.
+
+    For runtime callers (agent construction, graph creation, sub-agent invocation) that need
+    a concrete model and cannot proceed without one. Per the runtime-registration policy there
+    is no fallback alias: an admin must set the "chat" default in the console. Crucially the
+    console backend itself must NOT call this — it has to stay reachable with no default set so
+    an admin can configure one (use get_default_model() there and tolerate ``None``)."""
+    model = get_default_model()
+    if model is None:
+        raise NoDefaultModelError(
+            "No default chat model is configured. An admin must set the 'chat' default in the "
+            "console (Models → Defaults) before agents can run."
+        )
+    return model
 
 
 def get_available_models_metadata() -> list[dict]:
@@ -446,12 +480,22 @@ def get_available_models_metadata() -> list[dict]:
     ]
 
 
-def get_default_indexing_model() -> ModelType:
+def get_default_fast_model() -> ModelType | None:
+    """Default model for cheap, low-latency utility LLM calls — file filtering, tool-risk
+    scoring, watch-condition evaluation, notification-message generation, etc.
+
+    Runs on the low chat tier (``chat:low``) — the fleet's designated cheap chat model —
+    falling back to the standard chat default when no low tier is set. No hardcoded alias and
+    no per-task model slot: the gateway + the existing chat tiers are the single source of
+    truth, so a retired/renamed alias never silently routes a task to an arbitrary model.
+    Returns ``None`` only when no chat default is configured at all; runtime callers that must
+    actually run a model pair this with require_default_model()."""
+    return _default_alias_for("chat:low") or get_default_model()
+
+
+def get_default_indexing_model() -> ModelType | None:
     """Model for semantic indexing/chunking (generating context descriptions).
 
-    Indexing is high-volume and cost-sensitive, so it runs on the low chat tier
-    (``chat:low``) — the fleet's designated cheap chat model — falling back to the standard
-    chat default only when no low tier is set. No hardcoded alias list and no separate
-    "indexing" slot: the gateway + the existing chat tiers are the single source of truth,
-    so a retired/renamed alias never silently routes indexing to an arbitrary model."""
-    return _default_alias_for("chat:low") or get_default_model()
+    Indexing is high-volume and cost-sensitive, so it runs on the cheap tier — see
+    get_default_fast_model()."""
+    return get_default_fast_model()

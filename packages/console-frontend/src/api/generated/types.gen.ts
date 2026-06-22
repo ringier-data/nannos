@@ -226,7 +226,8 @@ export type AutomatedSubAgentConfig = {
     /**
      * Model
      */
-    model: string;
+    model?: string | null;
+    model_tier?: ModelTier | null;
     /**
      * System Prompt
      *
@@ -4287,7 +4288,7 @@ export type SetDefaultRequest = {
     /**
      * Role
      *
-     * One of: chat, chat:low, chat:premium, embedding, multimodal_embedding, indexing
+     * One of: chat, chat:low, chat:premium, embedding, multimodal_embedding
      */
     role: string;
 };

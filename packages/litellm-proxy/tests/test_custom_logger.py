@@ -283,10 +283,58 @@ def test_output_only_does_not_borrow_total_as_input():
     assert bd["base_output_tokens"] == 50
 
 
+def _record_kwargs(**overrides):
+    """Minimal kwargs for _build_record with a billable usage + user attribution."""
+    kwargs = {
+        "model": "bedrock/anthropic.claude-3-5-sonnet",
+        "litellm_params": {"metadata": {"spend_logs_metadata": {"user_sub": "u1"}}},
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_provider_falls_back_to_deployment_prefix_when_unset():
+    """No custom_llm_provider → derive it from the deployment id prefix so the record is priceable."""
+
+    class _Resp:
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    rec = cl._build_record(_record_kwargs(), _Resp())
+    assert rec is not None
+    assert rec["provider"] == "bedrock"
+
+
+def test_provider_uses_explicit_custom_llm_provider_when_present():
+    class _Resp:
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    rec = cl._build_record(_record_kwargs(custom_llm_provider="anthropic"), _Resp())
+    assert rec is not None
+    assert rec["provider"] == "anthropic"
+
+
 def test_estimate_counts_pretokenized_integer_input():
     # Pre-tokenized embedding input (list of token ids) counts one token per id, never $0.
     assert cl._estimate_text_token_units({"input": [[1, 2, 3, 4], [5, 6]]}) == 6
 
 
 def test_estimate_text_input_still_uses_char_heuristic():
-    assert cl._estimate_text_token_units({"input": "x" * 40}) == 10  # 40 // 4
+    assert cl._estimate_text_token_units({"input": "x" * 40}) == 10  # ceil(40 / 4)
+
+
+def test_estimate_short_text_bills_at_least_one_token():
+    # A 1-3 char input must not floor to 0 tokens and get billed $0 (ceil division).
+    assert cl._estimate_text_token_units({"input": "ok"}) == 1
+    assert cl._estimate_text_token_units({"input": "x"}) == 1
+    assert cl._estimate_text_token_units({"input": "x" * 5}) == 2  # ceil(5 / 4)
+    assert cl._estimate_text_token_units({"input": ""}) == 0  # genuinely empty → 0
+
+
+def test_non_image_data_uri_is_billed_as_binary_input():
+    # data:application/pdf / data:text are excluded from the char estimate; they must be
+    # counted as a binary (input_images) part rather than billed nothing by both paths.
+    assert cl._estimate_text_token_units({"input": ["data:application/pdf;base64,AAAA"]}) == 0
+    assert cl._count_image_inputs({"input": ["data:application/pdf;base64,AAAA"]}) == 1
+    assert cl._count_image_inputs({"input": ["data:text/plain;base64,AAAA"]}) == 1
+    # image data URIs and gs:// still count (unchanged behavior).
+    assert cl._count_image_inputs({"input": ["data:image/png;base64,AAAA", "gs://bucket/x"]}) == 2

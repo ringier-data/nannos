@@ -4,7 +4,7 @@ A local sub-agent for analyzing files (images, PDFs, text, audio, video) using m
 This is a built-in capability, not an external A2A service, providing:
 
 1. Clean LangSmith observability (separate agent trace)
-2. True multimodal model (default: gemini-3-flash-preview) supporting audio/video natively
+2. A multimodal model (the fleet's cheap chat tier, resolved at runtime) supporting audio/video natively
 3. Consistent sub-agent interface with the rest of the system
 
 The sub-agent accepts any HTTPS URL directly (public URLs work as-is).
@@ -21,21 +21,24 @@ Supported file types:
 This module uses LocalA2ARunnable to provide the same response format
 as remote A2A agents, ensuring consistent middleware behavior.
 
-Configuration:
-- Model can be set via FILE_ANALYZER_MODEL environment variable
-- Default: gemini-3-flash-preview (true multimodal, supports audio/video)
+Model: the fleet's cheap/fast chat tier, resolved at runtime from the gateway
+(model_factory.get_default_fast_model). The configured default must be multimodal-capable
+(image/PDF/audio/video). No env var or hardcoded alias: models are registered at runtime.
 """
 
 import logging
-import os
 import re
 from typing import Any, Dict, List, Optional, cast
 
 import httpx
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
 from agent_common.a2a.stream_events import TaskResponseData
-from agent_common.core.model_factory import create_model, is_valid_model
-from agent_common.models.base import ModelType
+from agent_common.core.model_factory import (
+    create_model,
+    get_default_fast_model,
+    get_model_input_capabilities,
+    require_default_model,
+)
 from deepagents import CompiledSubAgent
 from langchain_core.messages import (
     ContentBlock,
@@ -61,11 +64,6 @@ FILE_ANALYZER_DESCRIPTION = (
     "Do NOT assume the file type - let the analyzer determine it. "
     "Works with any HTTPS URL - no presigning needed. Only S3 URIs (s3://...) need presigning first."
 )
-
-# Default model for file analysis (true multimodal with audio/video support)
-# Can be overridden via FILE_ANALYZER_MODEL environment variable
-# Note: Must be a model supporting file_url content (gpt-4o, claude-3.5-sonnet, or Gemini models)
-DEFAULT_FILE_ANALYZER_MODEL: ModelType = os.getenv("FILE_ANALYZER_MODEL", "gemini-3-flash-preview")  # type: ignore
 
 # Regex to extract URLs from text
 # Uses negative lookbehind to exclude trailing punctuation (periods, commas, etc.)
@@ -222,8 +220,9 @@ async def _detect_file_type(url: str, client: httpx.AsyncClient) -> str:
 def _create_file_analyzer_model(callbacks: Optional[List] = None):
     """Create the model for file analysis.
 
-    Uses gpt-4o-mini by default for cost optimization on vision tasks.
-    Can be overridden via FILE_ANALYZER_MODEL environment variable.
+    Runs on the fleet's cheap/fast chat tier, resolved at runtime from the gateway
+    (model_factory.get_default_fast_model). File analysis needs a multimodal-capable model
+    (image/PDF/audio/video), so the admin's chat / chat:low default must support file content.
 
     Args:
         callbacks: Optional list of callbacks to attach to the model
@@ -231,19 +230,9 @@ def _create_file_analyzer_model(callbacks: Optional[List] = None):
     Returns:
         BaseChatModel: The configured model for file analysis.
     """
-    # Get model from environment or use default
-    model_name = os.getenv("FILE_ANALYZER_MODEL", DEFAULT_FILE_ANALYZER_MODEL)
-
-    # Validate model if overridden
-    if model_name != DEFAULT_FILE_ANALYZER_MODEL:
-        if not is_valid_model(model_name):
-            logger.warning(
-                f"Invalid FILE_ANALYZER_MODEL '{model_name}'. Falling back to default: {DEFAULT_FILE_ANALYZER_MODEL}"
-            )
-            model_name = DEFAULT_FILE_ANALYZER_MODEL
-
+    model_name = get_default_fast_model() or require_default_model()
     logger.info(f"Creating file analyzer model: {model_name} with callbacks={callbacks}")
-    return create_model(model_name, callbacks=callbacks, streaming=False)  # type: ignore
+    return create_model(model_name, callbacks=callbacks, streaming=False)
 
 
 class FileAnalyzerRunnable(LocalA2ARunnable):
@@ -291,17 +280,29 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
     def get_supported_input_modes(self) -> List[str]:
         """Get list of input modes supported by the file analyzer.
 
-        Gemini 3 Flash (default model) natively supports all major file types:
-        text, images, PDFs/documents, audio, and video.
+        Derived from the resolved model's gateway-declared input_modes (set at registration),
+        so the advertised modes track the actual multimodal capability of whatever the admin
+        configured as the cheap chat tier — rather than assuming full audio/video support.
+        Falls back to text+image when no default is configured or the gateway snapshot is
+        unavailable.
 
         Returns:
             List of supported content types
         """
-        return ["text", "image", "file", "audio", "video"]
+        model_type = self.get_model_type()
+        if model_type:
+            try:
+                return get_model_input_capabilities(model_type)  # type: ignore[arg-type]
+            except Exception:
+                pass
+        return ["text", "image"]
 
     def get_model_type(self) -> str | None:
-        """Return the file analyzer model type for provider-specific transforms."""
-        return os.getenv("FILE_ANALYZER_MODEL", DEFAULT_FILE_ANALYZER_MODEL)
+        """Return the file analyzer model type for provider-specific transforms.
+
+        Resolves the same runtime alias _create_file_analyzer_model uses; None when no
+        default is configured (no transform applied)."""
+        return get_default_fast_model()
 
     @property
     def description(self) -> str:

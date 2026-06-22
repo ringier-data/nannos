@@ -40,7 +40,7 @@ from ringier_a2a_sdk.cost_tracking.logger import (
     start_cost_batching,
 )
 
-from agent_common.core.model_factory import create_model, get_default_indexing_model
+from agent_common.core.model_factory import create_model, get_default_indexing_model, require_default_model
 from agent_common.core.semantic_chunking import TITAN_EMBED_MAX_CHARS, chunk_with_context
 
 logger = logging.getLogger(__name__)
@@ -315,11 +315,14 @@ class IndexingStoreBackend(StoreBackend):
                     "source": "filesystem",
                 }
 
-            # Create model for contextualization (use haiku-4-5 for cost efficiency)
-            model = create_model(self._model_name or get_default_indexing_model())
+            # Create model for contextualization (prefers the cheap low chat tier).
+            # require_default_model() turns an unconfigured fleet default into a clear error
+            # instead of create_model(None) — get_default_indexing_model() can be None now that
+            # there's no env/hardcoded default fallback.
+            model = create_model(self._model_name or get_default_indexing_model() or require_default_model())
 
             # Perform semantic chunking with contextualization
-            chunks = await chunk_with_context(content, metadata, model, cost_logger=self._cost_logger)  # type: ignore[arg-type]
+            chunks = await chunk_with_context(content, metadata, model, cost_logger=self._cost_logger)
 
             logger.info(f"Generated {len(chunks)} semantic chunks for '{file_path}'")
 

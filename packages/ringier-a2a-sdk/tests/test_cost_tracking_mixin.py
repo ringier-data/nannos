@@ -32,28 +32,23 @@ class TestCostTrackingMixin:
         assert agent._langchain_callbacks == []
 
     def test_enable_cost_tracking(self):
-        """Test enabling cost tracking initializes logger and callbacks."""
+        """Test enabling cost tracking initializes the logger.
+
+        In-app LangChain callbacks are intentionally NOT wired up: all LLM traffic
+        goes through the Model Gateway, whose proxy-side CostLogger is the single
+        source of cost. Attaching CostTrackingCallback here would double-count.
+        """
         agent = TestAgent()
 
-        # Mock CostTrackingCallback at the import location
-        mock_callback_class = MagicMock()
-        mock_callback_instance = MagicMock()
-        mock_callback_class.return_value = mock_callback_instance
+        # Enable cost tracking
+        agent.enable_cost_tracking(backend_url="https://backend.test.com", batch_size=5, flush_interval=10.0)
 
-        with patch.dict(
-            "sys.modules",
-            {"ringier_a2a_sdk.cost_tracking.callback": MagicMock(CostTrackingCallback=mock_callback_class)},
-        ):
-            with patch("ringier_a2a_sdk.cost_tracking.CostTrackingCallback", mock_callback_class):
-                # Enable cost tracking
-                agent.enable_cost_tracking(backend_url="https://backend.test.com", batch_size=5, flush_interval=10.0)
-
-                # Verify state is updated
-                assert agent._cost_tracking_enabled
-                assert agent._cost_logger is not None
-                assert isinstance(agent._cost_logger, CostLogger)
-                assert len(agent._langchain_callbacks) == 1
-                assert agent._langchain_callbacks[0] == mock_callback_instance
+        # Verify state is updated
+        assert agent._cost_tracking_enabled
+        assert agent._cost_logger is not None
+        assert isinstance(agent._cost_logger, CostLogger)
+        # No in-app LangChain callback (gateway is the single source of cost)
+        assert agent._langchain_callbacks == []
 
     def test_enable_cost_tracking_import_error(self):
         """Test that ImportError for CostTrackingCallback is handled gracefully but cost tracking remains enabled."""
@@ -223,28 +218,21 @@ class TestCostTrackingMixin:
         await agent.flush_cost_tracking()
 
     def test_integration_with_langchain_model(self):
-        """Test integration pattern with LangChain models."""
+        """Test integration pattern with LangChain models.
+
+        Cost tracking is enabled but no in-app callbacks are attached: the Model
+        Gateway tracks cost proxy-side, so get_langchain_callbacks() returns empty.
+        """
         agent = TestAgent()
 
-        # Mock CostTrackingCallback at the import location
-        mock_callback_class = MagicMock()
-        mock_callback_instance = MagicMock()
-        mock_callback_class.return_value = mock_callback_instance
+        # Enable cost tracking
+        agent.enable_cost_tracking(backend_url="https://backend.test.com")
 
-        with patch.dict(
-            "sys.modules",
-            {"ringier_a2a_sdk.cost_tracking.callback": MagicMock(CostTrackingCallback=mock_callback_class)},
-        ):
-            with patch("ringier_a2a_sdk.cost_tracking.CostTrackingCallback", mock_callback_class):
-                # Enable cost tracking
-                agent.enable_cost_tracking(backend_url="https://backend.test.com")
+        # Get callbacks for model
+        callbacks = agent.get_langchain_callbacks()
 
-                # Get callbacks for model
-                callbacks = agent.get_langchain_callbacks()
-
-                # Verify we can pass callbacks to a model
-                assert len(callbacks) == 1
-                assert callbacks[0] == mock_callback_instance
+        # No in-app callbacks are wired (gateway is the single source of cost)
+        assert callbacks == []
 
     def test_create_runnable_config_basic(self):
         """Test create_runnable_config creates correct config structure."""
@@ -294,8 +282,13 @@ class TestCostTrackingMixin:
             assert config.configurable["checkpoint_ns"] == "test-namespace"
             assert config.configurable["__pregel_checkpointer"] == mock_checkpointer
 
-    def test_create_runnable_config_with_callbacks(self):
-        """Test create_runnable_config includes callbacks."""
+    def test_create_runnable_config_no_callbacks(self):
+        """Test create_runnable_config does not wire in-app cost callbacks.
+
+        The in-app CostTrackingCallback is intentionally NOT attached to avoid
+        double-counting; the Model Gateway tracks LLM cost proxy-side. The
+        cost_logger is still retained for non-LLM cost (e.g. embeddings).
+        """
         agent = TestAgent()
 
         # Enable cost tracking with a mock cost logger
@@ -307,18 +300,11 @@ class TestCostTrackingMixin:
             conversation_id="conv-456",
         )
 
-        # Should include the CostTrackingCallback
+        # No in-app callbacks are wired (gateway is the single source of cost)
         if isinstance(config, dict):
-            assert len(config["callbacks"]) == 1
-            # The callback should be a CostTrackingCallback instance
-            from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
-
-            assert isinstance(config["callbacks"][0], CostTrackingCallback)
+            assert config["callbacks"] == []
         else:
-            assert len(config.callbacks) == 1
-            from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
-
-            assert isinstance(config.callbacks[0], CostTrackingCallback)
+            assert config.callbacks == []
 
     def test_create_runnable_config_with_sub_agent_id(self):
         """Test create_runnable_config adds sub_agent tag from ContextVar."""

@@ -43,7 +43,7 @@ import textwrap
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
-from agent_common.core.model_factory import create_model
+from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -211,7 +211,7 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, None]):
 
         Phase 1 triggers when total tool count > TOOLSET_SELECTION_THRESHOLD.
         Phase 2 triggers when remaining tool count > TOOL_SELECTION_THRESHOLD.
-        Both phases use the same lightweight LLM (TOOLSET_SELECTION_MODEL).
+        Both phases use the same lightweight LLM (the fleet's cheap chat tier).
 
         Args:
             all_tools: All available tools (MCP + base)
@@ -341,8 +341,7 @@ class ToolsetSelectorMiddleware(AgentMiddleware[AgentState, None]):
             callbacks.append(CostTrackingCallback(self._cost_logger))
 
         return create_model(
-            model_type=AgentSettings.TOOLSET_SELECTION_MODEL,
-            bedrock_region=AgentSettings.get_bedrock_region(),
+            model_type=get_default_fast_model() or require_default_model(),
             thinking_level=None,
             callbacks=callbacks if callbacks else None,
         )

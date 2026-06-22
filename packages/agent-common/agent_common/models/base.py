@@ -23,26 +23,9 @@ class ThinkingLevel(str, Enum):
     xhigh = "xhigh"
 
 
-def _resolve_default_model() -> ModelType:
-    """The configured default model alias.
-
-    The Model Gateway is the source of truth for which models exist, so we
-    simply trust the configured DEFAULT_MODEL alias; the gateway validates it at call
-    time. No static registry to check against.
-    """
-    return os.getenv("DEFAULT_MODEL", "claude-sonnet-4.5")  # type: ignore[return-value]
-
-
-# Lazy default model — resolved on first access via _resolve_default_model()
-_default_model: ModelType | None = None
-
-
-def get_resolved_default_model() -> ModelType:
-    """Get the default model, resolving lazily on first call."""
-    global _default_model
-    if _default_model is None:
-        _default_model = _resolve_default_model()
-    return _default_model
+# There is no env var or hardcoded default model alias. The fleet default chat model is
+# owned entirely by the Model Gateway / console model_defaults store (the "chat" role) and
+# resolved at runtime via model_factory.get_default_model() / require_default_model().
 
 
 DEFAULT_THINKING_LEVEL: ThinkingLevel | None = (

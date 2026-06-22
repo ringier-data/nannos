@@ -18,7 +18,7 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.tools import BaseTool, StructuredTool
 from langsmith import traceable
-from ringier_a2a_sdk.embeddings import GeminiEmbeddings
+from ringier_a2a_sdk.embeddings import GatewayEmbeddings
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ _query_embeddings_alias: str | None = None
 def _get_query_embeddings(
     cost_logger: Any | None = None,
 ) -> Embeddings:
-    """Lazy-init query embedding singleton (Gemini Embedding 2, query role).
+    """Lazy-init query embedding singleton (gateway-backed, query role).
 
     Resolves the SAME default embedding alias the indexing side uses
     (CatalogSyncPipeline.resolve_embedding_readiness / get_default_embedding_model), so query
@@ -48,7 +48,7 @@ def _get_query_embeddings(
     user_sub is read from ContextVar at invoke time.
     """
     global _query_embeddings, _query_embeddings_alias
-    from agent_common.core.model_factory import get_default_embedding_model
+    from agent_common.core.model_factory import get_default_embedding_model, get_model_provider
 
     alias = get_default_embedding_model(multimodal=True)
     if not alias:
@@ -57,7 +57,11 @@ def _get_query_embeddings(
             "(Admin → Model Gateway). The catalog_search tool should have been disabled."
         )
     if _query_embeddings is None or alias != _query_embeddings_alias:
-        _query_embeddings = GeminiEmbeddings(role="query", model_id=alias, cost_logger=cost_logger)
+        # Provider family selects the request profile (must match the indexing side so query
+        # vectors are shaped like the index's). Read from the cached gateway registry.
+        _query_embeddings = GatewayEmbeddings(
+            role="query", model_id=alias, provider=get_model_provider(alias), cost_logger=cost_logger
+        )
         _query_embeddings_alias = alias
     return _query_embeddings
 

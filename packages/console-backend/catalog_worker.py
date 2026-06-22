@@ -239,12 +239,21 @@ async def _execute_sync(catalog_id: str, sync_job_id: str) -> None:
     # Set up progress callback (HTTP webhook to console-backend)
     progress_callback = _make_progress_callback(catalog_id, sync_job_id, catalog.owner_user_id)
 
+    # Resolve the summarization model once per job from the chat:low/chat fleet default
+    # (best-effort: None degrades to a filename-only summary, never blocks the sync).
+    summarization_alias = await pipeline.resolve_summarization_alias()
+    # Provider family of the embedding alias → picks the request profile (Gemini prefixes/fusion
+    # vs generic). None (unknown) degrades to the generic profile, never blocks the sync.
+    embedding_provider = await pipeline.resolve_embedding_provider(embedding_alias)
+
     pipeline.setup_job(
         sync_job_id=sync_job_id,
         user_sub=catalog.owner_user_id,
         catalog_id=catalog_id,
         progress_callback=progress_callback,
         embedding_model=embedding_alias,
+        embedding_provider=embedding_provider,
+        summarization_model=summarization_alias,
     )
 
     try:
@@ -367,11 +376,16 @@ async def _execute_reindex(catalog_id: str, sync_job_id: str) -> None:
 
     progress_callback = _make_reindex_progress_callback(catalog_id, sync_job_id, catalog.owner_user_id)
 
+    summarization_alias = await pipeline.resolve_summarization_alias()
+    embedding_provider = await pipeline.resolve_embedding_provider(embedding_alias)
+
     pipeline.setup_job(
         sync_job_id=sync_job_id,
         user_sub=catalog.owner_user_id,
         catalog_id=catalog_id,
         embedding_model=embedding_alias,
+        embedding_provider=embedding_provider,
+        summarization_model=summarization_alias,
     )
 
     try:

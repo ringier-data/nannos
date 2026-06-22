@@ -52,7 +52,7 @@ from agent_common.a2a.stream_events import (
 )
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
-from agent_common.core.model_factory import create_model
+from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -1092,12 +1092,11 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 Your response (JSON only):"""
             )
 
-            # Use fast Gemini model for filtering (low latency) with cost tracking
+            # Use the fleet's cheap/fast chat tier for filtering (low latency) with cost tracking
             if self.agent_settings and self.cost_logger:
                 callbacks = [CostTrackingCallback(self.cost_logger)]
                 model = create_model(
-                    "gemini-3-flash-preview",
-                    self.agent_settings.get_bedrock_region(),
+                    get_default_fast_model() or require_default_model(),
                     thinking_level=None,
                     callbacks=callbacks,
                     streaming=False,

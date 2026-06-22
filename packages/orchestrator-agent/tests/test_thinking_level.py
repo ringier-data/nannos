@@ -48,7 +48,7 @@ class TestCreateModelGateway:
     @patch.dict(os.environ, _GW_ENV)
     @patch("langchain_openai.ChatOpenAI")
     def test_thinking_model_sets_reasoning_effort(self, mock_chat):
-        create_model("claude-sonnet-4.6", "eu-central-1", thinking_level=ThinkingLevel.high)
+        create_model("claude-sonnet-4.6", thinking_level=ThinkingLevel.high)
         kwargs = mock_chat.call_args[1]
         assert kwargs["model"] == "claude-sonnet-4.6"
         assert kwargs["base_url"] == "http://litellm-proxy.test"
@@ -100,7 +100,6 @@ class TestThinkingLevelCaching:
         config.POSTGRES_SCHEMA = "public"
         config.MAX_RETRIES = 3
         config.BACKOFF_FACTOR = 2
-        config.get_bedrock_region.return_value = "eu-central-1"
 
         with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
             factory = GraphFactory(config)
@@ -125,7 +124,6 @@ class TestThinkingLevelCaching:
         config.POSTGRES_SCHEMA = "public"
         config.MAX_RETRIES = 3
         config.BACKOFF_FACTOR = 2
-        config.get_bedrock_region.return_value = "eu-central-1"
 
         with patch("agent_common.core.cost_tracking_embeddings.CostTrackingBedrockEmbeddings"):
             factory = GraphFactory(config)
