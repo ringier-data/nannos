@@ -20,6 +20,13 @@ ALL_PACKAGES="ringier-a2a-sdk soffice-worker console-backend voice-agent agent-r
 # Packages that only build Docker images but share another package's version (not independently released)
 VIRTUAL_PACKAGES="catalog-worker"
 
+# Non-released shared libraries that are consumed as editable path-dependencies
+# (and Docker build-contexts) by released packages. They are never tagged/bumped
+# themselves, so the release process must refresh their lockfiles after bumping
+# any package they depend on — otherwise their uv.lock pins a stale editable
+# version (e.g. ringier-a2a-sdk) and drifts out of sync.
+SHARED_LIBS="agent-common object-storage"
+
 # ── Package metadata (case-based, bash 3.2 compatible) ──────────────
 
 pkg_dir() {
@@ -30,6 +37,8 @@ pkg_dir() {
     catalog-worker)          echo "packages/console-backend" ;;
     console-frontend)        echo "packages/console-frontend" ;;
     ringier-a2a-sdk)         echo "packages/ringier-a2a-sdk" ;;
+    agent-common)            echo "packages/agent-common" ;;
+    object-storage)          echo "packages/object-storage" ;;
     client-slack)            echo "packages/client-slack" ;;
     client-slack-frontend)   echo "packages/client-slack-frontend" ;;
     client-email)           echo "packages/client-email" ;;
@@ -46,6 +55,23 @@ pkg_type() {
     console-frontend|client-slack-frontend|client-slack|client-email|client-google-chat) echo "node" ;;
     agent-runner|orchestrator-agent|console-backend|catalog-worker|ringier-a2a-sdk|voice-agent|soffice-worker|litellm-proxy) echo "python" ;;
     *) echo "ERROR: Unknown package '$1'" >&2; return 1 ;;
+  esac
+}
+
+# Direct editable path-dependencies of a package (from its pyproject [tool.uv.sources]).
+# Used to make release selection dependency-aware: a consumer must be rebuilt when
+# any of its (transitive) editable deps change, because those deps are bundled into
+# the consumer's image at build time via --build-context. Keep in sync with the
+# `editable = true` entries in each package's pyproject.toml.
+pkg_deps() {
+  case "$1" in
+    agent-common)        echo "ringier-a2a-sdk object-storage" ;;
+    console-backend)     echo "ringier-a2a-sdk object-storage" ;;
+    catalog-worker)      echo "ringier-a2a-sdk object-storage" ;;
+    voice-agent)         echo "ringier-a2a-sdk" ;;
+    agent-runner)        echo "ringier-a2a-sdk agent-common object-storage" ;;
+    orchestrator-agent)  echo "ringier-a2a-sdk agent-common object-storage" ;;
+    *) echo "" ;;
   esac
 }
 
@@ -77,7 +103,34 @@ get_last_tag() {
   git tag -l "${pkg}/v*" --sort=-v:refname | head -1
 }
 
-# Check if a package has changes since its last release tag
+# Recursively collect a package and all its transitive editable deps into the
+# space-padded global _SEEN_PKGS (e.g. " agent-runner ringier-a2a-sdk ... ").
+_collect_deps() {
+  local pkg="$1" dep
+  case "$_SEEN_PKGS" in *" $pkg "*) return ;; esac
+  _SEEN_PKGS="${_SEEN_PKGS}${pkg} "
+  for dep in $(pkg_deps "$pkg"); do
+    _collect_deps "$dep"
+  done
+}
+
+# Directories of a package plus all its transitive editable deps (deduped).
+# This is the full set of source that gets bundled into the package's image.
+pkg_all_dirs() {
+  local pkg="$1" p
+  _SEEN_PKGS=" "
+  _collect_deps "$pkg"
+  local out=""
+  for p in $_SEEN_PKGS; do
+    out="${out} $(pkg_dir "$p")"
+  done
+  echo "$out" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+}
+
+# Check if a package needs a new release since its last tag — true if its own
+# directory OR any of its (transitive) editable deps changed. Dependency-aware
+# so a dep-only change (e.g. ringier-a2a-sdk) still triggers a rebuild of every
+# consumer that bundles it.
 has_changes() {
   local pkg="$1"
   local tag
@@ -90,7 +143,7 @@ has_changes() {
   fi
 
   local dirs
-  dirs="$(pkg_dir "$pkg")"
+  dirs="$(pkg_all_dirs "$pkg")"
 
   if git diff --quiet "${tag}..HEAD" -- $dirs 2>/dev/null; then
     echo "false"
@@ -142,6 +195,19 @@ bump_version() {
   esac
 
   echo "$new_version"
+}
+
+# Refresh lockfiles of non-released shared libs so their editable path-dependency
+# versions stay in sync after releasing packages they depend on. Harmless no-op
+# when nothing changed. Call after all version bumps, before `git add`.
+refresh_shared_lockfiles() {
+  local lib dir
+  for lib in $SHARED_LIBS; do
+    dir="packages/${lib}"
+    if [[ -f "${dir}/uv.lock" ]]; then
+      (cd "$dir" && uv lock --quiet)
+    fi
+  done
 }
 
 # Determine bump action (major/minor/patch) from conventional commits since last tag

@@ -149,6 +149,10 @@ release bump="":
     done
     echo ""
 
+    # Refresh non-released shared libs' lockfiles so their editable path-dep
+    # versions stay in sync with the packages we just bumped.
+    refresh_shared_lockfiles
+
     RELEASE_MSG="release: $(IFS=', '; echo "${RELEASES[*]}")"
     git add -A
     COMMIT_SHA=$(git commit -m "$RELEASE_MSG" --quiet && git rev-parse HEAD)
@@ -239,6 +243,10 @@ release-pkg pkg bump="":
     NEW_VERSION=$(bump_version "$PKG" "$BUMP")
     TAG_NAME="${PKG}/v${NEW_VERSION}"
     printf "   → v%s\n\n" "$NEW_VERSION"
+
+    # Refresh non-released shared libs' lockfiles so their editable path-dep
+    # versions stay in sync with the package we just bumped.
+    refresh_shared_lockfiles
 
     git add -A
     git commit -m "release: $TAG_NAME" --quiet
