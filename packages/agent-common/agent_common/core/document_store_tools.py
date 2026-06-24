@@ -154,7 +154,9 @@ async def _read_personal_file_impl(
         if not content_lines:
             return f"File is empty: {file_path}"
 
-        content = "\n".join(content_lines)
+        # deepagents v2 stores `content` as a plain str; v1 (legacy) as list[str].
+        # Guard so we don't "\n".join() a string (which would split it per-character).
+        content = "\n".join(content_lines) if isinstance(content_lines, list) else str(content_lines)
         logger.info(f"Read personal file with permission: {file_path}")
         return content
 
@@ -469,8 +471,10 @@ async def _export_file_impl(
         if not content_lines:
             return f"Error: File '{file_path}' is empty"
 
-        # Join content lines (same format as FilesystemMiddleware)
-        file_content = "\n".join(content_lines)
+        # Join content lines (same format as FilesystemMiddleware).
+        # deepagents v2 stores `content` as a plain str; v1 (legacy) as list[str].
+        # Guard so we don't "\n".join() a string (which would split it per-character).
+        file_content = "\n".join(content_lines) if isinstance(content_lines, list) else str(content_lines)
 
     except Exception as e:
         logger.error(f"Failed to read persisted file '{file_path}' from filesystem: {e}")
