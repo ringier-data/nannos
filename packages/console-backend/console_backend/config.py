@@ -154,9 +154,6 @@ class SchedulerConfig(BaseModel):
     tick_interval_seconds: int = Field(default_factory=lambda: int(os.getenv("SCHEDULER_TICK_INTERVAL_SECONDS", "30")))
     claim_limit: int = Field(default_factory=lambda: int(os.getenv("SCHEDULER_CLAIM_LIMIT", "10")))
     agent_runner_url: str = Field(default_factory=lambda: os.getenv("AGENT_RUNNER_URL", "http://localhost:5005"))
-    ai_model_id: str = Field(
-        default_factory=lambda: os.getenv("SCHEDULER_AI_MODEL_ID", "claude-haiku-4-5")
-    )  # Model Gateway alias (resolved by the proxy)
 
 
 class OutboundScimConfig(BaseModel):

@@ -10,7 +10,6 @@ import re
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
-from ..config import config
 from ..db.session import DbSession
 from ..dependencies import require_auth, require_auth_or_bearer_token
 from ..models.scheduled_job import (
@@ -23,6 +22,7 @@ from ..models.scheduled_job import (
     ScheduledJobUpdate,
 )
 from ..models.user import User
+from ..repositories.model_defaults_repository import ModelDefaultsRepository
 from ..services.llm_gateway import gateway_chat
 from ..services.scheduler_engine import SchedulerEngine
 from ..services.scheduler_service import _UNSET, SchedulerService
@@ -47,6 +47,7 @@ def _get_scheduler_service(request: Request) -> SchedulerService:
 )
 async def generate_watch_params(
     data: GenerateWatchParamsRequest,
+    db: DbSession,
     current_user: User = Depends(require_auth),
 ) -> GenerateWatchParamsResponse:
     """Auto-generate watch parameters via the Model Gateway for a tool list and query."""
@@ -73,10 +74,23 @@ async def generate_watch_params(
         '"condition_expr": "$.result.status", "expected_value": "success", "notification_message": "Task completed successfully"}'
     )
 
+    # Resolve the model from the admin-managed fleet defaults rather than an env-pinned alias:
+    # watch-param generation is cheap, high-volume work, so it rides the 'chat:low' tier
+    # (falling back to standard 'chat') — the same model_defaults source of truth catalog
+    # summarization uses (see catalog.sync.resolve_summarization_alias). Unlike summarization
+    # this is a synchronous user request with no fallback path, so a missing default fails closed.
+    defaults = await ModelDefaultsRepository().get_all(db)
+    model = defaults.get("chat:low") or defaults.get("chat")
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No chat model is configured. An admin must set the 'chat' default in the console.",
+        )
+
     try:
         text = await gateway_chat(
             prompt,
-            model=config.scheduler.ai_model_id,
+            model=model,
             max_tokens=1024,
             metadata={"user_sub": current_user.sub},  # OIDC subject — the gateway/proxy attributes by sub, not internal id
         )
