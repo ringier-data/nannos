@@ -816,6 +816,20 @@ if [[ "$_HAS_AWS" == true ]]; then
   fi
 fi
 
+# Pod-level Vertex auth via ADC, mirroring deployment (k8s projects GCP_KEY to a file and points
+# GOOGLE_APPLICATION_CREDENTIALS at it; see the gitops litellm-proxy.yaml). Write the SA JSON to a
+# temp file and mount it so google.auth.default() resolves Vertex creds for BOTH config-defined and
+# runtime-registered (DB) models — the latter do NOT resolve os.environ/GCP_KEY, exactly as in
+# deployment, which is why console registrations must carry no vertex_credentials. Pointing ADC at
+# a real file also avoids the GCE-metadata-probe hang you get when only GCP_KEY is set. (The GCP_KEY
+# env below stays for config-defined model_list entries that still reference os.environ/GCP_KEY.)
+_GW_GCP_ENV=()
+if [[ -n "${GCP_KEY:-}" ]]; then
+  _GW_GCP_SA=$(mktemp /tmp/nannos-litellm-gcp-XXXXXX).json
+  printf '%s' "$GCP_KEY" > "$_GW_GCP_SA"
+  _GW_GCP_ENV=(-v "$_GW_GCP_SA:/secrets/gcp/sa.json:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp/sa.json)
+fi
+
 docker rm -f "$_GW_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$_GW_CONTAINER" \
   -p "${LLM_GATEWAY_PORT}:4000" \
@@ -836,6 +850,7 @@ docker run -d --name "$_GW_CONTAINER" \
   -e AZURE_AI_API_KEY="${AZURE_AI_API_KEY:-}" \
   -e GCP_PROJECT_ID="${GCP_PROJECT_ID:-}" \
   -e GCP_KEY="${GCP_KEY:-}" \
+  "${_GW_GCP_ENV[@]}" \
   -e DEFAULT_VERTEXAI_LOCATION="${DEFAULT_VERTEXAI_LOCATION:-eu}" \
   -e CONSOLE_BACKEND_URL="http://host.docker.internal:5001" \
   -e GATEWAY_INGEST_TOKEN="$GATEWAY_INGEST_TOKEN" \

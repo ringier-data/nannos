@@ -40,19 +40,14 @@ _COST_FIELD_TO_UNIT = {
 }
 
 
-def _with_provider_creds(litellm_params: dict) -> dict:
-    """Inject proxy-side credential refs the registration form doesn't supply.
-
-    Runtime-registered Vertex models must carry ``vertex_credentials`` so the proxy resolves
-    GCP creds from its ``GCP_KEY`` env — ADC is intentionally not wired (it hangs the proxy's
-    startup health check). Config-defined Vertex models already set this; the registration form
-    only sends vertex_location/vertex_project, so without this a runtime Vertex model falls back
-    to ADC and its test ping fails with "default credentials were not found".
-    """
-    params = dict(litellm_params)
-    if str(params.get("model", "")).startswith("vertex_ai/") and "vertex_credentials" not in params:
-        params["vertex_credentials"] = "os.environ/GCP_KEY"
-    return params
+# NOTE: Registrations carry NO per-model provider credentials. The proxy is the auth
+# authority for every provider: Vertex via pod ADC (GOOGLE_APPLICATION_CREDENTIALS, a file
+# projected from the GCP_KEY secret), Bedrock via the pod IAM role, Azure via the proxy's
+# AZURE_OPENAI_API_KEY env. In particular, do NOT inject vertex_credentials="os.environ/GCP_KEY":
+# DB-registered (runtime) models do not resolve os.environ/* refs (the proxy config is
+# settings-only, no model_list), so the literal string reaches json.loads() and fails with
+# "Unable to load vertex credentials ... JSONDecodeError". (Earlier code did this to work around
+# ADC not being wired; ADC is wired now — see gitops litellm-proxy.yaml.)
 
 
 def get_model_gateway_service(request: Request) -> ModelGatewayService:
@@ -165,7 +160,7 @@ async def register_model(
     # mode so chat vs embedding is explicit (the chat picker filters on mode=chat).
     model_info = {**body.model_info, "input_modes": body.input_modes, "mode": body.mode}
     try:
-        result = await svc.register_model(body.model_name, _with_provider_creds(body.litellm_params), model_info)
+        result = await svc.register_model(body.model_name, body.litellm_params, model_info)
     except ModelGatewayError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -210,7 +205,7 @@ async def edit_model(
 
     model_info = {**body.model_info, "input_modes": body.input_modes, "mode": body.mode}
     try:
-        await svc.update_model(model_id, _with_provider_creds(body.litellm_params), model_info)
+        await svc.update_model(model_id, body.litellm_params, model_info)
     except ModelGatewayError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

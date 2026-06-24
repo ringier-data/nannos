@@ -22,6 +22,17 @@ is **deployment-specific and not committed here** — it's mounted at runtime:
 - Provider auth for whatever you route: AWS creds + `AWS_BEDROCK_REGION` (Bedrock), `AZURE_API_BASE`/`AZURE_OPENAI_API_KEY` (Azure OpenAI, `azure/*`), `AZURE_AI_API_BASE`/`AZURE_AI_API_KEY` (Azure AI Studio, `azure_ai/*`), `GCP_PROJECT_ID`/`GCP_KEY` (Vertex).
 - `CONSOLE_BACKEND_URL` + `GATEWAY_INGEST_TOKEN` — cost-ingestion target and its shared secret.
 
+**Vertex auth is ADC, and the proxy is the authority.** Vertex credentials are resolved
+via `google.auth.default()` from `GOOGLE_APPLICATION_CREDENTIALS` (the `GCP_KEY` JSON written to a
+file): k8s projects the secret to `/secrets/gcp/sa.json`, and `scripts/start-local.sh` mounts the
+same file locally — so dev and prod authenticate identically. Consequently **model registrations
+must carry no per-model `vertex_credentials`** (console-backend sends none). Runtime-registered
+(DB) models do **not** resolve `os.environ/*` refs — the proxy config is settings-only with no
+`model_list` — so an injected `vertex_credentials: os.environ/GCP_KEY` reaches `json.loads()` and
+fails with "Unable to load vertex credentials … JSONDecodeError". Only config-defined `model_list`
+entries resolve `os.environ/GCP_KEY`; DB models rely solely on ADC. (Pointing ADC at a real file
+also avoids the GCE-metadata-probe startup hang you get when only `GCP_KEY` is set.)
+
 ## Build
 ```sh
 just build-pkg litellm-proxy            # local image
