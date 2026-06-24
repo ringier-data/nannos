@@ -173,15 +173,16 @@ const isEmbeddingRole = (role: DefaultRole): boolean => role === 'embedding' || 
 const perMillion = (v?: number | null): string | null =>
   v && v > 0 ? `$${(v * 1_000_000).toFixed(2)}/M` : null;
 
-// Human label for a default role / tier slot.
-const roleLabel = (role: DefaultRole): string =>
-  ({
+// Human label for a default role / tier slot. Accepts a plain string because the gateway
+// types `default_roles` loosely; unknown roles fall through to their raw value.
+const roleLabel = (role: string): string =>
+  (({
     chat: 'chat',
     'chat:low': 'low tier',
     'chat:premium': 'premium tier',
     embedding: 'embedding',
     multimodal_embedding: 'multimodal embedding',
-  })[role] ?? role;
+  }) as Record<string, string>)[role] ?? role;
 
 export function ModelGatewayPage() {
   const queryClient = useQueryClient();
@@ -306,7 +307,7 @@ export function ModelGatewayPage() {
     try {
       const { pricing } = await getCostPrefill(m.model_name);
       const prices: Record<string, string> = {};
-      for (const [unit, entry] of Object.entries(pricing)) prices[unit] = String(entry.price_per_million);
+      for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(entry.price_per_million);
       setForm((f) => ({ ...f, prices }));
     } catch {
       /* no seed — admin enters rates */
@@ -430,7 +431,7 @@ export function ModelGatewayPage() {
     try {
       const { pricing } = await getCostPrefill(form.model_name);
       const prices: Record<string, string> = {};
-      for (const [unit, entry] of Object.entries(pricing)) prices[unit] = String(entry.price_per_million);
+      for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(entry.price_per_million);
       setForm((f) => ({ ...f, prices: { ...f.prices, ...prices } }));
       toast.success('Pre-filled cost from the gateway');
     } catch {

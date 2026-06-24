@@ -913,6 +913,10 @@ export type CatalogModel = {
      */
     input_cost_per_token?: number | null;
     /**
+     * Input Cost Per Image
+     */
+    input_cost_per_image?: number | null;
+    /**
      * Output Cost Per Token
      */
     output_cost_per_token?: number | null;
@@ -1665,6 +1669,18 @@ export type GatewayModel = {
      */
     base_model?: string | null;
     /**
+     * Vertex Location
+     */
+    vertex_location?: string | null;
+    /**
+     * Vertex Project
+     */
+    vertex_project?: string | null;
+    /**
+     * Aws Region Name
+     */
+    aws_region_name?: string | null;
+    /**
      * Input Cost Per Token
      */
     input_cost_per_token?: number | null;
@@ -1680,6 +1696,26 @@ export type GatewayModel = {
      * Supports Vision
      */
     supports_vision?: boolean | null;
+};
+
+/**
+ * GatewayUiConfig
+ *
+ * Deployment-specific defaults the registration UI needs (env-driven, read-only).
+ */
+export type GatewayUiConfig = {
+    /**
+     * Default Vertex Location
+     *
+     * Suggested Vertex serving region for new Vertex models (e.g. 'eu')
+     */
+    default_vertex_location: string;
+    /**
+     * Default Vertex Project
+     *
+     * Suggested GCP project id for new Vertex models; '' when unset (no hardcoded default)
+     */
+    default_vertex_project?: string;
 };
 
 /**
@@ -10254,6 +10290,22 @@ export type RegisterModelApiV1AdminModelGatewayModelsPostResponses = {
 };
 
 export type RegisterModelApiV1AdminModelGatewayModelsPostResponse = RegisterModelApiV1AdminModelGatewayModelsPostResponses[keyof RegisterModelApiV1AdminModelGatewayModelsPostResponses];
+
+export type GatewayUiConfigApiV1AdminModelGatewayConfigGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/model-gateway/config';
+};
+
+export type GatewayUiConfigApiV1AdminModelGatewayConfigGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: GatewayUiConfig;
+};
+
+export type GatewayUiConfigApiV1AdminModelGatewayConfigGetResponse = GatewayUiConfigApiV1AdminModelGatewayConfigGetResponses[keyof GatewayUiConfigApiV1AdminModelGatewayConfigGetResponses];
 
 export type ModelCatalogApiV1AdminModelGatewayCatalogGetData = {
     body?: never;

@@ -1,23 +1,60 @@
 /**
  * Model Gateway admin API (runtime model registration).
  *
- * Hand-written wrappers for the console-backend admin endpoints
- * (`/api/v1/admin/model-gateway/*`) which the generated SDK doesn't describe yet.
- * Uses the shared `client` so the X-Admin-Mode interceptor is applied.
+ * Thin throw-on-error wrappers over the generated SDK operations for the model-gateway and
+ * model-discovery endpoints, kept only for stable call-site names and a small surface that
+ * returns `data` directly. They go through the generated bindings (same shared `client`, so
+ * the X-Admin-Mode interceptor still applies).
  *
- * TODO: replace with generated bindings after `npm run gen-sdk`.
+ * Types are RE-EXPORTED from the generated bindings, never hand-maintained here — a
+ * hand-written copy drifts from the backend. The few types below are NOT generated and stay
+ * hand-written on purpose:
+ *   - `DefaultRole` narrows the backend's free `string` role to the canonical fleet roles.
+ *   - `FeatureStatus` / `EmbeddingStatus` shape responses the backend serializes as loose
+ *     dicts (no schema in the OpenAPI doc), so there is nothing to re-export.
  */
-import { client } from './generated/client.gen';
+import {
+  consoleListModels,
+  costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGet,
+  deleteModelApiV1AdminModelGatewayModelsModelIdDelete,
+  editModelApiV1AdminModelGatewayModelsModelIdPut,
+  embeddingStatusApiV1ModelsEmbeddingsStatusGet,
+  gatewayUiConfigApiV1AdminModelGatewayConfigGet,
+  getSystemStatusApiV1AdminSystemStatusGet,
+  listModelsApiV1AdminModelGatewayModelsGet,
+  modelCatalogApiV1AdminModelGatewayCatalogGet,
+  registerModelApiV1AdminModelGatewayModelsPost,
+  setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost,
+  testModelApiV1AdminModelGatewayModelsModelNameTestPost,
+} from './generated/sdk.gen';
+import type {
+  AvailableModel,
+  CatalogModel,
+  CostPrefill,
+  GatewayModel,
+  GatewayUiConfig,
+  ModelRegistrationRequest,
+  ModelRegistrationResponse,
+  RateCardPricingEntryInput,
+} from './generated/types.gen';
 
-export type FlowDirection = 'input' | 'output' | 'other';
+export type {
+  AvailableModel,
+  CatalogModel,
+  CostPrefill,
+  GatewayModel,
+  GatewayUiConfig,
+  ModelRegistrationRequest,
+  ModelRegistrationResponse,
+};
 
-export interface RateCardPricingEntry {
-  price_per_million: number;
-  flow_direction: FlowDirection;
-}
+/** A rate-card pricing entry as submitted on registration (per-million price + flow). */
+export type RateCardPricingEntry = RateCardPricingEntryInput;
 
 // Canonical fleet-default roles — mirrors console-backend VALID_ROLES (models/model_gateway.py).
-// 'chat' is the standard chat tier; 'chat:low'/'chat:premium' are the low/premium tiers.
+// The backend types the role as a free `string`; we narrow it here so the registration UI's
+// role switches and labels stay exhaustive. 'chat' is the standard chat tier; 'chat:low'/
+// 'chat:premium' are the low/premium tiers.
 export type DefaultRole =
   | 'chat'
   | 'chat:low'
@@ -25,89 +62,11 @@ export type DefaultRole =
   | 'embedding'
   | 'multimodal_embedding';
 
-export interface GatewayModel {
-  model_name: string;
-  model_id?: string | null;
-  provider?: string | null;
-  litellm_model?: string | null;
-  mode?: string | null;
-  input_modes?: string[];
-  default_roles?: DefaultRole[];
-  db_model?: boolean;
-  base_model?: string | null;
-  vertex_location?: string | null;
-  vertex_project?: string | null;
-  aws_region_name?: string | null;
-  input_cost_per_token?: number | null;
-  output_cost_per_token?: number | null;
-  supports_reasoning?: boolean | null;
-  supports_vision?: boolean | null;
-}
-
-export interface ModelRegistrationRequest {
-  model_name: string;
-  litellm_params: Record<string, unknown>;
-  model_info?: Record<string, unknown>;
-  mode?: 'chat' | 'embedding';
-  input_modes: string[];
-  provider: string;
-  pricing: Record<string, RateCardPricingEntry>;
-  model_name_pattern?: string | null;
-}
-
-export interface ModelRegistrationResponse {
-  model_name: string;
-  rate_card_entry_ids: number[];
-  gateway_model_id?: string | null;
-  status: string;
-}
-
-export interface CostPrefill {
-  pricing: Record<string, RateCardPricingEntry>;
-  source: string;
-}
-
-export interface CatalogModel {
-  model_id: string;
-  provider?: string | null;
-  mode: string;
-  input_cost_per_token?: number | null;
-  input_cost_per_image?: number | null;
-  output_cost_per_token?: number | null;
-  cache_read_input_token_cost?: number | null;
-  cache_creation_input_token_cost?: number | null;
-  max_input_tokens?: number | null;
-  supports_vision: boolean;
-  supports_reasoning: boolean;
-  supports_audio_input: boolean;
-  supports_pdf_input: boolean;
-}
-
-const BASE = '/api/v1/admin/model-gateway';
-
-export interface AvailableModel {
-  value: string;
-  label: string;
-  provider: string;
-  supports_thinking: boolean;
-  thinking_levels?: string[] | null;
-  is_default: boolean;
-}
-
 /** The live model picker — models registered on the gateway (read by every model dropdown). */
 export async function listAvailableModels(): Promise<AvailableModel[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({ url: '/api/v1/models' });
+  const { data, error } = await consoleListModels();
   if (error) throw error;
-  return data as AvailableModel[];
-}
-
-/** Per-role default model aliases (role → alias). Used to gate embedding-dependent UI. */
-export async function listModelDefaults(): Promise<Record<string, string>> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({ url: '/api/v1/models/defaults' });
-  if (error) throw error;
-  return (data ?? {}) as Record<string, string>;
+  return (data ?? []) as AvailableModel[];
 }
 
 export interface EmbeddingStatus {
@@ -119,10 +78,9 @@ export interface EmbeddingStatus {
 
 /** Whether catalog embedding is usable: default set AND registered on the gateway. */
 export async function getEmbeddingStatus(): Promise<EmbeddingStatus> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({ url: '/api/v1/models/embeddings/status' });
+  const { data, error } = await embeddingStatusApiV1ModelsEmbeddingsStatusGet();
   if (error) throw error;
-  return data as EmbeddingStatus;
+  return data as unknown as EmbeddingStatus;
 }
 
 export type FeatureStatusLevel = 'ready' | 'limited' | 'degraded' | 'disabled';
@@ -139,45 +97,33 @@ export interface FeatureStatus {
 
 /** Admin system-status: per-feature readiness with remediation hints. */
 export async function getSystemStatus(): Promise<FeatureStatus[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({ url: '/api/v1/admin/system-status' });
+  const { data, error } = await getSystemStatusApiV1AdminSystemStatusGet();
   if (error) throw error;
   return ((data as { features?: FeatureStatus[] })?.features ?? []) as FeatureStatus[];
 }
 
 export async function listModelCatalog(): Promise<CatalogModel[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({ url: `${BASE}/catalog` });
+  const { data, error } = await modelCatalogApiV1AdminModelGatewayCatalogGet();
   if (error) throw error;
-  return data as CatalogModel[];
-}
-
-export interface GatewayUiConfig {
-  /** Deployment default Vertex serving region (env-driven), suggested for new Vertex models. */
-  default_vertex_location: string;
-  /** Deployment default GCP project (env-driven); '' when unset. Placeholder hint only. */
-  default_vertex_project?: string;
+  return (data ?? []) as CatalogModel[];
 }
 
 /** Deployment defaults the registration form needs (env-driven). */
 export async function getGatewayConfig(): Promise<GatewayUiConfig> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({ url: `${BASE}/config` });
+  const { data, error } = await gatewayUiConfigApiV1AdminModelGatewayConfigGet();
   if (error) throw error;
   return data as GatewayUiConfig;
 }
 
 export async function listGatewayModels(): Promise<GatewayModel[]> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({ url: `${BASE}/models` });
+  const { data, error } = await listModelsApiV1AdminModelGatewayModelsGet();
   if (error) throw error;
-  return data as GatewayModel[];
+  return (data ?? []) as GatewayModel[];
 }
 
 export async function getCostPrefill(modelName: string): Promise<CostPrefill> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).get({
-    url: `${BASE}/models/${encodeURIComponent(modelName)}/cost-prefill`,
+  const { data, error } = await costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGet({
+    path: { model_name: modelName },
   });
   if (error) throw error;
   return data as CostPrefill;
@@ -186,8 +132,7 @@ export async function getCostPrefill(modelName: string): Promise<CostPrefill> {
 export async function registerGatewayModel(
   body: ModelRegistrationRequest,
 ): Promise<ModelRegistrationResponse> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).post({ url: `${BASE}/models`, body });
+  const { data, error } = await registerModelApiV1AdminModelGatewayModelsPost({ body });
   if (error) throw error;
   return data as ModelRegistrationResponse;
 }
@@ -196,9 +141,8 @@ export async function updateGatewayModel(
   modelId: string,
   body: ModelRegistrationRequest,
 ): Promise<ModelRegistrationResponse> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).put({
-    url: `${BASE}/models/${encodeURIComponent(modelId)}`,
+  const { data, error } = await editModelApiV1AdminModelGatewayModelsModelIdPut({
+    path: { model_id: modelId },
     body,
   });
   if (error) throw error;
@@ -206,27 +150,24 @@ export async function updateGatewayModel(
 }
 
 export async function testGatewayModel(modelName: string): Promise<{ status: string }> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (client as any).post({
-    url: `${BASE}/models/${encodeURIComponent(modelName)}/test`,
+  const { data, error } = await testModelApiV1AdminModelGatewayModelsModelNameTestPost({
+    path: { model_name: modelName },
   });
   if (error) throw error;
-  return data as { status: string };
+  return (data ?? { status: 'ok' }) as { status: string };
 }
 
 export async function setGatewayModelDefault(modelId: string, role: DefaultRole): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (client as any).post({
-    url: `${BASE}/models/${encodeURIComponent(modelId)}/default`,
+  const { error } = await setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost({
+    path: { model_id: modelId },
     body: { role },
   });
   if (error) throw error;
 }
 
 export async function deleteGatewayModel(modelId: string): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { error } = await (client as any).delete({
-    url: `${BASE}/models/${encodeURIComponent(modelId)}`,
+  const { error } = await deleteModelApiV1AdminModelGatewayModelsModelIdDelete({
+    path: { model_id: modelId },
   });
   if (error) throw error;
 }
