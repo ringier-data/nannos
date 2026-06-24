@@ -609,7 +609,20 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
             showMessageToast(resolvedConversationId, content);
           };
 
-          if (streamedText && streamedText.trim()) {
+          // The backend tags the terminal status with `final_answer_source: "fallback"`
+          // when the streamed artifact is only a partial prefix of the real answer —
+          // notably delegations where the orchestrator streams an empty/stub message
+          // (e.g. include_subagent_output with message='') and the full answer is
+          // assembled into the terminal message. In that case the terminal message is
+          // authoritative, so we must NOT finalize from the (stub) streamed text, or the
+          // real answer (carried in data.status.message below) would be dropped.
+          const statusMeta = ((data as any)?.metadata
+            || (data.status as any)?.metadata
+            || (data.status?.message as any)?.metadata) as Record<string, unknown> | undefined;
+          const fallbackSupersedes =
+            normalizedStatus === 'completed' && statusMeta?.final_answer_source === 'fallback';
+
+          if (streamedText && streamedText.trim() && !fallbackSupersedes) {
             // Orchestrator streamed its own response token-by-token
             finalizeMessage(streamedText);
             finalizedFromStream = true;
