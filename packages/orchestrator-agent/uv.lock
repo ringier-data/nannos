@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.13"
 
 [[package]]
@@ -1682,7 +1682,7 @@ wheels = [
 
 [[package]]
 name = "orchestrator-agent-a2a-server"
-version = "0.26.0"
+version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -2503,7 +2503,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "0.15.2"
+version = "1.0.0"
 source = { editable = "../ringier-a2a-sdk" }
 dependencies = [
     { name = "a2a-sdk" },
