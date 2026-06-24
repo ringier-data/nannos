@@ -199,6 +199,65 @@ async def test_heartbeat_tick_does_not_cancel_in_flight_read(caplog):
 
 
 @pytest.mark.asyncio
+async def test_on_heartbeat_invoked_per_tick_with_waited_seconds():
+    """While the sub-agent is silent but under the hard cap, ``on_heartbeat`` is
+    called once per tick with the cumulative seconds waited — this is what the
+    caller uses to emit a keepalive that resets the orchestrator watchdog. The
+    callback may be async."""
+    upstream = _NeverYields()
+    waited_values: list[float] = []
+
+    async def on_heartbeat(waited: float) -> None:
+        waited_values.append(waited)
+
+    collected = []
+    async for item in _iter_subagent_stream_with_stall_timeout(
+        upstream,
+        subagent_type="busy-agent",
+        orchestrator_conversation_id="conv-hb",
+        subagent_thread_id="t-hb",
+        tick_seconds=0.05,
+        hard_cap_seconds=0.18,  # ≥ 3 ticks → at least one heartbeat before the cap
+        on_heartbeat=on_heartbeat,
+    ):
+        collected.append(item)
+
+    # Heartbeat fired at least once before the hard cap, with a positive waited time.
+    assert waited_values, "expected on_heartbeat to be called at least once"
+    assert all(w > 0 for w in waited_values)
+    # Still ends with the single ErrorEvent (heartbeats are a side channel, not items).
+    assert len(collected) == 1 and isinstance(collected[0], ErrorEvent)
+    assert upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_on_heartbeat_failure_is_swallowed():
+    """A throwing heartbeat callback must not break the stall loop — keepalive
+    emission is best-effort."""
+    upstream = _NeverYields()
+
+    def boom(_waited: float) -> None:
+        raise RuntimeError("stream_writer exploded")
+
+    collected = []
+    async for item in _iter_subagent_stream_with_stall_timeout(
+        upstream,
+        subagent_type="busy-agent",
+        orchestrator_conversation_id="conv-boom",
+        subagent_thread_id="t-boom",
+        tick_seconds=0.05,
+        hard_cap_seconds=0.18,
+        on_heartbeat=boom,
+    ):
+        collected.append(item)
+
+    # Despite the callback raising every tick, the loop still completes with the
+    # single ErrorEvent and closes the upstream.
+    assert len(collected) == 1 and isinstance(collected[0], ErrorEvent)
+    assert upstream.closed is True
+
+
+@pytest.mark.asyncio
 async def test_stall_timeout_completes_cleanly_when_upstream_finishes():
     """A normal stream that ends via StopAsyncIteration produces no ErrorEvent."""
 

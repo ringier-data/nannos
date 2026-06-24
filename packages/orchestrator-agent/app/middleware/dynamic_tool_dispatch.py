@@ -53,6 +53,7 @@ from agent_common.a2a.stream_events import (
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
 from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
+from agent_common.core.stream_watchdog import inter_chunk_timeout
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -117,6 +118,7 @@ async def _iter_subagent_stream_with_stall_timeout(
     subagent_thread_id: str,
     tick_seconds: float = SUBAGENT_STREAM_TICK_SECONDS,
     hard_cap_seconds: float = SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS,
+    on_heartbeat: Optional[Callable[[float], Any]] = None,
 ) -> AsyncIterable[Any]:
     """Wrap a sub-agent async stream with a per-item stall timeout.
 
@@ -133,6 +135,12 @@ async def _iter_subagent_stream_with_stall_timeout(
     that share the same ``subagent_thread_id`` (the orchestrator fans out
     parallel ``task`` tool calls), so operators can group log lines by dispatch
     and downstream alerting can correlate logs to events.
+
+    ``on_heartbeat`` is invoked once per tick (with the cumulative seconds waited)
+    while the sub-agent is silent but still within the hard cap. The caller uses
+    it to emit a keepalive on the orchestrator's stream_writer so the orchestrator's
+    own inter-chunk watchdog (which only sees graph stream parts) does not trip on a
+    legitimately long, silent sub-agent step. May be sync or async.
     """
     iterator = aiter(stream_iter)
     loop = asyncio.get_event_loop()
@@ -223,6 +231,13 @@ async def _iter_subagent_stream_with_stall_timeout(
                     item_count,
                     hard_cap_seconds,
                 )
+                if on_heartbeat is not None:
+                    try:
+                        hb_result = on_heartbeat(waited)
+                        if inspect.iscoroutine(hb_result):
+                            await hb_result
+                    except Exception as hb_exc:  # keepalive is best-effort, never fatal
+                        logger.debug("[STREAMING] heartbeat callback failed: %s", hb_exc)
                 # Leave `pending` in place across the heartbeat — do NOT cancel it.
                 continue
 
@@ -1810,11 +1825,37 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             # each tick and yields an ErrorEvent through the existing error path
             # after the hard cap.
             sub_thread_id = agent_config.get("configurable", {}).get("thread_id", "?")
+
+            async def _emit_keepalive(waited: float) -> None:
+                # While the sub-agent is busy but silent (long model generation, a
+                # multi-pass eval, etc.) it produces no TaskUpdate/ArtifactUpdate, so
+                # the orchestrator graph yields no stream parts and its inter-chunk
+                # watchdog would trip. Push a lightweight keepalive part so the
+                # watchdog timer resets; the orchestrator consumer ignores it. The
+                # tick (< the watchdog budget) guarantees a reset before the trip.
+                if not stream_writer:
+                    return
+                try:
+                    result = stream_writer(
+                        ("keepalive", {"source": subagent_type, "waited_s": round(waited, 1)})
+                    )
+                    if inspect.iscoroutine(result):
+                        await result
+                except Exception as e:
+                    logger.debug(f"Failed to emit sub-agent keepalive: {e}")
+
+            # Fire the keepalive at most half the orchestrator watchdog's inter-chunk
+            # budget so a silent-but-busy sub-agent always produces ≥2 resets before the
+            # watchdog could trip — independent of how SUBAGENT_STREAM_TICK_SECONDS and
+            # LLM_INTER_CHUNK_TIMEOUT are individually configured.
+            keepalive_tick = min(SUBAGENT_STREAM_TICK_SECONDS, max(1.0, inter_chunk_timeout() / 2))
             wrapped_stream = _iter_subagent_stream_with_stall_timeout(
                 runnable.astream(agent_state, agent_config),  # type: ignore[arg-type]
                 subagent_type=subagent_type,
                 orchestrator_conversation_id=orchestrator_conversation_id,
                 subagent_thread_id=sub_thread_id,
+                tick_seconds=keepalive_tick,
+                on_heartbeat=_emit_keepalive,
             )
 
             async for item in wrapped_stream:

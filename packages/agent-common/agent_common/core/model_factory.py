@@ -29,6 +29,40 @@ from ringier_a2a_sdk.utils.gateway import gateway_base_url as _gateway_base_url
 logger = logging.getLogger(__name__)
 
 
+_gateway_chat_model_cls = None
+
+
+def _gateway_chat_openai_cls():
+    """Lazily build (and cache) the gateway-aware ``ChatOpenAI`` subclass.
+
+    langchain_openai's ``ChatOpenAI`` (>=1.2) targets the official OpenAI spec only and
+    DROPS non-standard streaming delta fields — notably ``reasoning_content`` /
+    ``thinking_blocks``, which our LiteLLM gateway emits for extended-thinking models.
+    Without this, the model genuinely reasons (the gateway streams it) but the reasoning
+    never reaches the app, so no thinking is ever surfaced. We graft the per-chunk
+    ``reasoning_content`` back into ``additional_kwargs`` so callers can render it; the
+    base conversion (content, tool calls, usage) is left untouched.
+    """
+    global _gateway_chat_model_cls
+    if _gateway_chat_model_cls is None:
+        from langchain_openai import ChatOpenAI
+
+        class _GatewayChatOpenAI(ChatOpenAI):
+            def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class, base_generation_info):
+                gen = super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info)
+                if gen is not None:
+                    choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning:
+                            gen.message.additional_kwargs["reasoning_content"] = reasoning
+                return gen
+
+        _gateway_chat_model_cls = _GatewayChatOpenAI
+    return _gateway_chat_model_cls
+
+
 class NoDefaultModelError(RuntimeError):
     """Raised when a runtime caller needs the fleet default chat model but none is configured.
 
@@ -107,7 +141,8 @@ def create_model(
     drops it for models that don't support reasoning (`drop_params`), so no per-model
     capability check is needed here.
     """
-    from langchain_openai import ChatOpenAI
+    # Gateway-aware subclass: preserves reasoning_content that base ChatOpenAI (>=1.2) drops.
+    ChatOpenAI = _gateway_chat_openai_cls()
 
     from ringier_a2a_sdk.cost_tracking.attribution import build_attribution_http_client
 

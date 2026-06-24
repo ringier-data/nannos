@@ -15,6 +15,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -28,7 +29,7 @@ from agent_common.backends.attachments_store import (
     reset_current_attachments_backend,
     set_current_attachments_backend,
 )
-from agent_common.core.stream_watchdog import watch_stream
+from agent_common.core.stream_watchdog import StreamStallError, inter_chunk_timeout, watch_stream
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
@@ -444,12 +445,50 @@ class OrchestratorDeepAgent:
             # CRITICAL: Pass BOTH config and context parameters:
             # - config: Infrastructure (checkpointing via thread_id, metadata for LangSmith)
             # - context: Runtime data (tools, user preferences, sub-agents)
-            async for part in watch_stream(
-                graph.astream(  # type: ignore
-                    input_data, config, stream_mode=["custom", "messages"], context=runtime_context, version="v2"
-                ),
-                label="orchestrator",
-            ):
+            # Auto-resume-once wrapper (defense-in-depth for a genuine orchestrator
+            # model hang). The inter-chunk watchdog should not trip during a long
+            # sub-agent step now that sub-agent dispatch emits keepalives (see
+            # DynamicToolDispatchMiddleware), but if the orchestrator's OWN model
+            # stream hangs we transparently resume from the checkpoint a single time
+            # (input=None) with a more generous idle budget, surfacing a "recovering"
+            # status. A second stall propagates to the warm hand-off handler below
+            # instead of cold-failing.
+            stall_resume_budget_multiplier = float(os.getenv("LLM_STALL_RESUME_BUDGET_MULTIPLIER", "3"))
+
+            async def _astream_with_resume():
+                stream_input = input_data
+                chunk_budget: float | None = None  # None → watchdog env default on the first pass
+                resumed = False
+                while True:
+                    try:
+                        async for raw_part in watch_stream(
+                            graph.astream(  # type: ignore
+                                stream_input,
+                                config,
+                                stream_mode=["custom", "messages"],
+                                context=runtime_context,
+                                version="v2",
+                            ),
+                            label="orchestrator",
+                            chunk_timeout=chunk_budget,
+                        ):
+                            yield raw_part
+                        return
+                    except StreamStallError as stall:
+                        if resumed:
+                            raise
+                        resumed = True
+                        logger.warning(
+                            "[ORCHESTRATOR] Stream stalled (%s); auto-resuming once from checkpoint", stall
+                        )
+                        # Synthetic custom part: tells the consumer loop below to reset
+                        # its parse/buffer state and surface a "recovering" status. Then
+                        # resume pending checkpoint work with a more generous idle budget.
+                        yield {"type": "custom", "ns": (), "data": ("stream_recovering", {})}
+                        stream_input = None
+                        chunk_budget = inter_chunk_timeout() * stall_resume_budget_multiplier
+
+            async for part in _astream_with_resume():
                 chunk_count += 1
                 part_type = part["type"]
 
@@ -468,6 +507,23 @@ class OrchestratorDeepAgent:
                     # via artifact_update events through the middleware.
                     if _metadata.get("thread_id") != orchestrator_thread_id:
                         continue
+
+                    # --- Extended-thinking reasoning ---
+                    # The gateway streams Claude's reasoning as a non-standard
+                    # ``reasoning_content`` delta which base ChatOpenAI drops; our
+                    # gateway-aware subclass (see model_factory) preserves it in
+                    # ``additional_kwargs``. Surface it as an orchestrator thinking block.
+                    reasoning_delta = (msg_chunk.additional_kwargs or {}).get("reasoning_content")
+                    if reasoning_delta:
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content=reasoning_delta,
+                            metadata={
+                                "streaming_chunk": True,
+                                "intermediate_output": True,
+                                "agent_name": "orchestrator",
+                            },
+                        )
 
                     # --- Tool call detection for status history ---
                     # Capture tool calls for activity-log display. Internal/leaked
@@ -575,6 +631,28 @@ class OrchestratorDeepAgent:
                         logger.warning(f"Ignoring unexpected custom event: {type(event)}, value: {event}")
                         continue
                     event_type, event_data = event
+
+                    if event_type == "stream_recovering":
+                        # Synthetic event from _astream_with_resume on a one-shot
+                        # auto-resume. Reset per-stream parse/buffer state so the
+                        # resumed (regenerated) segment streams cleanly without
+                        # colliding with the aborted stream's partial deltas, and
+                        # surface a warm "still working" status to the user.
+                        response_streamer = StructuredResponseStreamer("FinalResponseSchema")
+                        stream_buffer = StreamBuffer()
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content="Still working… recovering a slow step.",
+                            metadata={"activity_log": True},
+                        )
+                        continue
+
+                    if event_type == "keepalive":
+                        # Sub-agent dispatch heartbeat. Its only job is to be a graph
+                        # stream part so the inter-chunk watchdog timer resets while a
+                        # long, legitimately-silent sub-agent step runs. Nothing is
+                        # surfaced to the user — merely consuming it here is enough.
+                        continue
 
                     if event_type == "a2a_status":
                         # PROGRESSIVE STATUS UPDATE from A2A middleware
@@ -760,6 +838,25 @@ class OrchestratorDeepAgent:
                     state=TaskState.TASK_STATE_FAILED,
                     content="We are unable to process your request at the moment. Please try again.",
                 )
+
+        except StreamStallError as stall:
+            # The stream stalled again after the one-shot auto-resume (or a first-token
+            # stall before any progress). The graph is checkpointed at the last
+            # completed step, so hand off warmly as input_required — the user's next
+            # message resumes from the checkpoint — instead of the cold generic failure
+            # in the broad handler below.
+            logger.warning(
+                "[ORCHESTRATOR] Stream stalled after auto-resume (%s); handing off to user for continuation",
+                stall,
+            )
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                content=(
+                    "This is taking longer than I expected and I paused partway through. "
+                    "I've saved my progress — reply “continue” and I'll pick up where I left off."
+                ),
+                interrupt_reason="stream_stall",
+            )
 
         except GraphRecursionError as e:
             # Recursion limit reached — the graph state is already checkpointed at the
