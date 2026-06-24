@@ -49,15 +49,18 @@ class RiskyValuesOutput(BaseModel):
 class ToolRiskOutput(BaseModel):
     """Structured LLM output for tool risk scoring."""
 
+    # NOTE: No ge/le constraints here. Pydantic would emit them as JSON-schema
+    # `minimum`/`maximum`, which Bedrock's structured-output schema rejects
+    # ("For 'number' type, properties maximum, minimum are not supported").
+    # The valid range is documented in the description and clamped after the call.
     base_score: float = Field(
-        description="Inherent risk of this tool when no risky arg patterns match (0.0-1.0). "
+        description="Inherent risk of this tool when no risky arg patterns match. "
+        "Must be between 0.0 and 1.0. "
         "0.0 = completely safe (read-only info retrieval), "
         "0.3 = low risk (data reads with filters), "
         "0.5 = moderate (writes to user's own data), "
         "0.7 = elevated (writes to shared resources), "
         "1.0 = critical (destructive, irreversible, or security-sensitive operations).",
-        ge=0.0,
-        le=1.0,
     )
     risk_factors: dict[str, RiskyValuesOutput] = Field(
         default_factory=dict,
@@ -231,7 +234,7 @@ async def _score_tool_via_llm(
 
     now = datetime.now(timezone.utc)
     entry = ToolRiskEntry(
-        base_score=result.base_score,
+        base_score=max(0.0, min(1.0, result.base_score)),
         risk_factors=risk_factors,
         allowed_actions=["approve", "edit", "reject"],  # Default; overridden by DB if exists
         schema_hash="",  # Set by caller
