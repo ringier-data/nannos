@@ -7,6 +7,7 @@ import {
   Cpu,
   Eye,
   Brain,
+  Globe,
   Star,
   Pencil,
   Loader2,
@@ -44,6 +45,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -182,6 +184,7 @@ const roleLabel = (role: string): string =>
     'chat:premium': 'premium tier',
     embedding: 'embedding',
     multimodal_embedding: 'multimodal embedding',
+    search: 'search',
   }) as Record<string, string>)[role] ?? role;
 
 export function ModelGatewayPage() {
@@ -517,6 +520,8 @@ export function ModelGatewayPage() {
         </Button>
       </div>
 
+      <WebSearchSettings models={models} />
+
       {isLoading ? (
         <p className="text-muted-foreground">Loading…</p>
       ) : models.length === 0 ? (
@@ -570,6 +575,11 @@ export function ModelGatewayPage() {
                     {m.supports_vision && (
                       <Badge variant="outline">
                         <Eye className="mr-1 h-3 w-3" /> vision
+                      </Badge>
+                    )}
+                    {m.supports_web_search && (
+                      <Badge variant="outline">
+                        <Globe className="mr-1 h-3 w-3" /> web search
                       </Badge>
                     )}
                   </div>

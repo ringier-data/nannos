@@ -58,6 +58,7 @@ from console_backend.routers.admin_user_router import router as admin_user_route
 from console_backend.routers.analytics_router import router as analytics_router
 from console_backend.routers.auth_router import router as auth_router
 from console_backend.routers.bug_report_mcp_tools import router as bug_report_mcp_router
+from console_backend.routers.web_search_mcp_tools import router as web_search_mcp_router
 from console_backend.routers.bug_report_router import router as bug_report_router
 from console_backend.routers.catalog_router import router as catalog_router
 from console_backend.routers.conversation_router import router as conversation_router
@@ -338,6 +339,8 @@ app.include_router(delivery_channel_router)
 app.include_router(catalog_router)
 app.include_router(bug_report_router)
 app.include_router(bug_report_mcp_router)
+# web_search MCP tool (console_web_search) — must be registered before FastApiMCP below.
+app.include_router(web_search_mcp_router)
 app.include_router(feedback_router)
 app.include_router(playbook_router)
 app.include_router(skills_registry_router)

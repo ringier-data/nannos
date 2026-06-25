@@ -112,3 +112,57 @@ async def gateway_chat(
     # apply their own fallback, distinct from the gateway error path (which raises above).
     content = resp.json()["choices"][0]["message"].get("content")
     return content or ""
+
+
+async def gateway_web_search(
+    query: str,
+    *,
+    model: str,
+    search_context_size: str = "medium",
+    metadata: dict | None = None,
+    timeout: float = 60.0,
+) -> tuple[str, list[dict]]:
+    """Isolated web-search completion through the gateway → ``(answer_text, citations)``.
+
+    Sends ``web_search_options`` and NO function tools, so the provider performs server-side
+    search (Vertex drops googleSearch when function tools are present — the whole reason web
+    search runs as this dedicated, tool-free call rather than on a tool-using agent's model).
+
+    Citations are parsed from the raw response here: LiteLLM surfaces grounding sources as
+    OpenAI-style ``annotations`` of type ``url_citation``. Each citation is ``{"title", "url"}``,
+    deduped by URL. ``metadata`` rides on ``x-litellm-spend-logs-metadata`` for cost attribution
+    (same as ``gateway_chat``).
+    """
+    headers = {
+        "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
+        "Content-Type": "application/json",
+    }
+    if metadata:
+        headers["x-litellm-spend-logs-metadata"] = json.dumps({k: v for k, v in metadata.items() if v is not None})
+
+    url = f"{config.model_gateway.url.rstrip('/')}/v1/chat/completions"
+    resp = await _client.get().post(
+        url,
+        headers=headers,
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": query}],
+            "web_search_options": {"search_context_size": search_context_size},
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    message = resp.json()["choices"][0]["message"]
+
+    citations: list[dict] = []
+    seen: set[str] = set()
+    for ann in message.get("annotations") or []:
+        if ann.get("type") != "url_citation":
+            continue
+        citation = ann.get("url_citation") or {}
+        cited_url = citation.get("url")
+        if not cited_url or cited_url in seen:
+            continue
+        seen.add(cited_url)
+        citations.append({"title": citation.get("title") or cited_url, "url": cited_url})
+    return message.get("content") or "", citations
