@@ -183,6 +183,47 @@ class TestActivate:
         assert row["user_id"] is None
 
     @pytest.mark.asyncio
+    async def test_activate_sub_agent_scope_uses_lowercase_slug_for_config(
+        self, pg_session: AsyncSession, activation_service
+    ):
+        """Sub-agent scope must pass the lowercase slug (not the title-cased display name) to config.
+
+        Regression: the registry stores a title-cased display name (e.g. 'Mockdata'), but
+        SkillDefinition.name requires a lowercase identifier. Activation must hand the slug to
+        add_skill_to_config, otherwise the title-cased name fails validation and surfaces as a 409.
+        """
+        from console_backend.models.sub_agent import SkillDefinition
+
+        user_id = await _create_test_user(pg_session)
+        agent_id = await _create_test_agent(pg_session, user_id=user_id)
+        # Display name is title-cased; slug is the lowercase identifier.
+        registry_id = await _create_registry_entry(
+            pg_session, slug="mockdata", name="Mockdata", user_id=user_id
+        )
+        await pg_session.commit()
+
+        mock_sub_agent_service = MagicMock()
+        mock_sub_agent_service.add_skill_to_config = AsyncMock()
+        activation_service._sub_agent_service = mock_sub_agent_service
+
+        await activation_service.activate(
+            db=pg_session,
+            registry_id=registry_id,
+            sub_agent_id=agent_id,
+            agent_name="test-agent",
+            scope="sub-agent",
+            user_id=user_id,
+            actor=MagicMock(id=user_id),
+        )
+        await pg_session.commit()
+
+        mock_sub_agent_service.add_skill_to_config.assert_called_once()
+        passed_name = mock_sub_agent_service.add_skill_to_config.call_args.kwargs["skill_name"]
+        assert passed_name == "mockdata"
+        # The handed-off name must satisfy the SkillDefinition identifier validator.
+        assert SkillDefinition(name=passed_name).name == "mockdata"
+
+    @pytest.mark.asyncio
     async def test_activate_duplicate_is_idempotent(self, pg_session: AsyncSession, activation_service):
         """Activating the same skill twice returns the existing activation ID."""
         user_id = await _create_test_user(pg_session)

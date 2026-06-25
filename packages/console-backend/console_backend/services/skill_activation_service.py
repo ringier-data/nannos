@@ -133,7 +133,7 @@ class SkillActivationService:
                 db=db,
                 sub_agent_id=sub_agent_id,
                 registry_id=registry_id,
-                skill_name=registry.name,
+                skill_name=registry.slug,
                 skill_description=registry.description or "",
                 content_hash=registry.content_hash,
                 actor=actor,

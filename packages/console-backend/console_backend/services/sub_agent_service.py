@@ -2003,7 +2003,7 @@ class SubAgentService:
             db: Database session
             sub_agent_id: Target sub-agent ID
             registry_id: UUID of the skill in the registry
-            skill_name: Display name of the skill
+            skill_name: Lowercase skill identifier (the registry slug)
             skill_description: Skill description
             content_hash: Content hash at activation time (for pinning)
             actor: User performing the action
