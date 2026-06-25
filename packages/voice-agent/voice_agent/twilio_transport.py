@@ -61,6 +61,7 @@ from voice_agent.call_bridge import (
     _PENDING_CALLS,
     build_effective_prompt
 )
+from voice_agent.inbound import build_inbound_init_config, pop_inbound_state
 
 logger = logging.getLogger(__name__)
 
@@ -146,18 +147,18 @@ async def twilio_stream(websocket: WebSocket) -> None:
                     state["call_sid"] = msg["start"].get("callSid")
                     state["session_key"] = state["call_sid"]  # Use call_sid as session key
 
-                    # Check for custom config (registered by VoiceAgent._stream_phone_call)
+                    # Check for custom config — outbound first, then inbound.
                     call_config = _PENDING_CALLS.pop(state["call_sid"], None) if state["call_sid"] else None
+                    inbound_state = pop_inbound_state(state["call_sid"]) if (state["call_sid"] and not call_config) else None
 
                     # Initialize A2A session with config
                     if call_config and call_config.system_prompt:
                         logger.info(
-                            "Starting A2A voice session with custom prompt (streamSid=%s, callSid=%s)",
+                            "Starting outbound A2A voice session (streamSid=%s, callSid=%s)",
                             state["stream_sid"],
                             state["call_sid"],
                         )
                         system_prompt = build_effective_prompt(call_config.system_prompt, call_config.context_messages)
-                        
                         init_query = json.dumps(
                             {
                                 "system_prompt": system_prompt,
@@ -166,6 +167,17 @@ async def twilio_stream(websocket: WebSocket) -> None:
                                 "access_token": call_config.access_token,
                             }
                         )
+                    elif inbound_state and inbound_state.ready:
+                        logger.info(
+                            "Starting inbound A2A voice session (streamSid=%s, callSid=%s, agent=%s)",
+                            state["stream_sid"],
+                            state["call_sid"],
+                            inbound_state.selected_agent.name if inbound_state.selected_agent else "unknown",
+                        )
+                        init_config = build_inbound_init_config(inbound_state)
+                        # Store voice_session_id so the finally block can mark it complete/failed
+                        state["voice_session_id"] = init_config.pop("voice_session_id", None)
+                        init_query = json.dumps(init_config)
                     else:
                         logger.info(
                             "Starting A2A voice session with default config (streamSid=%s, callSid=%s)",
@@ -328,3 +340,9 @@ async def twilio_stream(websocket: WebSocket) -> None:
         if _fut and not _fut.done():
             _fut.set_result({"transcript": transcript, "call_sid": call_sid})
             logger.info("Resolved A2A future for call_sid=%s", call_sid)
+
+        # Mark inbound voice session complete (fire-and-forget)
+        voice_session_id = state.get("voice_session_id")
+        if voice_session_id:
+            from voice_agent.console_client import complete_voice_session  # noqa: PLC0415
+            asyncio.create_task(complete_voice_session(voice_session_id))

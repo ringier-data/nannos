@@ -87,6 +87,7 @@ from console_backend.routers.skills_registry_router import router as skills_regi
 from console_backend.routers.sub_agent_router import router as sub_agent_router
 from console_backend.routers.tool_risk_router import router as tool_risk_router
 from console_backend.routers.usage_router import router as usage_router
+from console_backend.routers.voice_agent_router import router as voice_agent_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
 from console_backend.services.messages_service import MessagesService, _parse_task_state
@@ -372,6 +373,7 @@ app.include_router(scim_token_router)
 app.include_router(scim_router)
 # Outbound SCIM endpoint management (push provisioning to external IdPs)
 app.include_router(outbound_scim_router)
+app.include_router(voice_agent_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.

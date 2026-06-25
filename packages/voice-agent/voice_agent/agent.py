@@ -280,17 +280,25 @@ def build_live_config(
     voice_name: str = VOICE_NAME,
     system_prompt: str | None = None,
     tools: list | None = None,
+    session_resumption_handle: str | None = None,
 ) -> types.LiveConnectConfig:
     """Build Gemini Live configuration with optional custom system prompt.
 
     Args:
         voice_name: Voice to use (Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus, Zephyr)
         system_prompt: Custom system prompt. If None, uses default SYSTEM_PROMPT.
-        tools: List of tools to make available. If None, uses default [get_current_time].
+        tools: List of tools to make available.
+        session_resumption_handle: Opaque handle from a previous session to resume from.
     """
     prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
     prompt = prompt + _NO_PROACTIVE_TOOLS_INSTRUCTION
     tool_list = tools
+
+    resumption = (
+        types.SessionResumptionConfig(handle=session_resumption_handle)
+        if session_resumption_handle
+        else types.SessionResumptionConfig()
+    )
 
     return types.LiveConnectConfig(
         response_modalities=["audio"],
@@ -307,6 +315,7 @@ def build_live_config(
             trigger_tokens=128000,
             sliding_window=types.SlidingWindow(target_tokens=32000),
         ),
+        session_resumption=resumption,
     )
 
 
@@ -331,6 +340,7 @@ class GeminiLiveAgent:
         mcp_gateway_url: str | None = None,
         mcp_headers: dict[str, str] | None = None,
         mcp_tool_filter: list[str] | None = None,
+        session_resumption_handle: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.voice_name = voice_name
@@ -339,12 +349,15 @@ class GeminiLiveAgent:
         self.mcp_gateway_url = mcp_gateway_url
         self.mcp_headers = mcp_headers
         self.mcp_tool_filter = mcp_tool_filter
-        self._config = build_live_config(voice_name, system_prompt)
+        self.session_resumption_handle = session_resumption_handle
+        self._config = build_live_config(voice_name, system_prompt, session_resumption_handle=session_resumption_handle)
         # Resolved when the MCP connection status is known:
         #   True  = connected successfully
         #   False = connection/auth failed, running without tools
         # None when no MCP gateway is configured.
         self.mcp_status: asyncio.Future[bool] | None = None
+        # Updated during the session when Gemini sends resumption handle updates.
+        self.latest_resumption_handle: str | None = session_resumption_handle
 
     async def _init_mcp_tools(
         self,
@@ -611,7 +624,8 @@ class GeminiLiveAgent:
                             else None
                         )
                         config = build_live_config(
-                            self.voice_name, self.system_prompt, tools=gemini_tools
+                            self.voice_name, self.system_prompt, tools=gemini_tools,
+                            session_resumption_handle=self.session_resumption_handle,
                         )
                         logger.info(
                             "MCP gateway connected (url=%s), %d tools registered",
@@ -864,6 +878,15 @@ class GeminiLiveAgent:
                             await event_out.put({"type": "turn_complete"})
                             turn += 1
                             break  # restart session.receive() for next turn
+
+                        # Capture session resumption handle updates from Gemini.
+                        # The handle changes periodically; we always keep the latest.
+                        resumption_update = getattr(response, "session_resumption_update", None)
+                        if resumption_update is not None:
+                            handle = getattr(resumption_update, "handle", None) or getattr(resumption_update, "new_handle", None)
+                            if handle:
+                                self.latest_resumption_handle = handle
+                                await event_out.put({"type": "session_resumption_handle", "handle": handle})
                     else:
                         # for completed without break → session genuinely closed.
                         logger.warning(

@@ -272,6 +272,8 @@ class VoiceAgent(BaseAgent):
         mcp_tools: list[str],
         access_token: str | None,
         phone_number: str | None = None,
+        session_resumption_handle: str | None = None,
+        voice_session_id: str | None = None,
     ) -> None:
         """Create a GeminiLiveAgent, start it, and register in ``_active_sessions``.
 
@@ -302,9 +304,10 @@ class VoiceAgent(BaseAgent):
         agent = GeminiLiveAgent(
             system_prompt=prompt,
             voice_name=voice,
-            mcp_gateway_url=_MCP_GATEWAY_URL,
+            mcp_gateway_url=_MCP_GATEWAY_URL if mcp_headers else None,
             mcp_headers=mcp_headers,
             mcp_tool_filter=mcp_tools if mcp_tools else None,
+            session_resumption_handle=session_resumption_handle,
         )
         agent_task = asyncio.create_task(agent.run(audio_in, event_out))
 
@@ -314,13 +317,15 @@ class VoiceAgent(BaseAgent):
             "agent": agent,
             "agent_task": agent_task,
             "phone_number": phone_number,
+            "voice_session_id": voice_session_id,
         }
         logger.info(
-            "Gemini session created: %s (voice=%s, mcp_tools=%s, gateway=%s)",
+            "Gemini session created: %s (voice=%s, mcp_tools=%s, gateway=%s, resume=%s)",
             session_key,
             voice,
             mcp_tools,
             _MCP_GATEWAY_URL,
+            bool(session_resumption_handle),
         )
 
     async def _prewarm_audio_session(
@@ -404,6 +409,8 @@ class VoiceAgent(BaseAgent):
                     mcp_tools=init_config.get("mcp_tools") or [],
                     access_token=init_config.get("access_token"),
                     phone_number=None,
+                    session_resumption_handle=init_config.get("gemini_session_handle"),
+                    voice_session_id=init_config.get("voice_session_id"),
                 )
 
         voice_name = self._active_sessions[session_key]["agent"].voice_name
@@ -476,6 +483,13 @@ class VoiceAgent(BaseAgent):
                         content="Tool authorization required — SMS sent with instructions.",
                         metadata={"type": "mcp_auth_failed", "authorize_url": authorize_url},
                     )
+                elif event_type == "session_resumption_handle":
+                    handle = event.get("handle", "")
+                    voice_session_id = self._active_sessions.get(session_key, {}).get("voice_session_id")
+                    if voice_session_id and handle:
+                        from voice_agent.console_client import update_session_handle  # noqa: PLC0415
+                        asyncio.create_task(update_session_handle(voice_session_id, handle))
+                        logger.debug("Queued session handle update (session=%s)", session_key)
                 elif event_type == "error":
                     error_msg = event.get("message", "Unknown error")
                     logger.error(f"Gemini error: {error_msg}")
