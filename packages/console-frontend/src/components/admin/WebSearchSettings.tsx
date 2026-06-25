@@ -1,8 +1,8 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Globe } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { setGatewayModelDefault, type GatewayModel } from '@/api/model-gateway';
+import { getWebSearchConfig, setGatewayModelDefault } from '@/api/model-gateway';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -13,35 +13,35 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 
-const byCostAsc = (a: GatewayModel, b: GatewayModel) =>
-  (a.input_cost_per_token ?? Infinity) - (b.input_cost_per_token ?? Infinity);
-
 /**
  * Web Search configuration: pick the Search Provider and (for the gateway-native provider) which
- * web-search-capable model backs the agent's `web_search` tool.
+ * web-search-capable model backs the agent's `console_web_search` tool.
  *
- * The functional knob is the `search` model-default: setting it pins the gateway-native search to
- * that model; leaving it unset auto-selects the cheapest web-search-capable model (mirrors
- * model_factory.get_web_search_model). External providers appear disabled until integrated.
+ * Purely presentational: the cheapest-capable / selected-vs-auto decision is owned entirely by the
+ * backend (services/web_search.py::resolve_web_search_config, exposed at GET .../web-search), so the
+ * picker can never disagree with the tool. The only write is setting the `search` model-default.
  */
-export function WebSearchSettings({ models }: { models: GatewayModel[] }) {
+export function WebSearchSettings() {
   const queryClient = useQueryClient();
 
-  const capable = models.filter((m) => m.supports_web_search).sort(byCostAsc);
-  const selected = models.find((m) => (m.default_roles ?? []).includes('search'));
-  const autoModel = capable[0];
-  const active = selected ?? autoModel;
-  const available = capable.length > 0;
+  const { data: config, isLoading } = useQuery({
+    queryKey: ['web-search-config'],
+    queryFn: getWebSearchConfig,
+  });
 
   const mutation = useMutation({
     mutationFn: (modelId: string) => setGatewayModelDefault(modelId, 'search'),
     onSuccess: () => {
       toast.success('Web-search model set (apps pick it up within ~60s)');
+      queryClient.invalidateQueries({ queryKey: ['web-search-config'] });
       queryClient.invalidateQueries({ queryKey: ['gateway-models'] });
       queryClient.invalidateQueries({ queryKey: ['system-status'] });
     },
     onError: (e: unknown) => toast.error(`Set web-search model failed: ${String(e)}`),
   });
+
+  const models = config?.models ?? [];
+  const available = config?.available ?? false;
 
   return (
     <Card>
@@ -69,10 +69,12 @@ export function WebSearchSettings({ models }: { models: GatewayModel[] }) {
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium">Search model</label>
-          {available ? (
+          {isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : available ? (
             <>
               <Select
-                value={active?.model_id ?? undefined}
+                value={config?.active_model_id ?? undefined}
                 onValueChange={(modelId) => modelId && mutation.mutate(modelId)}
                 disabled={mutation.isPending}
               >
@@ -80,21 +82,26 @@ export function WebSearchSettings({ models }: { models: GatewayModel[] }) {
                   <SelectValue placeholder="Select a search model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {capable.map((m) => (
-                    <SelectItem key={m.model_id ?? m.model_name} value={m.model_id ?? ''}>
-                      <span>{m.model_name}</span>
-                      {m.model_id === autoModel?.model_id && (
-                        <Badge variant="outline" className="ml-1">
-                          cheapest
-                        </Badge>
-                      )}
-                    </SelectItem>
-                  ))}
+                  {models
+                    .filter((m) => m.model_id)
+                    .map((m) => (
+                      <SelectItem key={m.model_id} value={m.model_id ?? ''}>
+                        <span>{m.model_name}</span>
+                        {m.is_cheapest && (
+                          <Badge variant="outline" className="ml-1">
+                            cheapest
+                          </Badge>
+                        )}
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Active: <span className="font-medium">{active?.model_name}</span>{' '}
-                {selected ? '(selected)' : '(auto-selected — cheapest capable)'}.
+                Active: <span className="font-medium">{config?.active_model_name}</span>{' '}
+                {config?.source === 'selected'
+                  ? '(selected)'
+                  : '(auto-selected — cheapest capable)'}
+                .
               </p>
             </>
           ) : (

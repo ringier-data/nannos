@@ -129,9 +129,10 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
         try:
             raw = await request.app.state.model_gateway_service.list_models()
             registered = {m.get("model_name") for m in raw if m.get("model_name")}
-            model_info_by_name = {
-                m["model_name"]: (m.get("model_info") or {}) for m in raw if m.get("model_name")
-            }
+            # Same reshape the web_search resolver uses, so the status row and the tool agree.
+            from .web_search import model_info_by_name as _model_info_by_name
+
+            model_info_by_name = _model_info_by_name(raw)
             features.append(
                 FeatureStatus(
                     key="model_gateway",
@@ -340,7 +341,7 @@ def _web_search_feature(
             name=name,
             status="degraded",
             detail=f"The selected search model '{search_default}' is not registered on the gateway.",
-            remediation="Pick a registered web-search model in Admin → Model Gateway → Web Search, or clear it to auto-select.",
+            remediation="Pick a registered web-search model in Admin → Model Gateway → Web Search.",
         )
 
     # Gateway list unreadable → fail open, matching the other rows (don't hard-disable on a blip).

@@ -43,10 +43,26 @@ _FIELDS = {
 
 _HEADER = "x-litellm-spend-logs-metadata"
 
+# Inter-service request-context header for the orchestrator → console-backend MCP hop. Distinct
+# from the gateway billing header (_HEADER): it carries the same attribution fields as *context* a
+# console MCP tool can act on (conversation_id for a bug report, or to forward onto a gateway
+# sub-call) — without overloading the gateway's spend-logs header for non-gateway data.
+NANNOS_CONTEXT_HEADER = "x-nannos-context"
+
 
 def current_attribution() -> dict:
     """Snapshot the non-empty attribution fields from the current context."""
     return {name: var.get() for name, var in _FIELDS.items() if var.get() is not None}
+
+
+def _merged_attribution(overrides: dict) -> dict:
+    """Current attribution ContextVars merged with explicit overrides (overrides win; None and
+    unknown keys ignored). Shared by the header builders below."""
+    attrib = current_attribution()
+    for name, value in overrides.items():
+        if name in _FIELDS and value is not None:
+            attrib[name] = value
+    return attrib
 
 
 def set_attribution(**fields) -> None:
@@ -84,11 +100,35 @@ def attribution_header(**overrides) -> dict[str, str]:
     This is the single place the header name and field shape live; the embeddings adapter
     and console-backend's gateway_chat use it instead of hand-rolling the header.
     """
-    attrib = current_attribution()
-    for name, value in overrides.items():
-        if name in _FIELDS and value is not None:
-            attrib[name] = value
+    attrib = _merged_attribution(overrides)
     return {_HEADER: json.dumps(attrib)} if attrib else {}
+
+
+def context_header(**overrides) -> dict[str, str]:
+    """Build the ``x-nannos-context`` header carrying the current attribution as request context
+    for a downstream service (the orchestrator → console-backend MCP hop).
+
+    Unlike ``attribution_header`` (which feeds a virtual-key gateway call and so must carry
+    ``user_sub``), this hop is independently authenticated by the caller's token — the downstream
+    service derives identity from that token, so ``user_sub`` is omitted here as redundant. Only the
+    context the downstream can't derive (conversation_id, sub_agent_id, …) is sent. Returns {} when
+    there's nothing to stamp; read back with ``parse_context_header``."""
+    attrib = _merged_attribution(overrides)
+    attrib.pop("user_sub", None)
+    return {NANNOS_CONTEXT_HEADER: json.dumps(attrib)} if attrib else {}
+
+
+def parse_context_header(raw: str | None) -> dict:
+    """Inverse of ``context_header``: parse a received ``x-nannos-context`` value into an
+    attribution dict, or {} when absent/malformed. Framework-agnostic (takes the raw header
+    string) so any web layer can wrap it."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        return {}
 
 
 async def _stamp_metadata(request) -> None:

@@ -138,6 +138,15 @@ def _billing_unit_breakdown(usage: dict) -> dict[str, int]:
     if reasoning > 0:
         breakdown["reasoning_output_tokens"] = reasoning
 
+    # Server-side web search (e.g. Gemini grounding): a token-only breakdown misses the per-query
+    # search fee LiteLLM prices via model_info.search_context_cost_per_query. The provider reports
+    # prompt_tokens_details.web_search_requests when a call grounded; LiteLLM bills ONE grounding
+    # request per call regardless of how many underlying searches it ran, so we emit a single
+    # `web_search` unit (priced on the rate card) — NOT the web_search_requests count, which would
+    # over-bill. Verified against x-litellm-response-cost (1 × $0.014/query) on 2026-06-25.
+    if prompt_details.get("web_search_requests"):
+        breakdown["web_search"] = 1
+
     return {k: v for k, v in breakdown.items() if v > 0}
 
 

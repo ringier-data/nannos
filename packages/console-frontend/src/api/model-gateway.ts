@@ -26,6 +26,7 @@ import {
   registerModelApiV1AdminModelGatewayModelsPost,
   setDefaultApiV1AdminModelGatewayModelsModelIdDefaultPost,
   testModelApiV1AdminModelGatewayModelsModelNameTestPost,
+  webSearchConfigApiV1AdminModelGatewayWebSearchGet,
 } from './generated/sdk.gen';
 import type {
   AvailableModel,
@@ -36,6 +37,8 @@ import type {
   ModelRegistrationRequest,
   ModelRegistrationResponse,
   RateCardPricingEntryInput,
+  WebSearchConfig,
+  WebSearchModelOption,
 } from './generated/types.gen';
 
 export type {
@@ -46,6 +49,8 @@ export type {
   GatewayUiConfig,
   ModelRegistrationRequest,
   ModelRegistrationResponse,
+  WebSearchConfig,
+  WebSearchModelOption,
 };
 
 /** A rate-card pricing entry as submitted on registration (per-million price + flow). */
@@ -156,6 +161,17 @@ export async function testGatewayModel(modelName: string): Promise<{ status: str
   });
   if (error) throw error;
   return (data ?? { status: 'ok' }) as { status: string };
+}
+
+/**
+ * Fully-resolved Web Search picker state (backend-owned): which web-search-capable models exist
+ * (cheapest first), which one backs the console_web_search tool, and whether it's selected/auto.
+ * The console renders this verbatim instead of re-deriving the pick client-side.
+ */
+export async function getWebSearchConfig(): Promise<WebSearchConfig> {
+  const { data, error } = await webSearchConfigApiV1AdminModelGatewayWebSearchGet();
+  if (error) throw error;
+  return data as WebSearchConfig;
 }
 
 export async function setGatewayModelDefault(modelId: string, role: DefaultRole): Promise<void> {

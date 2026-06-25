@@ -5,6 +5,7 @@ Web search runs as one isolated, function-tool-free gateway call against a web-s
 model; the active model is the `search` default when capable, else the cheapest capable model.
 """
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,8 +16,21 @@ import console_backend.services.llm_gateway as llm_gateway
 from console_backend.services.web_search import (
     format_web_search_result,
     pick_web_search_model,
+    resolve_web_search_config,
     resolve_web_search_model,
 )
+
+
+def _raw(*entries):
+    """Gateway list_models payload from (name, supports_web_search, input_cost[, model_id]) tuples."""
+    out = []
+    for e in entries:
+        name, cap, cost = e[0], e[1], e[2]
+        info = {"supports_web_search": cap, "input_cost_per_token": cost}
+        if len(e) > 3:
+            info["id"] = e[3]
+        out.append({"model_name": name, "model_info": info})
+    return out
 
 
 def _caps(*entries):
@@ -121,6 +135,54 @@ class TestResolveModel:
         assert await resolve_web_search_model(_request(raw), db=None) is None
 
 
+# --- resolve_web_search_config (backend-owned picker state) -------------------------------
+
+
+class TestResolveConfig:
+    def test_auto_marks_cheapest_active_and_sorts_cheapest_first(self):
+        cfg = resolve_web_search_config(
+            _raw(("pro", True, 2e-6, "id-pro"), ("flash", True, 5e-7, "id-flash"), ("claude", None, 1e-6, "id-c")),
+            search_default=None,
+        )
+        assert cfg.available is True
+        assert cfg.source == "auto"
+        assert cfg.active_model_id == "id-flash"
+        assert cfg.active_model_name == "flash"
+        # Only capable models, cheapest first; flash is both cheapest and active.
+        assert [m.model_name for m in cfg.models] == ["flash", "pro"]
+        assert cfg.models[0].is_cheapest and cfg.models[0].is_active
+        assert not cfg.models[1].is_cheapest and not cfg.models[1].is_active
+
+    def test_selected_default_is_active_but_cheapest_still_marked(self):
+        cfg = resolve_web_search_config(
+            _raw(("pro", True, 2e-6, "id-pro"), ("flash", True, 5e-7, "id-flash")),
+            search_default="pro",
+        )
+        assert cfg.source == "selected"
+        assert cfg.active_model_id == "id-pro"
+        active = [m for m in cfg.models if m.is_active]
+        assert [m.model_name for m in active] == ["pro"]
+        # The cheapest badge tracks the cheapest model, not the active one.
+        assert [m.model_name for m in cfg.models if m.is_cheapest] == ["flash"]
+
+    def test_non_capable_default_falls_back_to_auto(self):
+        cfg = resolve_web_search_config(
+            _raw(("flash", True, 5e-7, "id-flash"), ("claude", None, 1e-6, "id-c")),
+            search_default="claude",
+        )
+        assert cfg.source == "auto"
+        assert cfg.active_model_name == "flash"
+        # The non-capable default is never offered as an option.
+        assert [m.model_name for m in cfg.models] == ["flash"]
+
+    def test_unavailable_when_none_capable(self):
+        cfg = resolve_web_search_config(_raw(("claude", None, 1e-6, "id-c")), search_default=None)
+        assert cfg.available is False
+        assert cfg.source is None
+        assert cfg.active_model_id is None
+        assert cfg.models == []
+
+
 # --- gateway_web_search citation parsing --------------------------------------------------
 
 
@@ -157,17 +219,61 @@ class TestGatewayWebSearch:
         assert body["web_search_options"] == {"search_context_size": "medium"}
         assert "tools" not in body  # isolated, function-tool-free call
 
+    @pytest.mark.asyncio
+    async def test_parses_vertex_gemini_grounding_metadata(self):
+        # Gemini grounds via top-level vertex_ai_grounding_metadata and emits NO annotations;
+        # parsing only annotations would drop every citation. Sources live in groundingChunks[].web.
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(
+            return_value={
+                "choices": [{"message": {"content": "Node 24 is the active LTS."}}],
+                "vertex_ai_grounding_metadata": [
+                    {
+                        "groundingChunks": [
+                            {"web": {"uri": "https://herodevs.com/a", "title": "herodevs.com"}},
+                            {"web": {"uri": "https://nodejs.org/b", "title": "nodejs.org"}},
+                            {"web": {"uri": "https://herodevs.com/a", "title": "dup"}},  # deduped
+                        ]
+                    }
+                ],
+            }
+        )
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=resp))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            answer, citations = await llm_gateway.gateway_web_search("node lts?", model="gemini-3-flash-preview")
+
+        assert answer == "Node 24 is the active LTS."
+        assert citations == [
+            {"title": "herodevs.com", "url": "https://herodevs.com/a"},
+            {"title": "nodejs.org", "url": "https://nodejs.org/b"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_choices_returns_empty_answer_not_indexerror(self):
+        # A 2xx with no choices (content-filter / moderation) must not raise IndexError.
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={"choices": []})
+        fake_client = SimpleNamespace(post=AsyncMock(return_value=resp))
+        with patch.object(llm_gateway._client, "get", return_value=fake_client):
+            answer, citations = await llm_gateway.gateway_web_search("q", model="m")
+        assert answer == "" and citations == []
+
 
 # --- endpoint -----------------------------------------------------------------------------
+
+
+def _req(headers: dict | None = None):
+    """A minimal request whose .headers.get(...) works (FastAPI Request stand-in)."""
+    return SimpleNamespace(headers=headers or {})
 
 
 class TestEndpoint:
     @pytest.mark.asyncio
     async def test_unavailable_when_no_model(self):
         with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value=None)):
-            out = await endpoint.web_search_mcp(
-                SimpleNamespace(), query="q", db=None, user=SimpleNamespace(sub="u1")
-            )
+            out = await endpoint.web_search_mcp(_req(), query="q", db=None, user=SimpleNamespace(sub="u1"))
         assert "Web search is unavailable" in out
 
     @pytest.mark.asyncio
@@ -175,9 +281,7 @@ class TestEndpoint:
         with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="gemini-flash")), patch.object(
             endpoint, "gateway_web_search", AsyncMock(return_value=("Answer.", [{"title": "t", "url": "https://u"}]))
         ):
-            out = await endpoint.web_search_mcp(
-                SimpleNamespace(), query="q", db=None, user=SimpleNamespace(sub="u1")
-            )
+            out = await endpoint.web_search_mcp(_req(), query="q", db=None, user=SimpleNamespace(sub="u1"))
         assert "Answer." in out and "https://u" in out
 
     @pytest.mark.asyncio
@@ -185,7 +289,39 @@ class TestEndpoint:
         with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="m")), patch.object(
             endpoint, "gateway_web_search", AsyncMock(side_effect=RuntimeError("boom"))
         ):
-            out = await endpoint.web_search_mcp(
-                SimpleNamespace(), query="q", db=None, user=SimpleNamespace(sub="u1")
-            )
+            out = await endpoint.web_search_mcp(_req(), query="q", db=None, user=SimpleNamespace(sub="u1"))
         assert out.startswith("Web search failed:") and "boom" in out
+
+    @pytest.mark.asyncio
+    async def test_forwards_conversation_id_and_overrides_user_sub(self):
+        # The orchestrator stamps attribution on the MCP request; the endpoint forwards it to the
+        # gateway call but always uses the authenticated user_sub (never the client-supplied one).
+        header = json.dumps({"conversation_id": "conv-123", "sub_agent_id": "sa-9", "user_sub": "spoofed"})
+        gw = AsyncMock(return_value=("Answer.", []))
+        with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="gemini-flash")), patch.object(
+            endpoint, "gateway_web_search", gw
+        ):
+            await endpoint.web_search_mcp(
+                _req({"x-nannos-context": header}),
+                query="q",
+                db=None,
+                user=SimpleNamespace(sub="real-user"),
+            )
+        meta = gw.call_args.kwargs["metadata"]
+        assert meta["conversation_id"] == "conv-123"
+        assert meta["sub_agent_id"] == "sa-9"
+        assert meta["user_sub"] == "real-user"  # authenticated identity wins over the header
+
+    @pytest.mark.asyncio
+    async def test_malformed_attribution_header_is_ignored(self):
+        gw = AsyncMock(return_value=("Answer.", []))
+        with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="m")), patch.object(
+            endpoint, "gateway_web_search", gw
+        ):
+            await endpoint.web_search_mcp(
+                _req({"x-nannos-context": "not-json"}),
+                query="q",
+                db=None,
+                user=SimpleNamespace(sub="u1"),
+            )
+        assert gw.call_args.kwargs["metadata"] == {"user_sub": "u1"}

@@ -23,6 +23,7 @@ from ..models.model_gateway import (
     ModelRegistrationRequest,
     ModelRegistrationResponse,
     SetDefaultRequest,
+    WebSearchConfig,
 )
 from ..models.usage import RateCardPricingEntry
 from ..models.user import User
@@ -47,6 +48,10 @@ _COST_FIELD_TO_UNIT: dict[str, tuple[str, _FlowDir]] = {
 # billing_unit → flow_direction, for rate-card rows (which store only unit + price). Unknown
 # units default to "input" (the common case; only base_output_tokens is output-side).
 _UNIT_TO_FLOW = {unit: flow for (unit, flow) in _COST_FIELD_TO_UNIT.values()}
+# Web search isn't a per-token cost field (model_info carries it as a per-query dict, seeded
+# separately below), so it has no _COST_FIELD_TO_UNIT entry — register its flow explicitly so the
+# stored-rate edit path groups it the same way the registration seed does.
+_UNIT_TO_FLOW["web_search"] = "output"
 
 
 def _with_default_vertex_location(litellm_params: dict, provider: str) -> dict:
@@ -124,6 +129,22 @@ async def list_models(request: Request, db: DbSession, user: User = Depends(requ
     return out
 
 
+@router.get("/web-search", response_model=WebSearchConfig)
+async def web_search_config(request: Request, db: DbSession, user: User = Depends(require_admin)):
+    """Fully-resolved Web Search picker state — which web-search-capable models exist (cheapest
+    first), which one backs ``console_web_search`` right now, and whether it's the admin's
+    ``search`` default or auto-selected. The console renders this verbatim instead of re-deriving
+    the pick, so the picker can't disagree with the tool (shared services.web_search resolver)."""
+    from ..services.web_search import resolve_web_search_config
+
+    try:
+        raw = await get_model_gateway_service(request).list_models()
+    except ModelGatewayError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    search_default = (await get_model_defaults_service(request).get_all(db)).get("search")
+    return resolve_web_search_config(raw, search_default)
+
+
 @router.get("/config", response_model=GatewayUiConfig)
 async def gateway_ui_config(user: User = Depends(require_admin)):
     """Deployment defaults the registration form needs (env-driven). Keeps the UI's suggested
@@ -187,6 +208,28 @@ async def cost_prefill(model_name: str, request: Request, db: DbSession, user: U
                 price_per_million=Decimal(str(val)) * Decimal(1_000_000),
                 flow_direction=flow,
             )
+
+    # Web search is a per-query fee, not per-token: LiteLLM exposes it as
+    # search_context_cost_per_query keyed by context size. We always call with
+    # search_context_size="medium" (services.llm_gateway.gateway_web_search), so seed the
+    # `web_search` unit from that tier (×1e6 for the per-1M rate card), falling back to low/high
+    # only when medium is absent. This makes the search fee billable on registration like the
+    # token costs — matching the `web_search` unit the proxy emits (custom_logger) — instead of
+    # silently $0 until hand-entered. The rate card requires a positive price, so a 0.0 (free)
+    # tier is left unpriced. NOTE: keep the tier in sync if gateway_web_search's size changes.
+    search_costs = info.get("search_context_cost_per_query")
+    if isinstance(search_costs, dict):
+        per_query = search_costs.get("search_context_size_medium")
+        if per_query is None:
+            per_query = search_costs.get("search_context_size_low")
+        if per_query is None:
+            per_query = search_costs.get("search_context_size_high")
+        if per_query and per_query > 0:
+            pricing["web_search"] = RateCardPricingEntry(
+                price_per_million=Decimal(str(per_query)) * Decimal(1_000_000),
+                flow_direction="output",
+            )
+
     return CostPrefill(pricing=pricing)
 
 

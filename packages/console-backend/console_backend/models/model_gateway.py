@@ -14,7 +14,7 @@ from .usage import RateCardPricingEntry
 #   embedding / multimodal_embedding — vector models.
 #   search — the model backing the web_search tool (the "Search Provider" picker's gateway-native
 #     model). Optional: when unset, web search auto-selects the cheapest web-search-capable model
-#     (see model_factory.get_web_search_model). Distinct from chat: it's a tool-only sub-call.
+#     (see services.web_search.pick_web_search_model). Distinct from chat: it's a tool-only sub-call.
 # Semantic indexing/chunking has no slot of its own — it runs on the 'chat:low' tier
 # (see model_factory.get_default_indexing_model).
 VALID_ROLES = (
@@ -64,6 +64,33 @@ class GatewayModel(BaseModel):
     supports_web_search: bool | None = None
 
 
+class WebSearchModelOption(BaseModel):
+    """One web-search-capable model as the Web Search picker should render it."""
+
+    model_id: str | None = None
+    model_name: str
+    # First in the cheapest-first ordering — the model auto-selected when no `search` default is set.
+    is_cheapest: bool = False
+    # The model the console_web_search tool resolves to right now (selected default or auto).
+    is_active: bool = False
+
+
+class WebSearchConfig(BaseModel):
+    """Fully-resolved Web Search picker state — the single backend-owned source of which model
+    backs the ``console_web_search`` tool, so the console never re-derives the pick client-side.
+
+    ``models`` is sorted cheapest-first (services.web_search ordering); ``source`` is ``"selected"``
+    (admin's ``search`` default), ``"auto"`` (cheapest capable), or ``None`` when none is available.
+    """
+
+    provider: str = "gateway"
+    available: bool = False
+    source: str | None = None
+    active_model_id: str | None = None
+    active_model_name: str | None = None
+    models: list[WebSearchModelOption] = Field(default_factory=list)
+
+
 class SetDefaultRequest(BaseModel):
     """Mark a model as the fleet default for a role (graceful degradation when an alias retires)."""
 
@@ -91,6 +118,9 @@ class CatalogModel(BaseModel):
     output_cost_per_token: float | None = None
     cache_read_input_token_cost: float | None = None
     cache_creation_input_token_cost: float | None = None
+    # Per-query web-search (grounding) fee keyed by context size (e.g.
+    # {"search_context_size_medium": 0.014}); lets the picker pre-fill the `web_search` rate.
+    search_context_cost_per_query: dict[str, float] | None = None
     max_input_tokens: int | None = None
     supports_vision: bool = False
     supports_reasoning: bool = False

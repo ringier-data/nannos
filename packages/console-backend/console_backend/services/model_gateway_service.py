@@ -270,6 +270,9 @@ class ModelGatewayService:
                     "output_cost_per_token": info.get("output_cost_per_token"),
                     "cache_read_input_token_cost": info.get("cache_read_input_token_cost"),
                     "cache_creation_input_token_cost": info.get("cache_creation_input_token_cost"),
+                    # Per-query web-search (grounding) fee, keyed by context size — lets the
+                    # registration picker pre-fill the `web_search` rate-card unit on selection.
+                    "search_context_cost_per_query": info.get("search_context_cost_per_query"),
                     "max_input_tokens": info.get("max_input_tokens"),
                     "supports_vision": info.get("supports_vision", False),
                     "supports_reasoning": info.get("supports_reasoning", False),

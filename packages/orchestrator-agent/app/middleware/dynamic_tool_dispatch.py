@@ -546,7 +546,6 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         "4. For `system_error`: Try alternatives first. Only call console_create_bug_report as last resort "
         "when the error is unrecoverable AND prevents fulfilling the user's request.\n\n"
         "When calling console_create_bug_report:\n"
-        "- The `conversation_id` parameter is auto-injected by the system — use any placeholder value.\n"
         "- Do NOT claim the bug was reported or say 'done' — the tool pauses execution "
         "to collect user confirmation first.\n"
         "- Explain to the user what went wrong BEFORE calling the tool.\n"
@@ -2313,13 +2312,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 status="error",
             )
 
-        # Auto-inject conversation_id for bug report tool from config thread_id
-        if tool_name == "console_create_bug_report":
-            config = request.runtime.config or {}
-            thread_id = config.get("configurable", {}).get("thread_id")
-            if thread_id:
-                tool_call = {**tool_call, "args": {**tool_call.get("args", {}), "conversation_id": thread_id}}
-                request = request.override(tool_call=tool_call)
+        # conversation_id for console_create_bug_report is no longer injected as a tool arg here:
+        # the console MCP client stamps it on every request as the x-nannos-context header
+        # (discovery._attribution_http_client_factory), and console-backend reads it there. This
+        # keeps conversation_id out of the tool schema entirely (no model-visible placeholder param).
 
         logger.debug(
             f"DynamicToolDispatchMiddleware.awrap_tool_call: "

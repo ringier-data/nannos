@@ -19,6 +19,7 @@ from ..dependencies import require_auth_or_bearer_token
 from ..models.bug_report import BugReportResponse, BugReportStatus
 from ..models.user import User
 from ..services.bug_report_service import BugReportService
+from ..services.forwarded_attribution import forwarded_conversation_id
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +62,16 @@ def _require_triage(user: User) -> None:
 )
 async def create_bug_report_mcp(
     request: Request,
-    conversation_id: str = Query(..., description="The conversation ID where the error occurred."),
     description: str = Query(..., description="Description of the bug — what went wrong and why it's unrecoverable."),
     task_id: str | None = Query(None, description="The A2A task ID associated with the error."),
     db: DbSession = None,
     user: User = Depends(require_auth_or_bearer_token),
 ) -> BugReportResponse:
+    # conversation_id is system context, not a model input: the orchestrator stamps it on the MCP
+    # request (x-nannos-context) so it's deterministic and out of the tool schema (the model used to
+    # see a param it was told to fill with a placeholder). Fall back to "unknown" if absent, matching
+    # the orchestrator's own fallback when a turn has no thread_id.
+    conversation_id = forwarded_conversation_id(request) or "unknown"
     service = _get_bug_report_service(request)
     return await service.create_bug_report(
         db=db,

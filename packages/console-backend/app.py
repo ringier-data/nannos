@@ -376,6 +376,11 @@ else:
 mcp = FastApiMCP(
     app,
     include_tags=["MCP"],
+    # FastApiMCP only forwards allowlisted headers to the underlying route (default: authorization).
+    # x-nannos-context carries the caller's cost-attribution (conversation_id, …) the orchestrator
+    # stamps on each console MCP call — forward it so console_web_search / console_create_bug_report
+    # can read it (see services.forwarded_attribution). Without this it's silently stripped.
+    headers=["authorization", "x-nannos-context"],
 )
 
 # Override list_tools handler to hide triage-only tools from users without triage capability.

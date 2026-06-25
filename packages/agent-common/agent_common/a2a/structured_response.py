@@ -102,9 +102,10 @@ def select_response_format(
         when tool_choice forces tool use"); only OpenAI/Azure are known-safe to force.
         Anything else — Gemini, or an unknown/cold-cache provider (``""``) — is treated
         as unsafe, so a stale gateway snapshot can never force a forbidden combination.
-      - Models with server-side built-in tools (e.g. Gemini google_search /
-        code_execution): a forced function-call ``tool_choice`` can't coexist with
-        built-in tools, which must be free to run before the final response.
+      - ``has_builtin_tools=True`` (the orchestrator passes this for Gemini): a forced
+        function-call ``tool_choice`` can't coexist with server-side built-in tools that must
+        run before the final response. The orchestrator no longer binds those tools, but it
+        still sets the flag for Gemini, which can't force a ``tool_choice`` cleanly regardless.
 
     Args:
         model_type: The model alias (gateway-registered name), or None if unknown

@@ -216,8 +216,8 @@ def test_chat_tiers_fails_open_when_registry_unknown():
 
 
 # --- web search ---------------------------------------------------------------------------
-# _web_search_feature mirrors model_factory.get_web_search_model: the active search model is the
-# admin's `search` default when registered+capable, else the cheapest web-search-capable model;
+# _web_search_feature mirrors services.web_search.pick_web_search_model: the active search model is
+# the admin's `search` default when registered+capable, else the cheapest web-search-capable model;
 # off when none. model_info_by_name maps name → model_info (with supports_web_search / cost).
 
 
