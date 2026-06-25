@@ -169,6 +169,27 @@ class TestMiddlewareStack:
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
+    def test_conversation_caching_disabled_for_gemini(self, mock_pg_store, _mock_creds, mock_config):
+        """Gemini gets system-prefix caching only — the conversation breakpoint is off.
+
+        Vertex uses *extractive* context caching (LiteLLM moves the tagged message into a
+        CachedContent), so tagging the live turn empties the request `contents`
+        ("No contents in messages"). Non-Gemini providers (inline cachePoint/ephemeral) keep
+        the incremental conversation breakpoint.
+        """
+        factory = GraphFactory(config=mock_config)
+
+        def _caching(stack):
+            return next(m for m in stack if isinstance(m, LiteLLMPromptCachingMiddleware))
+
+        gemini_stack = factory._create_middleware_stack(model=Mock(), is_gemini=True)
+        assert _caching(gemini_stack).cache_conversation is False
+
+        other_stack = factory._create_middleware_stack(model=Mock(), is_gemini=False)
+        assert _caching(other_stack).cache_conversation is True
+
+    @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
+    @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
     def test_middleware_stack_excludes_bedrock_caching_when_model_is_none(
         self, mock_pg_store, _mock_creds, mock_config
     ):

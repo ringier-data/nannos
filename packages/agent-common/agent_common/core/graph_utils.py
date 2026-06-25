@@ -73,6 +73,7 @@ from agent_common.middleware.conversation_context_tools_middleware import (
 )
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
+from agent_common.core.model_factory import is_gemini_model
 from agent_common.core.ptc_discovery import (
     PTC_DESCRIBE_TOOL_NAME,
     PTC_SEARCH_TOOL_NAME,
@@ -1208,7 +1209,18 @@ def build_common_middleware_stack(
             # provider-specific middlewares can't fire here — the client is never a
             # ChatBedrockConverse/ChatAnthropic instance, and their model_settings path
             # is a no-op for ChatOpenAI.
-            LiteLLMPromptCachingMiddleware(),
+            #
+            # Gemini (Vertex/AI-Studio) uses *extractive* context caching: LiteLLM physically
+            # MOVES cache_control-tagged messages out of the live request into a Vertex
+            # CachedContent (see vertex_ai/context_caching separate_cached_messages), unlike the
+            # inline Anthropic ephemeral / Bedrock cachePoint breakpoints. Tagging the last
+            # conversation message there pulls the current turn into the cache — on a
+            # single-message turn it empties `contents` entirely (LiteLLM: "No contents in
+            # messages"). So for Gemini we cache only the static system prefix and skip the
+            # incremental conversation breakpoint; every other provider keeps it.
+            LiteLLMPromptCachingMiddleware(
+                cache_conversation=not is_gemini_model(getattr(model, "model_name", "") or "")
+            ),
         ]
         middleware += [
             PatchToolCallsMiddleware(),

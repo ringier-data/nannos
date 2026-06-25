@@ -102,9 +102,12 @@ Two correctness contracts must hold regardless of which proxy serves traffic:
   so this works on any LiteLLM proxy. Records with no `user_sub` are skipped (can't be billed).
 
 **Caveat — LiteLLM version.** `_billing_unit_breakdown` parses LiteLLM's normalized usage
-shapes (cache-inclusive vs additive token accounting), which is why the image is pinned to
-**v1.89.2**. On a materially different version the cache/reasoning bucketing can drift →
-mis-billing. Match that version or validate the breakdown against a known call.
+shapes (cache-inclusive vs additive token accounting), which is why the image is pinned to an
+exact version (**v1.90.0-rc.1** — bumped from v1.89.2 for the Vertex multi-region context-caching
+fix, BerriAI/litellm#29573; see the Dockerfile). On a materially different version the
+cache/reasoning bucketing can drift → mis-billing, so this bump MUST be validated: run a known
+call (ideally one that exercises cache-read/cache-creation) and confirm the billing-unit
+breakdown still matches before promoting past dev. Match this version or re-validate.
 
 **Escape hatch.** If touching your proxy image is off the table, skip the in-process callback
 and instead consume LiteLLM's native spend logs (DB / generic webhook), transforming them into

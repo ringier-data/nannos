@@ -729,7 +729,7 @@ export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-nannos-local}"
 export GATEWAY_INGEST_TOKEN="${GATEWAY_INGEST_TOKEN:-sk-nannos-local-ingest}"
 # Pinned to match the prod base image (packages/litellm-proxy/Dockerfile) so local
 # reproduces prod's Vertex region-resolution behavior. Override with LITELLM_IMAGE.
-_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.89.2@sha256:713e2a036aecc8f2cb24cdf0bdeffd893b4f37190d4b21eb9e26ac648939c67a}"
+_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.90.0-rc.1@sha256:7315a3a1573d9ff0ed78068b73260e960486ff62922ee6a78f1a2be0f1e5e249}"
 _GW_CONTAINER="nannos-litellm-proxy-local"
 
 log "Starting local Model Gateway (LiteLLM proxy) on :${LLM_GATEWAY_PORT}..."
@@ -758,6 +758,13 @@ litellm_settings:
   # client-side inter-chunk watchdog (Bedrock ignores stream_timeout).
   request_timeout: 600
   drop_params: true
+  # Let LiteLLM normalize provider-specific message sequencing. Bedrock's Converse API
+  # requires alternating user/assistant turns; agent loops with parallel tool calls produce
+  # consecutive user/tool blocks, which LiteLLM otherwise merges-and-warns about on every
+  # turn ("Potential consecutive user/tool blocks"). With this set it normalizes them
+  # cleanly (inserting a dummy assistant turn where needed) and stays quiet. Mirror in the
+  # k8s ConfigMap.
+  modify_params: true
   # Gateway-native retries on transient failures/timeouts, replacing the
   # per-call boto3 retries dropped in the migration. Matches the k8s ConfigMap.
   num_retries: 2

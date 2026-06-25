@@ -4,10 +4,17 @@
 # callback). The `config.yaml` (model_list, regions, costs) is deployment-specific
 # and is mounted at runtime (a ConfigMap in k8s, a bind-mount locally) — never baked.
 #
-# Base is the upstream LiteLLM image, pinned to an exact version+digest (was the moving
-# `main-stable` tag, which resolved to v1.89.2 — this is that same image). Reproducible
+# Base is the upstream LiteLLM image, pinned to an exact version+digest. Reproducible
 # builds matter here: Vertex `eu` multi-region routing is version-dependent.
-FROM ghcr.io/berriai/litellm:v1.89.2@sha256:713e2a036aecc8f2cb24cdf0bdeffd893b4f37190d4b21eb9e26ac648939c67a
+#
+# Bumped v1.89.2 -> v1.90.0-rc.1 to pick up the Vertex multi-region context-caching fix
+# (BerriAI/litellm#29573, merged 2026-06-09): the cachedContents call hardcoded
+# `https://{location}-aiplatform.googleapis.com`, which 404s for the `eu`/`us` multi-regions
+# (only the inference path used the correct `aiplatform.{geo}.rep.googleapis.com` REP host —
+# hence completions worked but any cache_control on a Vertex Gemini model 404'd). The fix was
+# NOT backported to the 1.89.x stable line (still broken in v1.89.4), so the earliest published
+# tag carrying it is the v1.90.0 release candidate. Revisit to v1.90.0 final once it ships.
+FROM ghcr.io/berriai/litellm:v1.90.0-rc.1@sha256:7315a3a1573d9ff0ed78068b73260e960486ff62922ee6a78f1a2be0f1e5e249
 
 WORKDIR /app
 

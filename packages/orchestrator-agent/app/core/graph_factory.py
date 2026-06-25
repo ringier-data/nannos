@@ -521,7 +521,9 @@ class GraphFactory:
             self._models[cache_key] = self._create_model(model_type, thinking_level)
         return self._models[cache_key]
 
-    def _create_middleware_stack(self, model: BaseChatModel | None = None) -> list[Any]:
+    def _create_middleware_stack(
+        self, model: BaseChatModel | None = None, is_gemini: bool = False
+    ) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
         Middleware Execution Order (LangChain convention):
@@ -667,10 +669,14 @@ class GraphFactory:
             # appended below (steering, user preferences, playbook). The marker is
             # injected as an OpenAI-format cache_control content block, which LiteLLM
             # translates to the provider's native format (Bedrock cachePoint /
-            # Anthropic ephemeral) and ignores for non-caching providers — so no
-            # provider gate is needed under the gateway architecture,
-            # where the client is always ChatOpenAI rather than ChatBedrockConverse.
-            LiteLLMPromptCachingMiddleware(),
+            # Anthropic ephemeral) and ignores for non-caching providers.
+            #
+            # cache_conversation (the second breakpoint on the last message) is disabled for
+            # Gemini: Vertex uses *extractive* caching — LiteLLM moves the tagged message into a
+            # CachedContent rather than marking it inline — so tagging the live turn empties the
+            # request `contents` ("No contents in messages"). Gemini caches the system prefix
+            # only; the inline-breakpoint providers (Anthropic/Bedrock) keep conversation caching.
+            LiteLLMPromptCachingMiddleware(cache_conversation=not is_gemini),
             steering_middleware,
             user_preferences_middleware,
             playbook_middleware,
@@ -775,9 +781,10 @@ class GraphFactory:
         #   gateway maps it to Gemini googleSearch, BUT Vertex forbids mixing server-side search
         #   with function declarations, so LiteLLM silently DROPS it (we always send tools).
         # - Forcing it through needs include_server_side_tool_invocations, which triggers Gemini 3
-        #   "context circulation" (Vertex cached content); gateway LiteLLM v1.89.2 then 400s
+        #   "context circulation" (Vertex cached content); the gateway LiteLLM then 400s
         #   ("Tool config, tools and system instruction should not be set ... when using cached
-        #   content"). Verified 2026-06-24. Until the gateway LiteLLM is upgraded past that bug,
+        #   content"). Verified on v1.89.2 (2026-06-24); the gateway is now on v1.90.0-rc.1 but
+        #   whether that resolves this 400 is UNVERIFIED. Until re-tested past that bug,
         #   Gemini grounds via the orchestrator's own fetch tools, not server-side search.
         # Web search is instead exposed as the `console_web_search` MCP tool (console-backend),
         # which runs an isolated, function-tool-free search call — the only path that grounds
@@ -793,7 +800,7 @@ class GraphFactory:
             thinking_enabled=bool(thinking_level),
             has_builtin_tools=is_gemini,
         )
-        middleware = self._create_middleware_stack(model=model)
+        middleware = self._create_middleware_stack(model=model, is_gemini=is_gemini)
         static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
 
         system_prompt = (
