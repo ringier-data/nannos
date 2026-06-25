@@ -67,11 +67,8 @@ async def web_search_mcp(
     metadata["user_sub"] = user.sub
     try:
         answer, citations = await gateway_web_search(query, model=model, metadata=metadata)
-    except Exception as e:  # network/timeout/non-2xx — surface, don't 500 the tool call
-        # Include the exception type: a httpx timeout str()s to "", which would otherwise log/return
-        # a bare "Web search failed:" (the search just ran past the gateway timeout).
-        detail = f"{type(e).__name__}: {e}".rstrip(": ")
-        logger.warning("console_web_search failed (model=%s): %s", model, detail)
-        return f"Web search failed ({detail}). Try a narrower query or retry."
+    except Exception:  # network/timeout/non-2xx — surface, don't 500 the tool call
+        logger.exception("console_web_search failed (model=%s)", model)
+        return "Web search failed. Try a narrower query or retry."
     logger.info("console_web_search via %s: %d citation(s)", model, len(citations))
     return format_web_search_result(answer, citations)
