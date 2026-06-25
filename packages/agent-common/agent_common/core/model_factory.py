@@ -32,16 +32,84 @@ logger = logging.getLogger(__name__)
 _gateway_chat_model_cls = None
 
 
+def coalesce_thinking_blocks(fragments: list | None) -> list[dict]:
+    """Reduce streamed extended-thinking *fragments* into complete, signed blocks.
+
+    The gateway streams Anthropic/Bedrock reasoning as a sequence of single-item fragments:
+    text deltas ``{"type": "thinking", "thinking": "..."}`` accumulate, then a terminal
+    ``{"type": "thinking", "signature": "...", "thinking": ""}`` closes the block. Redacted
+    reasoning arrives already-complete as ``{"type": "redacted_thinking", "data": "..."}``.
+    langchain concatenates these fragment lists across chunks (no ``index`` key, so
+    ``merge_lists`` just extends), so a finalized message's
+    ``additional_kwargs["thinking_blocks"]`` is the flat fragment stream.
+
+    Anthropic/Bedrock require each *replayed* thinking block to carry BOTH its text and its
+    signature in one block (an unsigned thinking block is rejected). So we concatenate text
+    fragments and attach the signature, emitting one block per signature. Trailing unsigned
+    text is dropped — it can't be validly replayed. Idempotent on already-coalesced input.
+    """
+    blocks: list[dict] = []
+    cur_text: list[str] = []
+    cur_sig: str | None = None
+
+    def _flush() -> None:
+        nonlocal cur_text, cur_sig
+        if cur_sig is not None:
+            blocks.append({"type": "thinking", "thinking": "".join(cur_text), "signature": cur_sig})
+        cur_text = []
+        cur_sig = None
+
+    for frag in fragments or []:
+        if not isinstance(frag, dict):
+            continue
+        if frag.get("type") == "redacted_thinking":
+            _flush()  # close any pending signed block before the (complete) redacted one
+            data = frag.get("data")
+            if data:
+                blocks.append({"type": "redacted_thinking", "data": data})
+            continue
+        text = frag.get("thinking")
+        if text:
+            cur_text.append(text)
+        signature = frag.get("signature")
+        if signature:
+            cur_sig = signature
+            _flush()  # a signature terminates the current thinking block
+    return blocks
+
+
+def _thinking_round_trip_provider(model_name: str | None) -> bool:
+    """Whether ``model_name``'s provider needs signed thinking blocks replayed.
+
+    Only Anthropic/Bedrock enforce the "replay the assistant turn's signed thinking_blocks or
+    extended thinking is dropped" rule. Gating the outbound injection on the provider keeps a
+    top-level ``thinking_blocks`` key off requests to providers that would reject it (OpenAI)
+    or ignore it, and is robust to a conversation switching models mid-thread."""
+    try:
+        provider = get_model_provider(model_name) if model_name else ""
+    except Exception:
+        return False
+    return "anthropic" in provider or "bedrock" in provider
+
+
 def _gateway_chat_openai_cls():
     """Lazily build (and cache) the gateway-aware ``ChatOpenAI`` subclass.
 
-    langchain_openai's ``ChatOpenAI`` (>=1.2) targets the official OpenAI spec only and
-    DROPS non-standard streaming delta fields — notably ``reasoning_content`` /
-    ``thinking_blocks``, which our LiteLLM gateway emits for extended-thinking models.
-    Without this, the model genuinely reasons (the gateway streams it) but the reasoning
-    never reaches the app, so no thinking is ever surfaced. We graft the per-chunk
-    ``reasoning_content`` back into ``additional_kwargs`` so callers can render it; the
-    base conversion (content, tool calls, usage) is left untouched.
+    langchain_openai's ``ChatOpenAI`` (>=1.2) targets the official OpenAI spec only and DROPS
+    non-standard fields — notably ``reasoning_content`` / ``thinking_blocks``, which our LiteLLM
+    gateway emits for extended-thinking models. This subclass closes two gaps:
+
+    1. CAPTURE (inbound): graft the per-chunk ``reasoning_content`` (for display) AND the signed
+       ``thinking_blocks`` fragments (for replay) back into ``additional_kwargs``. The fragments
+       accumulate across chunks via langchain's chunk merge and survive into the LangGraph
+       checkpoint (``additional_kwargs`` is serialized), so cross-turn continuity is free.
+
+    2. REPLAY (outbound): on Anthropic/Bedrock, re-attach each assistant turn's coalesced
+       ``thinking_blocks`` as a top-level message field. Without this, Bedrock's Converse transform
+       sees an assistant tool-call turn with no thinking_blocks and DROPS extended thinking for that
+       turn ("Dropping 'thinking' param ... has no thinking_blocks"). The base conversion strips
+       ``thinking`` content blocks, so a top-level key is the only channel LiteLLM reads
+       (utils.py:any_assistant_message_has_thinking_blocks).
     """
     global _gateway_chat_model_cls
     if _gateway_chat_model_cls is None:
@@ -57,7 +125,38 @@ def _gateway_chat_openai_cls():
                         reasoning = delta.get("reasoning_content")
                         if reasoning:
                             gen.message.additional_kwargs["reasoning_content"] = reasoning
+                        # Capture this chunk's signed thinking-block fragment(s); langchain
+                        # concatenates the per-chunk lists across the stream, and
+                        # coalesce_thinking_blocks() reassembles them at replay time.
+                        thinking_blocks = delta.get("thinking_blocks")
+                        if thinking_blocks:
+                            gen.message.additional_kwargs["thinking_blocks"] = list(thinking_blocks)
                 return gen
+
+            def _get_request_payload(self, input_, *, stop=None, **kwargs):
+                payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+                try:
+                    messages = payload.get("messages")
+                    if not isinstance(messages, list) or not _thinking_round_trip_provider(self.model_name):
+                        return payload
+                    # payload["messages"] is built 1:1 and in order from these source messages;
+                    # zip to recover the additional_kwargs the dict form drops.
+                    source = self._convert_input(input_).to_messages()
+                    if len(source) != len(messages):
+                        return payload
+                    for src, dst in zip(source, messages):
+                        if not isinstance(dst, dict) or dst.get("role") != "assistant":
+                            continue
+                        fragments = (getattr(src, "additional_kwargs", None) or {}).get("thinking_blocks")
+                        if not fragments:
+                            continue
+                        blocks = coalesce_thinking_blocks(fragments)
+                        if blocks:
+                            dst["thinking_blocks"] = blocks
+                except Exception:
+                    # Never break the call over reasoning replay — degrade to no thinking_blocks.
+                    logger.exception("thinking_blocks replay failed; sending payload without them")
+                return payload
 
         _gateway_chat_model_cls = _GatewayChatOpenAI
     return _gateway_chat_model_cls
