@@ -60,7 +60,8 @@ export type DefaultRole =
   | 'chat:low'
   | 'chat:premium'
   | 'embedding'
-  | 'multimodal_embedding';
+  | 'multimodal_embedding'
+  | 'search';
 
 /** The live model picker — models registered on the gateway (read by every model dropdown). */
 export async function listAvailableModels(): Promise<AvailableModel[]> {

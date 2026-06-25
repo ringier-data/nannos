@@ -44,6 +44,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -182,6 +183,7 @@ const roleLabel = (role: string): string =>
     'chat:premium': 'premium tier',
     embedding: 'embedding',
     multimodal_embedding: 'multimodal embedding',
+    search: 'search',
   }) as Record<string, string>)[role] ?? role;
 
 export function ModelGatewayPage() {
@@ -516,6 +518,8 @@ export function ModelGatewayPage() {
           <Plus className="mr-2 h-4 w-4" /> Register model
         </Button>
       </div>
+
+      <WebSearchSettings models={models} />
 
       {isLoading ? (
         <p className="text-muted-foreground">Loading…</p>

@@ -12,6 +12,9 @@ from .usage import RateCardPricingEntry
 #     may bind to a tier instead of a concrete alias, so retiring/upgrading a model is one
 #     slot repoint rather than a fleet-wide reclassification.
 #   embedding / multimodal_embedding — vector models.
+#   search — the model backing the web_search tool (the "Search Provider" picker's gateway-native
+#     model). Optional: when unset, web search auto-selects the cheapest web-search-capable model
+#     (see model_factory.get_web_search_model). Distinct from chat: it's a tool-only sub-call.
 # Semantic indexing/chunking has no slot of its own — it runs on the 'chat:low' tier
 # (see model_factory.get_default_indexing_model).
 VALID_ROLES = (
@@ -20,6 +23,7 @@ VALID_ROLES = (
     "chat:premium",
     "embedding",
     "multimodal_embedding",
+    "search",
 )
 
 # The chat tiers ("chat" = standard). Assignments to these roles are remembered per alias
@@ -55,6 +59,9 @@ class GatewayModel(BaseModel):
     output_cost_per_token: float | None = None
     supports_reasoning: bool | None = None
     supports_vision: bool | None = None
+    # Whether the gateway advertises server-side web search for this model. Drives the console's
+    # Web Search picker (which models can back the gateway-native search provider).
+    supports_web_search: bool | None = None
 
 
 class SetDefaultRequest(BaseModel):

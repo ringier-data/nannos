@@ -763,12 +763,25 @@ class GraphFactory:
 
         backend = self.backend_factory
 
-        # Gemini models get Google's server-side built-in tools (google_search,
-        # code_execution), which can't coexist with a forced tool_choice — so they drive
-        # both the built-in-tools binding below and the structured-output strategy. Detected
-        # via is_gemini_model (NOT a bare "vertex" provider match — Vertex also hosts
-        # Claude/Llama, which must not be bound Google's built-in tools).
+        # Gemini can't force a tool_choice cleanly, so it drives the structured-output
+        # strategy (bind-as-tool instead of forced ToolStrategy). Detected via is_gemini_model
+        # (NOT a bare "vertex" provider match — Vertex also hosts Claude/Llama).
         is_gemini = is_gemini_model(model_type)
+
+        # NOTE: We deliberately do NOT bind Google's server-side web search here.
+        # - The native langchain_google_genai shape {"google_search": {}} can't be used: every
+        #   client is a gateway ChatOpenAI (ADR-0001), whose bind_tools raises "Unsupported
+        #   function" on it. The OpenAI-built-in shape {"type": "web_search"} binds fine and the
+        #   gateway maps it to Gemini googleSearch, BUT Vertex forbids mixing server-side search
+        #   with function declarations, so LiteLLM silently DROPS it (we always send tools).
+        # - Forcing it through needs include_server_side_tool_invocations, which triggers Gemini 3
+        #   "context circulation" (Vertex cached content); gateway LiteLLM v1.89.2 then 400s
+        #   ("Tool config, tools and system instruction should not be set ... when using cached
+        #   content"). Verified 2026-06-24. Until the gateway LiteLLM is upgraded past that bug,
+        #   Gemini grounds via the orchestrator's own fetch tools, not server-side search.
+        # Web search is instead exposed as the `console_web_search` MCP tool (console-backend),
+        # which runs an isolated, function-tool-free search call — the only path that grounds
+        # answers for any orchestrator model. See console_backend.routers.web_search_mcp_tools.
 
         # Single source of truth for the provider -> structured-output strategy decision,
         # shared with the sub-agent path (agent_common.a2a.structured_response). Picks
@@ -782,13 +795,6 @@ class GraphFactory:
         )
         middleware = self._create_middleware_stack(model=model)
         static_tools_list = self.get_static_tools(with_response_tool=requires_response_tool)
-
-        # Add Google built-in tools for Gemini models
-        # These are passed via the tools parameter so create_deep_agent can bind them
-        # (bind_tools on the model directly returns a RunnableBinding which isn't a BaseChatModel)
-        if is_gemini:
-            logger.info("Adding built-in tools for Gemini model: google_search, code_execution")
-            static_tools_list = static_tools_list + [{"google_search": {}}, {"code_execution": {}}]
 
         system_prompt = (
             self.config.SYSTEM_INSTRUCTION_SHORT

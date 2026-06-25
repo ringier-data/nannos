@@ -159,6 +159,14 @@ def create_model(
     if effort:
         model_kwargs["reasoning_effort"] = effort
 
+    # NOTE: Native Gemini server-side web search (googleSearch) is NOT enabled here.
+    # Enabling it for a tool-using deep agent requires `include_server_side_tool_invocations`
+    # (so LiteLLM doesn't drop the search tool when function tools are present). But that flag
+    # turns on Gemini 3 "context circulation" (Vertex cached content), and gateway LiteLLM
+    # v1.89.2 still sends tools+system inline alongside the cached content, so Vertex 400s:
+    # "Tool config, tools and system instruction should not be set ... when using cached content."
+    # Verified 2026-06-24. Revisit once the gateway LiteLLM is upgraded past that bug.
+
     logger.info("Creating gateway model alias=%s thinking=%s streaming=%s", model_type, effort, streaming)
     return ChatOpenAI(
         base_url=_gateway_base_url(),

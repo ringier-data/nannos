@@ -124,10 +124,14 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
             )
         )
         registered: set[str] | None = None
+        model_info_by_name: dict[str, dict] | None = None
     else:
         try:
             raw = await request.app.state.model_gateway_service.list_models()
             registered = {m.get("model_name") for m in raw if m.get("model_name")}
+            model_info_by_name = {
+                m["model_name"]: (m.get("model_info") or {}) for m in raw if m.get("model_name")
+            }
             features.append(
                 FeatureStatus(
                     key="model_gateway",
@@ -138,6 +142,7 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
             )
         except ModelGatewayError as e:
             registered = None
+            model_info_by_name = None
             features.append(
                 FeatureStatus(
                     key="model_gateway",
@@ -155,6 +160,9 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
 
     # Chat tiers — which capability tiers sub-agents can bind to, and which are missing.
     features.append(_chat_tiers_feature(defaults, registered))
+
+    # Web search — the web_search tool, backed by the selected Search Provider (gateway-native).
+    features.append(_web_search_feature(defaults.get("search"), model_info_by_name, registered))
 
     # Catalog — embedding default registered + Google OAuth for source connection.
     features.append(await _catalog_feature(request, db))
@@ -312,6 +320,67 @@ def _chat_tiers_feature(defaults: dict[str, str], registered: set[str] | None) -
             remediation='Assign a model to each tier ("Default low/premium tier") in Admin → Model Gateway.',
         )
     return FeatureStatus(key="chat_tiers", name="Chat model tiers", status="ready", detail=detail)
+
+
+def _web_search_feature(
+    search_default: str | None, model_info_by_name: dict[str, dict] | None, registered: set[str] | None
+) -> FeatureStatus:
+    """Web search readiness — mirrors the console_web_search tool's model pick (services.web_search).
+
+    The web_search tool runs an isolated, tool-free LiteLLM ``web_search_options`` call against a
+    web-search-capable model. The active model is the admin's ``search`` default when it's
+    registered and capable, else the cheapest capable model auto-selected; web search is off when
+    neither exists."""
+    key, name = "web_search", "Web search"
+
+    # An explicit default that's no longer registered is the silent-misconfiguration case.
+    if search_default and registered is not None and search_default not in registered:
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="degraded",
+            detail=f"The selected search model '{search_default}' is not registered on the gateway.",
+            remediation="Pick a registered web-search model in Admin → Model Gateway → Web Search, or clear it to auto-select.",
+        )
+
+    # Gateway list unreadable → fail open, matching the other rows (don't hard-disable on a blip).
+    # Single source of the model pick, shared with the console_web_search tool (services.web_search).
+    from .web_search import pick_web_search_model
+
+    model, source = pick_web_search_model(search_default, model_info_by_name)
+
+    if model is None:
+        if model_info_by_name is None:
+            # Gateway list unreadable and no explicit default → unknown; fail open (don't
+            # hard-disable on a transient blip), matching the other model-gateway rows.
+            return FeatureStatus(
+                key=key,
+                name=name,
+                status="ready",
+                detail="Gateway list unavailable — can't confirm a web-search-capable model.",
+            )
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="disabled",
+            detail="No web-search-capable model is registered — the web_search tool is unavailable.",
+            remediation="Register a web-search-capable model (e.g. a Gemini model), then optionally select it under Admin → Model Gateway → Web Search.",
+        )
+
+    if source == "selected":
+        detail = f"Provider: Model Gateway (built-in) · model: {model} (selected)."
+    else:
+        detail = f"Provider: Model Gateway (built-in) · model: {model} (auto-selected — cheapest capable)."
+
+    caveat = None
+    # An explicit default that's registered but NOT web-search-capable is a misconfiguration the
+    # resolver silently overrides — call it out so the picker selection isn't trusted blindly.
+    if source == "auto" and search_default and search_default != model:
+        caveat = (
+            f"Selected model '{search_default}' isn't web-search-capable, so search falls back to "
+            f"the cheapest capable model."
+        )
+    return FeatureStatus(key=key, name=name, status="ready", detail=detail, caveat=caveat)
 
 
 def _voice_agent_feature() -> FeatureStatus:
