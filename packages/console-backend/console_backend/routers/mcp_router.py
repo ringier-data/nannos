@@ -6,6 +6,7 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from ringier_a2a_sdk.utils.schema_cleaning import clean_gemini_schema
 
 from ..config import config
 from ..dependencies import require_auth_or_bearer_token
@@ -324,13 +325,17 @@ async def _list_mcp_tools(
 
         mcp_tools = data["result"]["tools"]
 
-        # Convert to our response model
+        # Convert to our response model.
+        # Gateway tool schemas can carry JSON-Schema $ref/$defs (e.g. union types like
+        # HttpStreamingTransportConfig). Gemini/Vertex rejects $ref/$defs, so inline them
+        # here before the schema is echoed to the agent and reaches the model. clean_gemini_schema
+        # is a no-op on schemas that have no $ref/$defs, so non-Gemini providers are unaffected.
         tools = [
             MCPTool(
                 name=tool.get("name", ""),
                 description=tool.get("description"),
-                input_schema=tool.get("inputSchema"),  # MCP standard field
-                output_schema=tool.get("outputSchema"),  # MCP standard field for output validation
+                input_schema=clean_gemini_schema(tool.get("inputSchema")),  # MCP standard field
+                output_schema=clean_gemini_schema(tool.get("outputSchema")),  # MCP standard field for output validation
                 server=tool.get("server") or tool.get("serverName"),  # Check both possible fields
             )
             for tool in mcp_tools

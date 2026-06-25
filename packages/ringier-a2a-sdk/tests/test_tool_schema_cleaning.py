@@ -15,10 +15,22 @@ the middleware.
 
 from ringier_a2a_sdk.utils.schema_cleaning import (
     CleanupLevel,
+    clean_gemini_schema,
     clean_schema_node,
     clean_schema_properties,
     validate_and_clean_tool_dict,
 )
+
+
+def _has_ref_or_defs(obj) -> bool:
+    """True if a $ref, $defs, or definitions appears anywhere in the structure."""
+    if isinstance(obj, dict):
+        if "$ref" in obj or "$defs" in obj or "definitions" in obj:
+            return True
+        return any(_has_ref_or_defs(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_has_ref_or_defs(v) for v in obj)
+    return False
 
 
 class TestCleanSchemaProperties:
@@ -978,3 +990,145 @@ class TestAnyOfNullableUnwrapping:
             result = clean_schema_node(node, level=level)
             assert result["type"] == "string", f"Failed at level {level}"
             assert "anyOf" not in result, f"anyOf not removed at level {level}"
+
+
+class TestRefInlining:
+    """Tests for $ref/$defs inlining — Vertex/Gemini rejects $ref/$defs.
+
+    Reproduces the production error:
+      'The referenced name `#/$defs/HttpStreamingTransportConfig` in
+       function_response.response does not match to a display_name ...'
+    Anthropic/Claude resolve $ref fine, so this only breaks on Gemini.
+    """
+
+    def test_simple_ref_inlined(self):
+        """A $ref node is replaced by the referenced definition."""
+        node = {"$ref": "#/$defs/Inner"}
+        defs = {"Inner": {"type": "string", "description": "an inner value"}}
+        result = clean_schema_node(node, defs=defs)
+        assert result == {"type": "string", "description": "an inner value"}
+        assert "$ref" not in result
+
+    def test_ref_sibling_metadata_merged(self):
+        """description carried alongside $ref is preserved, but the def's own fields win."""
+        node = {"$ref": "#/$defs/Inner", "description": "field-level doc"}
+        defs = {"Inner": {"type": "string"}}
+        result = clean_schema_node(node, defs=defs)
+        assert result["type"] == "string"
+        assert result["description"] == "field-level doc"
+
+    def test_definitions_dialect_resolves(self):
+        """draft-7 'definitions' (not '$defs') refs also resolve."""
+        node = {"$ref": "#/definitions/Inner"}
+        defs = {"Inner": {"type": "integer"}}
+        result = clean_schema_node(node, defs=defs)
+        assert result == {"type": "integer"}
+
+    def test_unresolvable_ref_becomes_object(self):
+        """A $ref with no matching def collapses to a permissive object, never a dangling $ref."""
+        node = {"$ref": "#/$defs/Missing"}
+        result = clean_schema_node(node, defs={})
+        assert "$ref" not in result
+        assert result.get("type") == "object"
+
+    def test_cyclic_ref_terminates(self):
+        """A self-referential def must not infinite-loop; it bottoms out as an object."""
+        defs = {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string"},
+                    "child": {"$ref": "#/$defs/Node"},
+                },
+            }
+        }
+        result = clean_schema_node({"$ref": "#/$defs/Node"}, defs=defs)
+        assert not _has_ref_or_defs(result)
+        assert result["type"] == "object"
+
+    def test_validate_and_clean_tool_dict_inlines_defs(self):
+        """The real-world shape: $defs at the parameters root, $ref nested in a property."""
+        tool_dict = {
+            "function": {
+                "name": "console_list_mcp_servers",
+                "description": "List MCP servers",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "transport_config": {"$ref": "#/$defs/HttpStreamingTransportConfig"},
+                    },
+                    "$defs": {
+                        "HttpStreamingTransportConfig": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string"},
+                                "type": {"type": "string"},
+                            },
+                        }
+                    },
+                },
+            },
+            "type": "function",
+        }
+
+        result = validate_and_clean_tool_dict(tool_dict)
+
+        params = result["function"]["parameters"]
+        # $defs table is gone, and no $ref leaks anywhere
+        assert "$defs" not in params
+        assert not _has_ref_or_defs(result), f"ref/defs survived: {result}"
+        # The ref was inlined to the actual object schema
+        transport = params["properties"]["transport_config"]
+        assert transport["type"] == "object"
+        assert "url" in transport["properties"]
+
+    def test_clean_gemini_schema_inlines_output_schema(self):
+        """clean_gemini_schema handles a raw MCP outputSchema (not a tool dict)."""
+        output_schema = {
+            "type": "object",
+            "properties": {
+                "servers": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/Server"},
+                }
+            },
+            "$defs": {
+                "Server": {
+                    "type": "object",
+                    "properties": {"slug": {"type": "string"}},
+                }
+            },
+        }
+
+        result = clean_gemini_schema(output_schema)
+
+        assert not _has_ref_or_defs(result), f"ref/defs survived: {result}"
+        item = result["properties"]["servers"]["items"]
+        assert item["type"] == "object"
+        assert "slug" in item["properties"]
+
+    def test_clean_gemini_schema_noop_without_refs(self):
+        """A schema with no $ref/$defs passes through unchanged in shape (non-Gemini-safe)."""
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "n"}},
+        }
+        result = clean_gemini_schema(schema)
+        assert result["properties"]["name"] == {"type": "string", "description": "n"}
+
+    def test_clean_gemini_schema_passthrough_none(self):
+        """None / non-dict input is returned unchanged (input_schema can be None)."""
+        assert clean_gemini_schema(None) is None
+        assert clean_gemini_schema("x") == "x"
+
+    def test_ref_inside_array_items_inlined(self):
+        """$ref nested inside array items resolves."""
+        node = {
+            "type": "array",
+            "items": {"$ref": "#/$defs/Item"},
+        }
+        defs = {"Item": {"type": "object", "properties": {"id": {"type": "string"}}}}
+        result = clean_schema_node(node, defs=defs)
+        assert result["items"]["type"] == "object"
+        assert "id" in result["items"]["properties"]
+        assert not _has_ref_or_defs(result)
