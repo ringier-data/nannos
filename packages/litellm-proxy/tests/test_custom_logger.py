@@ -49,7 +49,9 @@ class _StatusResponse:
 
     def raise_for_status(self) -> None:
         resp = httpx.Response(self.status_code, request=self._request)
-        raise httpx.HTTPStatusError(f"HTTP {self.status_code}", request=self._request, response=resp)
+        raise httpx.HTTPStatusError(
+            f"HTTP {self.status_code}", request=self._request, response=resp
+        )
 
 
 class _FakeClient:
@@ -149,7 +151,9 @@ def test_is_retryable_classification():
     req = httpx.Request("POST", "http://x")
 
     def status(code: int) -> httpx.HTTPStatusError:
-        return httpx.HTTPStatusError("", request=req, response=httpx.Response(code, request=req))
+        return httpx.HTTPStatusError(
+            "", request=req, response=httpx.Response(code, request=req)
+        )
 
     assert cl._is_retryable(status(503))
     assert cl._is_retryable(status(500))
@@ -189,7 +193,9 @@ async def test_retryable_failure_is_retried_then_succeeds(logger_env, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_non_retryable_status_is_not_retried_and_dead_letters(logger_env, monkeypatch):
+async def test_non_retryable_status_is_not_retried_and_dead_letters(
+    logger_env, monkeypatch
+):
     """A 4xx won't fix itself, so it is dead-lettered immediately without retrying."""
     monkeypatch.setattr(cl, "_FLUSH_BACKOFF_BASE", 0)
     calls = {"n": 0}
@@ -268,7 +274,11 @@ def test_dead_letter_emits_parseable_redacted_line(caplog):
     with caplog.at_level(_logging.ERROR, logger="nannos.litellm.custom_logger"):
         logger._dead_letter([record], RuntimeError("boom"))
 
-    lines = [r.getMessage() for r in caplog.records if "[cost][dead-letter]" in r.getMessage()]
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "[cost][dead-letter]" in r.getMessage()
+    ]
     assert len(lines) == 1
     payload = _json.loads(lines[0].split("[cost][dead-letter]", 1)[1].strip())
     # PII is gone; safe operational context survives.
@@ -287,6 +297,7 @@ def test_dead_letter_emits_parseable_redacted_line(caplog):
 
 # --- Billing breakdown: embedding token-counting edge cases (#7) ---
 
+
 def test_total_tokens_only_billed_as_input():
     """An embedding provider that reports ONLY total_tokens bills real tokens, not $0/estimate."""
     bd = cl._billing_unit_breakdown({"total_tokens": 1234})
@@ -295,7 +306,9 @@ def test_total_tokens_only_billed_as_input():
 
 def test_chat_total_tokens_not_miscounted_as_input():
     """A chat call with a normal split is unaffected (total_tokens fallback must not trigger)."""
-    bd = cl._billing_unit_breakdown({"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140})
+    bd = cl._billing_unit_breakdown(
+        {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140}
+    )
     assert bd["base_input_tokens"] == 100
     assert bd["base_output_tokens"] == 40
 
@@ -378,8 +391,145 @@ def test_estimate_short_text_bills_at_least_one_token():
 def test_non_image_data_uri_is_billed_as_binary_input():
     # data:application/pdf / data:text are excluded from the char estimate; they must be
     # counted as a binary (input_images) part rather than billed nothing by both paths.
-    assert cl._estimate_text_token_units({"input": ["data:application/pdf;base64,AAAA"]}) == 0
+    assert (
+        cl._estimate_text_token_units({"input": ["data:application/pdf;base64,AAAA"]})
+        == 0
+    )
     assert cl._count_image_inputs({"input": ["data:application/pdf;base64,AAAA"]}) == 1
     assert cl._count_image_inputs({"input": ["data:text/plain;base64,AAAA"]}) == 1
     # image data URIs and gs:// still count (unchanged behavior).
-    assert cl._count_image_inputs({"input": ["data:image/png;base64,AAAA", "gs://bucket/x"]}) == 2
+    assert (
+        cl._count_image_inputs(
+            {"input": ["data:image/png;base64,AAAA", "gs://bucket/x"]}
+        )
+        == 2
+    )
+
+
+# --- Bedrock structured-output schema sanitization ----------------------------------------
+
+
+def test_force_additional_properties_false_on_flat_object():
+    # The real-world failing case: a flat object (FinalResponseSchema shape) with no
+    # additionalProperties. Bedrock requires it set to false.
+    schema = {
+        "type": "object",
+        "properties": {"task_state": {"type": "string"}, "message": {"type": "string"}},
+        "required": ["task_state", "message"],
+    }
+    cl._force_additional_properties_false(schema)
+    assert schema["additionalProperties"] is False
+
+
+def test_force_additional_properties_overrides_object_value():
+    # Bedrock's exact complaint: additionalProperties is an object (e.g. an open map). Force false.
+    schema = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": {"type": "string"},
+    }
+    cl._force_additional_properties_false(schema)
+    assert schema["additionalProperties"] is False
+
+
+def test_force_additional_properties_preserves_explicit_bool():
+    # A caller that deliberately set a boolean is left alone (both true and false).
+    open_schema = {"type": "object", "properties": {}, "additionalProperties": True}
+    cl._force_additional_properties_false(open_schema)
+    assert open_schema["additionalProperties"] is True
+
+
+def test_force_additional_properties_recurses_nested_and_defs():
+    schema = {
+        "type": "object",
+        "properties": {
+            "child": {"type": "object", "properties": {"x": {"type": "string"}}},
+            "items": {"type": "array", "items": {"type": "object", "properties": {}}},
+            "variant": {
+                "anyOf": [{"type": "object", "properties": {}}, {"type": "null"}]
+            },
+        },
+        "$defs": {
+            "Nested": {"type": "object", "properties": {"y": {"type": "integer"}}}
+        },
+    }
+    cl._force_additional_properties_false(schema)
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["child"]["additionalProperties"] is False
+    assert schema["properties"]["items"]["items"]["additionalProperties"] is False
+    assert schema["properties"]["variant"]["anyOf"][0]["additionalProperties"] is False
+    assert schema["$defs"]["Nested"]["additionalProperties"] is False
+    # the null branch and scalar leaves are untouched
+    assert "additionalProperties" not in schema["properties"]["variant"]["anyOf"][1]
+
+
+def test_force_additional_properties_object_detected_via_properties_without_type():
+    # Some generators omit "type": "object" but include properties — still an object node.
+    schema = {"properties": {"a": {"type": "string"}}}
+    cl._force_additional_properties_false(schema)
+    assert schema["additionalProperties"] is False
+
+
+def test_sanitize_response_format_openai_shape():
+    data = {
+        "model": "claude-sonnet-4.6",
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "FinalResponseSchema",
+                "schema": {"type": "object", "properties": {"m": {"type": "string"}}},
+            },
+        },
+    }
+    cl._sanitize_response_format(data)
+    assert (
+        data["response_format"]["json_schema"]["schema"]["additionalProperties"]
+        is False
+    )
+
+
+def test_sanitize_response_format_flat_schema_shape():
+    # Tolerate the variant where the schema sits directly under response_format.schema.
+    data = {
+        "response_format": {
+            "type": "json_schema",
+            "schema": {"type": "object", "properties": {}},
+        }
+    }
+    cl._sanitize_response_format(data)
+    assert data["response_format"]["schema"]["additionalProperties"] is False
+
+
+def test_sanitize_response_format_ignores_non_json_schema():
+    for rf in ({"type": "json_object"}, {"type": "text"}, None, "json"):
+        data = {"response_format": rf}
+        cl._sanitize_response_format(data)  # must not raise
+        assert data["response_format"] == rf
+
+
+def test_pre_call_hook_mutates_and_returns_data():
+    data = {
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "S",
+                "schema": {"type": "object", "properties": {}},
+            },
+        }
+    }
+    out = asyncio.run(
+        cl.proxy_handler_instance.async_pre_call_hook(None, None, data, "completion")
+    )
+    assert out is data
+    assert (
+        data["response_format"]["json_schema"]["schema"]["additionalProperties"]
+        is False
+    )
+
+
+def test_pre_call_hook_passthrough_without_response_format():
+    data = {"model": "claude-sonnet-4.6", "messages": []}
+    out = asyncio.run(
+        cl.proxy_handler_instance.async_pre_call_hook(None, None, data, "completion")
+    )
+    assert out == {"model": "claude-sonnet-4.6", "messages": []}

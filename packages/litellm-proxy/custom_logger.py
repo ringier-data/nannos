@@ -57,6 +57,94 @@ def _get_client() -> httpx.AsyncClient:
     return _client
 
 
+# --- Bedrock structured-output schema compatibility -------------------------------------
+# Bedrock's Converse structured-output validator (outputConfig.format.schema) requires EVERY
+# object node to carry an explicit `additionalProperties: false`. It rejects both the absent
+# default and an object-valued `additionalProperties` with:
+#   "output_config.format.schema: For 'object' type, 'additionalProperties: object' is not
+#    supported. Please set 'additionalProperties' to false"
+#
+# The app's strict tool path (convert_to_openai_tool(strict=True)) already emits
+# additionalProperties:false, so those calls succeed. But the native ProviderStrategy /
+# AutoStrategy path (LangChain `with_structured_output` / `AutoStrategy(schema=...)`) sends a
+# NON-strict `response_format` json_schema with no `additionalProperties` at all — which Bedrock
+# 400s on. We normalize it here, at the provider boundary, so every structured-output path is
+# fixed uniformly regardless of how the caller built the schema.
+#
+# Applied to ALL providers (not just Bedrock): the model alias hasn't been routed to a deployment
+# at pre-call time, and the change is safe everywhere — OpenAI strict mode REQUIRES
+# additionalProperties:false, OpenAI non-strict accepts it, and Gemini's responseSchema subset
+# ignores/strips it. Every structured-output schema in this product is a closed Pydantic model
+# (no open `dict[str, X]` maps), so forcing closed objects loses no expressible validation —
+# and Bedrock/OpenAI-strict can't express open maps anyway.
+_SCHEMA_CHILD_LISTS = ("anyOf", "allOf", "oneOf", "prefixItems")
+_SCHEMA_CHILD_TABLES = ("$defs", "definitions")
+
+
+def _force_additional_properties_false(node, _depth: int = 0) -> None:
+    """Recursively set ``additionalProperties: false`` on every object node, in place.
+
+    An "object node" is any schema dict declaring ``type: object`` or carrying
+    ``properties``. A pre-existing boolean ``additionalProperties`` is preserved (the caller
+    may have deliberately set ``true``); only a missing or object/non-bool value is forced to
+    ``false`` — that is exactly the shape Bedrock rejects. ``_depth`` guards against
+    pathologically deep / cyclic schemas.
+    """
+    if not isinstance(node, dict) or _depth > 64:
+        return
+
+    properties = node.get("properties")
+    is_object = node.get("type") == "object" or isinstance(properties, dict)
+    if is_object and not isinstance(node.get("additionalProperties"), bool):
+        node["additionalProperties"] = False
+
+    if isinstance(properties, dict):
+        for sub in properties.values():
+            _force_additional_properties_false(sub, _depth + 1)
+
+    items = node.get("items")
+    if isinstance(items, dict):
+        _force_additional_properties_false(items, _depth + 1)
+    elif isinstance(items, list):  # draft tuple-form items
+        for sub in items:
+            _force_additional_properties_false(sub, _depth + 1)
+
+    for key in _SCHEMA_CHILD_LISTS:
+        seq = node.get(key)
+        if isinstance(seq, list):
+            for sub in seq:
+                _force_additional_properties_false(sub, _depth + 1)
+
+    for key in _SCHEMA_CHILD_TABLES:
+        table = node.get(key)
+        if isinstance(table, dict):
+            for sub in table.values():
+                _force_additional_properties_false(sub, _depth + 1)
+
+
+def _sanitize_response_format(data: dict) -> None:
+    """Make a request's ``response_format`` json_schema Bedrock-safe, in place.
+
+    No-op unless ``data`` carries a ``response_format`` of type ``json_schema`` with a dict
+    schema. Tolerant of both shapes LiteLLM accepts: the schema under
+    ``response_format.json_schema.schema`` (OpenAI) or directly under ``response_format.schema``.
+    """
+    response_format = data.get("response_format")
+    if (
+        not isinstance(response_format, dict)
+        or response_format.get("type") != "json_schema"
+    ):
+        return
+    json_schema = response_format.get("json_schema")
+    schema = (
+        json_schema.get("schema")
+        if isinstance(json_schema, dict)
+        else response_format.get("schema")
+    )
+    if isinstance(schema, dict):
+        _force_additional_properties_false(schema)
+
+
 def _as_dict(obj) -> dict:
     if obj is None:
         return {}
@@ -69,7 +157,11 @@ def _as_dict(obj) -> dict:
                 pass
     if isinstance(obj, dict):
         return obj
-    return {k: v for k, v in vars(obj).items() if not k.startswith("_")} if hasattr(obj, "__dict__") else {}
+    return (
+        {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+        if hasattr(obj, "__dict__")
+        else {}
+    )
 
 
 def _billing_unit_breakdown(usage: dict) -> dict[str, int]:
@@ -108,7 +200,9 @@ def _billing_unit_breakdown(usage: dict) -> dict[str, int]:
     inclusive_cache_read = prompt_details.get("cached_tokens") or 0
     inclusive_cache_creation = prompt_details.get("cache_creation_tokens") or 0
     cache_read = usage.get("cache_read_input_tokens") or inclusive_cache_read or 0
-    cache_creation = usage.get("cache_creation_input_tokens") or inclusive_cache_creation or 0
+    cache_creation = (
+        usage.get("cache_creation_input_tokens") or inclusive_cache_creation or 0
+    )
     reasoning = completion_details.get("reasoning_tokens") or 0
 
     # Base (full-price) input. Trust text_tokens when present — it is LiteLLM's authoritative
@@ -204,7 +298,9 @@ def _count_image_inputs(kwargs: dict) -> int:
         for part in parts:
             if isinstance(part, str) and part.startswith(("data:", "gs://")):
                 count += 1
-            elif isinstance(part, dict) and ("image" in part or part.get("type") == "image"):
+            elif isinstance(part, dict) and (
+                "image" in part or part.get("type") == "image"
+            ):
                 count += 1
     return count
 
@@ -229,13 +325,18 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
     # custom_llm_provider on passthrough/routed calls. Fall back to the provider prefix of the
     # resolved deployment id ("bedrock/anthropic.claude-..." → "bedrock") so the record stays
     # priceable instead of landing at $0 and silently under-counting budget spend.
-    provider = kwargs.get("custom_llm_provider") or litellm_params.get("custom_llm_provider")
+    provider = kwargs.get("custom_llm_provider") or litellm_params.get(
+        "custom_llm_provider"
+    )
     if not provider:
         deployment_id = kwargs.get("model") or ""
         if "/" in deployment_id:
             provider = deployment_id.split("/", 1)[0]
     if not provider:
-        logger.warning("[cost] could not resolve provider for model=%s; cost may not resolve", model_name)
+        logger.warning(
+            "[cost] could not resolve provider for model=%s; cost may not resolve",
+            model_name,
+        )
 
     usage = _as_dict(getattr(response_obj, "usage", None))
     breakdown = _billing_unit_breakdown(usage)
@@ -249,7 +350,9 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
     if kwargs.get("input") is not None and "base_input_tokens" not in breakdown:
         estimated = _estimate_text_token_units(kwargs)
         if estimated:
-            breakdown["input_text_tokens"] = breakdown.get("input_text_tokens", 0) + estimated
+            breakdown["input_text_tokens"] = (
+                breakdown.get("input_text_tokens", 0) + estimated
+            )
     if not breakdown:
         logger.warning("[cost] empty billing breakdown for model=%s", model_name)
         return None
@@ -267,7 +370,9 @@ def _build_record(kwargs: dict, response_obj) -> dict | None:
     }
 
 
-_RETRYABLE_STATUS = frozenset({408, 429})  # request-timeout / too-many-requests: transient
+_RETRYABLE_STATUS = frozenset(
+    {408, 429}
+)  # request-timeout / too-many-requests: transient
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -325,6 +430,25 @@ class NannosCostLogger(CustomLogger):
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run())
 
+    async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+        """Normalize structured-output schemas before the request leaves the gateway.
+
+        LiteLLM calls this on every proxied request and uses the returned ``data`` as the
+        (possibly mutated) request. We force ``additionalProperties: false`` on every object
+        node of a ``response_format`` json_schema so Bedrock's Converse structured-output
+        validator accepts it (see ``_force_additional_properties_false``). Never raise — a
+        sanitization bug must not block a request, so on any error we pass ``data`` through
+        unchanged.
+        """
+        try:
+            if isinstance(data, dict):
+                _sanitize_response_format(data)
+        except Exception as e:  # never break the call on a sanitization failure
+            logger.warning(
+                "[schema] response_format sanitization failed: %s", e, exc_info=True
+            )
+        return data
+
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         try:
             record = _build_record(kwargs, response_obj)
@@ -345,7 +469,10 @@ class NannosCostLogger(CustomLogger):
                 # console-backend unreachable long enough to fill the buffer; drop rather
                 # than grow memory, but dead-letter the payload so it stays recoverable. We
                 # never break the LLM call on a logging failure.
-                logger.error("[cost] ingest buffer full (%d); dead-lettering usage record", _MAX_BUFFER)
+                logger.error(
+                    "[cost] ingest buffer full (%d); dead-lettering usage record",
+                    _MAX_BUFFER,
+                )
                 self._dead_letter([record], None)
         except Exception as e:  # never break the LLM call on a logging failure
             logger.error("[cost] failed to enqueue usage: %s", e, exc_info=True)
@@ -388,7 +515,11 @@ class NannosCostLogger(CustomLogger):
                 backoff = _FLUSH_BACKOFF_BASE * (2**attempt)
                 logger.warning(
                     "[cost] flush attempt %d/%d for %d record(s) failed (%s); retrying in %.1fs",
-                    attempt + 1, _FLUSH_MAX_RETRIES + 1, len(batch), e, backoff,
+                    attempt + 1,
+                    _FLUSH_MAX_RETRIES + 1,
+                    len(batch),
+                    e,
+                    backoff,
                 )
                 await asyncio.sleep(backoff)
         # Retries exhausted (or a non-retryable error): dead-letter so the records survive
