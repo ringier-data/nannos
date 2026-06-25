@@ -307,6 +307,27 @@ def test_output_only_does_not_borrow_total_as_input():
     assert bd["base_output_tokens"] == 50
 
 
+def test_web_search_billed_one_unit_per_grounded_call():
+    """A grounded call (provider reports web_search_requests) bills exactly ONE web_search unit,
+    regardless of how many underlying searches ran — matching LiteLLM's per-request grounding fee."""
+    bd = cl._billing_unit_breakdown(
+        {
+            "prompt_tokens": 12,
+            "completion_tokens": 251,
+            "prompt_tokens_details": {"text_tokens": 12, "web_search_requests": 2},
+        }
+    )
+    assert bd["web_search"] == 1  # NOT 2 — would over-bill the flat per-call grounding fee
+    assert bd["base_input_tokens"] == 12
+    assert bd["base_output_tokens"] == 251
+
+
+def test_no_web_search_unit_when_call_did_not_ground():
+    """A plain chat call (no web_search_requests) emits no web_search unit."""
+    bd = cl._billing_unit_breakdown({"prompt_tokens": 100, "completion_tokens": 40})
+    assert "web_search" not in bd
+
+
 def _record_kwargs(**overrides):
     """Minimal kwargs for _build_record with a billable usage + user attribution."""
     kwargs = {

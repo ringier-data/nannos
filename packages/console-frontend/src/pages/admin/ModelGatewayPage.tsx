@@ -81,13 +81,26 @@ const PRICING_UNITS: Array<{
   label: string;
   flow: RateCardPricingEntry['flow_direction'];
   embeddingOnly?: boolean;
+  webSearchOnly?: boolean;
 }> = [
   { unit: 'base_input_tokens', label: 'Input ($/M tokens)', flow: 'input' },
   { unit: 'base_output_tokens', label: 'Output ($/M tokens)', flow: 'output' },
   { unit: 'cache_read_input_tokens', label: 'Cache read ($/M)', flow: 'input' },
   { unit: 'cache_creation_input_tokens', label: 'Cache write ($/M)', flow: 'input' },
   { unit: 'input_images', label: 'Per image ($/M images)', flow: 'input', embeddingOnly: true },
+  // Per-grounded-call web-search fee (matches the proxy's `web_search` billing unit). Only shown
+  // for web-search-capable models — i.e. once the gateway prefill reports a price for it — so it
+  // isn't a confusing empty field on chat models that can't search. See webSearchOnly gating below.
+  { unit: 'web_search', label: 'Web search ($/M searches)', flow: 'output', webSearchOnly: true },
 ];
+
+// The pricing fields shown/submitted for a given mode. web_search is gated on the prefill having
+// surfaced it (capable models only); everything else follows the input/embedding split.
+const visiblePricingUnits = (mode: string, prices: Record<string, string>) =>
+  (mode === 'embedding'
+    ? PRICING_UNITS.filter((u) => u.flow === 'input')
+    : PRICING_UNITS.filter((u) => !u.embeddingOnly)
+  ).filter((u) => !u.webSearchOnly || prices[u.unit] != null);
 
 interface FormState {
   model_name: string;
@@ -244,12 +257,20 @@ export function ModelGatewayPage() {
     if (entry.supports_pdf_input) modes.push('file');
     const perM = (v?: number | null) => (v && v > 0 ? String(v * 1_000_000) : undefined);
     const prices: Record<string, string> = {};
+    // Web search is a per-query fee keyed by context size; price the `medium` tier (what
+    // gateway_web_search sends), falling back to low/high — mirrors the backend cost-prefill.
+    const search = entry.search_context_cost_per_query;
+    const perQuery =
+      search?.search_context_size_medium ??
+      search?.search_context_size_low ??
+      search?.search_context_size_high;
     const map: Array<[string, string | undefined]> = [
       ['base_input_tokens', perM(entry.input_cost_per_token)],
       ['base_output_tokens', perM(entry.output_cost_per_token)],
       ['cache_read_input_tokens', perM(entry.cache_read_input_token_cost)],
       ['cache_creation_input_tokens', perM(entry.cache_creation_input_token_cost)],
       ['input_images', perM(entry.input_cost_per_image)],
+      ['web_search', perM(perQuery)],
     ];
     for (const [unit, val] of map) if (val) prices[unit] = val;
     const isEmbedding = entry.mode === 'embedding';
@@ -261,7 +282,9 @@ export function ModelGatewayPage() {
       provider: entry.provider ?? f.provider,
       mode: isEmbedding ? 'embedding' : 'chat',
       input_modes: isEmbedding ? embeddingInputModes(entry) : modes,
-      prices: { ...f.prices, ...prices },
+      // Replace (not merge): selecting a different model must not leave a prior model's prices —
+      // e.g. a stale web_search fee on a model that can't search, or stale cache rates.
+      prices,
     }));
   };
 
@@ -453,11 +476,8 @@ export function ModelGatewayPage() {
     // location ("eu"/"global") in the provider field from creating an orphan rate card that never
     // matches usage (→ silent $0 billing).
     const provider = deriveProvider(form.litellm_model) || form.provider;
-    // Embeddings bill input only; chat bills input/output (+ optional cache).
-    const units =
-      form.mode === 'embedding'
-        ? PRICING_UNITS.filter((u) => u.flow === 'input')
-        : PRICING_UNITS.filter((u) => !u.embeddingOnly);
+    // Embeddings bill input only; chat bills input/output (+ optional cache / web search).
+    const units = visiblePricingUnits(form.mode, form.prices);
     const pricing: Record<string, RateCardPricingEntry> = {};
     for (const { unit, flow } of units) {
       const raw = form.prices[unit];
@@ -520,7 +540,7 @@ export function ModelGatewayPage() {
         </Button>
       </div>
 
-      <WebSearchSettings models={models} />
+      <WebSearchSettings />
 
       {isLoading ? (
         <p className="text-muted-foreground">Loading…</p>
@@ -841,10 +861,7 @@ export function ModelGatewayPage() {
                 </Button>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {(form.mode === 'embedding'
-                  ? PRICING_UNITS.filter((u) => u.flow === 'input')
-                  : PRICING_UNITS.filter((u) => !u.embeddingOnly)
-                ).map(({ unit, label }) => (
+                {visiblePricingUnits(form.mode, form.prices).map(({ unit, label }) => (
                   <div key={unit} className="grid gap-1">
                     <Label className="text-xs text-muted-foreground">{label}</Label>
                     <Input

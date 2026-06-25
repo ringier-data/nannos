@@ -24,6 +24,41 @@ logger = logging.getLogger(__name__)
 _client = LazyClient(lambda: httpx.AsyncClient())
 
 
+def _gateway_headers(metadata: dict | None = None) -> dict[str, str]:
+    """Auth + content headers every console-backend → gateway call shares.
+
+    The Bearer default mirrors agent-common._gateway_api_key / the embeddings adapter — a
+    consistent key avoids silent 401s when the env is unset. console-backend is dependency-light
+    (no agent-common), so the value is duplicated here rather than imported. ``metadata`` (e.g.
+    {"user_sub": ...}) rides on x-litellm-spend-logs-metadata so the proxy attributes the cost;
+    without it the proxy logs nothing.
+    """
+    headers = {
+        "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
+        "Content-Type": "application/json",
+    }
+    if metadata:
+        headers["x-litellm-spend-logs-metadata"] = json.dumps({k: v for k, v in metadata.items() if v is not None})
+    return headers
+
+
+def _completions_url() -> str:
+    return f"{config.model_gateway.url.rstrip('/')}/v1/chat/completions"
+
+
+def _first_message(resp_json: dict) -> dict:
+    """The first choice's ``message`` from an OpenAI-shaped completion, or ``{}`` when the
+    provider returned no choices.
+
+    A 2xx with ``choices: []`` is a *successful* response with no output (content-filter block,
+    moderation refusal, a provider error the gateway mapped to 200) — not a transport failure,
+    which ``raise_for_status`` already caught. Returning ``{}`` lets callers fall through to their
+    empty-output handling instead of raising IndexError on ``choices[0]``.
+    """
+    choices = resp_json.get("choices") or []
+    return choices[0].get("message", {}) if choices else {}
+
+
 async def gateway_registered_aliases(timeout: float = 10.0) -> set[str] | None:
     """Model aliases currently registered on the gateway, read with the app's virtual key
     (like ``gateway_chat`` — no master key, so this works from the catalog-worker deployment).
@@ -32,10 +67,9 @@ async def gateway_registered_aliases(timeout: float = 10.0) -> set[str] | None:
     registration as unknown rather than hard-blocking) — matching ``get_model_registry`` and
     agent-common's ``is_valid_model``.
     """
-    headers = {"Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}"}
     url = f"{config.model_gateway.url.rstrip('/')}/v1/model/info"
     try:
-        resp = await _client.get().get(url, headers=headers, timeout=timeout)
+        resp = await _client.get().get(url, headers=_gateway_headers(), timeout=timeout)
         resp.raise_for_status()
         data = resp.json().get("data", [])
         return {m["model_name"] for m in data if m.get("model_name")}
@@ -54,10 +88,9 @@ async def gateway_model_provider(alias: str, timeout: float = 10.0) -> str | Non
     catalog worker can resolve it. Returns ``None`` on any failure → ``profile_for`` falls back
     to the conservative generic profile rather than blocking the sync.
     """
-    headers = {"Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}"}
     url = f"{config.model_gateway.url.rstrip('/')}/v1/model/info"
     try:
-        resp = await _client.get().get(url, headers=headers, timeout=timeout)
+        resp = await _client.get().get(url, headers=_gateway_headers(), timeout=timeout)
         resp.raise_for_status()
         for m in resp.json().get("data", []):
             if m.get("model_name") == alias:
@@ -88,20 +121,9 @@ async def gateway_chat(
     summarization) run outside any sub-agent / scheduled-job context, so the richer
     attribution dimensions would always be empty. The caller passes whatever applies.
     """
-    headers = {
-        # Match the default every other gateway caller uses (agent-common._gateway_api_key,
-        # the embeddings adapter): a consistent key avoids silent 401s when the env is unset.
-        # console-backend is dependency-light (no agent-common), so the value is duplicated.
-        "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
-        "Content-Type": "application/json",
-    }
-    if metadata:
-        headers["x-litellm-spend-logs-metadata"] = json.dumps({k: v for k, v in metadata.items() if v is not None})
-
-    url = f"{config.model_gateway.url.rstrip('/')}/v1/chat/completions"
     resp = await _client.get().post(
-        url,
-        headers=headers,
+        _completions_url(),
+        headers=_gateway_headers(metadata),
         json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
         timeout=timeout,
     )
@@ -110,8 +132,42 @@ async def gateway_chat(
     # *successful* response with no text, not a transport failure. Return "" so callers'
     # str ops (re.sub/.strip) don't crash; they treat empty as "no usable output" and
     # apply their own fallback, distinct from the gateway error path (which raises above).
-    content = resp.json()["choices"][0]["message"].get("content")
+    # _first_message tolerates an empty choices array the same way (returns {} → "").
+    content = _first_message(resp.json()).get("content")
     return content or ""
+
+
+def _extract_citations(resp_json: dict) -> list[dict]:
+    """Grounding sources from a web-search completion → ``[{"title", "url"}]``, deduped by URL.
+
+    Two provider shapes are surfaced by the gateway and we read BOTH:
+      - OpenAI-style ``message.annotations`` of type ``url_citation`` (OpenAI and most providers).
+      - Vertex Gemini grounding: sources live in the top-level ``vertex_ai_grounding_metadata``
+        (a per-candidate list of ``{groundingChunks: [{web: {uri, title}}]}``) and Gemini does
+        NOT emit ``annotations`` — so parsing only annotations drops every Gemini citation.
+        Verified against a live Gemini grounded response 2026-06-25.
+    """
+    citations: list[dict] = []
+    seen: set[str] = set()
+
+    def add(url: str | None, title: str | None) -> None:
+        if not url or url in seen:
+            return
+        seen.add(url)
+        citations.append({"title": title or url, "url": url})
+
+    message = _first_message(resp_json)
+    for ann in message.get("annotations") or []:
+        if ann.get("type") == "url_citation":
+            citation = ann.get("url_citation") or {}
+            add(citation.get("url"), citation.get("title"))
+
+    for candidate in resp_json.get("vertex_ai_grounding_metadata") or []:
+        for chunk in (candidate or {}).get("groundingChunks") or []:
+            web = (chunk or {}).get("web") or {}
+            add(web.get("uri"), web.get("title"))
+
+    return citations
 
 
 async def gateway_web_search(
@@ -128,22 +184,13 @@ async def gateway_web_search(
     search (Vertex drops googleSearch when function tools are present — the whole reason web
     search runs as this dedicated, tool-free call rather than on a tool-using agent's model).
 
-    Citations are parsed from the raw response here: LiteLLM surfaces grounding sources as
-    OpenAI-style ``annotations`` of type ``url_citation``. Each citation is ``{"title", "url"}``,
-    deduped by URL. ``metadata`` rides on ``x-litellm-spend-logs-metadata`` for cost attribution
-    (same as ``gateway_chat``).
+    Citations are parsed from the raw response (see ``_extract_citations`` — both OpenAI-style
+    annotations and Vertex Gemini grounding metadata), deduped by URL. ``metadata`` rides on
+    ``x-litellm-spend-logs-metadata`` for cost attribution (same as ``gateway_chat``).
     """
-    headers = {
-        "Authorization": f"Bearer {os.getenv('LLM_GATEWAY_API_KEY', 'sk-nannos-gateway')}",
-        "Content-Type": "application/json",
-    }
-    if metadata:
-        headers["x-litellm-spend-logs-metadata"] = json.dumps({k: v for k, v in metadata.items() if v is not None})
-
-    url = f"{config.model_gateway.url.rstrip('/')}/v1/chat/completions"
     resp = await _client.get().post(
-        url,
-        headers=headers,
+        _completions_url(),
+        headers=_gateway_headers(metadata),
         json={
             "model": model,
             "messages": [{"role": "user", "content": query}],
@@ -152,17 +199,7 @@ async def gateway_web_search(
         timeout=timeout,
     )
     resp.raise_for_status()
-    message = resp.json()["choices"][0]["message"]
-
-    citations: list[dict] = []
-    seen: set[str] = set()
-    for ann in message.get("annotations") or []:
-        if ann.get("type") != "url_citation":
-            continue
-        citation = ann.get("url_citation") or {}
-        cited_url = citation.get("url")
-        if not cited_url or cited_url in seen:
-            continue
-        seen.add(cited_url)
-        citations.append({"title": citation.get("title") or cited_url, "url": cited_url})
-    return message.get("content") or "", citations
+    resp_json = resp.json()
+    # Tolerate an empty choices array (content-filter/moderation can map to a 2xx with no
+    # choice) — fall through to an empty answer + no citations rather than IndexError.
+    return _first_message(resp_json).get("content") or "", _extract_citations(resp_json)

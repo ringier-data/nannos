@@ -929,6 +929,12 @@ export type CatalogModel = {
      */
     cache_creation_input_token_cost?: number | null;
     /**
+     * Search Context Cost Per Query
+     */
+    search_context_cost_per_query?: {
+        [key: string]: number;
+    } | null;
+    /**
      * Max Input Tokens
      */
     max_input_tokens?: number | null;
@@ -6948,6 +6954,66 @@ export type VisibilityUpdate = {
 };
 
 /**
+ * WebSearchConfig
+ *
+ * Fully-resolved Web Search picker state — the single backend-owned source of which model
+ * backs the ``console_web_search`` tool, so the console never re-derives the pick client-side.
+ *
+ * ``models`` is sorted cheapest-first (services.web_search ordering); ``source`` is ``"selected"``
+ * (admin's ``search`` default), ``"auto"`` (cheapest capable), or ``None`` when none is available.
+ */
+export type WebSearchConfig = {
+    /**
+     * Provider
+     */
+    provider?: string;
+    /**
+     * Available
+     */
+    available?: boolean;
+    /**
+     * Source
+     */
+    source?: string | null;
+    /**
+     * Active Model Id
+     */
+    active_model_id?: string | null;
+    /**
+     * Active Model Name
+     */
+    active_model_name?: string | null;
+    /**
+     * Models
+     */
+    models?: Array<WebSearchModelOption>;
+};
+
+/**
+ * WebSearchModelOption
+ *
+ * One web-search-capable model as the Web Search picker should render it.
+ */
+export type WebSearchModelOption = {
+    /**
+     * Model Id
+     */
+    model_id?: string | null;
+    /**
+     * Model Name
+     */
+    model_name: string;
+    /**
+     * Is Cheapest
+     */
+    is_cheapest?: boolean;
+    /**
+     * Is Active
+     */
+    is_active?: boolean;
+};
+
+/**
  * SkillSummary
  *
  * Summary of a skill file (for listing).
@@ -10295,6 +10361,22 @@ export type RegisterModelApiV1AdminModelGatewayModelsPostResponses = {
 
 export type RegisterModelApiV1AdminModelGatewayModelsPostResponse = RegisterModelApiV1AdminModelGatewayModelsPostResponses[keyof RegisterModelApiV1AdminModelGatewayModelsPostResponses];
 
+export type WebSearchConfigApiV1AdminModelGatewayWebSearchGetData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/admin/model-gateway/web-search';
+};
+
+export type WebSearchConfigApiV1AdminModelGatewayWebSearchGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: WebSearchConfig;
+};
+
+export type WebSearchConfigApiV1AdminModelGatewayWebSearchGetResponse = WebSearchConfigApiV1AdminModelGatewayWebSearchGetResponses[keyof WebSearchConfigApiV1AdminModelGatewayWebSearchGetResponses];
+
 export type GatewayUiConfigApiV1AdminModelGatewayConfigGetData = {
     body?: never;
     path?: never;
@@ -12145,12 +12227,6 @@ export type ConsoleCreateBugReportData = {
     body?: never;
     path?: never;
     query: {
-        /**
-         * Conversation Id
-         *
-         * The conversation ID where the error occurred.
-         */
-        conversation_id: string;
         /**
          * Description
          *

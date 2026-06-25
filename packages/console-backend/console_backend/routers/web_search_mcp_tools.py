@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from ..db.session import DbSession
 from ..dependencies import require_auth_or_bearer_token
 from ..models.user import User
+from ..services.forwarded_attribution import forwarded_attribution
 from ..services.llm_gateway import gateway_web_search
 from ..services.web_search import format_web_search_result, resolve_web_search_model
 
@@ -57,10 +58,20 @@ async def web_search_mcp(
             "Web search is unavailable: no web-search-capable model is registered on the Model "
             "Gateway. An admin can register one (e.g. a Gemini model) in the console."
         )
+    # Build the gateway call's cost-attribution. CONTEXT (conversation_id, sub_agent_id, …) comes
+    # from the orchestrator's x-nannos-context header — console-backend can't derive it. IDENTITY
+    # comes from the validated token (user.sub), NOT the header: the onward gateway call uses the
+    # app virtual key, so the proxy needs user_sub in spend_logs_metadata to attribute cost, and we
+    # source it authoritatively from the token rather than trusting whatever the header carried.
+    metadata = forwarded_attribution(request)
+    metadata["user_sub"] = user.sub
     try:
-        answer, citations = await gateway_web_search(query, model=model, metadata={"user_sub": user.sub})
+        answer, citations = await gateway_web_search(query, model=model, metadata=metadata)
     except Exception as e:  # network/timeout/non-2xx — surface, don't 500 the tool call
-        logger.warning("console_web_search failed (model=%s): %s", model, e)
-        return f"Web search failed: {e}"
+        # Include the exception type: a httpx timeout str()s to "", which would otherwise log/return
+        # a bare "Web search failed:" (the search just ran past the gateway timeout).
+        detail = f"{type(e).__name__}: {e}".rstrip(": ")
+        logger.warning("console_web_search failed (model=%s): %s", model, detail)
+        return f"Web search failed ({detail}). Try a narrower query or retry."
     logger.info("console_web_search via %s: %d citation(s)", model, len(citations))
     return format_web_search_result(answer, citations)

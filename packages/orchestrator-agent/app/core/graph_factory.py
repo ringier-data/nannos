@@ -792,8 +792,13 @@ class GraphFactory:
 
         # Single source of truth for the provider -> structured-output strategy decision,
         # shared with the sub-agent path (agent_common.a2a.structured_response). Picks
-        # ToolStrategy unless forcing tool_choice is unsafe (Anthropic+thinking, or
-        # built-in tools present), in which case FinalResponseSchema is bound as a tool.
+        # ToolStrategy unless forcing tool_choice is unsafe, in which case FinalResponseSchema
+        # is bound as a tool instead.
+        # We pass has_builtin_tools=is_gemini to force that bind-as-tool path for Gemini. The flag
+        # is named for its original trigger (Gemini server-side google_search/code_execution had to
+        # run before a forced tool_choice) — that binding is now removed (see the NOTE above), but
+        # the same lever is still required because Gemini can't force a tool_choice cleanly. Do NOT
+        # drop this argument: without it Gemini falls through to a forced ToolStrategy it can't honor.
         response_format, requires_response_tool = select_response_format(
             model_type,
             FinalResponseSchema,

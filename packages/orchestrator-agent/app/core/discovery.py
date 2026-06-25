@@ -18,6 +18,7 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.callbacks import Callbacks
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.sessions import StreamableHttpConnection
+from ringier_a2a_sdk.cost_tracking.attribution import context_header
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
 from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
@@ -25,6 +26,27 @@ from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 from ..models.config import AgentSettings
 
 logger = logging.getLogger(__name__)
+
+
+async def _console_attribution_interceptor(request, handler):
+    """Stamp the caller's cost-attribution (user_sub, conversation_id, sub_agent_id, …) on every
+    console MCP tool call as the dedicated ``x-nannos-context`` header.
+
+    Why a tool-call interceptor and not a static header / tool param / httpx event hook: the console
+    MCP client is memoized per-user and shared across conversations, so conversation_id can't be
+    baked in at connection time. The interceptor runs in the tool-call task — exactly where the
+    request-scoped attribution ContextVars are live (set per turn in executor.set_attribution) —
+    so it reads the *current* conversation deterministically, unlike a transport-level httpx hook
+    that fires in the streamable-HTTP transport's own task. It rides as a header, never a tool param,
+    so conversation_id stays out of MCP tool discovery; console-backend reads it for request context
+    (a bug report's conversation_id) or forwards it onto a gateway sub-call (console_web_search).
+    Scoped to the ``console`` server only — never the external gateway connections.
+    """
+    if request.server_name == "console":
+        ctx = context_header()  # {"x-nannos-context": "..."} from the current attribution, or {}
+        if ctx:
+            request = request.override(headers={**(request.headers or {}), **ctx})
+    return await handler(request)
 
 
 class AgentDiscoveryService:
@@ -389,6 +411,10 @@ class ToolDiscoveryService:
             client = MultiServerMCPClient(
                 connections=connections,
                 callbacks=Callbacks(on_progress=on_mcp_progress),
+                # Stamp x-nannos-context (conversation_id, …) on every console tool call so
+                # console-backend tools that hit the gateway (console_web_search) bill to the right
+                # conversation instead of "Direct API Calls". Scoped to the console server inside.
+                tool_interceptors=[_console_attribution_interceptor],
             )
 
             # Gather tools from all servers with retry logic
