@@ -6,9 +6,17 @@ model registration, and proxy-side cost capture. Apps talk to it via
 `LLM_GATEWAY_URL` and never construct provider clients directly.
 
 ## Contents (deployment-agnostic)
-- `custom_logger.py` — `NannosCostLogger`: maps native usage (incl. cache/reasoning
-  tokens) → Nannos billing units and POSTs to console-backend `/api/v1/usage/gateway-batch-log`
-  with the attribution the app forwarded as `spend_logs_metadata`.
+- `custom_logger.py` — `NannosCostLogger`, the in-process callback that owns two
+  provider-boundary jobs:
+  - **Cost capture** (`async_log_success_event`): maps native usage (incl. cache/reasoning
+    tokens) → Nannos billing units and POSTs to console-backend `/api/v1/usage/gateway-batch-log`
+    with the attribution the app forwarded as `spend_logs_metadata`.
+  - **Structured-output schema normalization** (`async_pre_call_hook`): forces
+    `additionalProperties: false` on every object node of a `response_format` json_schema.
+    Bedrock's Converse structured-output validator rejects schemas without it
+    ("`additionalProperties: object` is not supported. Please set to false"); LangChain's
+    native `ProviderStrategy`/`AutoStrategy` path emits non-strict schemas that omit it.
+    Fixing it here covers every structured-output path uniformly and is safe across providers.
 - `Dockerfile` — `FROM ghcr.io/berriai/litellm` + the callback only.
 
 The `config.yaml` (model_list, regions, `model_info` cost seeds, `store_model_in_db`)
