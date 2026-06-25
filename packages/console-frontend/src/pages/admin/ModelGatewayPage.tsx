@@ -7,6 +7,7 @@ import {
   Cpu,
   Eye,
   Brain,
+  Globe,
   Star,
   Pencil,
   Loader2,
@@ -574,6 +575,11 @@ export function ModelGatewayPage() {
                     {m.supports_vision && (
                       <Badge variant="outline">
                         <Eye className="mr-1 h-3 w-3" /> vision
+                      </Badge>
+                    )}
+                    {m.supports_web_search && (
+                      <Badge variant="outline">
+                        <Globe className="mr-1 h-3 w-3" /> web search
                       </Badge>
                     )}
                   </div>
