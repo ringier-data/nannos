@@ -118,6 +118,7 @@ async def list_models(request: Request, db: DbSession, user: User = Depends(requ
                 output_cost_per_token=info.get("output_cost_per_token"),
                 supports_reasoning=info.get("supports_reasoning"),
                 supports_vision=info.get("supports_vision"),
+                supports_web_search=info.get("supports_web_search"),
             )
         )
     return out

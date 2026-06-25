@@ -14,6 +14,7 @@ import console_backend.services.model_status as model_status
 from console_backend.services.feature_status import (
     _catalog_feature,
     _chat_tiers_feature,
+    _web_search_feature,
     get_embedding_readiness,
     resolve_embedding_readiness,
 )
@@ -212,3 +213,61 @@ def test_chat_tiers_fails_open_when_registry_unknown():
     # Gateway unreadable (registered=None): a set tier isn't flagged retired.
     f = _chat_tiers_feature({"chat": "sonnet", "chat:low": "haiku", "chat:premium": "opus"}, None)
     assert f.status == "ready"
+
+
+# --- web search ---------------------------------------------------------------------------
+# _web_search_feature mirrors model_factory.get_web_search_model: the active search model is the
+# admin's `search` default when registered+capable, else the cheapest web-search-capable model;
+# off when none. model_info_by_name maps name → model_info (with supports_web_search / cost).
+
+
+def _caps(*entries):
+    """{name: model_info} from (name, supports_web_search, input_cost) tuples."""
+    return {n: {"supports_web_search": cap, "input_cost_per_token": cost} for n, cap, cost in entries}
+
+
+def test_web_search_auto_selects_cheapest_capable():
+    info = _caps(("gemini-pro", True, 2e-6), ("gemini-flash", True, 5e-7), ("claude", None, 1e-6))
+    f = _web_search_feature(None, info, set(info))
+    assert f.status == "ready"
+    assert "gemini-flash" in f.detail
+    assert "auto-selected" in f.detail
+    assert f.caveat is None  # no "coming soon" promises
+
+
+def test_web_search_selected_default_wins():
+    info = _caps(("gemini-pro", True, 2e-6), ("gemini-flash", True, 5e-7))
+    f = _web_search_feature("gemini-pro", info, set(info))
+    assert f.status == "ready"
+    assert "gemini-pro" in f.detail
+    assert "(selected)" in f.detail
+
+
+def test_web_search_disabled_when_none_capable():
+    info = _caps(("claude", None, 1e-6), ("titan", False, 0.0))
+    f = _web_search_feature(None, info, set(info))
+    assert f.status == "disabled"
+    assert f.remediation is not None
+
+
+def test_web_search_degraded_when_selected_default_unregistered():
+    info = _caps(("gemini-flash", True, 5e-7))
+    f = _web_search_feature("retired-model", info, set(info))
+    assert f.status == "degraded"
+    assert "retired-model" in f.detail
+
+
+def test_web_search_selected_not_capable_falls_back_with_caveat():
+    # Default points at a registered but non-web-search model → use cheapest capable, warn.
+    info = _caps(("gemini-flash", True, 5e-7), ("claude", None, 1e-6))
+    f = _web_search_feature("claude", info, set(info))
+    assert f.status == "ready"
+    assert "gemini-flash" in f.detail
+    assert "isn't web-search-capable" in (f.caveat or "")
+
+
+def test_web_search_fails_open_when_gateway_unreadable():
+    # model_info_by_name is None (gateway disabled/unreachable): don't hard-disable.
+    f = _web_search_feature("gemini-flash", None, None)
+    assert f.status == "ready"
+    assert "gemini-flash" in f.detail

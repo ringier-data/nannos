@@ -1696,6 +1696,10 @@ export type GatewayModel = {
      * Supports Vision
      */
     supports_vision?: boolean | null;
+    /**
+     * Supports Web Search
+     */
+    supports_web_search?: boolean | null;
 };
 
 /**
@@ -4324,7 +4328,7 @@ export type SetDefaultRequest = {
     /**
      * Role
      *
-     * One of: chat, chat:low, chat:premium, embedding, multimodal_embedding
+     * One of: chat, chat:low, chat:premium, embedding, multimodal_embedding, search
      */
     role: string;
 };
@@ -12247,6 +12251,40 @@ export type ConsoleSetBugReportExternalLinkResponses = {
 };
 
 export type ConsoleSetBugReportExternalLinkResponse = ConsoleSetBugReportExternalLinkResponses[keyof ConsoleSetBugReportExternalLinkResponses];
+
+export type ConsoleWebSearchData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Query
+         *
+         * A self-contained natural-language search query.
+         */
+        query: string;
+    };
+    url: '/api/v1/web-search/mcp-search';
+};
+
+export type ConsoleWebSearchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ConsoleWebSearchError = ConsoleWebSearchErrors[keyof ConsoleWebSearchErrors];
+
+export type ConsoleWebSearchResponses = {
+    /**
+     * Response Console Web Search
+     *
+     * Successful Response
+     */
+    200: string;
+};
+
+export type ConsoleWebSearchResponse = ConsoleWebSearchResponses[keyof ConsoleWebSearchResponses];
 
 export type DeleteFeedbackApiV1ConversationsConversationIdMessagesMessageIdFeedbackDeleteData = {
     body?: never;

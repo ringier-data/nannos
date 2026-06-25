@@ -265,6 +265,9 @@ def build_runtime_context(
         "console_search_skills",
         "console_import_skill",
         "console_activate_skill",
+        # Web search (console-backend MCP tool). Auto-included so the orchestrator can ground
+        # answers; sub-agents opt in via their MCP-tools whitelist.
+        "console_web_search",
     }
     orchestrator_auto_tools = {
         name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
