@@ -114,3 +114,29 @@ async def test_failed_keepalive_does_not_break_tool():
     server = _make_server(progress_token="tok", session=session)
     result = await with_progress_keepalive(slow(), server, interval=0.05)
     assert result == "survived"
+
+
+@pytest.mark.asyncio
+async def test_outer_cancellation_cancels_underlying_tool_task():
+    """If the /mcp handler is cancelled mid-call, the shielded tool task must not
+    be left running detached — the keepalive cancels it on the way out."""
+    session = AsyncMock()
+    cancelled = asyncio.Event()
+
+    async def slow():
+        try:
+            await asyncio.sleep(10)
+            return "should not finish"
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    server = _make_server(progress_token="tok", session=session)
+    outer = asyncio.ensure_future(with_progress_keepalive(slow(), server, interval=0.05))
+    # Let the keepalive loop tick at least once, then cancel the outer wrapper.
+    await asyncio.sleep(0.12)
+    outer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+    # The underlying tool task must have received the cancellation (no orphan leak).
+    await asyncio.wait_for(cancelled.wait(), timeout=1.0)

@@ -39,6 +39,7 @@ from rcplus_alloy_common.logging import (
 )
 from sqlalchemy import text as sa_text
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import Receive, Scope, Send
 
 from console_backend.config import config
 from console_backend.db import close_db, get_async_session_factory, init_db
@@ -92,6 +93,7 @@ from console_backend.services.socket_notification_manager import SocketNotificat
 from console_backend.utils.connection_pool import connection_pool
 from console_backend.utils.cookie_signer import verify_cookie
 from console_backend.utils.fastapi_mcp_patch import apply_patch
+from console_backend.utils.mcp_keepalive import with_progress_keepalive
 from console_backend.utils.socket_errors import (
     SocketError,
     create_error_response,
@@ -237,8 +239,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Start the MCP StreamableHTTP session manager (streaming SSE transport mounted
     # at /mcp). Its run() context owns the background task that services /mcp requests.
+    # A fresh instance is created here each startup because run() can only be entered
+    # once per instance; the /mcp mount delegate reads it back off app.state.
+    app.state.mcp_session_manager = StreamableHTTPSessionManager(
+        app=mcp.server,
+        json_response=False,  # SSE so intermediate keepalive notifications stream
+        stateless=False,  # keep optional session support, matching fastapi_mcp's mount_http
+    )
     app.state.mcp_sm_stack = AsyncExitStack()
-    await app.state.mcp_sm_stack.enter_async_context(mcp_session_manager.run())
+    await app.state.mcp_sm_stack.enter_async_context(app.state.mcp_session_manager.run())
     logger.info("MCP StreamableHTTP session manager started")
 
     logger.info("Application startup complete")
@@ -459,13 +468,19 @@ async def _handle_list_tools() -> list:
 # (e.g. console_web_search) don't trip the ALB idle timeout → 504 on the /mcp connection.
 # fastapi_mcp's handle_call_tool calls self._execute_api_tool; shadowing it on the instance
 # routes every tool call through the keepalive. See utils.mcp_keepalive for why progress
-# notifications (not streaming.py-style whitespace) are the signal that reaches the ALB here.
-from console_backend.utils.mcp_keepalive import with_progress_keepalive  # noqa: E402
-
+# notifications (rather than raw whitespace) are the signal that reaches the ALB here.
+#
+# The shadow targets a *private* fastapi_mcp attribute; if a future upgrade renames or
+# inlines it the keepalive would silently no-op and the /mcp 504s would return with no
+# error. Fail loudly at import instead so the regression is caught on upgrade.
+assert hasattr(mcp, "_execute_api_tool"), (
+    "fastapi_mcp no longer exposes `_execute_api_tool`; the MCP keepalive shadow is broken "
+    "and /mcp will 504 on long tool calls. Re-wire after the fastapi_mcp upgrade."
+)
 _original_execute_api_tool = mcp._execute_api_tool
 
 
-async def _execute_api_tool_with_keepalive(*args, **kwargs):
+async def _execute_api_tool_with_keepalive(*args: Any, **kwargs: Any) -> Any:
     return await with_progress_keepalive(_original_execute_api_tool(*args, **kwargs), mcp.server)
 
 
@@ -479,16 +494,16 @@ mcp._execute_api_tool = _execute_api_tool_with_keepalive
 # ALB still times out (→ 504 ExceptionGroup on /mcp). Mounting the SDK's session
 # manager as a native ASGI app with json_response=False instead lets each progress/
 # log notification flush as an SSE event as it is produced, keeping the connection
-# alive. The manager's lifecycle is started/stopped in the app lifespan above.
-mcp_session_manager = StreamableHTTPSessionManager(
-    app=mcp.server,
-    json_response=False,  # SSE so intermediate keepalive notifications stream
-    stateless=False,  # keep optional session support, matching fastapi_mcp's mount_http
-)
-
-
-async def _mcp_streamable_asgi(scope, receive, send):
-    await mcp_session_manager.handle_request(scope, receive, send)
+# alive.
+#
+# The StreamableHTTPSessionManager instance is created per-startup inside the lifespan
+# (its run() context can only be entered once per instance — a module-level singleton
+# would raise RuntimeError the second time the lifespan runs, e.g. every test after the
+# first, or under `uvicorn --reload`). The delegate resolves the live manager off the
+# app on each request via scope["app"], which Starlette sets to the root app.
+async def _mcp_streamable_asgi(scope: Scope, receive: Receive, send: Send) -> None:
+    session_manager: StreamableHTTPSessionManager = scope["app"].state.mcp_session_manager
+    await session_manager.handle_request(scope, receive, send)
 
 
 app.mount("/mcp", _mcp_streamable_asgi)
