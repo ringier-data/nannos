@@ -4,7 +4,7 @@ import logging
 import os
 import socket
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.cookies import SimpleCookie
@@ -30,6 +30,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi_mcp import FastApiMCP
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
 from rcplus_alloy_common.logging import (
@@ -234,12 +235,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     connection_pool.start_cleanup_task()
     logger.info("Connection pool cleanup task started")
 
+    # Start the MCP StreamableHTTP session manager (streaming SSE transport mounted
+    # at /mcp). Its run() context owns the background task that services /mcp requests.
+    app.state.mcp_sm_stack = AsyncExitStack()
+    await app.state.mcp_sm_stack.enter_async_context(mcp_session_manager.run())
+    logger.info("MCP StreamableHTTP session manager started")
+
     logger.info("Application startup complete")
 
     yield
 
     # Shutdown - called automatically when Uvicorn receives SIGTERM/SIGINT
     logger.info("Application shutting down...")
+    if hasattr(app.state, "mcp_sm_stack"):
+        await app.state.mcp_sm_stack.aclose()
+        logger.info("MCP StreamableHTTP session manager stopped")
     if hasattr(app.state, "scheduler_engine"):
         await app.state.scheduler_engine.stop()
         logger.info("Scheduler engine stopped")
@@ -445,8 +455,43 @@ async def _handle_list_tools() -> list:
         return all_tools
 
 
-# Mount the MCP server directly to your FastAPI app using HTTP transport
-mcp.mount_http()
+# Wrap tool execution with a progress-notification keepalive so long-running tools
+# (e.g. console_web_search) don't trip the ALB idle timeout → 504 on the /mcp connection.
+# fastapi_mcp's handle_call_tool calls self._execute_api_tool; shadowing it on the instance
+# routes every tool call through the keepalive. See utils.mcp_keepalive for why progress
+# notifications (not streaming.py-style whitespace) are the signal that reaches the ALB here.
+from console_backend.utils.mcp_keepalive import with_progress_keepalive  # noqa: E402
+
+_original_execute_api_tool = mcp._execute_api_tool
+
+
+async def _execute_api_tool_with_keepalive(*args, **kwargs):
+    return await with_progress_keepalive(_original_execute_api_tool(*args, **kwargs), mcp.server)
+
+
+mcp._execute_api_tool = _execute_api_tool_with_keepalive
+
+# Mount the MCP server over a *streaming* StreamableHTTP transport.
+#
+# We deliberately do NOT use mcp.mount_http(): fastapi_mcp's handle_fastapi_request
+# buffers the whole ASGI response and returns it as one Response only after the tool
+# call finishes — so the keepalive notifications above never reach the wire and the
+# ALB still times out (→ 504 ExceptionGroup on /mcp). Mounting the SDK's session
+# manager as a native ASGI app with json_response=False instead lets each progress/
+# log notification flush as an SSE event as it is produced, keeping the connection
+# alive. The manager's lifecycle is started/stopped in the app lifespan above.
+mcp_session_manager = StreamableHTTPSessionManager(
+    app=mcp.server,
+    json_response=False,  # SSE so intermediate keepalive notifications stream
+    stateless=False,  # keep optional session support, matching fastapi_mcp's mount_http
+)
+
+
+async def _mcp_streamable_asgi(scope, receive, send):
+    await mcp_session_manager.handle_request(scope, receive, send)
+
+
+app.mount("/mcp", _mcp_streamable_asgi)
 # Initialize Socket.IO server with optimized settings
 sio = socketio.AsyncServer(
     async_mode="asgi",
