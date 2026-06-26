@@ -418,6 +418,13 @@ def _gateway_models() -> dict[str, dict]:
     off-thread). model_info carries capabilities set at registration; fetched with the
     app's virtual key (no master key needed)."""
     _refresh_if_stale(_GW_CACHE, "models", _GW_TTL, _GW_LOCK, _fetch_gateway_models)
+    # A successfully-empty registry is the fresh-deploy bootstrap state, not a steady one:
+    # keep it marked cold so the next call re-fetches synchronously. Otherwise the first
+    # model an admin registers isn't seen until _GW_TTL expires (up to 60s), and the chat
+    # keeps telling the user "no model configured". A genuine fetch failure (last_error set)
+    # is left on the normal TTL so a gateway outage still backs off instead of hammering.
+    if not _GW_CACHE["models"] and _GW_CACHE["last_error"] is None:
+        _GW_CACHE["ts"] = _COLD
     return _GW_CACHE["models"]
 
 
@@ -442,6 +449,13 @@ def _model_defaults() -> dict[str, str]:
     """{role: default_alias} from console-backend /api/v1/models/defaults (cached,
     refreshed off-thread)."""
     _refresh_if_stale(_DEFAULTS_CACHE, "defaults", _DEFAULTS_TTL, _DEFAULTS_LOCK, _fetch_model_defaults)
+    # No defaults at all is the fresh-deploy bootstrap state (see _gateway_models): keep it
+    # cold so the next call re-fetches synchronously. Registering the first model auto-sets
+    # it as the "chat" default, and require_default_model() must see that on the next request
+    # instead of raising NoDefaultModelError for up to _DEFAULTS_TTL. A genuine fetch failure
+    # (last_error set) stays on the normal TTL so a console-backend outage backs off.
+    if not _DEFAULTS_CACHE["defaults"] and _DEFAULTS_CACHE["last_error"] is None:
+        _DEFAULTS_CACHE["ts"] = _COLD
     return _DEFAULTS_CACHE["defaults"]
 
 

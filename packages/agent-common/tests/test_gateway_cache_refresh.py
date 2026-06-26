@@ -90,6 +90,70 @@ def test_cold_fetch_failure_releases_waiters():
     assert cache["ts"] != mf._COLD  # ts advanced → back off a full TTL before retrying
 
 
+def test_empty_registry_refetches_on_next_call(monkeypatch):
+    """Regression: a freshly-registered model is visible on the very next request.
+
+    A successfully-empty registry is the fresh-deploy bootstrap state. It must NOT latch
+    behind _GW_TTL — otherwise the orchestrator keeps telling the user "no model
+    configured" for up to a minute after the admin registers the first model.
+    """
+    monkeypatch.setattr(mf, "_GW_CACHE", _cold_cache())
+    fetched = {"models": {}}  # empty until "registration" flips it
+    monkeypatch.setattr(mf, "_fetch_gateway_models", lambda: dict(fetched["models"]))
+
+    # First request on a fresh deploy: gateway reached, registry genuinely empty.
+    assert mf._gateway_models() == {}
+    assert mf.models_known_empty() is True
+    # The empty (but successful) fetch is kept cold so it doesn't stick for a full TTL.
+    assert mf._GW_CACHE["ts"] == mf._COLD
+
+    # Admin registers a model.
+    fetched["models"] = {"claude-sonnet-4-6": {"cap": True}}
+
+    # Next request must re-fetch and see it immediately — no TTL wait.
+    assert mf._gateway_models() == {"claude-sonnet-4-6": {"cap": True}}
+    assert mf.models_known_empty() is False
+    assert mf._GW_CACHE["ts"] != mf._COLD  # now a steady state on the normal TTL
+
+
+def test_failed_fetch_stays_on_normal_ttl(monkeypatch):
+    """A gateway outage (last_error set) backs off a full TTL instead of being kept cold."""
+    monkeypatch.setattr(mf, "_GW_CACHE", _cold_cache())
+
+    def boom():
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(mf, "_fetch_gateway_models", boom)
+
+    assert mf._gateway_models() == {}
+    assert mf._GW_CACHE["last_error"] is not None
+    assert mf._GW_CACHE["ts"] != mf._COLD  # not kept cold → won't hammer the gateway
+    assert mf.models_known_empty() is False  # fail open, don't claim "no model configured"
+
+
+def test_empty_defaults_refetches_on_next_call(monkeypatch):
+    """Regression: the auto-set 'chat' default is visible on the next request after register.
+
+    Sibling to the gateway-models latch one layer down: with no defaults at all,
+    require_default_model() must not keep raising NoDefaultModelError for a full _DEFAULTS_TTL
+    after the admin registers the first model (which auto-becomes the chat default).
+    """
+    monkeypatch.setattr(mf, "_DEFAULTS_CACHE", _cold_cache() | {"defaults": {}})
+    fetched = {"defaults": {}}
+    monkeypatch.setattr(mf, "_fetch_model_defaults", lambda: dict(fetched["defaults"]))
+
+    # Fresh deploy: no defaults configured yet.
+    assert mf.get_default_model() is None
+    assert mf._DEFAULTS_CACHE["ts"] == mf._COLD  # kept cold, won't latch for a full TTL
+
+    # Registering the first model sets it as the chat default.
+    fetched["defaults"] = {"chat": "claude-sonnet-4-6"}
+
+    # Next request re-fetches and resolves — no TTL wait, no NoDefaultModelError.
+    assert mf.require_default_model() == "claude-sonnet-4-6"
+    assert mf._DEFAULTS_CACHE["ts"] != mf._COLD
+
+
 def test_warm_refresh_does_not_block_caller():
     """A stale (non-cold) cache refreshes in the background; the caller returns immediately."""
     cache = {"ts": time.monotonic() - 1000.0, "models": {"old": {}}, "inflight": False, "last_error": None}
