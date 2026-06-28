@@ -30,7 +30,7 @@ from object_storage import IObjectStorageService
 from ringier_a2a_sdk.cost_tracking import CostLogger
 
 from agent_common.backends.attachments_store import get_current_attachments_backend
-from agent_common.backends.indexing_store import IndexingStoreBackend
+from agent_common.backends.indexing_store import IndexingStoreBackend, bounded_storage_key
 
 
 class FilesystemState(dict):
@@ -352,6 +352,13 @@ async def _semantic_search_file_impl(
     """
     config = get_config()
     metadata = config.get("metadata", {}) if config else {}
+
+    # Bound the path to the same key the backend stores under, so the direct
+    # store.aget below and the value["file_path"] == file_path filter further down
+    # both match what IndexingStoreBackend._index_content wrote. Without this, a
+    # raw Gemini __thought__ id reads/filters under the un-bounded path and finds
+    # nothing. Idempotent and prefix-preserving, so namespace routing is unaffected.
+    file_path = bounded_storage_key(file_path)
 
     namespaces = _resolve_namespaces_for_path(file_path, user_id, metadata)
     if namespaces is None:

@@ -14,8 +14,21 @@ import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from deepagents.backends.store import StoreBackend
 
-from agent_common.backends.indexing_store import IndexingStoreBackend
+from agent_common.backends.indexing_store import (
+    _MAX_STORAGE_KEY_BYTES,
+    IndexingStoreBackend,
+    bounded_storage_key,
+)
+
+# A real-shape Gemini tool-call id from the LiteLLM gateway: the genuine call id
+# followed by a multi-KB packed thought-signature. Used to reproduce the
+# ProgramLimitExceeded ("index row size exceeds btree maximum") store failure.
+_GEMINI_CALL_ID = "call_7acafe2be6f646eaa9562734ce9f"
+_THOUGHT_PACKED_ID = f"{_GEMINI_CALL_ID}__thought__" + "AY89a1" + "x" * 2700
+_OFFLOAD_PATH = f"/large_tool_results/{_THOUGHT_PACKED_ID}"
+_BOUNDED_PATH = f"/large_tool_results/{_GEMINI_CALL_ID}"
 
 
 def _content_hash(content: str) -> str:
@@ -393,3 +406,185 @@ class TestAensureIndexed:
             await backend.aensure_indexed("/large_tool_results/tool-9", "blob content")
 
         mock_index.assert_awaited_once_with("/large_tool_results/tool-9", "blob content")
+
+
+class TestBoundedStorageKey:
+    """The store key derived from a path must never exceed the btree limit.
+
+    LiteLLM packs Gemini thought-signatures into the tool-call id
+    (``call_<id>__thought__<sig>``), which makes the offload path multi-KB and
+    overflows the Postgres store_pkey index. bounded_storage_key() must drop the
+    signature, stay under the cap, and be idempotent and prefix-preserving.
+    """
+
+    def test_drops_thought_signature_tail(self):
+        assert bounded_storage_key(_OFFLOAD_PATH) == _BOUNDED_PATH
+
+    def test_result_is_within_byte_cap(self):
+        out = bounded_storage_key(_OFFLOAD_PATH)
+        assert len(out.encode("utf-8")) <= _MAX_STORAGE_KEY_BYTES
+
+    def test_idempotent(self):
+        once = bounded_storage_key(_OFFLOAD_PATH)
+        assert bounded_storage_key(once) == once
+
+    def test_noop_for_normal_paths(self):
+        for path in (
+            _BOUNDED_PATH,
+            "/memories/notes.md",
+            "/channel_memories/team/playbook.md",
+            "/attachments/image.png",
+        ):
+            assert bounded_storage_key(path) == path
+
+    def test_caps_oversized_path_without_delimiter(self):
+        # Defends against a future provider/convention that bloats the id without
+        # the __thought__ marker: still capped, still idempotent.
+        huge = "/large_tool_results/" + "q" * 5000
+        out = bounded_storage_key(huge)
+        assert len(out.encode("utf-8")) <= _MAX_STORAGE_KEY_BYTES
+        assert bounded_storage_key(out) == out
+
+    def test_distinct_ids_yield_distinct_keys(self):
+        # The genuine call id (before __thought__) is unique per call, so bounding
+        # must not collapse two different tool calls onto the same key.
+        a = bounded_storage_key("/large_tool_results/call_aaaa__thought__" + "x" * 2700)
+        b = bounded_storage_key("/large_tool_results/call_bbbb__thought__" + "x" * 2700)
+        assert a != b
+
+    def test_legit_thought_substring_in_user_path_is_preserved(self):
+        # The __thought__ drop is scoped to /large_tool_results/. A user file that
+        # happens to contain that substring must NOT be truncated — otherwise two
+        # distinct files would collide onto one key and become unaddressable.
+        a = "/memories/my__thought__journal.md"
+        b = "/memories/my__thought__notes.md"
+        assert bounded_storage_key(a) == a
+        assert bounded_storage_key(b) == b
+        assert bounded_storage_key(a) != bounded_storage_key(b)
+
+
+class TestBackendOpsBoundKeys:
+    """IndexingStoreBackend op overrides must bound the key before it hits the store."""
+
+    @pytest.mark.asyncio
+    async def test_awrite_writes_under_bounded_key(self, mock_agent_settings):
+        mock_store = _make_store()
+        mock_store.aget.return_value = None  # parent existence check: not present
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        # /large_tool_results/ is not eagerly indexed, so only the filesystem
+        # aput (parent awrite) should fire — and it must use the bounded key.
+        result = await backend.awrite(_OFFLOAD_PATH, "huge tool result")
+
+        assert not result.error
+        assert mock_store.aput.await_args is not None
+        written_key = mock_store.aput.await_args.args[1]  # store.aput(namespace, key, value)
+        assert written_key == _BOUNDED_PATH
+        assert len(written_key.encode("utf-8")) <= _MAX_STORAGE_KEY_BYTES
+
+    @pytest.mark.asyncio
+    async def test_aread_reads_under_bounded_key(self, mock_agent_settings):
+        mock_store = _make_store()
+        mock_store.aget.return_value = None  # content irrelevant; we assert the key
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        await backend.aread(_OFFLOAD_PATH)
+
+        # aread -> parent uses store.aget(namespace, key); key must be bounded so a
+        # file written under the bounded key is found when read by the long path.
+        assert mock_store.aget.await_args.args[1] == _BOUNDED_PATH
+
+    @pytest.mark.asyncio
+    async def test_index_content_chunk_keys_are_bounded(self, mock_agent_settings):
+        mock_store = _make_store()
+        mock_store.aget.return_value = None  # not previously indexed
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
+            with patch(
+                "agent_common.backends.indexing_store.chunk_with_context",
+                return_value=[("chunk-a", "ctx-a"), ("chunk-b", "ctx-b")],
+            ):
+                with patch("agent_common.backends.indexing_store.create_model", return_value=MagicMock()):
+                    await backend._index_content(_OFFLOAD_PATH, "indexable blob content")
+
+        # Every key written (file-index + #chunk_N) must be bounded and rooted at
+        # the bounded path — this is the path that produced the #chunk_6 failure.
+        keys = [call.kwargs.get("key") for call in mock_store.aput.await_args_list]
+        assert keys, "expected index writes"
+        # Bounded path (<= cap) plus a "#chunk_<i>" suffix. Size the allowance off
+        # the actual key count so the bound is correct even past 999 chunks.
+        max_suffix = len(f"#chunk_{len(keys)}")
+        for key in keys:
+            assert key.startswith(_BOUNDED_PATH), key
+            assert len(key.encode("utf-8")) <= _MAX_STORAGE_KEY_BYTES + max_suffix
+        assert _BOUNDED_PATH in keys  # file-index entry
+        assert f"{_BOUNDED_PATH}#chunk_0" in keys  # chunk entry
+
+    @pytest.mark.asyncio
+    async def test_aedit_edits_under_bounded_key(self, mock_agent_settings):
+        mock_store = _make_store()
+        mock_store.aget.return_value = None  # file-not-found early return; we assert the key
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+
+        await backend.aedit(_OFFLOAD_PATH, "old", "new")
+
+        assert _BOUNDED_PATH in mock_store.aget.await_args.args
+        assert _OFFLOAD_PATH not in mock_store.aget.await_args.args
+
+    def test_sync_read_reads_under_bounded_key(self, mock_agent_settings):
+        sync_store = MagicMock()
+        sync_store.get.return_value = None
+        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings)
+
+        backend.read(_OFFLOAD_PATH)
+
+        assert _BOUNDED_PATH in sync_store.get.call_args.args
+
+    def test_sync_write_writes_under_bounded_key(self, mock_agent_settings):
+        sync_store = MagicMock()
+        sync_store.get.return_value = None  # parent existence check: not present
+        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings)
+
+        result = backend.write(_OFFLOAD_PATH, "huge tool result")
+
+        assert not result.error
+        assert _BOUNDED_PATH in sync_store.put.call_args.args
+        assert _OFFLOAD_PATH not in sync_store.put.call_args.args
+
+    def test_sync_edit_edits_under_bounded_key(self, mock_agent_settings):
+        sync_store = MagicMock()
+        sync_store.get.return_value = None  # file-not-found early return; we assert the key
+        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings)
+
+        backend.edit(_OFFLOAD_PATH, "old", "new")
+
+        assert _BOUNDED_PATH in sync_store.get.call_args.args
+
+    def test_grep_bounds_the_path_filter(self, mock_agent_settings):
+        # The agent is handed the raw offload path in the eviction message; an
+        # exact-path grep on the raw path must be bounded so it matches the
+        # bounded stored key rather than finding nothing.
+        backend = IndexingStoreBackend(store=_make_store(), model_name=mock_agent_settings)
+        with patch.object(StoreBackend, "grep", return_value=MagicMock()) as parent_grep:
+            backend.grep("pattern", _OFFLOAD_PATH)
+        assert _BOUNDED_PATH in parent_grep.call_args.args
+        assert _OFFLOAD_PATH not in parent_grep.call_args.args
+
+    def test_grep_passes_through_none_path(self, mock_agent_settings):
+        backend = IndexingStoreBackend(store=_make_store(), model_name=mock_agent_settings)
+        with patch.object(StoreBackend, "grep", return_value=MagicMock()) as parent_grep:
+            backend.grep("pattern")
+        assert None in parent_grep.call_args.args
+
+    def test_glob_bounds_the_path_filter(self, mock_agent_settings):
+        backend = IndexingStoreBackend(store=_make_store(), model_name=mock_agent_settings)
+        with patch.object(StoreBackend, "glob", return_value=MagicMock()) as parent_glob:
+            backend.glob("*.md", _OFFLOAD_PATH)
+        assert _BOUNDED_PATH in parent_glob.call_args.args
+
+    def test_ls_bounds_the_path(self, mock_agent_settings):
+        backend = IndexingStoreBackend(store=_make_store(), model_name=mock_agent_settings)
+        with patch.object(StoreBackend, "ls", return_value=MagicMock()) as parent_ls:
+            backend.ls(_OFFLOAD_PATH)
+        assert _BOUNDED_PATH in parent_ls.call_args.args
