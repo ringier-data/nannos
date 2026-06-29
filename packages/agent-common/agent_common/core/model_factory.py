@@ -303,7 +303,7 @@ def create_model(
     # turns on Gemini 3 "context circulation" (Vertex cached content), and the gateway LiteLLM
     # then sent tools+system inline alongside the cached content, so Vertex 400s:
     # "Tool config, tools and system instruction should not be set ... when using cached content."
-    # Verified on v1.89.2 (2026-06-24). The gateway has since been bumped to v1.90.0-rc.1 (for an
+    # Verified on v1.89.2 (2026-06-24). The gateway has since been bumped to v1.90.0 (for an
     # unrelated multi-region caching fix); whether that bump also resolves this tools+cached-content
     # 400 is UNVERIFIED — re-test before enabling server-side tools.
 

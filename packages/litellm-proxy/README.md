@@ -111,8 +111,8 @@ Two correctness contracts must hold regardless of which proxy serves traffic:
 
 **Caveat — LiteLLM version.** `_billing_unit_breakdown` parses LiteLLM's normalized usage
 shapes (cache-inclusive vs additive token accounting), which is why the image is pinned to an
-exact version (**v1.90.0-rc.1** — bumped from v1.89.2 for the Vertex multi-region context-caching
-fix, BerriAI/litellm#29573; see the Dockerfile). On a materially different version the
+exact version (**v1.90.0** — bumped from v1.89.2 via v1.90.0-rc.1 for the Vertex multi-region
+context-caching fix, BerriAI/litellm#29573; see the Dockerfile). On a materially different version the
 cache/reasoning bucketing can drift → mis-billing, so this bump MUST be validated: run a known
 call (ideally one that exercises cache-read/cache-creation) and confirm the billing-unit
 breakdown still matches before promoting past dev. Match this version or re-validate.

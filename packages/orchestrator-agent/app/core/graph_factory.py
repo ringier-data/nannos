@@ -783,7 +783,7 @@ class GraphFactory:
         # - Forcing it through needs include_server_side_tool_invocations, which triggers Gemini 3
         #   "context circulation" (Vertex cached content); the gateway LiteLLM then 400s
         #   ("Tool config, tools and system instruction should not be set ... when using cached
-        #   content"). Verified on v1.89.2 (2026-06-24); the gateway is now on v1.90.0-rc.1 but
+        #   content"). Verified on v1.89.2 (2026-06-24); the gateway is now on v1.90.0 but
         #   whether that resolves this 400 is UNVERIFIED. Until re-tested past that bug,
         #   Gemini grounds via the orchestrator's own fetch tools, not server-side search.
         # Web search is instead exposed as the `console_web_search` MCP tool (console-backend),
