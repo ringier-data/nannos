@@ -11,6 +11,8 @@ from agent_common.a2a.models import LocalFoundrySubAgentConfig, LocalLangGraphSu
 from agent_common.models.base import ThinkingLevel
 from pydantic import BaseModel, Field
 
+from .prompt_placeholders import resolve_prompt_placeholders
+
 logger = logging.getLogger(__name__)
 
 # System prompt addendum for playground mode
@@ -399,7 +401,7 @@ class RegistryService:
                     }
             elif sa.type == "local":
                 # Local agents have system_prompt and mcp_tools at root level
-                system_prompt = cv.system_prompt or ""
+                system_prompt = resolve_prompt_placeholders(cv.system_prompt or "")
                 mcp_tools = cv.mcp_tools or []
 
                 if sa.name and system_prompt:

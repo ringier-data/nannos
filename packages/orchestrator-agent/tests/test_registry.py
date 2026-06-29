@@ -183,6 +183,58 @@ class TestRegistryService:
             assert local_agent.model_name == "gpt-4o"
 
     @pytest.mark.asyncio
+    async def test_local_agent_system_prompt_placeholders_resolved(self, mock_registry_service, monkeypatch):
+        """A stored local-agent prompt has its {{CONSOLE_FRONTEND_URL}} placeholder resolved."""
+        monkeypatch.setenv("CONSOLE_FRONTEND_URL", "https://console.example.com")
+        mock_sub_agents_response = {
+            "items": [
+                {
+                    "id": 2,
+                    "name": "data-analyst",
+                    "description": "Analyzes data",
+                    "owner_user_id": "test-user",
+                    "type": "local",
+                    "current_version": 1,
+                    "default_version": 1,
+                    "config_version": {
+                        "id": 2,
+                        "sub_agent_id": 2,
+                        "version": 1,
+                        "description": "Analyzes data",
+                        "model": "gpt-4o",
+                        "agent_url": None,
+                        "system_prompt": "Link users to {{CONSOLE_FRONTEND_URL}}/app for details.",
+                        "mcp_tools": [],
+                        "status": "approved",
+                        "created_at": "2024-01-01T00:00:00",
+                    },
+                    "created_at": "2024-01-01T00:00:00",
+                    "updated_at": "2024-01-01T00:00:00",
+                }
+            ],
+            "total": 1,
+        }
+        mock_settings_response = {
+            "data": {
+                "user_id": "test-user-id",
+                "sub": "test-user-sub",
+                "language": "en",
+                "custom_prompt": None,
+                "timezone": "Europe/Zurich",
+                "mcp_tools": [],
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        }
+
+        with mock_registry_service(mock_sub_agents_response, mock_settings_response) as registry_service:
+            user = await registry_service.get_user(user_sub="test-user-sub", access_token="test-token")
+
+            assert user is not None
+            assert len(user.local_subagents) == 1
+            assert user.local_subagents[0].system_prompt == "Link users to https://console.example.com/app for details."
+
+    @pytest.mark.asyncio
     async def test_get_user_success_with_mixed_agents(self, mock_registry_service):
         """Test get_user successfully fetches both remote and local sub-agents."""
         mock_sub_agents_response = {

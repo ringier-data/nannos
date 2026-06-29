@@ -38,6 +38,8 @@ from agent_common.models.base import ModelType
 from deepagents import CompiledSubAgent
 from ringier_a2a_sdk.cost_tracking import CostLogger
 
+from ..core.prompt_placeholders import resolve_prompt_placeholders
+
 logger = logging.getLogger(__name__)
 
 # Sub-agent configuration
@@ -66,9 +68,8 @@ TASK_SCHEDULER_DESCRIPTION = (
 # Default model for task scheduling (strategic planning)
 # Can be overridden via TASK_SCHEDULER_MODEL environment variable
 DEFAULT_TASK_SCHEDULER_MODEL: ModelType = os.getenv("TASK_SCHEDULER_MODEL", "claude-sonnet-4.6")  # type: ignore
-CONSOLE_FRONTEND_URL = os.getenv("CONSOLE_FRONTEND_URL", "http://localhost:5173")
 # System prompt for the task scheduler agent
-TASK_SCHEDULER_SYSTEM_PROMPT = """<role>
+TASK_SCHEDULER_SYSTEM_PROMPT = resolve_prompt_placeholders("""<role>
 You are a task scheduling specialist responsible for managing scheduled tasks and automated workflows.
 </role>
 
@@ -178,8 +179,8 @@ Poll interval: interval_seconds
 - Show job IDs and next run times
 - Explain what will happen when the job executes
 - Guide users on how to monitor or modify schedules
-- Provide a link to the newly created scheduled job in the UI: CONSOLE_FRONTEND_URL/app/scheduler/{scheduled_job_id}
-</response_format>""".replace("CONSOLE_FRONTEND_URL", CONSOLE_FRONTEND_URL)
+- Provide a link to the newly created scheduled job in the UI: {{CONSOLE_FRONTEND_URL}}/app/scheduler/{scheduled_job_id}
+</response_format>""")
 
 
 class TaskSchedulerRunnable(StructuredResponseMixin, LocalA2ARunnable):
