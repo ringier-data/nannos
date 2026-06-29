@@ -78,6 +78,28 @@ def coalesce_thinking_blocks(fragments: list | None) -> list[dict]:
     return blocks
 
 
+def _restore_stripped_cache_control(src, dst: dict) -> None:
+    """Re-attach ``cache_control`` markers langchain_openai strips from a tool message.
+
+    ``_sanitize_chat_completions_content`` rebuilds every text block of a ``tool``-role message
+    as ``{"type": "text", "text": ...}`` — dropping the ``cache_control`` breakpoint our
+    prompt-caching middleware places on the latest tool result. The sanitizer preserves block
+    order 1:1, so copy each source block's ``cache_control`` back onto the positionally-matching
+    serialized block. No-op when either side isn't list content or the lengths diverge.
+    """
+    src_content = getattr(src, "content", None)
+    dst_content = dst.get("content")
+    if not isinstance(src_content, list) or not isinstance(dst_content, list):
+        return
+    if len(src_content) != len(dst_content):
+        return
+    for s, d in zip(src_content, dst_content):
+        if isinstance(s, dict) and isinstance(d, dict):
+            cc = s.get("cache_control")
+            if cc is not None and "cache_control" not in d:
+                d["cache_control"] = cc
+
+
 def _thinking_round_trip_provider(model_name: str | None) -> bool:
     """Whether ``model_name``'s provider needs signed thinking blocks replayed.
 
@@ -110,6 +132,15 @@ def _gateway_chat_openai_cls():
        turn ("Dropping 'thinking' param ... has no thinking_blocks"). The base conversion strips
        ``thinking`` content blocks, so a top-level key is the only channel LiteLLM reads
        (utils.py:any_assistant_message_has_thinking_blocks).
+
+    3. CACHE-CONTROL REPLAY (outbound): re-attach the ``cache_control`` marker that the base
+       conversion strips from **tool**-role messages. ``_sanitize_chat_completions_content``
+       rebuilds every text block of a tool message as ``{"type": "text", "text": ...}``, dropping
+       the breakpoint our prompt-caching middleware places on the latest tool result. Because the
+       orchestrator's turns usually end on a tool result, this silently killed the conversation
+       cache breakpoint on the majority of turns — only the static system prefix stayed cached, so
+       the growing history was reprocessed uncached every turn. System/Human messages keep their
+       marker (they don't go through the tool-message sanitizer), so only tool messages need this.
     """
     global _gateway_chat_model_cls
     if _gateway_chat_model_cls is None:
@@ -145,7 +176,15 @@ def _gateway_chat_openai_cls():
                     if len(source) != len(messages):
                         return payload
                     for src, dst in zip(source, messages):
-                        if not isinstance(dst, dict) or dst.get("role") != "assistant":
+                        if not isinstance(dst, dict):
+                            continue
+                        role = dst.get("role")
+                        if role == "tool":
+                            # Tool messages lose their cache_control in sanitization; restore it
+                            # so the conversation cache breakpoint survives on tool-terminated turns.
+                            _restore_stripped_cache_control(src, dst)
+                            continue
+                        if role != "assistant":
                             continue
                         fragments = (getattr(src, "additional_kwargs", None) or {}).get("thinking_blocks")
                         if not fragments:

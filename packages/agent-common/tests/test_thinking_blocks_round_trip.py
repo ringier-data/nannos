@@ -181,3 +181,58 @@ def test_replay_noop_when_no_thinking_blocks_captured():
     with patch(_PROVIDER, return_value="bedrock_converse"):
         payload = client._get_request_payload(history)
     assert "thinking_blocks" not in _assistant_dicts(payload)[0]
+
+
+# --- cache_control restore on tool messages -------------------------------------------
+#
+# langchain_openai's tool-message sanitizer rebuilds text blocks as {type, text} only,
+# dropping the cache_control breakpoint our prompt-caching middleware places on the latest
+# tool result. The gateway subclass restores it so conversation caching survives on
+# tool-terminated turns (the common case in the orchestrator's dispatch loop).
+
+_CC = {"type": "ephemeral"}
+
+
+def _tool_history():
+    """A tool-loop turn whose latest tool result carries the conversation cache breakpoint."""
+    return [
+        HumanMessage(content="run it"),
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "t1"}]),
+        ToolMessage(
+            content=[{"type": "text", "text": "BIG RESULT", "cache_control": _CC}],
+            tool_call_id="t1",
+        ),
+    ]
+
+
+def _tool_dicts(payload):
+    return [m for m in payload["messages"] if m.get("role") == "tool"]
+
+
+def test_cache_control_restored_on_tool_message():
+    client = _client()
+    with patch(_PROVIDER, return_value="bedrock_converse"):
+        payload = client._get_request_payload(_tool_history())
+    assert _tool_dicts(payload)[0]["content"][-1]["cache_control"] == _CC
+
+
+def test_cache_control_restore_skipped_for_non_caching_provider():
+    client = _client()
+    with patch(_PROVIDER, return_value="openai"):
+        payload = client._get_request_payload(_tool_history())
+    # OpenAI takes the early return; the stripped marker is not re-added (OpenAI can't cache).
+    assert all("cache_control" not in b for b in _tool_dicts(payload)[0]["content"])
+
+
+def test_cache_control_noop_on_untagged_tool_message():
+    client = _client()
+    history = [
+        HumanMessage(content="run it"),
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {}, "id": "t1"}]),
+        ToolMessage(content="plain result", tool_call_id="t1"),
+    ]
+    with patch(_PROVIDER, return_value="bedrock_converse"):
+        payload = client._get_request_payload(history)
+    content = _tool_dicts(payload)[0]["content"]
+    blocks = content if isinstance(content, list) else []
+    assert all(not (isinstance(b, dict) and "cache_control" in b) for b in blocks)
