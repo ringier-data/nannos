@@ -224,10 +224,15 @@ export type AutomatedSubAgentConfig = {
      */
     description: string;
     /**
+     * PREFERRED way to choose the model. Bind the agent to a capability tier — 'low' (cheap/fast, for trivial tasks), 'standard' (the default, good for most tasks), or 'premium' (the most capable, for hard reasoning). A tier always resolves to the current fleet default for that tier, so it keeps working when a model is retired or upgraded. Use this unless you have a specific reason to pin an exact model. Exactly one of `model_tier` or `model` must be set — they are mutually exclusive. If unsure, set model_tier='standard'.
+     */
+    model_tier?: ModelTier | null;
+    /**
      * Model
+     *
+     * A concrete model alias registered on the gateway (e.g. 'claude-sonnet-4-6'). Only set this when the task requires one specific model; a pinned alias can stop working if that model is later retired. Prefer `model_tier` instead for stability. Exactly one of `model` or `model_tier` must be set — they are mutually exclusive.
      */
     model?: string | null;
-    model_tier?: ModelTier | null;
     /**
      * System Prompt
      *
@@ -1458,11 +1463,11 @@ export type DeliveryChannelCreate = {
      */
     secret: string;
     /**
-     * Group Ids
+     * Installation Id
      *
-     * IDs of user groups whose members can see and use this channel.
+     * Stable client-supplied identifier (e.g. the bot's installation) that scopes the channel to a tenant and is the idempotency key for re-registration. Required: every channel resolves by (client_id, installation_id).
      */
-    group_ids: Array<number>;
+    installation_id: string;
 };
 
 /**
@@ -1512,11 +1517,11 @@ export type DeliveryChannelResponse = {
      */
     registered_by: string;
     /**
-     * Group Ids
+     * Installation Id
      *
-     * IDs of groups that can use this channel.
+     * Stable client-supplied identifier (set when the channel was self-registered).
      */
-    group_ids: Array<number>;
+    installation_id?: string | null;
     /**
      * Created At
      */
@@ -1549,10 +1554,6 @@ export type DeliveryChannelUpdate = {
      * Secret
      */
     secret?: string | null;
-    /**
-     * Group Ids
-     */
-    group_ids?: Array<number> | null;
 };
 
 /**
@@ -5519,10 +5520,15 @@ export type SubAgentCreate = {
      */
     is_public?: boolean;
     /**
+     * PREFERRED way to choose the model. Bind the agent to a capability tier — 'low' (cheap/fast, for trivial tasks), 'standard' (good for most tasks), or 'premium' (the most capable, for hard reasoning). A tier always resolves to the current fleet default for that tier, so it keeps working when a model is retired or upgraded. Leave both unset to inherit the orchestrator's model. If you do set one, `model_tier` and `model` are mutually exclusive — set at most one.
+     */
+    model_tier?: ModelTier | null;
+    /**
      * Model
+     *
+     * A concrete model alias registered on the gateway (e.g. 'claude-sonnet-4-6'). Only set this when the agent must run on one specific model; a pinned alias can stop working if that model is later retired. Prefer `model_tier` for stability. Mutually exclusive with `model_tier` — set at most one.
      */
     model?: string | null;
-    model_tier?: ModelTier | null;
     /**
      * System Prompt
      */
@@ -5839,10 +5845,15 @@ export type SubAgentUpdate = {
      */
     is_public?: boolean | null;
     /**
+     * PREFERRED way to choose the model. Bind the agent to a capability tier — 'low' (cheap/fast, for trivial tasks), 'standard' (good for most tasks), or 'premium' (the most capable, for hard reasoning). A tier always resolves to the current fleet default for that tier, so it keeps working when a model is retired or upgraded. `model_tier` and `model` are mutually exclusive — set at most one.
+     */
+    model_tier?: ModelTier | null;
+    /**
      * Model
+     *
+     * A concrete model alias registered on the gateway (e.g. 'claude-sonnet-4-6'). Only set this when the agent must run on one specific model; a pinned alias can stop working if that model is later retired. Prefer `model_tier` for stability. Mutually exclusive with `model_tier` — set at most one.
      */
     model?: string | null;
-    model_tier?: ModelTier | null;
     /**
      * System Prompt
      */
@@ -11108,6 +11119,22 @@ export type RegisterChannelApiV1DeliveryChannelsPostResponses = {
 };
 
 export type RegisterChannelApiV1DeliveryChannelsPostResponse = RegisterChannelApiV1DeliveryChannelsPostResponses[keyof RegisterChannelApiV1DeliveryChannelsPostResponses];
+
+export type ConsoleListDeliveryChannelsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/delivery-channels/mcp-list';
+};
+
+export type ConsoleListDeliveryChannelsResponses = {
+    /**
+     * Successful Response
+     */
+    200: DeliveryChannelListResponse;
+};
+
+export type ConsoleListDeliveryChannelsResponse = ConsoleListDeliveryChannelsResponses[keyof ConsoleListDeliveryChannelsResponses];
 
 export type DeleteChannelApiV1DeliveryChannelsChannelIdDeleteData = {
     body?: never;

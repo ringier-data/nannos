@@ -4,6 +4,7 @@ import type {
   IPendingRequestStore,
   IInFlightTaskStore,
   IOAuthStateStore,
+  IInstallationSecretStore,
 } from './types.js';
 
 /**
@@ -16,6 +17,7 @@ export abstract class StorageProvider {
   abstract readonly pendingRequest: IPendingRequestStore;
   abstract readonly inFlightTask: IInFlightTaskStore;
   abstract readonly oauthState: IOAuthStateStore;
+  abstract readonly installationSecret: IInstallationSecretStore;
 
   /**
    * Gracefully shutdown the storage provider.

@@ -6,6 +6,7 @@ import type {
   IOAuthStateStore,
   IBotInstallationStore,
   IAdminSessionStore,
+  IInstallationSecretStore,
 } from './types.js';
 
 /**
@@ -20,6 +21,7 @@ export abstract class StorageProvider {
   abstract readonly oauthState: IOAuthStateStore;
   abstract readonly botInstallation: IBotInstallationStore;
   abstract readonly adminSession: IAdminSessionStore;
+  abstract readonly installationSecret: IInstallationSecretStore;
 
   /**
    * Gracefully shutdown the storage provider.

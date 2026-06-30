@@ -25,6 +25,7 @@ export interface GoogleChatFileUrl {
 }
 
 export interface A2AGoogleChatBasedRequest {
+  botName: string; // Installation identifier; must match the botName used to register delivery channels
   userId: string; // Google Chat user ID
   projectId: string; // Google Chat project number
   spaceId?: string; // Google Chat space ID
@@ -150,6 +151,9 @@ export class A2AClientService {
         ...(request.contextId && { contextId: request.contextId }),
       },
       metadata: {
+        // installation = the botName this project's channels were registered under; lets the
+        // orchestrator scope delivery channels (console_list_delivery_channels) to this tenant.
+        installation: request.botName,
         googleChatUserId: request.userId,
         googleChatProjectId: request.projectId,
         googleChatSpaceId: request.spaceId,

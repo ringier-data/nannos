@@ -200,21 +200,28 @@ async def update_job(
     # Use model_fields_set to detect which fields were explicitly provided
     # If field is in model_fields_set, pass its value (including None to clear)
     # If field is not in model_fields_set, pass _UNSET to keep current value
-    job = await service.update_job(
-        db=db,
-        job_id=job_id,
-        data=data,
-        actor=current_user,
-        name=data.name if "name" in data.model_fields_set else _UNSET,
-        prompt=data.prompt if "prompt" in data.model_fields_set else _UNSET,
-        notification_message=data.notification_message if "notification_message" in data.model_fields_set else _UNSET,
-        check_tool=data.check_tool if "check_tool" in data.model_fields_set else _UNSET,
-        condition_expr=data.condition_expr if "condition_expr" in data.model_fields_set else _UNSET,
-        expected_value=data.expected_value if "expected_value" in data.model_fields_set else _UNSET,
-        llm_condition=data.llm_condition if "llm_condition" in data.model_fields_set else _UNSET,
-        check_args=data.check_args if "check_args" in data.model_fields_set else _UNSET,
-        delivery_channel_id=data.delivery_channel_id if "delivery_channel_id" in data.model_fields_set else _UNSET,
-    )
+    try:
+        job = await service.update_job(
+            db=db,
+            job_id=job_id,
+            data=data,
+            actor=current_user,
+            name=data.name if "name" in data.model_fields_set else _UNSET,
+            prompt=data.prompt if "prompt" in data.model_fields_set else _UNSET,
+            notification_message=(
+                data.notification_message if "notification_message" in data.model_fields_set else _UNSET
+            ),
+            check_tool=data.check_tool if "check_tool" in data.model_fields_set else _UNSET,
+            condition_expr=data.condition_expr if "condition_expr" in data.model_fields_set else _UNSET,
+            expected_value=data.expected_value if "expected_value" in data.model_fields_set else _UNSET,
+            llm_condition=data.llm_condition if "llm_condition" in data.model_fields_set else _UNSET,
+            check_args=data.check_args if "check_args" in data.model_fields_set else _UNSET,
+            delivery_channel_id=(
+                data.delivery_channel_id if "delivery_channel_id" in data.model_fields_set else _UNSET
+            ),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job

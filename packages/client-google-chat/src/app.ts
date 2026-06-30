@@ -5,8 +5,7 @@ import { Logger } from './utils/logger.js';
 import { createStorageProvider, type StorageProvider } from './storage/index.js';
 import { OIDCClient } from './services/oidcClient.js';
 import { registerInstallations } from './services/installationRegistrar.js';
-import { AwsSsmInstallationSecretService } from './services/awsSsmInstallationSecretService.js';
-import { SSMClient } from '@aws-sdk/client-ssm';
+import { createInstallationSecretService } from './services/installationSecretServiceFactory.js';
 import { UserAuthService } from './services/userAuthService.js';
 import { A2AClientService } from './services/a2aClientService.js';
 import { FileStorageService } from './services/fileStorageService.js';
@@ -24,7 +23,7 @@ import { AppCommand, handleAppCommand } from './handlers/commandHandler.js';
 import { ButtonClickedPayload, handleButtonClicked } from './handlers/buttonClickedHandler.js';
 import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
 import { patchGaxiosToUseNativeFetch } from './utils/gaxiosNativeFetch.js';
-import { Task } from '@a2a-js/sdk';
+import { parseA2APushEvent } from './utils/a2aPushPayload.js';
 
 // Initialize logger early
 const logger = Logger.getLogger('app');
@@ -156,11 +155,9 @@ function setupServerTimeouts(server: Server, config: Config) {
     // OIDC client
     const oidcClient = new OIDCClient(config);
 
-    // Per-installation notification secrets backed by AWS SSM Parameter Store.
-    const installationSecretService = new AwsSsmInstallationSecretService(
-      new SSMClient({ region: config.aws.region }),
-      config.installationSecret.ssmPrefix
-    );
+    // Per-installation notification secrets, backed by the configured provider
+    // (storage provider by default, AWS SSM when opted in).
+    const installationSecretService = await createInstallationSecretService(config, storage);
 
     // User auth service
     const userAuthService = new UserAuthService(storage.userAuth, oidcClient, config, storage.oauthState);
@@ -441,13 +438,28 @@ function setupServerTimeouts(server: Server, config: Config) {
       '/api/v1/a2a/callback',
       createA2ANotificationAuthMiddleware(config.googleChatConfigs, installationSecretService),
       async (req: Request, res: Response) => {
-        const task = req.body as Task;
         const projectId = res.locals.projectNumber as string;
-        if (!task || task.kind !== 'task' || !task.status) {
-          logger.warn('[A2ACallback] Invalid task payload');
+        // The A2A SDK push sender emits one protobuf StreamResponse per event
+        // (task / statusUpdate / artifactUpdate / message); classify it and
+        // normalize the actionable ones to the JSON-spec Task shape.
+        const event = parseA2APushEvent(req.body);
+        if (event.type === 'invalid') {
+          logger.warn(
+            `[A2ACallback] Invalid task payload (top-level keys: ${
+              req.body && typeof req.body === 'object' ? Object.keys(req.body).join(',') : typeof req.body
+            })`
+          );
           res.status(400).json({ error: 'Invalid task payload' });
           return;
         }
+        if (event.type === 'ignored') {
+          // Recognized but non-actionable (streaming artifact/message): ack so
+          // the sender does not treat it as a failed delivery.
+          logger.debug(`[A2ACallback] Ignoring ${event.reason} event`);
+          res.status(200).json({ acknowledged: true });
+          return;
+        }
+        const task = event.task;
 
         // Only process completed/failed notifications
         const state = task.status.state;

@@ -27,15 +27,29 @@ export class AwsSsmInstallationSecretService extends InstallationSecretService {
 
     const name = this.parameterName(installationId);
     const generated = randomBytes(32).toString('hex');
-    await this.client.send(
-      new PutParameterCommand({
-        Name: name,
-        Value: generated,
-        Type: 'SecureString',
-        Overwrite: false,
-        Description: `Notification secret for installation ${installationId}`,
-      })
-    );
+    try {
+      await this.client.send(
+        new PutParameterCommand({
+          Name: name,
+          Value: generated,
+          Type: 'SecureString',
+          Overwrite: false,
+          Description: `Notification secret for installation ${installationId}`,
+        })
+      );
+    } catch (err) {
+      // Another replica booting concurrently may have created the parameter
+      // between our read and write (Overwrite:false). Re-read the winner's value
+      // so all replicas converge on a single shared secret.
+      if ((err as { name?: string })?.name === 'ParameterAlreadyExists') {
+        const winner = await this.read(installationId);
+        if (winner) {
+          logger.info(`Notification secret already provisioned by another replica for installation_id=${installationId}`);
+          return winner;
+        }
+      }
+      throw err;
+    }
     logger.info(`Generated and stored notification secret in SSM for installation_id=${installationId}`);
     return generated;
   }

@@ -139,3 +139,19 @@ export interface IOAuthStateStore {
   get(state: string): Promise<OAuthStateData | null>;
   consume(state: string): Promise<{ userId: string; projectId: string; codeVerifier: string } | null>;
 }
+
+/**
+ * Interface for per-installation notification-secret storage.
+ * Backs the 'db' installation-secret provider (the cloud-agnostic default).
+ */
+export interface IInstallationSecretStore {
+  /** Return the stored secret for an installation, or null if none exists. */
+  get(installationId: string): Promise<string | null>;
+  /**
+   * Insert a secret only if one does not already exist, then return the
+   * authoritative stored value. Concurrent callers (e.g. replicas booting
+   * together) must converge on a single shared secret, so the loser of the
+   * race receives the winner's value rather than its own candidate.
+   */
+  insertIfAbsent(installationId: string, candidate: string): Promise<string>;
+}

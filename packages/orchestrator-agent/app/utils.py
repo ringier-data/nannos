@@ -210,6 +210,9 @@ def build_runtime_context(
             # MCP tool discovery - hierarchical navigation (servers -> tools -> details)
             "console_list_mcp_servers",  # List available MCP integration servers (GitHub, Jira, etc.)
             "console_grep_mcp_tools",  # Discover available MCP tools
+            # Notification delivery: lets the scheduler resolve a real delivery_channel_id
+            # instead of guessing one (a guessed id fails the scheduled_jobs FK constraint).
+            "console_list_delivery_channels",
         }
         task_scheduler_tool_names = [
             t.name

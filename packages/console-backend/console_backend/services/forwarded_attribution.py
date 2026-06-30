@@ -28,3 +28,15 @@ def forwarded_conversation_id(request: Request) -> str | None:
     """The conversation_id the orchestrator stamped on the MCP request, if any."""
     cid = forwarded_attribution(request).get("conversation_id")
     return cid if isinstance(cid, str) and cid else None
+
+
+def forwarded_installation(request: Request) -> str | None:
+    """The installation (tenant) the orchestrator stamped on the MCP request, if any.
+
+    Originates from the calling bot client's A2A message metadata (its ``botName``), threaded
+    through orchestrator attribution. Used to scope delivery channels to the caller's installation
+    — system-injected and out of the tool schema, so the model can neither see nor spoof it.
+    ``None`` (e.g. the web-console, which sets no installation) means "no scoping → all channels".
+    """
+    inst = forwarded_attribution(request).get("installation")
+    return inst if isinstance(inst, str) and inst else None

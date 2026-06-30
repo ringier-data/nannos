@@ -82,10 +82,19 @@ def mock_sub_agent_service():
 
 
 @pytest.fixture
-def service(mock_repo, mock_sub_agent_service) -> SchedulerService:
+def mock_delivery_channel_repo():
+    repo = AsyncMock()
+    # Default: any referenced channel exists.
+    repo.get_channel_by_id.return_value = MagicMock()
+    return repo
+
+
+@pytest.fixture
+def service(mock_repo, mock_sub_agent_service, mock_delivery_channel_repo) -> SchedulerService:
     s = SchedulerService()
     s.set_repository(mock_repo)
     s.set_sub_agent_service(mock_sub_agent_service)
+    s.set_delivery_channel_repository(mock_delivery_channel_repo)
     return s
 
 
@@ -252,6 +261,27 @@ class TestCreateJobAccessControl:
         assert result.sub_agent_id == 42
 
     @pytest.mark.asyncio
+    async def test_raises_when_delivery_channel_missing(
+        self,
+        service: SchedulerService,
+        mock_sub_agent_service: AsyncMock,
+        mock_delivery_channel_repo: AsyncMock,
+        actor: User,
+    ):
+        """Raises ValueError (not a DB FK 500) when delivery_channel_id does not exist."""
+        db = AsyncMock()
+        accessible = MagicMock()
+        accessible.id = 42
+        mock_sub_agent_service.get_accessible_sub_agents.return_value = [accessible]
+        mock_delivery_channel_repo.get_channel_by_id.return_value = None
+
+        data = _make_interval_create(sub_agent_id=42)
+        data.delivery_channel_id = 999
+
+        with pytest.raises(ValueError, match="Delivery channel 999 not found"):
+            await service.create_job(db=db, data=data, actor=actor)
+
+    @pytest.mark.asyncio
     async def test_no_access_check_for_watch_without_sub_agent(
         self, service: SchedulerService, mock_repo: AsyncMock, mock_sub_agent_service: AsyncMock, actor: User
     ):
@@ -387,6 +417,47 @@ class TestUpdateJobUnsetSentinel:
         fields = mock_repo.update_job.call_args[1]["fields"]
         assert "name" in fields
         assert fields["name"] is None
+
+    @pytest.mark.asyncio
+    async def test_update_raises_when_delivery_channel_missing(
+        self,
+        service: SchedulerService,
+        mock_repo: AsyncMock,
+        mock_delivery_channel_repo: AsyncMock,
+        actor: User,
+    ):
+        """update_job() validates delivery_channel_id before the DB FK constraint."""
+        db = AsyncMock()
+        mock_repo.get_job.return_value = _make_job(user_id=actor.id)
+        mock_delivery_channel_repo.get_channel_by_id.return_value = None
+
+        with pytest.raises(ValueError, match="Delivery channel 1 not found"):
+            await service.update_job(
+                db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, delivery_channel_id=1
+            )
+        mock_repo.update_job.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_clearing_delivery_channel_skips_validation(
+        self,
+        service: SchedulerService,
+        mock_repo: AsyncMock,
+        mock_delivery_channel_repo: AsyncMock,
+        actor: User,
+    ):
+        """Setting delivery_channel_id=None (clearing) must not trigger an existence check."""
+        db = AsyncMock()
+        existing_job = _make_job(user_id=actor.id)
+        mock_repo.get_job.side_effect = [existing_job, existing_job]
+        mock_repo.update_job.return_value = None
+
+        await service.update_job(
+            db=db, job_id=1, data=ScheduledJobUpdate(), actor=actor, delivery_channel_id=None
+        )
+
+        mock_delivery_channel_repo.get_channel_by_id.assert_not_awaited()
+        fields = mock_repo.update_job.call_args[1]["fields"]
+        assert fields["delivery_channel_id"] is None
 
     @pytest.mark.asyncio
     async def test_update_returns_none_for_other_users_job(

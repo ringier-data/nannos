@@ -2,6 +2,12 @@ import type { StorageConfig } from '../storage/index.js';
 
 export type EnvName = 'local' | 'dev' | 'stg' | 'prod';
 export type StorageProviderType = 'postgres';
+/**
+ * Backend for per-installation notification secrets.
+ *   'db'      — cloud-agnostic default, persisted via the storage provider.
+ *   'aws-ssm' — AWS SSM Parameter Store (opt-in; requires AWS credentials).
+ */
+export type InstallationSecretProvider = 'db' | 'aws-ssm';
 
 export interface Config {
   isLocal(): boolean;
@@ -42,7 +48,8 @@ export interface Config {
     audience: string;
   };
   readonly installationSecret: {
-    ssmPrefix: string;
+    provider: InstallationSecretProvider;
+    ssmPrefix: string; // Only used when provider is 'aws-ssm'.
   };
 }
 
@@ -87,6 +94,12 @@ export async function getConfigFromEnv(): Promise<Config> {
     const envVarName = `GCP_SA_JSON_KEY_${project.name.toUpperCase().replace(/-/g, '_')}`;
     if (!process.env[envVarName]) {
       throw new Error(`Please provide ${envVarName}`);
+    }
+    // bot_name is load-bearing: it is the installation_id used for delivery-channel
+    // registration and the SSM key for the inbound notification secret. A missing
+    // value would silently break both, so fail fast at startup instead.
+    if (!project.bot_name) {
+      throw new Error(`Missing bot_name for Google Chat project '${project.name}' in GCP_CHAT_PROJECTS`);
     }
     googleChatConfigs.push({
       projectName: project.name,
@@ -161,6 +174,7 @@ export async function getConfigFromEnv(): Promise<Config> {
         }
       : undefined,
     installationSecret: {
+      provider: (process.env.INSTALLATION_SECRET_PROVIDER as InstallationSecretProvider) || 'db',
       ssmPrefix:
         process.env.INSTALLATION_SECRET_SSM_PREFIX ||
         `/nannos/${environment}/client-google-chat/installation-secrets`,

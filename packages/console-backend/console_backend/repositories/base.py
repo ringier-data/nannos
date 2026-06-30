@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Placeholder written to the audit trail in place of a sensitive field's value,
+# so the audit shows the field was set/changed without revealing the secret.
+_REDACTED = "***REDACTED***"
+
 
 def _serialize_for_audit(data: dict[str, Any]) -> dict[str, Any]:
     """Serialize dictionary for audit logging, converting datetimes to ISO strings."""
@@ -46,17 +50,40 @@ class AuditedRepository:
     IMPORTANT: audit_service must be injected via set_audit_service() before use.
     """
 
-    def __init__(self, entity_type: AuditEntityType, table_name: str):
+    def __init__(
+        self,
+        entity_type: AuditEntityType,
+        table_name: str,
+        sensitive_fields: set[str] | None = None,
+    ):
         """
         Initialize repository.
 
         Args:
             entity_type: The audit entity type for this repository
             table_name: The primary database table name
+            sensitive_fields: Column names whose values must never appear in the
+                audit trail (e.g. secrets). They are redacted in create/update
+                before-and-after snapshots.
         """
         self.entity_type = entity_type
         self.table_name = table_name
+        self.sensitive_fields = sensitive_fields or set()
         self._audit_service: Optional["AuditService"] = None
+
+    def _redact_sensitive(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Replace any sensitive-field values with a redaction placeholder.
+
+        Returns a copy; the original dict (used for the DB write) is untouched.
+        ``None`` values are left as-is so the audit still reflects a cleared field.
+        """
+        if not self.sensitive_fields:
+            return data
+        redacted = dict(data)
+        for key in self.sensitive_fields:
+            if redacted.get(key) is not None:
+                redacted[key] = _REDACTED
+        return redacted
 
     def set_audit_service(self, audit_service: "AuditService") -> None:
         """
@@ -133,7 +160,7 @@ class AuditedRepository:
                 entity_type=self.entity_type,
                 entity_id=str(entity_id),
                 action=AuditAction.CREATE,
-                changes={"after": _serialize_for_audit(fields)},
+                changes={"after": _serialize_for_audit(self._redact_sensitive(fields))},
             )
 
             logger.info(f"Created {self.entity_type.value} {entity_id} by {actor.sub}")
@@ -196,11 +223,13 @@ class AuditedRepository:
             changes = {}
             if before_state:
                 changes["before"] = _serialize_for_audit(
-                    {k: before_state[k] for k in fields.keys() if k in before_state}
+                    self._redact_sensitive(
+                        {k: before_state[k] for k in fields.keys() if k in before_state}
+                    )
                 )
-                changes["after"] = _serialize_for_audit(fields)
+                changes["after"] = _serialize_for_audit(self._redact_sensitive(fields))
             else:
-                changes["after"] = _serialize_for_audit(fields)
+                changes["after"] = _serialize_for_audit(self._redact_sensitive(fields))
 
             action = custom_action or AuditAction.UPDATE
 

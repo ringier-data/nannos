@@ -24,7 +24,6 @@ interface DeliveryChannelCreateBody {
   description?: string;
   webhook_url: string;
   secret: string;
-  group_ids: number[];
   installation_id: string;
 }
 
@@ -76,7 +75,6 @@ export async function registerOne(
     description: opts.description,
     webhook_url: webhookUrl,
     secret,
-    group_ids: [],
     installation_id: opts.installationId,
   };
 
