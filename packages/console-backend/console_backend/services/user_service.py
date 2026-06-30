@@ -181,7 +181,7 @@ class UserService:
             row = result.mappings().first()
 
             if row is None:
-                logger.debug(f"User not found by phone number: {phone_number}")
+                logger.debug("User not found by phone number")
                 return None
 
             return User(

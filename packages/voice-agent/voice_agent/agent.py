@@ -319,6 +319,101 @@ def build_live_config(
     )
 
 
+# ── MCP gateway warm-up ─────────────────────────────────────────────────────────
+
+
+async def _mint_warmup_token() -> str | None:
+    """Mint a client-credentials token for the Gatana audience (no user needed).
+
+    The real per-call MCP path is authenticated, and the slow cold-start lives
+    *behind* that auth check — an unauthenticated warm-up only reaches the (fast)
+    front door. There is no user at startup, so we use the voice-agent's own
+    client-credentials grant with the gateway as audience. Returns None on any
+    failure (warm-up then proceeds unauthenticated as a fallback).
+    """
+    issuer = os.getenv("OIDC_ISSUER", "")
+    client_id = os.getenv("OIDC_CLIENT_ID", "voice-agent")
+    client_secret = os.getenv("OIDC_CLIENT_SECRET", "")
+    audience = os.getenv("MCP_GATEWAY_CLIENT_ID", "gatana")
+    if not (issuer and client_secret):
+        return None
+    from ringier_a2a_sdk.oauth.client import OidcOAuth2Client  # noqa: PLC0415
+
+    client = OidcOAuth2Client(client_id=client_id, client_secret=client_secret, issuer=issuer)
+    try:
+        return await client.get_token(audience=audience)
+    finally:
+        await client.close()
+
+
+async def warm_up_mcp_gateway() -> None:
+    """Best-effort warm-up of the MCP gateway to avoid first-call cold start.
+
+    After a deploy the gateway's authenticated session path (and any scale-to-zero
+    backing services) is cold, so the first call can stall long enough for Gemini
+    to drop the Live session with a 1011 internal error — or simply never respond,
+    because the Gemini session is opened *inside* the MCP connect. This mints a
+    service token and opens a short authenticated MCP session
+    (connect → initialize → list_tools) to wake that path before the first call.
+
+    Fully best-effort: every failure is swallowed and it never blocks startup.
+
+    Toggles (env):
+      MCP_WARMUP_ENABLED          "false" to disable entirely (default: enabled)
+      MCP_WARMUP_TIMEOUT_SECONDS  hard cap on the warm-up attempt (default: 30)
+    """
+    if os.getenv("MCP_WARMUP_ENABLED", "true").lower() != "true":
+        logger.info("MCP gateway warm-up disabled (MCP_WARMUP_ENABLED!=true)")
+        return
+
+    gateway_url = os.getenv("MCP_GATEWAY_URL") or None
+    if not gateway_url:
+        logger.info("MCP gateway warm-up skipped — MCP_GATEWAY_URL not set")
+        return
+
+    timeout = int(os.getenv("MCP_WARMUP_TIMEOUT_SECONDS", "30"))
+    logger.info("MCP gateway warm-up starting (url=%s, timeout=%ds)", gateway_url, timeout)
+    try:
+        async with asyncio.timeout(timeout):
+            token = await _mint_warmup_token()
+            headers = {"Authorization": f"Bearer {token}"} if token else None
+            if headers is None:
+                logger.warning(
+                    "MCP gateway warm-up: no service token (check OIDC_* env) — "
+                    "warming unauthenticated, which may not reach the cold path"
+                )
+            async with streamablehttp_client(
+                gateway_url, headers=headers, timeout=timedelta(seconds=timeout)
+            ) as (read, write, _):
+                async with ClientSession(read, write) as mcp_session:
+                    await mcp_session.initialize()
+                    await mcp_session.list_tools()
+        logger.info("MCP gateway warm-up complete (url=%s, authenticated=%s)", gateway_url, token is not None)
+    except Exception as exc:
+        # MCP's streamablehttp_client runs inside an anyio TaskGroup, so failures arrive
+        # wrapped in an ExceptionGroup whose str() only says "N sub-exception(s)" and hides
+        # the real cause. Unwrap every leaf so the actual error (e.g. the gateway 500 body)
+        # is visible, and include the full traceback.
+        leaves = _flatten_exceptions(exc)
+        detail = "; ".join(f"{type(e).__name__}: {e}" for e in leaves)
+        logger.warning(
+            "MCP gateway warm-up failed (url=%s): %s — ignoring",
+            gateway_url,
+            detail,
+            exc_info=True,
+        )
+
+
+def _flatten_exceptions(exc: BaseException) -> list[BaseException]:
+    """Recursively flatten ExceptionGroups into their leaf exceptions."""
+    if isinstance(exc, BaseExceptionGroup):
+        leaves: list[BaseException] = []
+        for sub in exc.exceptions:
+            leaves.extend(_flatten_exceptions(sub))
+        return leaves
+    return [exc]
+
+
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
 
@@ -373,6 +468,26 @@ class GeminiLiveAgent:
         """
         tools_result = await mcp_session.list_tools()
         declarations: list[types.FunctionDeclaration] = []
+
+        # Pre-score tool risks CONCURRENTLY. Scoring is an LLM call per tool; doing
+        # it sequentially in the loop below added ~2-4s PER tool (30s+ for a large
+        # toolset) to session setup — all dead air before the call could start, and
+        # long enough to flood the model with buffered audio on the first call. Each
+        # _score_tool_risk caches into _TOOL_RISK_CACHE, so the loop's calls then hit
+        # the cache instantly. Results handled per-call (cache + keyword fallback);
+        # return_exceptions just guards the gather itself.
+        to_score = [
+            t for t in tools_result.tools
+            if not (self.mcp_tool_filter and t.name not in self.mcp_tool_filter)
+        ]
+        if to_score:
+            await asyncio.gather(
+                *(
+                    _score_tool_risk(client, t.name, t.description or "", dict(t.inputSchema or {}))
+                    for t in to_score
+                ),
+                return_exceptions=True,
+            )
 
         # Flag to ensure we only emit one mcp_auth_failed event (and thus
         # one SMS) per session, regardless of how many tools need credentials.
@@ -607,6 +722,11 @@ class GeminiLiveAgent:
         if self.mcp_gateway_url:
             self.mcp_status = asyncio.get_running_loop().create_future()
             mcp_timeout = int(os.getenv("MCP_TIMEOUT_SECONDS", "60"))
+            # Tracks whether the live session actually started. Distinguishes an
+            # MCP *connection* failure (before the session — safe to retry
+            # tool-less) from an *in-session* crash (e.g. Gemini 1011 — must NOT
+            # restart a second tool-less session over the same transport).
+            session_started = False
             try:
                 async with streamablehttp_client(
                     self.mcp_gateway_url,
@@ -637,19 +757,44 @@ class GeminiLiveAgent:
                         async with client.aio.live.connect(
                             model=self.model_id, config=config
                         ) as session:
+                            session_started = True
                             await self._run_session(
                                 session, audio_in, event_out, self.tool_map
                             )
                 return
             except Exception as exc:
-                logger.warning(
-                    "MCP gateway connection failed (url=%s): %s — falling back to session without tools",
+                if session_started:
+                    # The MCP connection was fine; the live session itself
+                    # crashed (e.g. Gemini 1011). End the call — do NOT fall
+                    # through to a second, tool-less session over a torn-down
+                    # transport.
+                    logger.exception(
+                        "Gemini live session crashed (url=%s)", self.mcp_gateway_url
+                    )
+                    return
+                logger.error(
+                    "MCP gateway connection FAILED (url=%s) — running this call WITHOUT tools, "
+                    "so write-tool RISK CHECKS ARE SKIPPED. Expected tools: %s. Cause: %r",
                     self.mcp_gateway_url,
+                    self.mcp_tool_filter or "all",
                     exc,
+                    exc_info=True,
                 )
                 if not self.mcp_status.done():
                     self.mcp_status.set_result(False)
                 await event_out.put({"type": "mcp_auth_failed", "message": str(exc)})
+
+        elif self.mcp_tool_filter:
+            # Tools were configured for this agent, but no MCP gateway URL was set —
+            # which happens when mcp_headers came back empty (no user token/consent,
+            # or token-exchange failure). The call proceeds tool-less and the risk
+            # check never runs; surface it loudly rather than silently dropping tools.
+            logger.error(
+                "MCP tools configured (%s) but no gateway URL resolved — mcp_headers were "
+                "missing (no user token/consent or token exchange failed). Running WITHOUT "
+                "tools; write-tool RISK CHECKS ARE SKIPPED.",
+                self.mcp_tool_filter,
+            )
 
         async with client.aio.live.connect(
             model=self.model_id, config=self._config
@@ -673,6 +818,27 @@ class GeminiLiveAgent:
         t_first_audio_sent: float | None = None
         first_response_logged = False
         chunks_sent = 0
+
+        # Drop audio that piled up in audio_in while the session was being set up
+        # (MCP connect + tool scoring). Sending tens of seconds of stale audio in
+        # one burst confuses the model's turn detection so it never answers the
+        # caller's first real question. Text turns (e.g. the "[call_connected]"
+        # greeting trigger) and the end sentinel are preserved, in order.
+        preserved: list[str | None] = []
+        dropped = 0
+        while not audio_in.empty():
+            try:
+                item = audio_in.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if isinstance(item, bytes):
+                dropped += 1
+            else:
+                preserved.append(item)
+        for item in preserved:
+            audio_in.put_nowait(item)
+        if dropped:
+            logger.info("Dropped %d stale audio chunks buffered during session setup", dropped)
 
         async def _send_loop() -> None:
             nonlocal t_first_audio_sent, first_response_logged, chunks_sent
@@ -790,6 +956,23 @@ class GeminiLiveAgent:
                 # session closure (generator exhausts without turn_complete).
                 while True:
                     async for response in session.receive():
+                        # ── Session resumption handle ─────────────────────
+                        # `session_resumption_update` is a TOP-LEVEL field on
+                        # the response and usually arrives in its own message
+                        # with no server_content and no tool_call. Capture it
+                        # first — before any `continue`/`break` below could
+                        # skip it (otherwise the handle is never persisted).
+                        resumption_update = getattr(response, "session_resumption_update", None)
+                        if resumption_update is not None:
+                            handle = getattr(resumption_update, "handle", None) or getattr(
+                                resumption_update, "new_handle", None
+                            )
+                            if handle:
+                                self.latest_resumption_handle = handle
+                                await event_out.put(
+                                    {"type": "session_resumption_handle", "handle": handle}
+                                )
+
                         # ── Tool calls ───────────────────────────────────
                         # Dispatch each call as a background task so the
                         # receive loop is never blocked by slow MCP calls.
@@ -878,15 +1061,6 @@ class GeminiLiveAgent:
                             await event_out.put({"type": "turn_complete"})
                             turn += 1
                             break  # restart session.receive() for next turn
-
-                        # Capture session resumption handle updates from Gemini.
-                        # The handle changes periodically; we always keep the latest.
-                        resumption_update = getattr(response, "session_resumption_update", None)
-                        if resumption_update is not None:
-                            handle = getattr(resumption_update, "handle", None) or getattr(resumption_update, "new_handle", None)
-                            if handle:
-                                self.latest_resumption_handle = handle
-                                await event_out.put({"type": "session_resumption_handle", "handle": handle})
                     else:
                         # for completed without break → session genuinely closed.
                         logger.warning(

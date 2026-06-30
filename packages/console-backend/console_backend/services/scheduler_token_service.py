@@ -134,15 +134,15 @@ class SchedulerTokenService:
 
         return _decrypt_token(plaintext_dek, nonce_and_ciphertext)
 
-    async def get_access_token(self, db: AsyncSession, user_id: str) -> str:
-        """Return a fresh Keycloak access token by refreshing the stored offline token.
+    async def _refresh_access_token(self, db: AsyncSession, user_id: str) -> str:
+        """Refresh the user's stored offline token into a fresh Keycloak access token.
 
         Raises ValueError if no token is stored for the user.
         Raises httpx.HTTPStatusError on Keycloak errors.
         """
         blob = await self._load_encrypted_blob(db, user_id)
         if blob is None:
-            raise ValueError(f"No offline token stored for user {user_id}. User must grant scheduler consent first.")
+            raise ValueError(f"No offline token stored for user {user_id}. User must grant consent first.")
 
         refresh_token = await self._decrypt_blob(blob)
 
@@ -161,12 +161,24 @@ class SchedulerTokenService:
             data = resp.json()
 
         logger.debug("Refreshed access token for user %s", user_id)
-        access_token = data["access_token"]
-        # Exchange for agent-runner audience so agent-runner's own OAuth client
-        # (OIDC_CLIENT_ID=agent-runner) can perform downstream token exchanges
-        # (e.g. agent-runner → voice-agent via SmartTokenInterceptor).
-        token = await self.exchange_token(access_token, audience="agent-runner")
-        return token
+        return data["access_token"]
+
+    async def get_exchanged_token(self, db: AsyncSession, user_id: str, audience: str) -> str:
+        """Refresh the user's offline token and exchange it for *audience* (RFC 8693).
+
+        Lets a service act on behalf of the user against a specific audience (e.g.
+        the MCP gateway) using only the user_id — no live user session required.
+        """
+        access_token = await self._refresh_access_token(db, user_id)
+        return await self.exchange_token(access_token, audience=audience)
+
+    async def get_access_token(self, db: AsyncSession, user_id: str) -> str:
+        """Return a fresh access token exchanged for the agent-runner audience.
+
+        Used by the scheduler so agent-runner's own OAuth client can perform
+        downstream token exchanges (e.g. agent-runner → voice-agent).
+        """
+        return await self.get_exchanged_token(db, user_id, audience="agent-runner")
 
     async def exchange_token(self, access_token: str, audience: str) -> str:
         """RFC 8693 token exchange — obtain a token for *audience* on behalf of the user.

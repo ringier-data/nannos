@@ -39,6 +39,10 @@ class OutboundCallRequest(BaseModel):
     mcp_tools: list[str] = []
     access_token: str | None = None  # User Bearer token forwarded to MCP gateway
     context_messages: list[str] = []
+    # Backend voice_session record ID, so the Twilio handler can mark the
+    # session complete when the call ends (the Gemini resume handle is saved
+    # during the call via _active_sessions). None when no record was created.
+    voice_session_id: str | None = None
 
 
 # Global registry: call_sid → OutboundCallRequest.

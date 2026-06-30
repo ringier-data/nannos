@@ -275,7 +275,7 @@ class SubAgentService:
         """
 
         activation_filter = (
-            "AND (usa.sub_agent_id IS NOT NULL OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE))"
+            "AND (usa.sub_agent_id IS NOT NULL OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)) "
             if activated_only
             else ""
         )
@@ -367,6 +367,95 @@ class SubAgentService:
         await self._populate_effective_permissions(db, sub_agents, user_id)
 
         return sub_agents
+
+    async def get_accessible_sub_agents_for_voice_call(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        include_owned: bool = True,
+    ) -> list[SubAgent]:
+        """Get sub-agents accessible to a user for the voice call menu.
+
+        Access rule: not deleted AND (owned | public | group-assigned | has activation record).
+        Joins default_version only — unapproved agents (no default_version) yield no config data.
+        Selects only what the voice menu needs (system_prompt and mcp_tools drive the call's
+        prompt and MCP/risk-check setup); skips foundry_*, skills, pricing_config, thinking, etc.
+        Does not branch on admin status or populate effective_permission.
+        """
+        query = text("""
+            SELECT DISTINCT
+                sa.id, sa.name, sa.owner_user_id, sa.owner_status, sa.type,
+                sa.system_role, sa.current_version, sa.default_version,
+                sa.is_public, sa.deleted_at, sa.created_at, sa.updated_at,
+                u.email AS owner_email, u.first_name, u.last_name,
+                cv.id AS cv_id, cv.version AS cv_version,
+                cv.description AS cv_description,
+                cv.model AS cv_model, cv.model_tier AS cv_model_tier,
+                cv.system_prompt AS cv_system_prompt, cv.mcp_tools AS cv_mcp_tools,
+                cv.status AS cv_status, cv.created_at AS cv_created_at,
+                (usa.sub_agent_id IS NOT NULL) AS is_activated,
+                usa.activated_by AS activated_by,
+                usa.activated_by_groups AS activated_by_groups
+            FROM sub_agents sa
+            JOIN users u ON sa.owner_user_id = u.id
+            LEFT JOIN sub_agent_config_versions cv
+                ON sa.id = cv.sub_agent_id AND sa.default_version = cv.version
+            LEFT JOIN sub_agent_permissions sap ON sa.id = sap.sub_agent_id
+            LEFT JOIN user_group_members ugm ON sap.user_group_id = ugm.user_group_id
+            LEFT JOIN user_sub_agent_activations usa
+                ON sa.id = usa.sub_agent_id AND usa.user_id = :user_id
+            WHERE sa.deleted_at IS NULL AND (
+                (:include_owned AND sa.owner_user_id = :user_id)
+                OR sa.is_public = TRUE
+                OR ugm.user_id = :user_id
+                OR usa.sub_agent_id IS NOT NULL
+            )
+            ORDER BY sa.updated_at DESC
+        """)
+        result = await db.execute(query, {"user_id": user_id, "include_owned": include_owned})
+        rows = result.mappings().all()
+        return [self._row_to_sub_agent_for_voice(row) for row in rows]
+
+    def _row_to_sub_agent_for_voice(self, row: Any) -> SubAgent:
+        """Convert a lean voice-call query row to a SubAgent."""
+        owner = SubAgentOwner(
+            id=row["owner_user_id"],
+            name=f"{row['first_name']} {row['last_name']}",
+            email=row["owner_email"],
+        )
+        config_version = None
+        if row.get("cv_id") is not None:
+            config_version = SubAgentConfigVersion(
+                id=row["cv_id"],
+                sub_agent_id=row["id"],
+                version=row["cv_version"],
+                description=row["cv_description"],
+                model=row.get("cv_model"),
+                model_tier=row.get("cv_model_tier"),
+                system_prompt=row.get("cv_system_prompt"),
+                mcp_tools=row.get("cv_mcp_tools", []),
+                status=row["cv_status"],
+                created_at=row["cv_created_at"],
+            )
+        return SubAgent(
+            id=row["id"],
+            name=row["name"],
+            owner_user_id=row["owner_user_id"],
+            owner=owner,
+            owner_status=row.get("owner_status", "active"),
+            type=row["type"],
+            system_role=row.get("system_role"),
+            current_version=row["current_version"],
+            default_version=row.get("default_version"),
+            config_version=config_version,
+            is_public=row.get("is_public", False),
+            is_activated=row.get("is_activated", False),
+            activated_by=row.get("activated_by"),
+            activated_by_groups=row.get("activated_by_groups", []),
+            deleted_at=row.get("deleted_at"),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     async def get_pending_approvals(self, db: AsyncSession) -> list[SubAgent]:
         """Get all sub-agents with versions pending approval (admin only)."""

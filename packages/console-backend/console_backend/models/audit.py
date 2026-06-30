@@ -28,6 +28,7 @@ class AuditEntityType(str, Enum):
     TOOL_RISK_SCORE = "tool_risk_score"  # For tool risk score operations
     MODEL_DEFAULT = "model_default"  # For fleet default model (role → alias) changes
     BUDGET_SETTING = "budget_setting"  # For Budget Guard configuration changes
+    VOICE_SESSION = "voice_session"  # For voice call session lifecycle
 
 
 class AuditAction(str, Enum):
