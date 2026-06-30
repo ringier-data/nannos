@@ -349,9 +349,26 @@ class SubAgentCreate(BaseModel):
     is_public: bool = False  # If true, accessible to all users without group permissions
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: ModelName | None = None
-    # Bind to a capability tier instead of a concrete model (mutually exclusive with `model`).
-    model_tier: ModelTier | None = None
+    model_tier: ModelTier | None = Field(
+        default=None,
+        description=(
+            "PREFERRED way to choose the model. Bind the agent to a capability tier — "
+            "'low' (cheap/fast, for trivial tasks), 'standard' (good for most tasks), "
+            "or 'premium' (the most capable, for hard reasoning). A tier always resolves to the "
+            "current fleet default for that tier, so it keeps working when a model is retired or upgraded. "
+            "Leave both unset to inherit the orchestrator's model. "
+            "If you do set one, `model_tier` and `model` are mutually exclusive — set at most one."
+        ),
+    )
+    model: ModelName | None = Field(
+        default=None,
+        description=(
+            "A concrete model alias registered on the gateway (e.g. 'claude-sonnet-4-6'). "
+            "Only set this when the agent must run on one specific model; a pinned alias can stop working "
+            "if that model is later retired. Prefer `model_tier` for stability. "
+            "Mutually exclusive with `model_tier` — set at most one."
+        ),
+    )
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] | None = None  # MCP tool names enabled for this version
@@ -404,9 +421,25 @@ class SubAgentUpdate(BaseModel):
     is_public: bool | None = None  # If true, accessible to all users without group permissions
 
     # Configuration data: Local sub-agents use system_prompt, Remote sub-agents use agent_url, Foundry agents use foundry_* fields
-    model: ModelName | None = None  # LLM model to use
-    # Bind to a capability tier instead of a concrete model (mutually exclusive with `model`).
-    model_tier: ModelTier | None = None
+    model_tier: ModelTier | None = Field(
+        default=None,
+        description=(
+            "PREFERRED way to choose the model. Bind the agent to a capability tier — "
+            "'low' (cheap/fast, for trivial tasks), 'standard' (good for most tasks), "
+            "or 'premium' (the most capable, for hard reasoning). A tier always resolves to the "
+            "current fleet default for that tier, so it keeps working when a model is retired or upgraded. "
+            "`model_tier` and `model` are mutually exclusive — set at most one."
+        ),
+    )
+    model: ModelName | None = Field(
+        default=None,
+        description=(
+            "A concrete model alias registered on the gateway (e.g. 'claude-sonnet-4-6'). "
+            "Only set this when the agent must run on one specific model; a pinned alias can stop working "
+            "if that model is later retired. Prefer `model_tier` for stability. "
+            "Mutually exclusive with `model_tier` — set at most one."
+        ),
+    )
     system_prompt: str | None = None  # For local sub-agents: the system prompt
     agent_url: str | None = None  # For remote sub-agents: the URL of the agent
     mcp_tools: list[str] | None = None  # MCP tool names enabled for this version

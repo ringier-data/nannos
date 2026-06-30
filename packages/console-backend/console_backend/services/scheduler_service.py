@@ -22,7 +22,7 @@ from ..repositories.scheduled_job_repository import ScheduledJobRepository, comp
 _UNSET: Any = object()
 
 if TYPE_CHECKING:
-    pass
+    from ..repositories.delivery_channel_repository import DeliveryChannelRepository
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,31 @@ class SchedulerService:
     ) -> None:
         self._repo = repository
         self._sub_agent_service = sub_agent_service
+        self._delivery_channel_repo: "DeliveryChannelRepository | None" = None
 
     def set_repository(self, repository: ScheduledJobRepository) -> None:
         self._repo = repository
 
     def set_sub_agent_service(self, sub_agent_service: SubAgentService) -> None:
         self._sub_agent_service = sub_agent_service
+
+    def set_delivery_channel_repository(self, repository: "DeliveryChannelRepository") -> None:
+        self._delivery_channel_repo = repository
+
+    async def _validate_delivery_channel(self, db: AsyncSession, channel_id: int) -> None:
+        """Ensure the referenced delivery channel exists before it reaches the FK constraint.
+
+        Without this, an unknown ``delivery_channel_id`` only fails at the database
+        foreign-key constraint and surfaces as an unhandled 500. Raising ValueError
+        here lets the router translate it into a clean 400.
+        """
+        if self._delivery_channel_repo is None:
+            raise RuntimeError(
+                "DeliveryChannelRepository not injected. Call set_delivery_channel_repository() during initialization."
+            )
+        channel = await self._delivery_channel_repo.get_channel_by_id(db, channel_id)
+        if channel is None:
+            raise ValueError(f"Delivery channel {channel_id} not found")
 
     @property
     def repo(self) -> ScheduledJobRepository:
@@ -82,6 +101,9 @@ class SchedulerService:
                 raise ValueError(
                     f"Access denied: You do not have permission to create jobs with sub-agent {data.sub_agent_id}"
                 )
+
+        if data.delivery_channel_id is not None:
+            await self._validate_delivery_channel(db, data.delivery_channel_id)
 
         now = datetime.now(timezone.utc)
 
@@ -181,6 +203,8 @@ class SchedulerService:
         if check_args is not _UNSET:
             fields["check_args"] = json.dumps(check_args) if check_args is not None else None
         if delivery_channel_id is not _UNSET:
+            if delivery_channel_id is not None:
+                await self._validate_delivery_channel(db, delivery_channel_id)
             fields["delivery_channel_id"] = delivery_channel_id
 
         # Handle fields that still use old pattern (from kwargs/data)

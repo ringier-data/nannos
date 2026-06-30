@@ -31,6 +31,10 @@ current_sub_agent_config_version_id: contextvars.ContextVar = contextvars.Contex
     "nannos_sub_agent_config_version_id", default=None
 )
 current_catalog_id: contextvars.ContextVar = contextvars.ContextVar("nannos_catalog_id", default=None)
+# The installation (tenant) the inbound request came from — e.g. the Slack/GChat botName the
+# bot client stamps on its A2A message metadata. Carried as request *context* so console MCP
+# tools can scope delivery channels to the calling installation (see context_header below).
+current_installation: contextvars.ContextVar = contextvars.ContextVar("nannos_installation", default=None)
 
 _FIELDS = {
     "user_sub": current_user_sub,
@@ -39,6 +43,7 @@ _FIELDS = {
     "scheduled_job_id": current_scheduled_job_id,
     "sub_agent_config_version_id": current_sub_agent_config_version_id,
     "catalog_id": current_catalog_id,
+    "installation": current_installation,
 }
 
 _HEADER = "x-litellm-spend-logs-metadata"

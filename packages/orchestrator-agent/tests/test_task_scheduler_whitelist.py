@@ -17,6 +17,9 @@ def test_task_scheduler_whitelist_includes_scheduler_and_console_tools():
     console_tool = Mock()
     console_tool.name = "console_list_sub_agents"
 
+    delivery_channels_tool = Mock()
+    delivery_channels_tool.name = "console_list_delivery_channels"
+
     github_tool = Mock()
     github_tool.name = "github-pull-request_activePullRequest"
 
@@ -27,7 +30,7 @@ def test_task_scheduler_whitelist_includes_scheduler_and_console_tools():
         email="test@example.com",
         access_token=SecretStr("test-token"),
         model="claude-sonnet-4.5",
-        tools=[scheduler_tool, console_tool, github_tool],
+        tools=[scheduler_tool, console_tool, delivery_channels_tool, github_tool],
     )
 
     # Mock the task_scheduler_graph_provider
@@ -53,6 +56,8 @@ def test_task_scheduler_whitelist_includes_scheduler_and_console_tools():
 
     assert "scheduler_create_job" in whitelisted_names
     assert "console_list_sub_agents" in whitelisted_names
+    # The scheduler must be able to discover delivery channels so it doesn't guess an id
+    assert "console_list_delivery_channels" in whitelisted_names
     # GitHub tool should NOT be in task-scheduler's whitelist
     assert "github-pull-request_activePullRequest" not in whitelisted_names
 

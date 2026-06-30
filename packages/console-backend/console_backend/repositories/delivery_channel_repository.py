@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.audit import AuditEntityType
@@ -19,7 +20,7 @@ from .base import AuditedRepository
 logger = logging.getLogger(__name__)
 
 
-def _row_to_response(row: Any, group_ids: list[int]) -> DeliveryChannelResponse:
+def _row_to_response(row: Any) -> DeliveryChannelResponse:
     return DeliveryChannelResponse(
         id=row["id"],
         name=row["name"],
@@ -27,19 +28,10 @@ def _row_to_response(row: Any, group_ids: list[int]) -> DeliveryChannelResponse:
         webhook_url=row["webhook_url"],
         client_id=row["client_id"],
         registered_by=row["registered_by"],
-        group_ids=group_ids,
+        installation_id=row["installation_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
-
-
-async def _fetch_group_ids(db: AsyncSession, channel_id: int) -> list[int]:
-    """Return the list of group IDs associated with a delivery channel."""
-    result = await db.execute(
-        text("SELECT user_group_id FROM delivery_channel_groups WHERE delivery_channel_id = :id"),
-        {"id": channel_id},
-    )
-    return [r["user_group_id"] for r in result.mappings().all()]
 
 
 class DeliveryChannelRepository(AuditedRepository):
@@ -49,6 +41,8 @@ class DeliveryChannelRepository(AuditedRepository):
         super().__init__(
             entity_type=AuditEntityType.DELIVERY_CHANNEL,
             table_name="delivery_channels",
+            # The webhook signing secret must never land in the audit trail.
+            sensitive_fields={"secret"},
         )
 
     async def create_channel(
@@ -58,7 +52,7 @@ class DeliveryChannelRepository(AuditedRepository):
         client_id: str,
         data: DeliveryChannelCreate,
     ) -> DeliveryChannelResponse:
-        """Insert a delivery channel and its group associations."""
+        """Insert a delivery channel."""
         now = datetime.now(timezone.utc)
         channel_id: int = await self.create(
             db=db,
@@ -70,24 +64,15 @@ class DeliveryChannelRepository(AuditedRepository):
                 "secret": data.secret,
                 "client_id": client_id,
                 "registered_by": actor.sub,
+                "installation_id": data.installation_id,
                 "created_at": now,
                 "updated_at": now,
             },
         )
 
-        # Insert group associations
-        for gid in data.group_ids:
-            await db.execute(
-                text(
-                    "INSERT INTO delivery_channel_groups (delivery_channel_id, user_group_id) "
-                    "VALUES (:cid, :gid) ON CONFLICT DO NOTHING"
-                ),
-                {"cid": channel_id, "gid": gid},
-            )
-
         row = await self._get_row(db, channel_id)
         assert row is not None
-        return _row_to_response(row, list(data.group_ids))
+        return _row_to_response(row)
 
     async def _get_row(self, db: AsyncSession, channel_id: int) -> Any | None:
         result = await db.execute(
@@ -106,8 +91,7 @@ class DeliveryChannelRepository(AuditedRepository):
         row = await self._get_row(db, channel_id)
         if row is None:
             return None
-        group_ids = await _fetch_group_ids(db, channel_id)
-        resp = _row_to_response(row, group_ids)
+        resp = _row_to_response(row)
         if include_secret:
             # Attach secret as a transient attribute for the scheduler engine
             object.__setattr__(resp, "_secret", row["secret"])
@@ -134,35 +118,23 @@ class DeliveryChannelRepository(AuditedRepository):
         row = result.mappings().first()
         return dict(row) if row else None
 
-    async def list_channels_for_user(
-        self,
-        db: AsyncSession,
-        user_id: str,
-        is_admin: bool = False,
-    ) -> list[DeliveryChannelResponse]:
-        """Return channels visible to a user via group membership (or all if admin)."""
-        if is_admin:
-            result = await db.execute(text("SELECT * FROM delivery_channels ORDER BY name"))
-            rows = result.mappings().all()
-        else:
-            result = await db.execute(
-                text("""
-                    SELECT DISTINCT dc.*
-                    FROM delivery_channels dc
-                    JOIN delivery_channel_groups dcg ON dcg.delivery_channel_id = dc.id
-                    JOIN user_group_members ugm ON ugm.user_group_id = dcg.user_group_id
-                    WHERE ugm.user_id = :user_id
-                    ORDER BY dc.name
-                """),
-                {"user_id": user_id},
-            )
-            rows = result.mappings().all()
+    async def list_all_channels(self, db: AsyncSession) -> list[DeliveryChannelResponse]:
+        """Return all delivery channels.
 
-        channels = []
-        for row in rows:
-            group_ids = await _fetch_group_ids(db, row["id"])
-            channels.append(_row_to_response(row, group_ids))
-        return channels
+        Channel visibility is no longer scoped by user groups: every authenticated
+        console user can see all channels (the web-console is a secondary interface;
+        installation-scoped filtering happens at the agent/MCP layer, not here).
+
+        TODO(ADR): This assumes the web-console is a SINGLE INTERNAL trust domain —
+        every console user is a trusted operator who may see all tenants' channels
+        (name, webhook_url, client_id; secrets are never returned here). This is an
+        accepted trade-off while the console is internal-only. If the console ever
+        serves mutually-untrusted tenants, this endpoint must be re-scoped (by
+        installation/client_id) because the agent/MCP-layer installation filter
+        protects only the agent path, not a direct console GET.
+        """
+        result = await db.execute(text("SELECT * FROM delivery_channels ORDER BY name"))
+        return [_row_to_response(row) for row in result.mappings().all()]
 
     async def list_channels_for_client(
         self,
@@ -174,12 +146,25 @@ class DeliveryChannelRepository(AuditedRepository):
             text("SELECT * FROM delivery_channels WHERE client_id = :client_id ORDER BY name"),
             {"client_id": client_id},
         )
-        rows = result.mappings().all()
-        channels = []
-        for row in rows:
-            group_ids = await _fetch_group_ids(db, row["id"])
-            channels.append(_row_to_response(row, group_ids))
-        return channels
+        return [_row_to_response(row) for row in result.mappings().all()]
+
+    async def list_channels_for_installation(
+        self,
+        db: AsyncSession,
+        installation_id: str,
+    ) -> list[DeliveryChannelResponse]:
+        """Return all channels tagged with a given installation_id (across all clients).
+
+        This is the installation-scoped view the orchestrator uses to pick a notification
+        target for the calling tenant: the installation comes from the request context, not
+        from the client_id, because the orchestrator calls console-backend under its own
+        Keycloak client — not the bot's.
+        """
+        result = await db.execute(
+            text("SELECT * FROM delivery_channels WHERE installation_id = :installation_id ORDER BY name"),
+            {"installation_id": installation_id},
+        )
+        return [_row_to_response(row) for row in result.mappings().all()]
 
     async def update_channel(
         self,
@@ -202,28 +187,12 @@ class DeliveryChannelRepository(AuditedRepository):
         if len(fields) > 1:  # more than just updated_at
             await self.update(db=db, actor=actor, entity_id=channel_id, fields=fields)
 
-        # Replace group associations if group_ids was provided
-        if data.group_ids is not None:
-            await db.execute(
-                text("DELETE FROM delivery_channel_groups WHERE delivery_channel_id = :id"),
-                {"id": channel_id},
-            )
-            for gid in data.group_ids:
-                await db.execute(
-                    text(
-                        "INSERT INTO delivery_channel_groups (delivery_channel_id, user_group_id) "
-                        "VALUES (:cid, :gid) ON CONFLICT DO NOTHING"
-                    ),
-                    {"cid": channel_id, "gid": gid},
-                )
-
         updated_row = await self._get_row(db, channel_id)
         assert updated_row is not None
-        group_ids = await _fetch_group_ids(db, channel_id)
-        return _row_to_response(updated_row, group_ids)
+        return _row_to_response(updated_row)
 
     async def delete_channel(self, db: AsyncSession, actor: User, channel_id: int) -> bool:
-        """Hard-delete a delivery channel (CASCADE removes group associations).
+        """Hard-delete a delivery channel.
 
         Returns True if the channel existed and was deleted, False if not found.
         """
@@ -238,6 +207,72 @@ class DeliveryChannelRepository(AuditedRepository):
         row = await self._get_row(db, channel_id)
         return row["client_id"] if row else None
 
-    async def get_channel_group_ids(self, db: AsyncSession, channel_id: int) -> list[int]:
-        """Return the group IDs associated with a channel."""
-        return await _fetch_group_ids(db, channel_id)
+    async def get_by_installation(
+        self,
+        db: AsyncSession,
+        client_id: str,
+        installation_id: str,
+    ) -> DeliveryChannelResponse | None:
+        """Look up a channel by its (client_id, installation_id) idempotency key."""
+        result = await db.execute(
+            text(
+                "SELECT * FROM delivery_channels "
+                "WHERE client_id = :client_id AND installation_id = :installation_id"
+            ),
+            {"client_id": client_id, "installation_id": installation_id},
+        )
+        row = result.mappings().first()
+        if row is None:
+            return None
+        return _row_to_response(row)
+
+    async def upsert_channel_by_installation(
+        self,
+        db: AsyncSession,
+        actor: User,
+        client_id: str,
+        data: DeliveryChannelCreate,
+    ) -> tuple[DeliveryChannelResponse, bool]:
+        """Idempotently create or update a channel keyed by ``(client_id, installation_id)``.
+
+        Returns ``(channel, created)`` where ``created`` is True when a new row was inserted.
+        On update, the registrar-owned fields (name, description, webhook_url, secret) are
+        overwritten. ``installation_id`` is required on ``DeliveryChannelCreate``; the guard
+        below is a defensive internal invariant for non-validated callers.
+        """
+        if data.installation_id is None:
+            raise ValueError("installation_id required for upsert")
+
+        existing = await self.get_by_installation(db, client_id, data.installation_id)
+        if existing is None:
+            # No row yet — try to insert. A concurrent registration of the same
+            # (client_id, installation_id) (e.g. several bot replicas booting at once)
+            # can win the race between the SELECT above and this INSERT, at which point
+            # delivery_channels_client_installation_uidx raises IntegrityError. Wrap the
+            # insert in a SAVEPOINT so the conflict rolls back only the failed INSERT,
+            # not the whole request transaction, and fall through to update the row the
+            # winner committed — converging all replicas on one channel.
+            try:
+                async with db.begin_nested():
+                    created = await self.create_channel(
+                        db=db, actor=actor, client_id=client_id, data=data
+                    )
+                return created, True
+            except IntegrityError:
+                existing = await self.get_by_installation(db, client_id, data.installation_id)
+                if existing is None:
+                    raise
+
+        update = DeliveryChannelUpdate(
+            name=data.name,
+            description=data.description,
+            webhook_url=data.webhook_url,
+            secret=data.secret,
+        )
+        updated = await self.update_channel(db=db, actor=actor, channel_id=existing.id, data=update)
+        if updated is None:
+            raise RuntimeError(
+                f"upsert: channel {existing.id} disappeared during update "
+                f"(client_id={client_id}, installation_id={data.installation_id})"
+            )
+        return updated, False

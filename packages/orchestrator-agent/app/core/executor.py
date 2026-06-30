@@ -372,10 +372,21 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # x-litellm-spend-logs-metadata at send time. Without this they arrive with no
         # user_sub and the proxy drops them. (Sub-agents set their own via
         # create_runnable_config.) ContextVars propagate to the graph's async tasks.
-        if caller_sub:
+        # The installation (tenant) the calling bot stamped on its A2A message metadata — equal to
+        # the botName the bot registered its delivery channels under. Threaded into attribution so
+        # console MCP tools (console_list_delivery_channels) can scope channels to this caller.
+        caller_installation: str | None = None
+        if context.message and context.message.metadata and isinstance(context.message.metadata, dict):
+            installation = context.message.metadata.get("installation")
+            if isinstance(installation, str) and installation:
+                caller_installation = installation
+
+        if caller_sub or caller_installation:
             from ringier_a2a_sdk.cost_tracking.attribution import set_attribution
 
-            set_attribution(user_sub=caller_sub, conversation_id=context_id)
+            set_attribution(
+                user_sub=caller_sub, conversation_id=context_id, installation=caller_installation
+            )
         # Extract caller's channel ID from message metadata (for multi-user conversations)
         caller_channel_id: str | None = None
         if context.message and context.message.metadata and isinstance(context.message.metadata, dict):

@@ -6,7 +6,6 @@ import { TableSkeleton } from '@/components/skeletons';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -41,7 +40,6 @@ import {
   type DeliveryChannel,
   type DeliveryChannelUpdate,
 } from '@/api/scheduler';
-import { listMyGroupsApiV1GroupsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,17 +64,15 @@ function formatDate(iso: string): string {
 
 interface EditDialogProps {
   channel: DeliveryChannel;
-  groupMap: Map<number, string>;
   onClose: () => void;
 }
 
-function EditDialog({ channel, groupMap, onClose }: EditDialogProps) {
+function EditDialog({ channel, onClose }: EditDialogProps) {
   const qc = useQueryClient();
   const [name, setName] = useState(channel.name);
   const [description, setDescription] = useState(channel.description ?? '');
   const [webhookUrl, setWebhookUrl] = useState(channel.webhook_url);
   const [secret, setSecret] = useState('');
-  const [groupIdsText, setGroupIdsText] = useState(channel.group_ids.join(', '));
   const [error, setError] = useState<string | null>(null);
 
   const mutation = useMutation({
@@ -91,22 +87,10 @@ function EditDialog({ channel, groupMap, onClose }: EditDialogProps) {
   function handleSave() {
     setError(null);
 
-    // Parse group IDs
-    const rawIds = groupIdsText
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const group_ids = rawIds.map(Number);
-    if (group_ids.some(isNaN)) {
-      setError('Group IDs must be comma-separated integers.');
-      return;
-    }
-
     const patch: DeliveryChannelUpdate = {
       name: name || undefined,
       description: description || null,
       webhook_url: webhookUrl || undefined,
-      group_ids: group_ids.length > 0 ? group_ids : undefined,
     };
     if (secret) patch.secret = secret;
 
@@ -161,27 +145,6 @@ function EditDialog({ channel, groupMap, onClose }: EditDialogProps) {
               placeholder="Leave blank to keep current secret"
             />
           </div>
-
-          <div className="grid gap-1.5">
-            <Label>
-              Group IDs{' '}
-              <span className="text-muted-foreground text-xs">(comma-separated)</span>
-            </Label>
-            <Input
-              value={groupIdsText}
-              onChange={(e) => setGroupIdsText(e.target.value)}
-              placeholder="1, 2, 3"
-            />
-            {groupMap.size > 0 && channel.group_ids.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-0.5">
-                {channel.group_ids.map((gid) => (
-                  <Badge key={gid} variant="outline" className="text-xs">
-                    {groupMap.get(gid) ?? `Group ${gid}`}
-                  </Badge>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
 
         {error && <p className="text-sm text-destructive">{error}</p>}
@@ -219,12 +182,6 @@ export function DeliveryChannelsPage() {
     queryFn: getDeliveryChannels,
     staleTime: 30_000,
   });
-
-  // Fetch the user's groups to resolve group IDs → names
-  const { data: myGroupsData } = useQuery(listMyGroupsApiV1GroupsGetOptions());
-  const groupMap = new Map<number, string>(
-    (Array.isArray(myGroupsData) ? myGroupsData : []).map((g: { id: number; name: string }) => [g.id, g.name]),
-  );
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => deleteDeliveryChannel(id),
@@ -268,7 +225,7 @@ export function DeliveryChannelsPage() {
 
       {/* Table */}
       {isLoading ? (
-        <TableSkeleton columns={5} />
+        <TableSkeleton columns={4} />
       ) : error ? (
         <p className="text-sm text-destructive">Failed to load delivery channels.</p>
       ) : channels.length === 0 ? (
@@ -283,7 +240,6 @@ export function DeliveryChannelsPage() {
               <TableRow>
                 <TableHead>Name</TableHead>
                 <TableHead>Webhook URL</TableHead>
-                <TableHead>Groups</TableHead>
                 <TableHead>Client</TableHead>
                 <TableHead>Registered</TableHead>
                 <TableHead className="w-[100px]" />
@@ -304,19 +260,6 @@ export function DeliveryChannelsPage() {
                     <code className="text-xs font-mono text-muted-foreground">
                       {truncateUrl(ch.webhook_url)}
                     </code>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      {ch.group_ids.length === 0 ? (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      ) : (
-                        ch.group_ids.map((gid) => (
-                          <Badge key={gid} variant="outline" className="text-xs">
-                            {groupMap.get(gid) ?? `#${gid}`}
-                          </Badge>
-                        ))
-                      )}
-                    </div>
                   </TableCell>
                   <TableCell>
                     <code className="text-xs font-mono text-muted-foreground">{ch.client_id}</code>
@@ -365,7 +308,6 @@ export function DeliveryChannelsPage() {
       {editChannel && (
         <EditDialog
           channel={editChannel}
-          groupMap={groupMap}
           onClose={() => setEditChannel(null)}
         />
       )}

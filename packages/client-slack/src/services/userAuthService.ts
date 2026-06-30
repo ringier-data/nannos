@@ -104,6 +104,7 @@ ai   * Check if user is authorized (has valid token, refreshing if needed)
         refreshToken: refreshedToken.refreshToken,
         expiresAt: refreshedToken.expiresAt,
         idToken: refreshedToken.idToken,
+        oidcSub: refreshedToken.oidcSub,
       });
 
       return refreshedToken.accessToken;

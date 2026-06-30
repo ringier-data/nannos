@@ -7,6 +7,7 @@ export interface UserAuthToken {
   tokenType: string; // Usually "Bearer"
   scope?: string; // Granted scopes
   idToken?: string; // OIDC ID token
+  oidcSub?: string; // OIDC subject identifier
   createdAt: number; // Unix timestamp when token was created
   updatedAt: number; // Unix timestamp when token was last updated
 }
@@ -52,6 +53,22 @@ export interface IBotInstallationStore {
   deleteAvatar(appId: string): Promise<void>;
 }
 
+/**
+ * Interface for per-installation notification-secret storage.
+ * Backs the 'db' installation-secret provider (the cloud-agnostic default).
+ */
+export interface IInstallationSecretStore {
+  /** Return the stored secret for an installation, or null if none exists. */
+  get(installationId: string): Promise<string | null>;
+  /**
+   * Insert a secret only if one does not already exist, then return the
+   * authoritative stored value. Concurrent callers (e.g. replicas booting
+   * together) must converge on a single shared secret, so the loser of the
+   * race receives the winner's value rather than its own candidate.
+   */
+  insertIfAbsent(installationId: string, candidate: string): Promise<string>;
+}
+
 // =============================================================================
 // Storage Interface Definitions
 // These interfaces define the contracts that storage implementations must satisfy
@@ -72,9 +89,11 @@ export interface IUserAuthStorage {
       refreshToken?: string;
       expiresAt?: number;
       idToken?: string;
+      oidcSub?: string;
     }
   ): Promise<void>;
   hasValidToken(userId: string, teamId: string): Promise<boolean>;
+  findByOidcSubAndTeam(oidcSub: string, teamId: string): Promise<UserAuthToken | null>;
 }
 
 /**

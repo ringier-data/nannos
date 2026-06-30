@@ -48,4 +48,5 @@ export type {
   IInFlightTaskStore,
   OAuthStateData,
   IOAuthStateStore,
+  IInstallationSecretStore,
 } from './types.js';

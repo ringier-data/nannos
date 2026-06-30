@@ -331,6 +331,7 @@ async def initialize_services(app: "FastAPI") -> None:
     app.state.scheduler_service = SchedulerService()
     app.state.scheduler_service.set_repository(app.state.scheduled_job_repository)
     app.state.scheduler_service.set_sub_agent_service(app.state.sub_agent_service)
+    app.state.scheduler_service.set_delivery_channel_repository(app.state.delivery_channel_repository)
 
     app.state.scheduler_engine = SchedulerEngine(
         repo=app.state.scheduled_job_repository,
