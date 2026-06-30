@@ -763,8 +763,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 **delivery_channel_id_prop,
                 "description": (
                     delivery_channel_id_prop.get("description", "ID of a registered delivery channel")
-                    + "\n\nNote: User must have configured delivery channels in Settings. "
-                    "If not available, omit this field - users will receive in-app notifications."
+                    + "\n\nDo NOT guess this value — a non-existent id is rejected by the database. "
+                    "Call console_list_delivery_channels to get valid channel ids, then pass the matching one. "
+                    "If that tool returns no channels, omit this field — users still receive in-app notifications."
                 ),
             }
 

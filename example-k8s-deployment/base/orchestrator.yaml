@@ -50,6 +50,11 @@ spec:
           value: "https://orchestrator.${BASE_DOMAIN}"
         - name: CONSOLE_BACKEND_URL
           value: "https://console.${BASE_DOMAIN}"
+        # Used to build user-facing links to the console SPA (e.g. scheduled-job pages the
+        # task-scheduler returns). Without it the {{CONSOLE_FRONTEND_URL}} prompt placeholder
+        # falls back to http://localhost:5173. The SPA is served on the same host as the backend.
+        - name: CONSOLE_FRONTEND_URL
+          value: "https://console.${BASE_DOMAIN}"
         # All LLM/embedding traffic routes through the Model Gateway (LiteLLM proxy) — the
         # sole path for LLM calls. The virtual key (LLM_GATEWAY_API_KEY) is in orchestrator-secrets.
         - name: LLM_GATEWAY_URL

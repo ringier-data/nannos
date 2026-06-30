@@ -1,8 +1,13 @@
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import type { StorageConfig } from '../storage/index.js';
 
 export type EnvName = 'local' | 'dev' | 'stg' | 'prod';
 export type StorageProviderType = 'postgres';
+/**
+ * Backend for per-installation notification secrets.
+ *   'db'      — cloud-agnostic default, persisted via the storage provider.
+ *   'aws-ssm' — AWS SSM Parameter Store (opt-in; requires AWS credentials).
+ */
+export type InstallationSecretProvider = 'db' | 'aws-ssm';
 
 export interface Config {
   isLocal(): boolean;
@@ -49,7 +54,8 @@ export interface Config {
     audience: string;
   };
   readonly installationSecret: {
-    ssmPrefix: string;
+    provider: InstallationSecretProvider;
+    ssmPrefix: string; // Only used when provider is 'aws-ssm'.
   };
   readonly adminGroup: string;
   readonly v2CookieSecret: string;
@@ -57,31 +63,15 @@ export interface Config {
 }
 
 /**
- * Helper function to get a parameter from AWS SSM Parameter Store
+ * Resolve a secret from an environment variable, falling back to AWS SSM
+ * Parameter Store only when an *_SSM_KEY env var is set. Env var takes precedence.
+ *
+ * The cloud-agnostic path is env-only: a deployment projects its secret store
+ * (k8s Secrets, Docker secrets, Vault, AWS External Secrets Operator, ...) into
+ * the env var. The SSM fallback is opt-in and loads the AWS SDK lazily so it is
+ * never a hard dependency.
  */
-async function getSSMParameter(ssmKey: string): Promise<string> {
-  const ssmClient = new SSMClient({});
-  const command = new GetParameterCommand({
-    Name: ssmKey,
-    WithDecryption: true,
-  });
-
-  try {
-    const response = await ssmClient.send(command);
-    if (!response.Parameter?.Value) {
-      throw new Error(`SSM parameter ${ssmKey} not found or has no value`);
-    }
-    return response.Parameter.Value;
-  } catch (error) {
-    throw new Error(`Failed to retrieve SSM parameter ${ssmKey}: ${error}`);
-  }
-}
-
-/**
- * Get a value either from environment variable or SSM Parameter Store
- * If both envVar and ssmKey are provided, envVar takes precedence
- */
-async function getSecretSSMValue(envVar: string, ssmKeyEnvVar?: string): Promise<string> {
+async function getSecretValue(envVar: string, ssmKeyEnvVar?: string): Promise<string> {
   const envValue = process.env[envVar];
   if (envValue) {
     return envValue;
@@ -89,6 +79,7 @@ async function getSecretSSMValue(envVar: string, ssmKeyEnvVar?: string): Promise
 
   const ssmKey = ssmKeyEnvVar ? process.env[ssmKeyEnvVar] : undefined;
   if (ssmKey) {
+    const { getSSMParameter } = await import('./awsSsmSecret.js');
     return getSSMParameter(ssmKey);
   }
 
@@ -143,7 +134,7 @@ export async function getConfigFromEnv(): Promise<Config> {
   }
 
   // Get OIDC client secret (potentially from SSM)
-  const oidcClientSecret = await getSecretSSMValue('OIDC_CLIENT_SECRET', 'OIDC_CLIENT_SECRET_SSM_KEY');
+  const oidcClientSecret = await getSecretValue('OIDC_CLIENT_SECRET', 'OIDC_CLIENT_SECRET_SSM_KEY');
 
   // Storage provider configuration
   const storageProvider: StorageProviderType = 'postgres';
@@ -218,6 +209,7 @@ export async function getConfigFromEnv(): Promise<Config> {
         }
       : undefined,
     installationSecret: {
+      provider: (process.env.INSTALLATION_SECRET_PROVIDER as InstallationSecretProvider) || 'db',
       ssmPrefix:
         process.env.INSTALLATION_SECRET_SSM_PREFIX ||
         `/nannos/${environment}/client-slack/installation-secrets`,

@@ -52,4 +52,5 @@ export type {
   IBotInstallationStore,
   AdminSession,
   IAdminSessionStore,
+  IInstallationSecretStore,
 } from './types.js';

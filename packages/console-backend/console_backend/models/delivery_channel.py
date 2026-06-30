@@ -22,15 +22,13 @@ class DeliveryChannelCreate(BaseModel):
         min_length=1,
         description="Shared secret sent verbatim as the X-A2A-Notification-Token header on every push.",
     )
-    group_ids: list[int] = Field(
-        description="IDs of user groups whose members can see and use this channel.",
-    )
-    installation_id: str | None = Field(
-        default=None,
+    installation_id: str = Field(
         min_length=1,
         max_length=200,
         description=(
-            "Stable client-supplied identifier enabling idempotent re-registration. "
+            "Stable client-supplied identifier (e.g. the bot's installation) that scopes the "
+            "channel to a tenant and is the idempotency key for re-registration. Required: "
+            "every channel resolves by (client_id, installation_id)."
         ),
     )
 
@@ -42,7 +40,6 @@ class DeliveryChannelUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     webhook_url: str | None = None
     secret: str | None = Field(default=None, min_length=1)
-    group_ids: list[int] | None = None
 
 
 class DeliveryChannelResponse(BaseModel):
@@ -54,7 +51,6 @@ class DeliveryChannelResponse(BaseModel):
     webhook_url: str
     client_id: str = Field(description="Keycloak client ID of the A2A service that registered this channel.")
     registered_by: str = Field(description="OIDC subject (sub) of the token used to register this channel.")
-    group_ids: list[int] = Field(description="IDs of groups that can use this channel.")
     installation_id: str | None = Field(
         default=None,
         description="Stable client-supplied identifier (set when the channel was self-registered).",

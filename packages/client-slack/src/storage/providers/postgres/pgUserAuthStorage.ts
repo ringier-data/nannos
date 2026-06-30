@@ -173,43 +173,6 @@ export class PgUserAuthStorage {
   }
 
   /**
-   * Find a user auth record by OIDC subject identifier
-   */
-  async findByOidcSub(oidcSub: string): Promise<UserAuthToken | null> {
-    try {
-      const result = await this.pool.query(SQL`
-        SELECT user_id, team_id, access_token, refresh_token, expires_at,
-               token_type, scope, id_token, oidc_sub, created_at, updated_at
-        FROM user_auth
-        WHERE oidc_sub = ${oidcSub}
-        LIMIT 1
-      `);
-
-      if (result.rows.length === 0) {
-        return null;
-      }
-
-      const row = result.rows[0];
-      return {
-        userId: row.user_id,
-        teamId: row.team_id,
-        accessToken: row.access_token,
-        refreshToken: row.refresh_token,
-        expiresAt: new Date(row.expires_at).getTime(),
-        tokenType: row.token_type,
-        scope: row.scope,
-        idToken: row.id_token,
-        oidcSub: row.oidc_sub,
-        createdAt: new Date(row.created_at).getTime(),
-        updatedAt: new Date(row.updated_at).getTime(),
-      };
-    } catch (error) {
-      this.logger.error(error, `Failed to find user by OIDC sub: ${error}`);
-      throw new Error(`Failed to find user by OIDC sub: ${error}`);
-    }
-  }
-
-  /**
    * Find a user auth record by OIDC subject identifier scoped to a Slack team.
    */
   async findByOidcSubAndTeam(oidcSub: string, teamId: string): Promise<UserAuthToken | null> {

@@ -34,6 +34,7 @@ export interface SlackFileUrl {
 }
 
 export interface A2ASlackBasedRequest {
+  botName: string; // Installation identifier; must match the botName used to register delivery channels
   userId: string; // Slack user ID
   teamId: string; // Slack team/workspace ID
   channelId: string; // Slack channel ID
@@ -191,6 +192,9 @@ export class A2AClientService {
         ...(request.contextId && { contextId: request.contextId }),
       },
       metadata: {
+        // installation = the botName this workspace's channels were registered under; lets the
+        // orchestrator scope delivery channels (console_list_delivery_channels) to this tenant.
+        installation: request.botName,
         slackUserId: request.userId,
         slackTeamId: request.teamId,
         slackChannelId: request.channelId,

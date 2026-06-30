@@ -105,8 +105,27 @@ class AutomatedSubAgentConfig(BaseModel):
     # Bind to either a concrete model alias or a capability tier (mutually exclusive). A tier
     # follows the fleet default for that tier, so it survives a model retirement/upgrade —
     # unlike a pinned alias, which can become unregistered on the gateway.
-    model: ModelName | None = None
-    model_tier: ModelTier | None = None
+    model_tier: ModelTier | None = Field(
+        default=None,
+        description=(
+            "PREFERRED way to choose the model. Bind the agent to a capability tier — "
+            "'low' (cheap/fast, for trivial tasks), 'standard' (the default, good for most tasks), "
+            "or 'premium' (the most capable, for hard reasoning). A tier always resolves to the "
+            "current fleet default for that tier, so it keeps working when a model is retired or upgraded. "
+            "Use this unless you have a specific reason to pin an exact model. "
+            "Exactly one of `model_tier` or `model` must be set — they are mutually exclusive. "
+            "If unsure, set model_tier='standard'."
+        ),
+    )
+    model: ModelName | None = Field(
+        default=None,
+        description=(
+            "A concrete model alias registered on the gateway (e.g. 'claude-sonnet-4-6'). "
+            "Only set this when the task requires one specific model; a pinned alias can stop working "
+            "if that model is later retired. Prefer `model_tier` instead for stability. "
+            "Exactly one of `model` or `model_tier` must be set — they are mutually exclusive."
+        ),
+    )
     system_prompt: str = Field(
         max_length=500,
         description=("System prompt describing the task for the agent."),

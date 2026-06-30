@@ -723,6 +723,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
 
     // ---- Build & send A2A request via streaming ----
     const a2aRequest: A2ASlackBasedRequest = {
+      botName,
       userId,
       teamId,
       channelId,

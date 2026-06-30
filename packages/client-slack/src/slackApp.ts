@@ -15,9 +15,8 @@ import { recoverOrphanedTasks } from './utils/taskRecovery.js';
 import { MultiTenantHTTPReceiver } from './receivers/MultiTenantHTTPReceiver.js';
 import { handleA2ANotification } from './handlers/a2aNotificationHandler.js';
 import { registerInstallations } from './services/installationRegistrar.js';
-import { AwsSsmInstallationSecretService } from './services/awsSsmInstallationSecretService.js';
-import { SSMClient } from '@aws-sdk/client-ssm';
-import { Task } from '@a2a-js/sdk';
+import { createInstallationSecretService } from './services/installationSecretServiceFactory.js';
+import { parseA2APushEvent } from './utils/a2aPushPayload.js';
 import { ParamsIncomingMessage } from '@slack/bolt/dist/receivers/ParamsIncomingMessage.js';
 import { ServerResponse } from 'node:http';
 let userAuthService: UserAuthService;
@@ -76,20 +75,14 @@ export async function startSlackApp(config: Config) {
     }
 
     // ----- Custom routes (used by both HTTP receiver and socket-mode) -----
-    // Per-installation notification secrets are stored in AWS SSM Parameter Store;
-    // the registrar generates them on first registration and the callback validator
-    // resolves them here to authenticate inbound A2A notifications.
-    const installationSecretService = new AwsSsmInstallationSecretService(
-      new SSMClient({ region: config.aws.region }),
-      config.installationSecret.ssmPrefix
-    );
+    // Per-installation notification secrets live in the configured backend
+    // (storage provider by default, AWS SSM when opted in); the registrar
+    // generates them on first registration and the callback validator resolves
+    // them here to authenticate inbound A2A notifications.
+    const installationSecretService = await createInstallationSecretService(config, storage);
 
     /**
-     * Verify a notification token by matching it against the SSM-stored secret
-     * for any active bot installation. Resolves true on first match.
-     */
-    /**
-     * Verify a notification token by matching it against the SSM-stored secret
+     * Verify a notification token by matching it against the stored secret
      * for any active bot installation. Returns the matching installation on
      * success (so the caller can route the notification to the correct team)
      * or `null` if no installation matched.
@@ -250,9 +243,9 @@ export async function startSlackApp(config: Config) {
           }
 
           // Parse task payload
-          let task: Task;
+          let parsed: unknown;
           try {
-            task = JSON.parse(body) as Task;
+            parsed = JSON.parse(body);
           } catch {
             logger.warn('[A2ACallback] Invalid JSON body');
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -260,12 +253,29 @@ export async function startSlackApp(config: Config) {
             return;
           }
 
-          if (!task || task.kind !== 'task' || !task.status) {
-            logger.warn('[A2ACallback] Invalid task payload');
+          // The A2A SDK push sender emits one protobuf StreamResponse per event
+          // (task / statusUpdate / artifactUpdate / message); classify it and
+          // normalize the actionable ones to the JSON-spec Task shape.
+          const event = parseA2APushEvent(parsed);
+          if (event.type === 'invalid') {
+            logger.warn(
+              `[A2ACallback] Invalid task payload (top-level keys: ${
+                parsed && typeof parsed === 'object' ? Object.keys(parsed).join(',') : typeof parsed
+              })`
+            );
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid task payload' }));
             return;
           }
+          if (event.type === 'ignored') {
+            // Recognized but non-actionable (streaming artifact/message): ack so
+            // the sender does not treat it as a failed delivery.
+            logger.debug(`[A2ACallback] Ignoring ${event.reason} event`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ acknowledged: true }));
+            return;
+          }
+          const task = event.task;
 
           // Only process completed/failed notifications
           const state = task.status.state;

@@ -36,14 +36,14 @@ export interface DeliveryChannel {
   webhook_url: string;
   client_id: string;
   registered_by: string;
-  group_ids: number[];
+  installation_id?: string | null;
   created_at: string;
   updated_at: string;
 }
 
 /**
- * Fetch delivery channels the current user can see (scoped by group membership).
- * Machine clients receive only their own channels.
+ * Fetch delivery channels. Console users receive all channels; machine clients
+ * receive only their own.
  */
 export async function getDeliveryChannels(): Promise<DeliveryChannel[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -59,7 +59,6 @@ export interface DeliveryChannelUpdate {
   description?: string | null;
   webhook_url?: string;
   secret?: string;
-  group_ids?: number[];
 }
 
 /** Partially update a delivery channel. */
