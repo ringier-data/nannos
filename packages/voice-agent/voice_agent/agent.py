@@ -34,7 +34,7 @@ from datetime import timedelta
 
 from google import genai
 from google.genai import types
-from langsmith import traceable
+from langsmith import trace, traceable
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -436,6 +436,7 @@ class GeminiLiveAgent:
         mcp_headers: dict[str, str] | None = None,
         mcp_tool_filter: list[str] | None = None,
         session_resumption_handle: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.voice_name = voice_name
@@ -444,6 +445,9 @@ class GeminiLiveAgent:
         self.mcp_gateway_url = mcp_gateway_url
         self.mcp_headers = mcp_headers
         self.mcp_tool_filter = mcp_tool_filter
+        # Stable id (call_sid / A2A context id) used to group every traced run for
+        # this call — tool calls, scoring — under one LangSmith trace + thread.
+        self.session_id = session_id
         self.session_resumption_handle = session_resumption_handle
         self._config = build_live_config(voice_name, system_prompt, session_resumption_handle=session_resumption_handle)
         # Resolved when the MCP connection status is known:
@@ -695,8 +699,15 @@ class GeminiLiveAgent:
                 },
             )
         )
-        self.tool_map["search_stored_result"] = search_stored_result
-        self.tool_map["read_stored_result_range"] = read_stored_result_range
+        # Wrap in traceable (like the MCP tools) so calls appear as child runs under
+        # the voice-session trace — useful for seeing when the model fell back to
+        # searching/reading a stored large result.
+        self.tool_map["search_stored_result"] = traceable(name="search_stored_result", run_type="tool")(
+            search_stored_result
+        )
+        self.tool_map["read_stored_result_range"] = traceable(name="read_stored_result_range", run_type="tool")(
+            read_stored_result_range
+        )
         logger.info("Local result-storage tools registered (search_stored_result, read_stored_result_range)")
 
         return declarations
@@ -708,6 +719,12 @@ class GeminiLiveAgent:
     ) -> None:
         """Run the agent until audio_in receives None (end-of-stream sentinel).
 
+        Opens one LangSmith root run per session so every nested ``traceable`` (tool
+        calls, risk scoring) is gathered under a single trace id — and groups those
+        traces into a thread via ``session_id`` metadata. ``run()`` is launched as its
+        own asyncio task, which copies the current context at creation, so without an
+        explicit root here each tool call would otherwise start its own orphan trace.
+
         Args:
             audio_in:  Queue of items to send to Gemini:
                        - ``bytes``  — raw 16-bit PCM (16 kHz) audio chunk
@@ -717,6 +734,30 @@ class GeminiLiveAgent:
             event_out: Queue of JSON-serialisable event dicts to forward to the
                        caller (audio_chunk, turn_complete, interrupted, …).
         """
+        cancelled = False
+        with trace(
+            name="voice-session",
+            run_type="chain",
+            inputs={"session_id": self.session_id, "voice_name": self.voice_name},
+            metadata={"session_id": self.session_id} if self.session_id else None,
+        ):
+            try:
+                await self._run_impl(audio_in, event_out)
+            except asyncio.CancelledError:
+                # Normal end-of-call teardown — _end_session cancels this task. Swallow
+                # it *inside* the trace so the run closes cleanly instead of being
+                # recorded (and logged) as a CancelledError, then re-raise below to
+                # preserve cancellation semantics for the awaiting _end_session.
+                cancelled = True
+                logger.info("Voice session run cancelled (normal teardown)")
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _run_impl(
+        self,
+        audio_in: asyncio.Queue[bytes | str | None],
+        event_out: asyncio.Queue[dict],
+    ) -> None:
         client = build_gemini_client()
 
         if self.mcp_gateway_url:

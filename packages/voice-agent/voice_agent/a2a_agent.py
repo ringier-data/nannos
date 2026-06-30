@@ -323,6 +323,7 @@ class VoiceAgent(BaseAgent):
             mcp_headers=mcp_headers,
             mcp_tool_filter=mcp_tools if mcp_tools else None,
             session_resumption_handle=session_resumption_handle,
+            session_id=session_key,
         )
         agent_task = asyncio.create_task(agent.run(audio_in, event_out))
 
