@@ -937,6 +937,25 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         Raises:
             NotImplementedError: If subclass doesn't implement _astream_impl()
         """
+        # Gateway cost-attribution for in-process sub-agents.
+        # A local sub-agent's LLM calls reach the Model Gateway on the *caller's*
+        # attribution context (the orchestrator turn, where sub_agent_id is unset),
+        # so their litellm spend logs would be misattributed to the orchestrator.
+        # The app-side CostLogger already gets sub_agent_id from the ``sub_agent:``
+        # LangGraph tag (see _instrument), but the gateway's
+        # ``x-litellm-spend-logs-metadata`` header is stamped from the
+        # ``current_sub_agent_id`` ContextVar, which nothing updates when the
+        # orchestrator dispatches into a local sub-agent. Set it to this agent's own
+        # id for the duration of the run, then restore the caller's value so the
+        # orchestrator's subsequent calls are not mis-tagged with this sub-agent.
+        # Restore via set() (not token.reset()): this is an async generator, and a
+        # Token created in one context cannot be reset from another after a yield.
+        from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_id as _attr_sub_agent_id
+
+        _sa_id = getattr(self, "sub_agent_id", None)
+        _attr_prev = _attr_sub_agent_id.get()
+        if isinstance(_sa_id, int):
+            _attr_sub_agent_id.set(_sa_id)
         try:
             # For HITL resume: pass Command directly to _astream_impl, skip validation
             from langgraph.types import Command as LGCommand
@@ -987,6 +1006,11 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
             result = self._build_error_response(f"Internal error: {str(e)}")
             wrapped = self._wrap_message_with_metadata(result)
             yield ErrorEvent(error=str(e), data=wrapped)
+        finally:
+            # Restore the caller's attribution so the orchestrator's own model
+            # calls after this sub-agent returns aren't billed to the sub-agent.
+            if isinstance(_sa_id, int):
+                _attr_sub_agent_id.set(_attr_prev)
 
     async def _astream_impl(self, input_data: SubAgentInput, config: Dict[str, Any]) -> AsyncIterable[StreamEvent]:
         """Stream implementation to be provided by subclasses.

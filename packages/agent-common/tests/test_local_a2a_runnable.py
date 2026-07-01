@@ -307,3 +307,79 @@ class TestEnsureSupportedBlockTypes:
         blocks = [{"type": "audio", "url": "https://example.com/clip.mp3"}]
         result = StubLocalAgent._ensure_supported_block_types(blocks, supported_modes=None)
         assert result == blocks
+
+
+class _AttributionCapturingAgent(StubLocalAgent):
+    """Records the gateway attribution sub_agent_id seen during execution."""
+
+    def __init__(self, sub_agent_id):
+        super().__init__()
+        self.sub_agent_id = sub_agent_id
+        self.seen_sub_agent_id = "unset"
+
+    async def _process(self, input_data, config):
+        from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_id
+
+        self.seen_sub_agent_id = current_sub_agent_id.get()
+        return self._build_success_response("ok")
+
+
+class TestGatewayAttributionScope:
+    """astream() must stamp the gateway attribution ContextVar with the sub-agent's
+    own id for the duration of the run, then restore the caller's value — otherwise
+    in-process sub-agent LLM calls are billed to the orchestrator in litellm spend
+    logs (the app-side tag path is separate and already correct)."""
+
+    async def test_sets_sub_agent_id_during_run_and_restores_after(self):
+        from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_id
+
+        agent = _AttributionCapturingAgent(sub_agent_id=42)
+        token = current_sub_agent_id.set(None)  # caller (orchestrator) has none
+        try:
+            _input = SubAgentInput(
+                messages=[HumanMessage(content="hello")], orchestrator_conversation_id="ctx-123"
+            )
+            async for _ in agent.astream(_input, _base_config()):
+                pass
+            # Seen during _process == this agent's id
+            assert agent.seen_sub_agent_id == 42
+            # Restored to the caller's value after the sub-agent returns
+            assert current_sub_agent_id.get() is None
+        finally:
+            current_sub_agent_id.reset(token)
+
+    async def test_restores_caller_value_for_nested_dispatch(self):
+        """A sub-agent invoked while another sub-agent's id is active must restore
+        that outer id, not blanket-clear it."""
+        from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_id
+
+        agent = _AttributionCapturingAgent(sub_agent_id=7)
+        token = current_sub_agent_id.set(99)  # outer sub-agent active
+        try:
+            _input = SubAgentInput(
+                messages=[HumanMessage(content="hello")], orchestrator_conversation_id="ctx-123"
+            )
+            async for _ in agent.astream(_input, _base_config()):
+                pass
+            assert agent.seen_sub_agent_id == 7
+            assert current_sub_agent_id.get() == 99
+        finally:
+            current_sub_agent_id.reset(token)
+
+    async def test_no_sub_agent_id_leaves_caller_attribution_untouched(self):
+        """A built-in agent without an int sub_agent_id (e.g. file-analyzer) must
+        not clobber the caller's attribution."""
+        from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_id
+
+        agent = _AttributionCapturingAgent(sub_agent_id=None)
+        token = current_sub_agent_id.set(99)
+        try:
+            _input = SubAgentInput(
+                messages=[HumanMessage(content="hello")], orchestrator_conversation_id="ctx-123"
+            )
+            async for _ in agent.astream(_input, _base_config()):
+                pass
+            assert agent.seen_sub_agent_id == 99  # inherits caller's
+            assert current_sub_agent_id.get() == 99
+        finally:
+            current_sub_agent_id.reset(token)
