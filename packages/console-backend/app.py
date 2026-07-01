@@ -1724,11 +1724,6 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
             return error_response
 
-        # Join the conversation room so this connection receives the turn's stream by
-        # conversation (not by sid). Keeps delivery working for the sending client even
-        # before it issues an explicit subscribe, and lets the stream survive reconnects.
-        await sio.enter_room(sid, _conversation_room(context_id))
-
         metadata = json_data.get("metadata", {})
         if not isinstance(metadata, dict):
             metadata = {}
@@ -1766,6 +1761,38 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         # Get services
         conversation_service: ConversationService = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
         messages_service: MessagesService = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
+
+        # Enforce conversation ownership BEFORE joining its stream room or forwarding to the
+        # orchestrator. The sender must own the conversation, or it must be new (created here
+        # under the sender). get_or_create raises for a conversation_id owned by another user
+        # (PK conflict on insert), so we fail closed — otherwise a caller could join a victim's
+        # room and eavesdrop the stream, or run a turn on the victim's orchestrator thread.
+        # (_save_user_message_to_db calls get_or_create again idempotently.)
+        sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
+        try:
+            await conversation_service.get_or_create_conversation(
+                conversation_id=context_id,
+                user_id=socket_session.user_id,
+                agent_url=socket_session.agent_url or "",
+                message=message_text,
+                sub_agent_config_hash=sub_agent_config_hash,
+            )
+        except Exception:
+            logger.warning(
+                f"send_message rejected: conversation {context_id} is not owned by user "
+                f"{socket_session.user_id} (sid={sid})"
+            )
+            error_response = create_error_response(
+                SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"}
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
+
+        # Ownership confirmed — safe to join the conversation's stream room. Keeps delivery
+        # working for this connection before it issues an explicit subscribe, and lets the
+        # stream survive reconnects.
+        await sio.enter_room(sid, _conversation_room(context_id))
 
         # Save message to database
         await _save_user_message_to_db(

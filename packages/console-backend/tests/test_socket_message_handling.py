@@ -454,3 +454,40 @@ async def test_pending_hitl_is_captured_on_input_required_and_cleared_on_complet
             assert "conv-hitl" not in app._pending_interactions
     finally:
         app._pending_interactions.pop("conv-hitl", None)
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_conversation_not_owned():
+    """A caller cannot send to (or join the room of, or run an orchestrator turn on) a
+    conversation owned by another user. get_or_create raises on the foreign conversation_id
+    and the handler fails closed — no room join, no forward to the orchestrator."""
+    import app
+    from app import handle_send_message
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.enter_room = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(
+        return_value=MagicMock(user_id="attacker", agent_url="http://agent")
+    )
+    # Victim owns the conversation → get_or_create raises (PK conflict on insert).
+    mock_sio.app_instance.state.conversation_service.get_or_create_conversation = AsyncMock(
+        side_effect=Exception("duplicate key value violates unique constraint")
+    )
+
+    mock_a2a_client = MagicMock()
+    mock_a2a_client.send_message = MagicMock()  # must never be called
+    mock_pool = MagicMock()
+    mock_pool.get_or_create_a2a_client = AsyncMock(return_value=mock_a2a_client)
+
+    with patch("app.sio", mock_sio), patch("app.connection_pool", mock_pool):
+        result = await handle_send_message.__wrapped__(
+            "attacker-sid",
+            {"message": "show me the victim's context", "conversationId": "victim-conv"},
+        )
+
+    # Failed closed: not joined to the victim's room, nothing forwarded to the orchestrator.
+    mock_sio.enter_room.assert_not_called()
+    mock_a2a_client.send_message.assert_not_called()
+    assert result is not None  # an error response was returned to the caller
