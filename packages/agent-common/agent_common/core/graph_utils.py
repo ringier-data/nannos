@@ -71,6 +71,7 @@ from agent_common.middleware.conversation_context_tools_middleware import (
     ContextGatedTool,
     ConversationContextToolsMiddleware,
 )
+from agent_common.middleware.gateway_attribution_middleware import GatewayAttributionMiddleware
 from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.core.model_factory import is_gemini_model
@@ -1169,7 +1170,10 @@ def build_common_middleware_stack(
         Ordered list of middleware instances ready to be included in a
         ``create_agent`` / ``create_deep_agent`` call.
     """
-    middleware = []
+    # Outermost: stamp gateway cost-attribution ContextVars from each model call's
+    # own tags, so in-process sub-agent LLM calls are billed to the sub-agent
+    # (not the orchestrator) regardless of which dispatch path invoked them.
+    middleware: list = [GatewayAttributionMiddleware()]
     if not exclude_deep_agents_middlewares:
         summarization_defaults = compute_summarization_defaults(model)
         fs_cls = _FilesystemMiddlewareWithDocstoreHint if add_docstore_hint else FilesystemMiddleware
