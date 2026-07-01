@@ -264,6 +264,13 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
+  // Keep playground-mode ref in sync so config-hash filtering and message
+  // tagging pick up changes (e.g. when the user views a different sub-agent
+  // version in the playground) without relying solely on a provider remount.
+  useEffect(() => {
+    playgroundModeRef.current = playgroundMode;
+  }, [playgroundMode]);
+
   // Derived state
   const pendingInterrupt = useMemo(
     () => (activeConversationId ? pendingInterruptMap.get(activeConversationId) ?? null : null),
@@ -1336,6 +1343,15 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
         metadata.thinkingLevel = effectiveThinkingLevel;
       }
 
+      // In playground mode, tag every message with the sub-agent config hash and
+      // name. The backend requires this on send_message (in addition to the
+      // socket init header) to route/persist the conversation against the
+      // version being tested.
+      if (playgroundModeRef.current) {
+        metadata.subAgentConfigHash = playgroundModeRef.current.subAgentConfigHash;
+        metadata.playgroundSubagentName = playgroundModeRef.current.subAgentName;
+      }
+
       // Get context ID if available
       const contextId = contextIdsMap.get(conversationId);
 
@@ -1392,12 +1408,18 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       const contextId = contextIdsMap.get(conversationId);
       const messageId = generateUUID();
 
+      const metadata: Record<string, string> = {};
+      if (playgroundModeRef.current) {
+        metadata.subAgentConfigHash = playgroundModeRef.current.subAgentConfigHash;
+        metadata.playgroundSubagentName = playgroundModeRef.current.subAgentName;
+      }
+
       const payload: any = {
         id: messageId,
         conversationId,
         message: content,
         sessionId,
-        metadata: {},
+        metadata,
         ...(contextId && { contextId }),
         ...(dataParts && { dataParts }),
       };
