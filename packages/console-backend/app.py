@@ -535,8 +535,16 @@ class ActiveTaskInfo:
     asyncio_task: asyncio.Task[Any]
     a2a_client: Client | None = None
     a2a_task_id: str | None = None
+    # The connection that started the turn. The turn is keyed by conversation (so it
+    # survives that connection dropping and can be steered/cancelled from any later
+    # connection), but its httpx/A2A client belongs to origin_sid's connection-pool
+    # entry — so deferred cleanup must keep that entry alive until the task finishes.
+    origin_sid: str | None = None
 
 
+# Active turns keyed by conversation_id (== A2A context_id): a turn is owned by the
+# conversation, not the connection, so a reconnected client can steer/cancel it and
+# at most one turn runs per conversation (a concurrent send becomes steering).
 active_tasks: dict[str, ActiveTaskInfo] = {}
 
 # Buffer for accumulating streaming artifact chunks per conversation.
@@ -661,13 +669,12 @@ async def _cancel_active_task(task_info: ActiveTaskInfo, key: str, reason: str) 
 
 
 async def _deferred_connection_cleanup(sid: str) -> None:
-    """Wait for all tasks of a disconnected socket to finish, then clean up the connection pool."""
-    prefix = f"{sid}:"
+    """Wait for all tasks started by a disconnected socket to finish, then clean up its connection."""
     while True:
         running = [
             info.asyncio_task
-            for key, info in active_tasks.items()
-            if key.startswith(prefix) and not info.asyncio_task.done()
+            for info in active_tasks.values()
+            if info.origin_sid == sid and not info.asyncio_task.done()
         ]
         if not running:
             break
@@ -1245,11 +1252,10 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     # the httpx client backs the SSE stream the task is consuming.  We schedule
     # deferred cleanup so the connection is removed once all tasks finish.
     has_running_tasks = False
-    prefix = f"{sid}:"
     for key in list(active_tasks.keys()):
-        if key.startswith(prefix):
-            task_info = active_tasks.get(key)
-            if task_info and not task_info.asyncio_task.done():
+        task_info = active_tasks.get(key)
+        if task_info and task_info.origin_sid == sid:
+            if not task_info.asyncio_task.done():
                 has_running_tasks = True
             else:
                 active_tasks.pop(key, None)
@@ -1817,14 +1823,16 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             metadata=metadata,
         )
 
-        task_key = f"{sid}:{context_id}"
+        # Turns are keyed by conversation, not connection, so a turn started on one
+        # socket can be steered/cancelled after a reconnect (new sid).
+        task_key = context_id
 
-        # Steering: if there's already an active task for this context_id,
-        # send as a steering message (continuous interaction turn) instead
-        # of starting a new full stream.
+        # Steering: if there's already an active turn for this conversation (from this
+        # or a previous connection), send as a steering message (continuous interaction
+        # turn) instead of starting a second full stream.
         existing_task = active_tasks.get(task_key)
         if existing_task is not None and not existing_task.asyncio_task.done():
-            logger.info(f"[STEERING] Active task detected for {task_key}, routing as steering message")
+            logger.info(f"[STEERING] Active turn detected for conversation {task_key}, routing as steering message")
             return await _send_steering_message_to_agent(a2a_client, message, sid, message_id, sio)
 
         send_task = asyncio.create_task(
@@ -1835,17 +1843,18 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         active_tasks[task_key] = ActiveTaskInfo(
             asyncio_task=send_task,
             a2a_client=a2a_client,
+            origin_sid=sid,
         )
         try:
             return await send_task
         except asyncio.CancelledError:
-            logger.info(f"Send message task cancelled: sid={sid}, context_id={context_id}")
+            logger.info(f"Send message task cancelled: context_id={context_id}")
             cancelled_response = {
                 "id": message_id,
                 "contextId": context_id,
                 "status": {"state": "cancelled"},
             }
-            await sio.emit(SocketEvents.AGENT_RESPONSE, cancelled_response, to=sid)
+            await sio.emit(SocketEvents.AGENT_RESPONSE, cancelled_response, to=_conversation_room(context_id))
             return cancelled_response
         finally:
             active_tasks.pop(task_key, None)
@@ -1915,31 +1924,45 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
 async def handle_cancel_task(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
     """Handle the 'cancel_task' socket.io event.
 
-    Cancels an active send_message task for the given conversation.
+    Cancels the active turn for the given conversation. The turn is keyed by
+    conversation (not the connection), so a reconnected client can cancel a turn it
+    started earlier — but only for a conversation it owns.
     """
     conversation_id = json_data.get("conversationId")
     if not conversation_id:
         return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Missing conversationId"})
 
-    # Look up the task by sid + conversationId (the same value used as
-    # context_id when the task was created in handle_send_message).
-    task_key = f"{sid}:{conversation_id}"
-    task_info = active_tasks.pop(task_key, None)
-    if task_info:
-        await _cancel_active_task(task_info, task_key, reason="user requested")
+    # Ownership check: cancel is keyed by conversation_id alone, so verify the caller
+    # owns it — otherwise any authenticated user could cancel another user's turn.
+    socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
+    if not socket_session or not socket_session.user_id:
+        return create_error_response(SocketError.SESSION_NOT_FOUND, details={"reason": "Client session not found."})
+    conversation = await sio.app_instance.state.conversation_service.get_conversation(  # type: ignore[attr-defined]
+        conversation_id=conversation_id,
+        user_id=socket_session.user_id,
+    )
+    if not conversation:
+        logger.warning(
+            f"Cancel rejected: conversation {conversation_id} not owned by user {socket_session.user_id} (sid={sid})"
+        )
+        return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"})
 
-    if not task_info:
-        logger.info(f"No active task to cancel for sid={sid}, conversationId={conversation_id}")
+    task_info = active_tasks.pop(conversation_id, None)
+    if task_info:
+        await _cancel_active_task(task_info, conversation_id, reason="user requested")
+    else:
+        logger.info(f"No active turn to cancel for conversation {conversation_id}")
 
     return create_success_response({"cancelled": task_info is not None})
 
 
 def _has_active_turn(conversation_id: str) -> bool:
     """Whether a turn is currently streaming for this conversation on this pod."""
-    if conversation_id in _streaming_buffers or conversation_id in _pending_interactions:
-        return True
-    suffix = f":{conversation_id}"
-    return any(key.endswith(suffix) for key in active_tasks)
+    return (
+        conversation_id in active_tasks
+        or conversation_id in _streaming_buffers
+        or conversation_id in _pending_interactions
+    )
 
 
 @sio.on(SocketEvents.SUBSCRIBE_CONVERSATION)  # type: ignore

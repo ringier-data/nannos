@@ -461,7 +461,6 @@ async def test_send_message_rejects_conversation_not_owned():
     """A caller cannot send to (or join the room of, or run an orchestrator turn on) a
     conversation owned by another user. get_or_create raises on the foreign conversation_id
     and the handler fails closed — no room join, no forward to the orchestrator."""
-    import app
     from app import handle_send_message
 
     mock_sio = MagicMock()
@@ -491,3 +490,77 @@ async def test_send_message_rejects_conversation_not_owned():
     mock_sio.enter_room.assert_not_called()
     mock_a2a_client.send_message.assert_not_called()
     assert result is not None  # an error response was returned to the caller
+
+
+# ── W4: conversation-keyed cancel (survives reconnect; ownership-guarded) ─────
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_rejected_when_not_owner():
+    """Cancel is keyed by conversation_id alone, so it must verify ownership — a user
+    cannot cancel another user's turn by supplying its conversation id."""
+    import asyncio as aio
+
+    import app
+    from app import handle_cancel_task
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(
+        return_value=MagicMock(user_id="attacker")
+    )
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(return_value=None)  # not owned
+
+    async def _never():
+        await aio.sleep(3600)
+
+    victim_task = aio.create_task(_never())
+    app.active_tasks["victim-conv"] = app.ActiveTaskInfo(asyncio_task=victim_task, origin_sid="victim-sid")
+    try:
+        with patch("app.sio", mock_sio):
+            await handle_cancel_task.__wrapped__("attacker-sid", {"conversationId": "victim-conv"})
+        # The victim's turn is untouched.
+        assert "victim-conv" in app.active_tasks
+        assert not victim_task.cancelled() and not victim_task.done()
+    finally:
+        victim_task.cancel()
+        app.active_tasks.pop("victim-conv", None)
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_cancels_owned_turn_from_a_different_connection():
+    """A turn is keyed by conversation, so a reconnected client (new sid) can cancel a
+    turn started by an earlier, now-dead connection."""
+    import asyncio as aio
+
+    import app
+    from app import handle_cancel_task
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(
+        return_value=MagicMock(user_id="owner")
+    )
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(
+        return_value=MagicMock(user_id="owner")
+    )
+
+    async def _never():
+        await aio.sleep(3600)
+
+    task = aio.create_task(_never())
+    # Turn started by an earlier connection that has since dropped.
+    app.active_tasks["conv-x"] = app.ActiveTaskInfo(asyncio_task=task, origin_sid="old-dead-sid")
+    try:
+        with patch("app.sio", mock_sio):
+            result = await handle_cancel_task.__wrapped__("new-sid", {"conversationId": "conv-x"})
+        await aio.sleep(0)  # let the cancellation propagate
+        assert result is not None
+        assert "conv-x" not in app.active_tasks
+        assert task.cancelled() or task.done()
+    finally:
+        if not task.done():
+            task.cancel()
+        app.active_tasks.pop("conv-x", None)
