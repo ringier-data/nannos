@@ -78,7 +78,6 @@ from ringier_a2a_sdk.utils import create_runnable_config
 from ringier_a2a_sdk.utils.schema_cleaning import CleanupLevel, validate_and_clean_tool_dict
 
 from app.agents.file_analyzer import FileAnalyzerRunnable
-from app.agents.task_scheduler import TaskSchedulerRunnable
 from app.middleware.error_classification_middleware import classify_error
 
 from ..core.steering_state import ActiveSubagentDispatch, clear_active_subagent_dispatch, set_active_subagent_dispatch
@@ -105,9 +104,7 @@ SUBAGENT_STREAM_TICK_SECONDS = _positive_float_env("SUBAGENT_STREAM_TICK_SECONDS
 
 # Hard cap: total seconds with no new stream item from the sub-agent before the
 # consumer loop gives up and surfaces an ErrorEvent through the existing error path.
-SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS = _positive_float_env(
-    "SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS", 300.0
-)
+SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS = _positive_float_env("SUBAGENT_STREAM_STALL_TIMEOUT_SECONDS", 300.0)
 
 
 async def _iter_subagent_stream_with_stall_timeout(
@@ -323,12 +320,7 @@ class A2ACompiledSubAgent(TypedDict, total=False):
 
 
 OrchestratorSupportedRunnables = (
-    A2AClientRunnable
-    | LocalA2ARunnable
-    | DynamicLocalAgentRunnable
-    | FoundryLocalAgentRunnable
-    | FileAnalyzerRunnable
-    | TaskSchedulerRunnable
+    A2AClientRunnable | LocalA2ARunnable | DynamicLocalAgentRunnable | FoundryLocalAgentRunnable | FileAnalyzerRunnable
 )
 
 
@@ -1836,9 +1828,7 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 if not stream_writer:
                     return
                 try:
-                    result = stream_writer(
-                        ("keepalive", {"source": subagent_type, "waited_s": round(waited, 1)})
-                    )
+                    result = stream_writer(("keepalive", {"source": subagent_type, "waited_s": round(waited, 1)}))
                     if inspect.iscoroutine(result):
                         await result
                 except Exception as e:

@@ -226,7 +226,6 @@ class OrchestratorDeepAgent:
             backend_factory=self._graph_factory.backend_factory,
             cost_logger=self._graph_factory.cost_logger,
             backend_url=backend_url,
-            task_scheduler_graph_provider=self._graph_factory.get_task_scheduler_graph,
             sandbox_pool=sandbox_pool,
             tool_risk_cache=getattr(self, "tool_risk_cache", None),
         )
@@ -384,10 +383,7 @@ class OrchestratorDeepAgent:
             # NOTE: we intentionally do NOT include file content in the message text
             # visible to the orchestrator's LLM. Sub-agents handle file analysis via
             # the /attachments/ virtual filesystem and their own multimodal inputs.
-            serialized_blocks = [
-                b if isinstance(b, dict) else b.model_dump()
-                for b in pending_file_blocks
-            ]
+            serialized_blocks = [b if isinstance(b, dict) else b.model_dump() for b in pending_file_blocks]
             current_msg = HumanMessage(
                 content=text_content,
                 additional_kwargs={"file_blocks": serialized_blocks} if serialized_blocks else {},
@@ -478,9 +474,7 @@ class OrchestratorDeepAgent:
                         if resumed:
                             raise
                         resumed = True
-                        logger.warning(
-                            "[ORCHESTRATOR] Stream stalled (%s); auto-resuming once from checkpoint", stall
-                        )
+                        logger.warning("[ORCHESTRATOR] Stream stalled (%s); auto-resuming once from checkpoint", stall)
                         # Synthetic custom part: tells the consumer loop below to reset
                         # its parse/buffer state and surface a "recovering" status. Then
                         # resume pending checkpoint work with a more generous idle budget.

@@ -65,9 +65,9 @@ The GP agent is a `DynamicLocalAgentRunnable` (from `agent-common`) registered a
 Built dynamically at runtime in `build_runtime_context()`:
 
 - **tool_registry**: `{name: BaseTool}` — all discovered MCP tools + document store tools + catalog tools
-- **subagent_registry**: `{name: CompiledSubAgent}` — file-analyzer, task-scheduler, remote A2A agents, dynamic local agents, GP agent
-- Built-in sub-agents: `file-analyzer` (system), `task-scheduler` (system)
-- Dynamic local sub-agents from user configuration (loaded from DB)
+- **subagent_registry**: `{name: CompiledSubAgent}` — file-analyzer, remote A2A agents, dynamic local agents (incl. task-scheduler), GP agent
+- Built-in sub-agents: `file-analyzer` (system, code-instantiated)
+- Dynamic local sub-agents from user configuration (loaded from DB) — includes the pre-seeded system agents `general-purpose`, `skill-assessor`, `agent-creator` and `task-scheduler`
 - Remote A2A sub-agents from discovery
 
 ### HITL Guards for Skill Management

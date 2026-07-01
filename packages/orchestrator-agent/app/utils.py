@@ -70,7 +70,6 @@ def build_runtime_context(
     backend_factory: Any = None,
     cost_logger: Any = None,
     backend_url: str | None = None,
-    task_scheduler_graph_provider: Any = None,
     sandbox_pool: SandboxPool | None = None,
     tool_risk_cache: ToolRiskCache | None = None,
 ) -> Any:  # GraphRuntimeContext
@@ -110,7 +109,6 @@ def build_runtime_context(
         backend_factory: Backend factory for FilesystemMiddleware (from GraphFactory).
         cost_logger: CostLogger instance for cost tracking callbacks (optional).
         backend_url: Backend URL for cost tracking (extracted from cost_logger if available).
-        task_scheduler_graph_provider: Callable(model_type) -> CompiledStateGraph for task-scheduler agent.
 
     Returns:
         GraphRuntimeContext for graph invocation
@@ -120,16 +118,14 @@ def build_runtime_context(
     from agent_common.agents.dynamic_agent import create_dynamic_local_subagent
     from agent_common.agents.foundry_agent import create_foundry_local_subagent
     from agent_common.core.document_store_tools import create_document_store_tools
+    from agent_common.core.graph_utils import code_interpreter_ptc_enabled
     from agent_common.core.model_factory import create_model, require_default_model, resolve_chat_model
+    from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
     from deepagents import CompiledSubAgent
     from langchain_core.tools import BaseTool
     from ringier_a2a_sdk.cost_tracking import CostTrackingCallback
 
-    from agent_common.core.graph_utils import code_interpreter_ptc_enabled
-    from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
-
     from .agents.file_analyzer import create_file_analyzer_subagent
-    from .agents.task_scheduler import create_task_scheduler_subagent
     from .middleware import AuthErrorDetectionMiddleware, ToolsetSelectorMiddleware
     from .models.config import GraphRuntimeContext
 
@@ -181,8 +177,12 @@ def build_runtime_context(
         else:
             logger.warning("CATALOG_VECTOR_BUCKET_NAME not set, skipping catalog_search tool")
 
-    # Start with built-in local sub-agents (like file-analyzer, task-scheduler)
-    # These run in-process but use the same registry as remote A2A agents
+    # Start with built-in local sub-agents (like file-analyzer)
+    # These run in-process but use the same registry as remote A2A agents.
+    # NOTE: task-scheduler is no longer special-cased here. It is a pre-seeded
+    # system-owned local sub-agent (see console-backend migration
+    # 073_reseed_task_scheduler_as_local_subagent) discovered for every user and
+    # instantiated via the generic create_dynamic_local_subagent path below.
     subagent_registry: dict[str, CompiledSubAgent] = {}
     subagent_registry["file-analyzer"] = create_file_analyzer_subagent(
         cost_logger=cost_logger,  # Share CostLogger from GraphFactory
@@ -192,55 +192,6 @@ def build_runtime_context(
         # This is intentional: file-analyzer is a built-in capability (not a user-created
         # sub-agent), so its costs are considered part of orchestrator overhead.
     )
-
-    # Add task-scheduler sub-agent if graph provider is available
-    # Task-scheduler requires a LangGraph graph with middleware for tool access
-    if task_scheduler_graph_provider is not None:
-        # Import here since we need GraphRuntimeContext which is defined in the calling module
-        from .models.config import GraphRuntimeContext
-
-        # Build task-scheduler's tool whitelist
-        # Include specific tools needed for scheduling operations:
-        # - All scheduler_* tools (validate, create, list, get, update, pause)
-        # - Only specific console tools for sub-agent management and structured MCP tool discovery
-        allowed_console_tools = {
-            "console_list_sub_agents",
-            # "console_create_sub_agent",  # The sub-agent normally can be created by the task-scheduler tool itself
-            "console_update_sub_agent",  # TODO: in theory we should allow only to update automated sub-agents
-            # MCP tool discovery - hierarchical navigation (servers -> tools -> details)
-            "console_list_mcp_servers",  # List available MCP integration servers (GitHub, Jira, etc.)
-            "console_grep_mcp_tools",  # Discover available MCP tools
-            # Notification delivery: lets the scheduler resolve a real delivery_channel_id
-            # instead of guessing one (a guessed id fails the scheduled_jobs FK constraint).
-            "console_list_delivery_channels",
-        }
-        task_scheduler_tool_names = [
-            t.name
-            for t in (user_config.tools or [])
-            if t.name.startswith("scheduler_") or t.name in allowed_console_tools
-        ]
-        logger.debug(f"Task-scheduler tool whitelist: {task_scheduler_tool_names}")
-
-        # We'll create a partial context just for task-scheduler registration
-        # The full context will be passed at invocation time
-        # IMPORTANT: Use tool_registry (not user_config.tools) to include document store tools
-        task_scheduler_context = GraphRuntimeContext(
-            user_id=user_config.user_id,
-            user_sub=user_config.user_sub,
-            name=user_config.name or "",
-            email=user_config.email or "",
-            tool_registry=tool_registry,  # Use full registry with docstore tools
-            subagent_registry={},  # Empty for now, filled below
-            whitelisted_tool_names=task_scheduler_tool_names,
-        )
-
-        subagent_registry["task-scheduler"] = create_task_scheduler_subagent(
-            task_scheduler_graph_provider=task_scheduler_graph_provider,
-            user_context=task_scheduler_context,
-            model_type=user_config.model or require_default_model(),
-            user_sub=user_config.user_sub,
-            cost_logger=cost_logger,
-        )
 
     # Add remote A2A sub-agents from discovery
     for subagent in user_config.sub_agents or []:
