@@ -507,7 +507,13 @@ async def _mcp_streamable_asgi(scope: Scope, receive: Receive, send: Send) -> No
 
 
 app.mount("/mcp", _mcp_streamable_asgi)
-# Initialize Socket.IO server with optimized settings
+# Initialize Socket.IO server with optimized settings.
+# NOTE: no cross-node client_manager (Redis/pub-sub) — conversation rooms, active_tasks,
+# and the in-memory turn buffers are per-process. Stream resume and the one-turn-per-
+# conversation guard therefore assume a client's reconnect lands on the SAME pod (session
+# affinity). Scaling to multiple replicas without affinity + a cross-pod adapter would make
+# a reconnect that lands elsewhere see an empty snapshot and could start a second turn on
+# the same orchestrator thread. Cross-pod coordination is planned (Postgres lease-lock).
 sio = socketio.AsyncServer(
     async_mode="asgi",
     cors_allowed_origins=cors_origins,
@@ -603,6 +609,23 @@ def _accumulate_reply_buffer(context_id: str, response_data: dict[str, Any]) -> 
     # offset is defined for every emitted reply chunk.
     _streaming_buffers[context_id] = _streaming_buffers.get(context_id, "") + chunk_text
     return len(_streaming_buffers[context_id])
+
+
+def _clear_turn_state(context_id: str) -> None:
+    """Drop all in-memory turn state for a conversation.
+
+    Called from the single turn exit point (handle_send_message's finally) so the state
+    is cleared on EVERY termination path — normal completion, cancel, and error — not only
+    the turn-ending event inside _process_a2a_response. Without this, a cancelled or
+    errored turn leaves residue in these dicts and _has_active_turn reports the
+    conversation as permanently in-flight (stale snapshot / stuck spinner on reload).
+    """
+    _streaming_buffers.pop(context_id, None)
+    _pending_interactions.pop(context_id, None)
+    prefix = f"{context_id}:"
+    for key in [k for k in _intermediate_buffers if k.startswith(prefix)]:
+        _intermediate_buffers.pop(key, None)
+        _intermediate_buffer_ts.pop(key, None)
 
 
 # ==============================================================================
@@ -1449,18 +1472,8 @@ async def _save_user_message_to_db(
         if not socket_session or not socket_session.user_id:
             raise ValueError("Socket session or user ID is missing")
 
-        sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
-        logger.info(
-            f"Creating/getting conversation {context_id} with sub_agent_config_hash={sub_agent_config_hash}, metadata={metadata}"
-        )
-
-        await conversation_service.get_or_create_conversation(
-            conversation_id=context_id,
-            user_id=socket_session.user_id,
-            agent_url=socket_session.agent_url or "",
-            message=message_text,
-            sub_agent_config_hash=sub_agent_config_hash,
-        )
+        # The conversation is already created/ownership-verified by the caller's ownership
+        # gate (handle_send_message) before this runs, so we don't get_or_create again here.
 
         # Build parts array: text part (if non-empty) + file parts (if any)
         parts = []
@@ -1857,7 +1870,11 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             await sio.emit(SocketEvents.AGENT_RESPONSE, cancelled_response, to=_conversation_room(context_id))
             return cancelled_response
         finally:
+            # Single teardown point for the turn: clear task tracking AND all in-memory
+            # turn state on every exit (completion, cancel, error) so the conversation
+            # doesn't stay falsely "in-flight" (stale resume snapshot / stuck spinner).
             active_tasks.pop(task_key, None)
+            _clear_turn_state(context_id)
 
     except ValueError as e:
         # Validation errors - send specific error details
@@ -1919,6 +1936,22 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         return error_response
 
 
+async def _authorized_conversation(sid: str, conversation_id: str) -> Any | None:
+    """Return the conversation iff the socket's authenticated user owns it, else None.
+
+    Shared read-only ownership gate for handlers acting on an EXISTING conversation
+    (subscribe, cancel). The send path uses get_or_create instead, since it may
+    legitimately create a brand-new conversation under the sender.
+    """
+    socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
+    if not socket_session or not socket_session.user_id:
+        return None
+    return await sio.app_instance.state.conversation_service.get_conversation(  # type: ignore[attr-defined]
+        conversation_id=conversation_id,
+        user_id=socket_session.user_id,
+    )
+
+
 @sio.on(SocketEvents.CANCEL_TASK)  # type: ignore
 @require_socket_auth(sio)
 async def handle_cancel_task(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
@@ -1934,17 +1967,8 @@ async def handle_cancel_task(sid: str, json_data: dict[str, Any]) -> dict[str, A
 
     # Ownership check: cancel is keyed by conversation_id alone, so verify the caller
     # owns it — otherwise any authenticated user could cancel another user's turn.
-    socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
-    if not socket_session or not socket_session.user_id:
-        return create_error_response(SocketError.SESSION_NOT_FOUND, details={"reason": "Client session not found."})
-    conversation = await sio.app_instance.state.conversation_service.get_conversation(  # type: ignore[attr-defined]
-        conversation_id=conversation_id,
-        user_id=socket_session.user_id,
-    )
-    if not conversation:
-        logger.warning(
-            f"Cancel rejected: conversation {conversation_id} not owned by user {socket_session.user_id} (sid={sid})"
-        )
+    if not await _authorized_conversation(sid, conversation_id):
+        logger.warning(f"Cancel rejected: conversation {conversation_id} not owned (sid={sid})")
         return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"})
 
     task_info = active_tasks.pop(conversation_id, None)
@@ -1979,20 +2003,9 @@ async def handle_subscribe_conversation(sid: str, json_data: dict[str, Any]) -> 
     if not conversation_id:
         return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "conversationId is required"})
 
-    socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
-    if not socket_session or not socket_session.user_id:
-        return create_error_response(SocketError.SESSION_NOT_FOUND, details={"reason": "Client session not found."})
-
     # Authorize: the subscriber must own the conversation.
-    conversation_service = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
-    conversation = await conversation_service.get_conversation(
-        conversation_id=conversation_id,
-        user_id=socket_session.user_id,
-    )
-    if not conversation:
-        logger.warning(
-            f"Subscribe rejected: conversation {conversation_id} not owned by user {socket_session.user_id} (sid={sid})"
-        )
+    if not await _authorized_conversation(sid, conversation_id):
+        logger.warning(f"Subscribe rejected: conversation {conversation_id} not owned (sid={sid})")
         return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"})
 
     # Enter the room BEFORE reading the snapshot: any reply chunk emitted after this point

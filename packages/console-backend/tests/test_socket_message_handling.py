@@ -564,3 +564,30 @@ async def test_cancel_task_cancels_owned_turn_from_a_different_connection():
         if not task.done():
             task.cancel()
         app.active_tasks.pop("conv-x", None)
+
+
+def test_clear_turn_state_resets_in_flight_after_cancel_or_error():
+    """Turn state (reply buffer, pending HITL, intermediate buffers) must be cleared on
+    every termination path — regression for cancel/error leaving a conversation falsely
+    'in-flight' forever (stale resume snapshot / stuck spinner)."""
+    import app
+
+    app._streaming_buffers["c-leak"] = "partial reply"
+    app._pending_interactions["c-leak"] = {"kind": "status-update", "status": {"state": "input-required"}}
+    app._intermediate_buffers["c-leak:general-purpose"] = "sub-agent thoughts"
+    app._intermediate_buffer_ts["c-leak:general-purpose"] = "ts"
+    try:
+        assert app._has_active_turn("c-leak") is True
+
+        app._clear_turn_state("c-leak")
+
+        assert "c-leak" not in app._streaming_buffers
+        assert "c-leak" not in app._pending_interactions
+        assert "c-leak:general-purpose" not in app._intermediate_buffers
+        assert "c-leak:general-purpose" not in app._intermediate_buffer_ts
+        assert app._has_active_turn("c-leak") is False
+    finally:
+        app._streaming_buffers.pop("c-leak", None)
+        app._pending_interactions.pop("c-leak", None)
+        app._intermediate_buffers.pop("c-leak:general-purpose", None)
+        app._intermediate_buffer_ts.pop("c-leak:general-purpose", None)

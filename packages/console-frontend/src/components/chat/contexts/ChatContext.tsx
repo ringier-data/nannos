@@ -255,9 +255,6 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [pendingFeedbackRequest, setPendingFeedbackRequest] = useState<{ conversationId: string; subAgents: string[] } | null>(null);
   const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
   const streamingMapRef = useRef<Map<string, string>>(new Map());
-  // Highest reply offset (cumulative char length) applied per conversation. Used to dedupe
-  // streamed chunks against a resume snapshot so reconnect/reload doesn't double-count text.
-  const lastOffsetMapRef = useRef<Map<string, number>>(new Map());
   const subagentThoughtsMapRef = useRef<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
   const statusHistoryMapRef = useRef<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
@@ -467,17 +464,15 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
                 setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
               }
               // Dedupe against a resume snapshot: turnOffset is the cumulative reply
-              // length after this chunk. Skip chunks already covered by the snapshot (or an
-              // earlier chunk) so a reconnect/reload doesn't double-append.
+              // length after this chunk. The client's applied offset IS the current buffer
+              // length, so we derive it rather than tracking a parallel ref (which could go
+              // stale across turns and blank the next reply). Skip any chunk already covered
+              // (turnOffset <= what we already hold) so reconnect/reload never double-appends.
+              const existing = streamingMapRef.current.get(resolvedConversationId) || '';
               const chunkOffset = data.turnOffset;
-              const lastOffset = lastOffsetMapRef.current.get(resolvedConversationId) ?? -1;
-              if (typeof chunkOffset === 'number' && chunkOffset <= lastOffset) {
+              if (typeof chunkOffset === 'number' && chunkOffset <= existing.length) {
                 return;
               }
-              if (typeof chunkOffset === 'number') {
-                lastOffsetMapRef.current.set(resolvedConversationId, chunkOffset);
-              }
-              const existing = streamingMapRef.current.get(resolvedConversationId) || '';
               streamingMapRef.current.set(resolvedConversationId, existing + text);
               setStreamingMap(new Map(streamingMapRef.current));
             }
@@ -544,7 +539,6 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           streamingMapRef.current.delete(resolvedConversationId);
           setStreamingMap(new Map(streamingMapRef.current));
         }
-        lastOffsetMapRef.current.delete(resolvedConversationId);
       }
 
       // Handle error
@@ -663,7 +657,6 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
           // Always clear streaming buffer and waiting indicator on completion
           streamingMapRef.current.delete(resolvedConversationId);
           setStreamingMap(new Map(streamingMapRef.current));
-          lastOffsetMapRef.current.delete(resolvedConversationId);
           setWaitingMap((prev) => {
             const m = new Map(prev);
             m.delete(resolvedConversationId);
@@ -895,16 +888,20 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   }, [onAgentResponse, addMessage, addOrUpdateTask, updateConversation, tasksMap]);
 
   // Apply the snapshot of an in-flight turn returned when (re)subscribing to a conversation.
-  // Seeds the streaming buffer with the reply produced while the client was away and records
-  // the offset so subsequent live chunks dedupe against it. A pending HITL prompt (if any) is
-  // restored separately via the normal agent_response path (see SocketContext).
+  // Seeds the streaming buffer with the reply produced while the client was away. A pending
+  // HITL prompt (if any) is restored separately via the normal agent_response path (see
+  // SocketContext). Only overwrite when the snapshot is AHEAD of what we already hold: a live
+  // chunk can race ahead of the snapshot (server enters the room, then reads the buffer), and
+  // rewinding to the shorter snapshot would drop that segment.
   useEffect(() => {
     const unsubscribe = onConversationSnapshot((snap) => {
       if (!snap?.conversationId || !snap.inFlight) return;
       if (typeof snap.offset === 'number') {
-        streamingMapRef.current.set(snap.conversationId, snap.replyText || '');
-        setStreamingMap(new Map(streamingMapRef.current));
-        lastOffsetMapRef.current.set(snap.conversationId, snap.offset);
+        const existing = streamingMapRef.current.get(snap.conversationId) || '';
+        if (snap.offset > existing.length) {
+          streamingMapRef.current.set(snap.conversationId, snap.replyText || '');
+          setStreamingMap(new Map(streamingMapRef.current));
+        }
         setWaitingMap((prev) => {
           const m = new Map(prev);
           m.set(snap.conversationId, true);
