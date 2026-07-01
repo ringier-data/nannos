@@ -1,15 +1,18 @@
 """Middleware to extract sub_agent_id from A2A request metadata."""
 
 import logging
-from contextvars import ContextVar
-from typing import Optional
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-logger = logging.getLogger(__name__)
+# Re-export the canonical attribution ContextVar (defined in cost_tracking.attribution —
+# the one the gateway httpx hook stamps onto x-litellm-spend-logs-metadata, and that
+# GatewayAttributionMiddleware sets per model call). This ASGI middleware sets the SAME
+# object, so there is a single source of truth for sub_agent_id and no footgun of
+# importing the wrong `current_sub_agent_id`. For remote agents this means the header is
+# attributed to the sub-agent for the whole request, directly from the transport layer.
+from ..cost_tracking.attribution import current_sub_agent_id  # noqa: F401 (re-exported)
 
-# Context variable for storing sub_agent_id (thread-safe and async-safe)
-current_sub_agent_id: ContextVar[Optional[int]] = ContextVar("current_sub_agent_id", default=None)
+logger = logging.getLogger(__name__)
 
 
 class SubAgentIdMiddleware:

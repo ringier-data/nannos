@@ -312,10 +312,13 @@ class MyAgent(BaseAgent):
         # ... stream results
 ```
 
-**Sub-Agent ID Attribution:**
-- **Remote agents**: `sub_agent_id` is automatically read from `current_sub_agent_id` ContextVar (set by `SubAgentIdMiddleware`)
-- **Local agents** (orchestrator dynamic agents): `sub_agent_id` is automatically extracted from LangGraph tags by `CostTrackingCallback`
-- Agents don't need to pass `sub_agent_id` explicitly - the SDK handles it transparently
+**Cost Attribution:**
+Attribution (`user_sub`, `conversation_id`, `sub_agent_id`, `sub_agent_config_version_id`, `scheduled_job_id`) travels to the Model Gateway on the `x-litellm-spend-logs-metadata` header, stamped by a shared httpx hook from request-scoped ContextVars (`ringier_a2a_sdk.cost_tracking.attribution`); the proxy's `CustomLogger` reads them and is the single source of cost. Those ContextVars are set:
+- **Remote agents**: `SubAgentIdMiddleware` (ASGI) sets `current_sub_agent_id` from the inbound `X-Sub-Agent-Id` header for the request.
+- **Local (in-process) agents**: a model-call middleware in the agent's common stack (`GatewayAttributionMiddleware`) derives attribution from each model call's own LangGraph tags (`sub_agent:{id}`, `sub_agent_config_version:{id}`, `conversation:…`, `scheduled_job:…`) and sets the ContextVars for the duration of that call.
+- Agents don't need to pass `sub_agent_id` explicitly — it's handled transparently.
+
+> Note: the in-app `CostTrackingCallback` is **not** used for gateway traffic (`create_model` strips it, since the proxy is the single source of cost). It remains only for non-gateway / manual `report_llm_usage` reporting.
 
 ### Custom Billing Units (Beyond Tokens)
 

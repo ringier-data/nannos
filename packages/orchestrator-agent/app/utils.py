@@ -338,6 +338,7 @@ def build_runtime_context(
                         },
                         backend_url=backend_url,
                         sub_agent_id=config.sub_agent_id,
+                        sub_agent_config_version_id=config.sub_agent_config_version_id,
                     )
                     subagent_registry[config.name] = dynamic_subagent
                     if config.sub_agent_id is not None:

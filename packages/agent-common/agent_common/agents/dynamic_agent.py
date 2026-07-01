@@ -248,6 +248,9 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         self.oauth2_client = oauth2_client
         self.user_token = user_token
         self.sub_agent_id = sub_agent_id or config.sub_agent_id
+        # Exact running config version (for precise gateway cost-attribution). Only
+        # LocalLangGraphSubAgentConfig carries it; guard for other config shapes.
+        self.sub_agent_config_version_id = getattr(config, "sub_agent_config_version_id", None)
         self.checkpointer = checkpointer
         self.user_name = user_name
         self.user_language = user_language
@@ -344,6 +347,11 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         if self.sub_agent_id:
             return str(self.sub_agent_id)
         return f"dynamic-{self.name}"
+
+    def get_sub_agent_config_version_id(self, input_data: SubAgentInput) -> Optional[int]:
+        """Return the running config-version id so gateway spend logs attribute to the
+        exact version, not the agent's default version."""
+        return self.sub_agent_config_version_id
 
     def _build_preferences_addendum(self) -> str:
         """Build the user preferences addendum for the system prompt.

@@ -191,3 +191,15 @@ class TestSubAgentIdMiddleware:
         assert data["sub_agent_id"] == 123
         assert data["type"] == "int"
         assert data["type"] == "int"
+
+
+def test_sub_agent_id_var_is_the_canonical_attribution_var():
+    """The middleware's current_sub_agent_id must be the SAME object as the
+    attribution module's, so the ASGI middleware sets the exact var the gateway
+    httpx hook reads. Guards against re-introducing a second, out-of-sync var."""
+    from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_id as canonical
+    from ringier_a2a_sdk.middleware import current_sub_agent_id as via_middleware
+    from ringier_a2a_sdk.middleware.sub_agent_id_middleware import current_sub_agent_id as via_module
+
+    assert via_middleware is canonical
+    assert via_module is canonical

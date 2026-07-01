@@ -17,10 +17,13 @@ canonical home; import it directly from `ringier_a2a_sdk.cost_tracking.attributi
 import contextlib
 import contextvars
 import json
+import logging
 
 import httpx
 
 from ..utils.http_pool import LazyClient
+
+logger = logging.getLogger(__name__)
 
 # Canonical attribution ContextVars. ringier-a2a-sdk sets these per request.
 current_user_sub: contextvars.ContextVar = contextvars.ContextVar("nannos_user_sub", default=None)
@@ -53,6 +56,46 @@ _HEADER = "x-litellm-spend-logs-metadata"
 # console MCP tool can act on (conversation_id for a bug report, or to forward onto a gateway
 # sub-call) — without overloading the gateway's spend-logs header for non-gateway data.
 NANNOS_CONTEXT_HEADER = "x-nannos-context"
+
+
+def parse_attribution_tags(tags: list[str] | None) -> dict:
+    """Extract attribution fields from LangGraph cost-tracking tags.
+
+    Parses the ``user_sub:``/``conversation:``/``sub_agent:``/
+    ``sub_agent_config_version:``/``scheduled_job:`` scheme produced by
+    ``create_runnable_config`` and ``LocalA2ARunnable.extend_config_for_subagent``.
+    Integer fields that fail to parse are dropped (logged at DEBUG) rather than
+    raising. The returned dict is keyed by the attribution field names in
+    ``_FIELDS``, so it feeds ``set_attribution`` / ``attribution_scope`` directly.
+
+    Single source of truth for the tag scheme: the gateway attribution middleware
+    (agent-common) and the ``CostTrackingCallback`` here both consume it, so the
+    prefix set and int-parsing behaviour can never drift between call paths.
+    """
+    if not tags:
+        return {}
+    fields: dict = {}
+    for tag in tags:
+        if tag.startswith("user_sub:"):
+            fields["user_sub"] = tag.split(":", 1)[1]
+        elif tag.startswith("conversation:"):
+            fields["conversation_id"] = tag.split(":", 1)[1]
+        elif tag.startswith("sub_agent_config_version:"):
+            try:
+                fields["sub_agent_config_version_id"] = int(tag.split(":", 1)[1])
+            except ValueError:
+                logger.debug("Could not parse sub_agent_config_version id from tag %r", tag)
+        elif tag.startswith("sub_agent:"):
+            try:
+                fields["sub_agent_id"] = int(tag.split(":", 1)[1])
+            except ValueError:
+                logger.debug("Could not parse sub_agent id from tag %r", tag)
+        elif tag.startswith("scheduled_job:"):
+            try:
+                fields["scheduled_job_id"] = int(tag.split(":", 1)[1])
+            except ValueError:
+                logger.debug("Could not parse scheduled_job id from tag %r", tag)
+    return fields
 
 
 def current_attribution() -> dict:

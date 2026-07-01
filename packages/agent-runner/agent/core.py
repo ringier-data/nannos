@@ -947,6 +947,8 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             "type": agent_type,
             "name": data.get("name", f"sub-agent-{sub_agent_id}"),
             "sub_agent_id": sub_agent_id,
+            # Exact running config-version id, for precise cost attribution
+            "sub_agent_config_version_id": cfg_version.get("id"),
             "description": cfg_version.get("description", ""),
             "system_prompt": cfg_version.get("system_prompt", ""),
             "mcp_tools": cfg_version.get("mcp_tools") or [],
@@ -1156,6 +1158,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
                 thread_id=thread_id,
                 scheduled_job_id=scheduled_job_id,
                 sub_agent_id=sub_agent_cfg["sub_agent_id"],
+                sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
             )
             # Inject metadata consumed by IndexingStoreBackend and document-store tools.
             # user_id  — verified database UUID (fetched from backend) for docstore namespace.
@@ -1355,6 +1358,7 @@ Create a brief, actionable message (1-2 sentences) that a user would want to rec
             user=user_dict,
             backend_url=_CONSOLE_BACKEND_URL,
             sub_agent_id=sub_agent_cfg.get("sub_agent_id"),
+            sub_agent_config_version_id=sub_agent_cfg.get("sub_agent_config_version_id"),
         )
 
         # Stream the foundry runnable via the A2A SubAgentInput interface

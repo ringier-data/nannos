@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
+from .attribution import parse_attribution_tags
 from .logger import CostLogger
 
 logger = logging.getLogger(__name__)
@@ -79,31 +80,18 @@ class CostTrackingCallback(BaseCallbackHandler):
                     langsmith_trace_id = None
 
                     # Extract user_sub, conversation_id, and sub_agent_id from tags
-                    # LangGraph passes these via tags in config (unified for local and remote agents)
+                    # LangGraph passes these via tags in config (unified for local and remote agents).
+                    # parse_attribution_tags is the single source of truth for the tag scheme,
+                    # shared with agent-common's GatewayAttributionMiddleware.
                     tags = kwargs.get("tags", [])
-                    user_sub = None
-                    conversation_id = None
-                    sub_agent_id = None
-
                     logger.debug(f"[COST TRACKING] Processing LLM callback with tags: {tags}")
 
-                    scheduled_job_id = None
-
-                    for tag in tags:
-                        if tag.startswith("user_sub:"):
-                            user_sub = tag.split(":", 1)[1]
-                        elif tag.startswith("conversation:"):
-                            conversation_id = tag.split(":", 1)[1]
-                        elif tag.startswith("sub_agent:"):
-                            try:
-                                sub_agent_id = int(tag.split(":", 1)[1])
-                            except (ValueError, IndexError) as e:
-                                logger.warning(f"Failed to parse sub_agent_id from tag '{tag}': {e}")
-                        elif tag.startswith("scheduled_job:"):
-                            try:
-                                scheduled_job_id = int(tag.split(":", 1)[1])
-                            except (ValueError, IndexError) as e:
-                                logger.warning(f"Failed to parse scheduled_job_id from tag '{tag}': {e}")
+                    attrib = parse_attribution_tags(tags)
+                    user_sub = attrib.get("user_sub")
+                    conversation_id = attrib.get("conversation_id")
+                    sub_agent_id = attrib.get("sub_agent_id")
+                    scheduled_job_id = attrib.get("scheduled_job_id")
+                    sub_agent_config_version_id = attrib.get("sub_agent_config_version_id")
 
                     if not user_sub:
                         logger.warning("No user_sub found in callback tags, skipping cost tracking")
@@ -122,6 +110,7 @@ class CostTrackingCallback(BaseCallbackHandler):
                         invoked_at=datetime.now(tz=timezone.utc),
                         _sub_agent_id_from_tag=sub_agent_id,  # Internal: extracted from tag, not user-settable
                         _scheduled_job_id_from_tag=scheduled_job_id,  # Internal: extracted from tag
+                        _sub_agent_config_version_id_from_tag=sub_agent_config_version_id,  # Internal: from tag
                     )
 
                     logger.info(

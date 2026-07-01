@@ -258,6 +258,7 @@ class CostLogger:
         flush_interval: float = 5.0,
         sub_agent_id: Optional[int] = None,
         scheduled_job_id: Optional[int] = None,
+        sub_agent_config_version_id: Optional[int] = None,
     ):
         """
         Initialize the cost logger.
@@ -270,6 +271,9 @@ class CostLogger:
             flush_interval: Time in seconds to wait before auto-flushing partial batches (default: 5.0)
             sub_agent_id: Optional sub-agent ID for cost attribution (can be updated dynamically)
             scheduled_job_id: Optional scheduler ID for cost attribution (can be updated dynamically)
+            sub_agent_config_version_id: Optional exact config-version id for cost attribution
+                (can be updated dynamically). Mirrors the gateway spend-log dimension for the
+                manual reporting path (e.g. Foundry agents that call report_llm_usage).
         """
         self.backend_url = backend_url.rstrip("/")
         self.access_token = access_token
@@ -278,6 +282,7 @@ class CostLogger:
         self.flush_interval = flush_interval
         self.sub_agent_id = sub_agent_id
         self.scheduled_job_id = scheduled_job_id
+        self.sub_agent_config_version_id = sub_agent_config_version_id
         self._queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
         self._shutdown = False
@@ -398,6 +403,7 @@ class CostLogger:
         invoked_at: Optional[datetime] = None,
         _sub_agent_id_from_tag: Optional[int] = None,
         _scheduled_job_id_from_tag: Optional[int] = None,
+        _sub_agent_config_version_id_from_tag: Optional[int] = None,
         catalog_id: Optional[str] = None,
     ):
         """
@@ -428,6 +434,11 @@ class CostLogger:
         _scheduled_job_id_from_tag = (
             _scheduled_job_id_from_tag if _scheduled_job_id_from_tag is not None else self.scheduled_job_id
         )
+        sub_agent_config_version_id = (
+            _sub_agent_config_version_id_from_tag
+            if _sub_agent_config_version_id_from_tag is not None
+            else self.sub_agent_config_version_id
+        )
         record = {
             "user_sub": user_sub,
             "provider": provider,
@@ -436,6 +447,9 @@ class CostLogger:
             "conversation_id": conversation_id,
             "sub_agent_id": sub_agent_id,  # From tag (preferred) or instance attribute (fallback)
             "scheduled_job_id": _scheduled_job_id_from_tag,  # From tag (preferred) or instance attribute (fallback)
+            # Exact config version for cost attribution (parity with gateway spend logs); From tag
+            # (preferred) or instance attribute (fallback). None → backend infers the default version.
+            "sub_agent_config_version_id": sub_agent_config_version_id,
             "langsmith_run_id": langsmith_run_id,
             "langsmith_trace_id": langsmith_trace_id,
             "catalog_id": catalog_id,
