@@ -13,14 +13,12 @@ import {
   AlertCircle,
   Loader2,
   Plus,
-  MessageSquare,
   Trash2,
   Clock,
   CheckCircle,
   XCircle,
   Users,
   Info,
-  PanelRightOpen,
   HelpCircle,
   Maximize2,
   Eye,
@@ -31,7 +29,6 @@ import {
   Unlock,
   Database,
   Key,
-  AlertTriangle,
   Pencil,
   Cpu,
   FileText,
@@ -92,7 +89,8 @@ import type { SubAgentConfigVersion, OrchestratorThinkingLevel, SkillDefinition,
 import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
-import { usePlaygroundChat } from '@/hooks/usePlaygroundChat';
+import { ChatProviders } from '@/components/chat';
+import { PlaygroundChatPanel } from '@/components/subagents/PlaygroundChatPanel';
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { SkillRegistryBrowseDialog } from '@/components/skills/SkillRegistryBrowseDialog';
 import { SkillDiffDialog } from '@/components/skills/SkillDiffDialog';
@@ -118,7 +116,7 @@ export function SubAgentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user, adminMode, isImpersonating } = useAuth();
+  const { user, adminMode } = useAuth();
   const { models: availableModels } = useAvailableModels();
   const [isEditing, setIsEditing] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -206,11 +204,9 @@ export function SubAgentDetailPage() {
   const [activateScope, setActivateScope] = useState<'personal' | 'group'>('personal');
   const [activateGroupId, setActivateGroupId] = useState<number | null>(null);
 
-  // Chat input state
-  const [inputValue, setInputValue] = useState('');
+  // Playground layout state
   const [showConversationList, setShowConversationList] = useState(false);
   const [versionSidebarCollapsed, setVersionSidebarCollapsed] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-enable sandbox when any skill has executable files
   const SANDBOX_EXTENSIONS = useMemo(() => new Set(['.py', '.sh', '.bash', '.zsh', '.js', '.ts', '.rb', '.pl', '.ps1', '.bat', '.cmd', '.mjs', '.cjs']), []);
@@ -336,23 +332,9 @@ export function SubAgentDetailPage() {
     ? versionHistory.find((v: SubAgentConfigVersion) => v.version === viewingVersionNumber)
     : versionHistory.find((v: SubAgentConfigVersion) => v.version === currentVersion);
 
-  // Playground chat hook - uses version hash for conversation filtering
-  const {
-    conversations,
-    activeConversationId,
-    isConnected,
-    isLoading,
-    isLoadingConversations: _isLoadingConversations,
-    currentMessages: messages,
-    createConversation: createNewConversation,
-    selectConversation: handleSelectConversation,
-    deleteConversation: handleDeleteConversation,
-    sendMessage: sendPlaygroundMessage,
-  } = usePlaygroundChat({
-    subAgentConfigHash: viewedVersion?.version_hash || '',
-    subAgentName: subAgent?.name || 'Unknown',
-    configVersion: viewedVersion?.version || 0,
-  });
+  // The playground chat runs on the shared chat stack (see PlaygroundChatPanel),
+  // scoped to the version being viewed via its config hash.
+  const playgroundConfigHash = viewedVersion?.version_hash || '';
 
   // Helper to invalidate sub-agent query
   const invalidateSubAgentQuery = () => {
@@ -573,9 +555,6 @@ export function SubAgentDetailPage() {
     ? (viewedVersion?.thinking_level ?? subAgent?.config_version?.thinking_level ?? null)
     : (subAgent?.config_version?.thinking_level ?? null);
 
-  // Get active conversation
-  const activeConversation = conversations.find((c) => c.id === activeConversationId);
-
   useEffect(() => {
     if (subAgent) {
       initEditState(subAgent);
@@ -624,10 +603,6 @@ export function SubAgentDetailPage() {
     })();
     return () => { cancelled = true; };
   }, [isEditing, editSkills.length]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
 
   // Screen width detection for responsive behavior
   useEffect(() => {
@@ -981,26 +956,6 @@ export function SubAgentDetailPage() {
     }
     return updateActivationMutation.isPending;
   }, [skillDiffInfo, updatingSkillName, updateActivationMutation.isPending, updateMutation.isPending]);
-
-  const handleNewConversation = () => {
-    createNewConversation(currentVersion || 1);
-  };
-
-  const handleSendMessage = async () => {
-    if (!inputValue.trim() || isLoading || !isConnected) return;
-
-    const content = inputValue.trim();
-    setInputValue('');
-
-    await sendPlaygroundMessage(content, currentVersion || 1);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  };
 
   const handleDelete = async () => {
     if (!id) return;
@@ -2333,235 +2288,30 @@ export function SubAgentDetailPage() {
           )}
         </div>
 
-        {/* Middle Panel - Conversation List */}
-        {showConversationList && (
-          <div className="w-56 flex flex-col rounded-lg border border-border bg-muted/30 overflow-hidden flex-shrink-0">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
-              <h3 className="text-sm font-semibold">Conversations</h3>
-              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={handleNewConversation}>
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-            <ScrollArea className="flex-1 min-h-0">
-              {conversations.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 py-12 px-4 text-center">
-                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
-                    <MessageSquare className="w-6 h-6 text-muted-foreground" />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-foreground">No conversations</p>
-                    <p className="text-xs text-muted-foreground">Click + to start a new chat</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="p-2 space-y-0.5">
-                  {conversations.map((conv) => (
-                    <div
-                      key={conv.id}
-                      className={`group w-full text-left px-3 py-2.5 rounded-md transition-colors duration-150 hover:bg-accent/50 flex items-start gap-3 cursor-pointer ${
-                        activeConversationId === conv.id
-                          ? 'bg-accent text-accent-foreground'
-                          : 'text-foreground/80 hover:text-foreground'
-                      }`}
-                      onClick={() => handleSelectConversation(conv.id)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handleSelectConversation(conv.id);
-                        }
-                      }}
-                    >
-                      <MessageSquare
-                        className={`w-4 h-4 mt-0.5 shrink-0 ${
-                          activeConversationId === conv.id ? 'text-primary' : 'text-muted-foreground'
-                        }`}
-                      />
-                      <div className="flex-1 min-w-0 space-y-0.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <span
-                            className={`text-sm truncate ${
-                              activeConversationId === conv.id ? 'font-medium' : 'font-normal'
-                            }`}
-                          >
-                            {conv.title}
-                          </span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-5 w-5 opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity shrink-0"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteConversation(conv.id);
-                            }}
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </Button>
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <span>
-                            {conv.messages.length} msg{conv.messages.length !== 1 ? 's' : ''}
-                          </span>
-                          <span className="text-muted-foreground/60">{getVersionLabel(conv.configVersion)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </ScrollArea>
+        {/* Middle + Right Panels - Playground Chat (shared chat stack) */}
+        {playgroundConfigHash ? (
+          <ChatProviders
+            key={playgroundConfigHash}
+            socketPath="/api/v1/socket.io"
+            customHeaders={{ 'X-Playground-SubAgentConfig-Hash': playgroundConfigHash }}
+            playgroundMode={{ subAgentConfigHash: playgroundConfigHash, subAgentName: subAgent.name }}
+          >
+            <PlaygroundChatPanel
+              showConversationList={showConversationList}
+              onToggleConversationList={() => setShowConversationList(!showConversationList)}
+              versionHistoryLength={versionHistory.length}
+              versionSidebarCollapsed={versionSidebarCollapsed}
+              onShowVersionHistory={() => setVersionSidebarCollapsed(false)}
+              onChatFocusChange={setActiveFocusArea}
+              viewedVersionLabel={getVersionLabel(viewedVersion?.version)}
+              isViewingHistoricalVersion={isViewingHistoricalVersion}
+            />
+          </ChatProviders>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center rounded-lg border border-border bg-muted/30 min-w-0">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
         )}
-
-        {/* Right Panel - Chat */}
-        <div className="flex-1 flex flex-col rounded-lg border border-border bg-muted/30 min-w-0 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
-            <div className="flex items-center gap-2">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    onClick={() => setShowConversationList(!showConversationList)}
-                  >
-                    <MessageSquare className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{showConversationList ? 'Hide conversations' : 'Show conversations'}</TooltipContent>
-              </Tooltip>
-              <h2 className="text-sm font-semibold">{activeConversation ? activeConversation.title : 'Test Chat'}</h2>
-              {activeConversation && (
-                <Badge variant="outline" className="text-xs">
-                  {getVersionLabel(activeConversation.configVersion)}
-                  {activeConversation.configVersion !== currentVersion && (
-                    <span className="ml-1 text-amber-600">(outdated)</span>
-                  )}
-                </Badge>
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    onClick={handleNewConversation}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>New conversation</TooltipContent>
-              </Tooltip>
-              {/* Show version history button when collapsed */}
-              {versionHistory.length > 0 && versionSidebarCollapsed && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => setVersionSidebarCollapsed(false)}
-                    >
-                      <PanelRightOpen className="h-4 w-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Show version history</TooltipContent>
-                </Tooltip>
-              )}
-            </div>
-          </div>
-
-          {/* Messages */}
-          <ScrollArea className="flex-1 min-h-0">
-            <div className="p-4">
-              {messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                    <FlaskConical className="h-6 w-6 text-muted-foreground" />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-foreground">Start Testing</p>
-                    <p className="text-xs text-muted-foreground max-w-xs">
-                      Send a message to test your sub-agent configuration
-                    </p>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {messages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
-                      <div
-                        className={`max-w-[80%] rounded-2xl px-4 py-2.5 ${
-                          message.role === 'user'
-                            ? 'bg-primary text-primary-foreground rounded-br-md'
-                            : 'bg-card border border-border rounded-bl-md'
-                        }`}
-                      >
-                        <Markdown inverted={message.role === 'user'} className="text-sm">
-                          {message.content}
-                        </Markdown>
-                        <p
-                          className={`text-xs mt-1 ${
-                            message.role === 'user' ? 'text-primary-foreground/70' : 'text-muted-foreground'
-                          }`}
-                        >
-                          {message.timestamp.toLocaleTimeString()}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                  {isLoading && (
-                    <div className="flex justify-start">
-                      <div className="bg-card border border-border rounded-2xl rounded-bl-md px-4 py-2.5">
-                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                      </div>
-                    </div>
-                  )}
-                  <div ref={messagesEndRef} />
-                </div>
-              )}
-            </div>
-          </ScrollArea>
-
-          {/* Input */}
-          <div className="p-3 border-t border-border shrink-0">
-            {isImpersonating ? (
-              <Alert variant="default" className="border-amber-500/50 bg-amber-500/10">
-                <AlertTriangle className="h-4 w-4 text-amber-600" />
-                <AlertDescription className="text-amber-600 text-xs">
-                  Playground chat is unavailable while impersonating. Chat requires the user's access token.
-                </AlertDescription>
-              </Alert>
-            ) : (
-              <div className="flex gap-2">
-                <Textarea
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  onFocus={() => setActiveFocusArea('chat')}
-                  onBlur={() => setActiveFocusArea(null)}
-                  placeholder="Type a message to test..."
-                  className="min-h-[44px] max-h-32 resize-none bg-background"
-                  rows={1}
-                  disabled={isImpersonating}
-                />
-                <Button
-                  onClick={handleSendMessage}
-                  disabled={!inputValue.trim() || isLoading || isImpersonating}
-                  className="shrink-0"
-                >
-                  <Send className="h-4 w-4" />
-                </Button>
-              </div>
-            )}
-          </div>
-        </div>
 
         {/* Right Panel - Version History Sidebar */}
         {versionHistory.length > 0 && (
