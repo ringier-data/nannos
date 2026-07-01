@@ -702,6 +702,7 @@ async def _process_a2a_response(
     sid: str,
     request_id: str,
     context_id: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Processes a response from the A2A client, validates it, and emits events.
 
@@ -713,6 +714,8 @@ async def _process_a2a_response(
     sid: The session ID associated with the original request.
     request_id: The unique ID of the original request.
     context_id: The context ID (conversation ID) from the original message request.
+    user_id: The owning user's id, captured at Turn start. Used for persistence so
+        the Turn's reply is saved even after the originating socket session is gone.
     """
     # The response payload 'event' (Task, Message, etc.) may have its own 'id',
     # which can differ from the JSON-RPC request/response 'id'. We prioritize
@@ -762,19 +765,22 @@ async def _process_a2a_response(
 
     if effective_context_id:
         try:
-            socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
-            if socket_session:
+            # Persist under the Turn's captured user_id: identity is bound to
+            # (user_id, conversation_id) at Turn start, NOT to the ephemeral socket
+            # session — which is destroyed on disconnect. This lets a Turn that
+            # outlives its originating connection still persist its reply.
+            if user_id:
                 # Verify conversation exists and belongs to user
                 conversation_service = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
 
                 conversation = await conversation_service.get_conversation(
                     conversation_id=effective_context_id,
-                    user_id=socket_session.user_id,
+                    user_id=user_id,
                 )
 
                 if not conversation:
                     raise ConversationOwnershipError(
-                        f"Conversation {effective_context_id} does not exist or does not belong to user {socket_session.user_id}"
+                        f"Conversation {effective_context_id} does not exist or does not belong to user {user_id}"
                     )
 
                 messages_service = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
@@ -864,7 +870,7 @@ async def _process_a2a_response(
                     await _flush_intermediate_buffers(
                         effective_context_id,
                         messages_service,
-                        socket_session.user_id,
+                        user_id,
                         task_id=task_id,
                     )
 
@@ -880,7 +886,7 @@ async def _process_a2a_response(
                                 )
                                 saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
-                                    user_id=socket_session.user_id,
+                                    user_id=user_id,
                                     role="assistant",
                                     parts=[{"kind": "text", "text": accumulated}],
                                     task_id=task_id,
@@ -899,7 +905,7 @@ async def _process_a2a_response(
                                 )
                                 saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
-                                    user_id=socket_session.user_id,
+                                    user_id=user_id,
                                     role="assistant",
                                     parts=[{"kind": "text", "text": accumulated}],
                                     task_id=task_id,
@@ -942,7 +948,7 @@ async def _process_a2a_response(
                     await messages_service.save_agent_response(
                         response_data=response_data,
                         conversation_id=effective_context_id,
-                        user_id=socket_session.user_id,
+                        user_id=user_id,
                     )
         except ConversationOwnershipError as ownership_error:
             logger.error(
@@ -1488,6 +1494,7 @@ async def _send_message_to_agent(
     message_id: str,
     sio: socketio.AsyncServer,
     task_key: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Send message to agent via A2A client and process stream response.
 
@@ -1498,6 +1505,8 @@ async def _send_message_to_agent(
         message_id: Message ID
         sio: Socket.IO server
         task_key: Key in active_tasks to update with A2A task_id from stream
+        user_id: Owning user's id, captured at Turn start; threaded to persistence
+            so the reply is saved even if the originating socket session is gone.
 
     Returns:
         Success response or error response if HTTP error occurs
@@ -1531,7 +1540,7 @@ async def _send_message_to_agent(
                 if artifact.HasField("metadata"):
                     logger.info(f"[BACKEND_STREAM] artifact-update metadata: {MessageToDict(artifact.metadata)}")
 
-            await _process_a2a_response(stream_result, sid, message_id, message.context_id)
+            await _process_a2a_response(stream_result, sid, message_id, message.context_id, user_id=user_id)
 
         logger.info(f"[BACKEND_STREAM] Stream complete - received {stream_item_count} total items")
         return create_success_response({"id": message_id})
@@ -1743,7 +1752,9 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             return await _send_steering_message_to_agent(a2a_client, message, sid, message_id, sio)
 
         send_task = asyncio.create_task(
-            _send_message_to_agent(a2a_client, message, sid, message_id, sio, task_key=task_key)
+            _send_message_to_agent(
+                a2a_client, message, sid, message_id, sio, task_key=task_key, user_id=socket_session.user_id
+            )
         )
         active_tasks[task_key] = ActiveTaskInfo(
             asyncio_task=send_task,

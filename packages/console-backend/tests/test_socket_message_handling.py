@@ -105,7 +105,11 @@ async def test_process_a2a_response_receives_context_id():
 
         # Call _process_a2a_response with context_id
         await _process_a2a_response(
-            client_event=StreamResponse(message=message), sid="test-sid", request_id="req-1", context_id="conv-context-123"
+            client_event=StreamResponse(message=message),
+            sid="test-sid",
+            request_id="req-1",
+            context_id="conv-context-123",
+            user_id="user-1",
         )
 
         # Verify conversation service was called to check ownership
@@ -155,6 +159,7 @@ async def test_process_a2a_response_uses_fallback_context_id():
             sid="test-sid",
             request_id="req-2",
             context_id=None,  # No context_id passed
+            user_id="user-1",
         )
 
         # Should use contextId from the message's model_dump and verify ownership
@@ -162,6 +167,56 @@ async def test_process_a2a_response_uses_fallback_context_id():
         call_kwargs = mock_sio.app_instance.state.conversation_service.get_conversation.call_args.kwargs
         assert call_kwargs["conversation_id"] == "conv-from-response-456"
         assert call_kwargs["user_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_process_a2a_response_persists_when_socket_session_is_gone():
+    """A Turn must persist under its captured user_id even after the socket session is destroyed.
+
+    Regression for the disconnect data-loss bug: the orchestrator Turn keeps
+    running after the client disconnects, but the socket session is destroyed on disconnect.
+    Persistence must use the user_id captured at Turn start, NOT get_session(sid) — otherwise
+    a disconnect that outlives the Turn silently loses the reply.
+    """
+    from a2a.types import Message, Part, Role, StreamResponse
+
+    from app import _process_a2a_response
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+
+    # Socket session is GONE (client disconnected; destroy_session already ran).
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(return_value=None)
+    # Conversation still exists and belongs to the captured user.
+    mock_conversation = MagicMock(conversation_id="conv-disconnected", user_id="user-1")
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(return_value=mock_conversation)
+    mock_sio.app_instance.state.messages_service.save_history_messages = AsyncMock(return_value=0)
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+
+    with patch("app.sio", mock_sio):
+        message = Message(
+            role=Role.ROLE_AGENT,
+            parts=[Part(text="Reply produced after the client dropped")],
+            message_id="msg-after-disconnect",
+            context_id="conv-disconnected",
+        )
+
+        await _process_a2a_response(
+            client_event=StreamResponse(message=message),
+            sid="dead-sid",
+            request_id="req-dc",
+            context_id="conv-disconnected",
+            user_id="user-1",  # captured at Turn start, survives the disconnect
+        )
+
+    # Ownership checked and the reply persisted — under the captured user_id, despite no session.
+    mock_sio.app_instance.state.conversation_service.get_conversation.assert_called_once()
+    assert mock_sio.app_instance.state.conversation_service.get_conversation.call_args.kwargs["user_id"] == "user-1"
+    mock_sio.app_instance.state.messages_service.save_agent_response.assert_called_once()
+    save_kwargs = mock_sio.app_instance.state.messages_service.save_agent_response.call_args.kwargs
+    assert save_kwargs["conversation_id"] == "conv-disconnected"
+    assert save_kwargs["user_id"] == "user-1"
 
 
 @pytest.mark.asyncio
@@ -203,6 +258,7 @@ async def test_first_artifact_chunk_is_accumulated_not_persisted_standalone():
             sid="sid",
             request_id="req-fc",
             context_id="conv-firstchunk",
+            user_id="user-1",
         )
         # First chunk is accumulated for later assembly, never persisted on its own.
         mock_sio.app_instance.state.messages_service.save_agent_response.assert_not_called()
