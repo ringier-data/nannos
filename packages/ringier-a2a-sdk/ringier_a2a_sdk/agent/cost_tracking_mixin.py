@@ -66,6 +66,7 @@ class CostTrackingMixin:
         batch_size: int = 10,
         flush_interval: float = 5.0,
         sub_agent_id: Optional[int] = None,
+        sub_agent_config_version_id: Optional[int] = None,
     ) -> None:
         """
         Enable cost tracking for this agent.
@@ -82,6 +83,10 @@ class CostTrackingMixin:
             batch_size: Number of records to batch before sending (ignored when cost_logger provided)
             flush_interval: Seconds to wait before auto-flushing partial batches (ignored when cost_logger provided)
             sub_agent_id: Optional sub-agent ID for cost attribution (passed by orchestrator)
+            sub_agent_config_version_id: Optional exact config-version id for cost attribution.
+                Sets the CostLogger instance fallback, so manual report_llm_usage() records point
+                at the running version (parity with gateway spend logs). Ignored when a pre-built
+                cost_logger is supplied (that logger owns its own attribution).
 
         Note:
             - Manual cost reporting via report_llm_usage() works without LangChain
@@ -105,6 +110,7 @@ class CostTrackingMixin:
                 batch_size=batch_size,
                 flush_interval=flush_interval,
                 sub_agent_id=sub_agent_id,
+                sub_agent_config_version_id=sub_agent_config_version_id,
             )
             log_context = f"backend={backend_url}"
 
@@ -131,6 +137,7 @@ class CostTrackingMixin:
         langsmith_trace_id: Optional[str] = None,
         invoked_at: Optional[datetime] = None,
         scheduled_job_id: Optional[int] = None,
+        sub_agent_config_version_id: Optional[int] = None,
     ) -> None:
         """
         Manually report usage (framework-agnostic).
@@ -151,6 +158,10 @@ class CostTrackingMixin:
             langsmith_run_id: Optional LangSmith run ID
             langsmith_trace_id: Optional LangSmith trace ID
             invoked_at: Timestamp (defaults to now)
+            scheduled_job_id: Optional scheduled-job id for cost attribution
+            sub_agent_config_version_id: Optional exact config-version id, so the manual
+                usage event points at the version actually running (parity with gateway
+                spend logs). None → backend infers the sub-agent's default version.
 
         Example:
             ```python
@@ -190,6 +201,7 @@ class CostTrackingMixin:
             invoked_at=invoked_at,
             _sub_agent_id_from_tag=sub_agent_id_from_contextvar,  # Pass through as if from tag
             _scheduled_job_id_from_tag=scheduled_job_id,
+            _sub_agent_config_version_id_from_tag=sub_agent_config_version_id,
         )
 
         logger.debug(
@@ -225,6 +237,7 @@ class CostTrackingMixin:
         checkpointer=None,
         scheduled_job_id: Optional[int] = None,
         sub_agent_id: Optional[int] = None,
+        sub_agent_config_version_id: Optional[int] = None,
         user_id: Optional[str] = None,
         assistant_id: Optional[str] = None,
         **extra_configurable,
@@ -244,6 +257,9 @@ class CostTrackingMixin:
             scheduled_job_id: Optional scheduled job ID — adds "scheduled_job:{id}" tag for cost attribution
             sub_agent_id: Optional sub-agent ID for cost attribution (explicit override;
                 if not provided, falls back to ContextVar from SubAgentIdMiddleware)
+            sub_agent_config_version_id: Optional exact config-version id — adds a
+                "sub_agent_config_version:{id}" tag so gateway spend logs point at the
+                running version instead of the agent's default version
             user_id: Optional user database ID for IndexingStoreBackend (defaults to user_sub)
             assistant_id: Optional assistant ID for channel-scoped files (defaults to user_sub)
             **extra_configurable: Additional configurable parameters
@@ -279,6 +295,7 @@ class CostTrackingMixin:
             checkpointer=checkpointer,
             scheduled_job_id=scheduled_job_id,
             sub_agent_id=sub_agent_id,
+            sub_agent_config_version_id=sub_agent_config_version_id,
             cost_logger=self._cost_logger if self._cost_tracking_enabled else None,
             **extra_configurable,
         )

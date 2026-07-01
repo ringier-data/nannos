@@ -103,6 +103,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         user: dict[str, Any],
         backend_url: Optional[str] = None,
         sub_agent_id: Optional[int] = None,
+        sub_agent_config_version_id: Optional[int] = None,
     ):
         """Initialize Foundry agent runnable.
 
@@ -111,6 +112,9 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             user: User context dict
             backend_url: Backend URL for cost tracking (optional)
             sub_agent_id: Sub-agent ID for cost attribution (optional)
+            sub_agent_config_version_id: Exact running config-version id for cost attribution
+                (optional). Foundry reports cost via report_llm_usage (not the gateway), so this
+                is threaded to the manual usage event to point at the exact version.
         """
         # Initialize mixins first
         super().__init__()
@@ -118,6 +122,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         self.config = config
         self.user = user
         self.sub_agent_id = sub_agent_id
+        self.sub_agent_config_version_id = sub_agent_config_version_id
         self._client: PlatformAsyncFoundryClient | None = None
         self._client_secret: str | None = None
 
@@ -130,6 +135,7 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
             self.enable_cost_tracking(
                 backend_url=backend_url,
                 sub_agent_id=sub_agent_id,
+                sub_agent_config_version_id=sub_agent_config_version_id,
             )
             logger.info(f"Cost tracking enabled for Foundry agent '{self.config.name}' (sub_agent_id={sub_agent_id})")
         else:
@@ -173,6 +179,11 @@ class FoundryLocalAgentRunnable(LocalA2ARunnable):
         if self.sub_agent_id is not None:
             return str(self.sub_agent_id)
         return f"foundry-{self.config.name}"
+
+    def get_sub_agent_config_version_id(self, input_data: SubAgentInput) -> Optional[int]:
+        """Return the running config-version id so cost attribution points at the exact
+        version, not the agent's default version."""
+        return self.sub_agent_config_version_id
 
     async def _get_client_secret(self) -> str:
         """Retrieve client_secret from SSM Parameter Store.
@@ -453,6 +464,7 @@ def create_foundry_local_subagent(
     user: dict[str, Any],
     backend_url: Optional[str] = None,
     sub_agent_id: Optional[int] = None,
+    sub_agent_config_version_id: Optional[int] = None,
 ) -> CompiledSubAgent:
     """Create a dynamic local sub-agent from configuration.
 
@@ -464,6 +476,7 @@ def create_foundry_local_subagent(
         user: User context dict with user_sub, email, name
         backend_url: Backend URL for cost tracking (optional)
         sub_agent_id: Sub-agent ID for cost attribution (optional)
+        sub_agent_config_version_id: Exact running config-version id for cost attribution (optional)
 
     Returns:
         CompiledSubAgent that can be registered with the orchestrator
@@ -487,6 +500,7 @@ def create_foundry_local_subagent(
         user=user,
         backend_url=backend_url,
         sub_agent_id=sub_agent_id,
+        sub_agent_config_version_id=sub_agent_config_version_id,
     )
 
     return CompiledSubAgent(

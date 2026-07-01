@@ -39,40 +39,6 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResp
 logger = logging.getLogger(__name__)
 
 
-def _parse_attribution_from_tags(tags: list[str] | None) -> dict[str, Any]:
-    """Extract attribution fields from LangGraph tags.
-
-    Mirrors the ``user_sub:``/``conversation:``/``sub_agent:``/``scheduled_job:``
-    tag scheme produced by ``create_runnable_config`` and
-    ``LocalA2ARunnable.extend_config_for_subagent``. Integer fields that fail to
-    parse are dropped rather than raising.
-    """
-    if not tags:
-        return {}
-    fields: dict[str, Any] = {}
-    for tag in tags:
-        if tag.startswith("user_sub:"):
-            fields["user_sub"] = tag.split(":", 1)[1]
-        elif tag.startswith("conversation:"):
-            fields["conversation_id"] = tag.split(":", 1)[1]
-        elif tag.startswith("sub_agent_config_version:"):
-            try:
-                fields["sub_agent_config_version_id"] = int(tag.split(":", 1)[1])
-            except ValueError:
-                logger.debug("Could not parse sub_agent_config_version id from tag %r", tag)
-        elif tag.startswith("sub_agent:"):
-            try:
-                fields["sub_agent_id"] = int(tag.split(":", 1)[1])
-            except ValueError:
-                logger.debug("Could not parse sub_agent id from tag %r", tag)
-        elif tag.startswith("scheduled_job:"):
-            try:
-                fields["scheduled_job_id"] = int(tag.split(":", 1)[1])
-            except ValueError:
-                logger.debug("Could not parse scheduled_job id from tag %r", tag)
-    return fields
-
-
 class GatewayAttributionMiddleware(AgentMiddleware):
     """Set gateway cost-attribution ContextVars from the model call's own tags."""
 
@@ -82,12 +48,13 @@ class GatewayAttributionMiddleware(AgentMiddleware):
         # runnable context it raises, and a missing/edge config must not break the
         # model call.
         from langgraph.config import get_config
+        from ringier_a2a_sdk.cost_tracking.attribution import parse_attribution_tags
 
         try:
             cfg = get_config()
         except Exception:
             return {}
-        return _parse_attribution_from_tags((cfg or {}).get("tags"))
+        return parse_attribution_tags((cfg or {}).get("tags"))
 
     def wrap_model_call(
         self,

@@ -30,6 +30,7 @@ def create_runnable_config(
     checkpointer: Optional[Any] = None,
     scheduled_job_id: Optional[int] = None,
     sub_agent_id: Optional[int] = None,
+    sub_agent_config_version_id: Optional[int] = None,
     cost_logger: Optional[Any] = None,
     **extra_configurable,
 ) -> Dict[str, Any]:
@@ -56,6 +57,10 @@ def create_runnable_config(
         scheduled_job_id: Optional scheduled job ID for cost attribution
         sub_agent_id: Optional sub-agent ID for cost attribution (explicit override;
             if not provided, falls back to ContextVar from SubAgentIdMiddleware)
+        sub_agent_config_version_id: Optional exact config-version id for cost attribution.
+            When set, adds a ``sub_agent_config_version:{id}`` tag (read by
+            GatewayAttributionMiddleware) and the matching ContextVar, so gateway spend
+            logs point at the running version instead of the agent's default version.
         cost_logger: Optional CostLogger instance for generating callbacks
         **extra_configurable: Additional configurable parameters
 
@@ -113,6 +118,11 @@ def create_runnable_config(
     if resolved_sub_agent_id is not None:
         tags.append(f"sub_agent:{resolved_sub_agent_id}")
 
+    # Add the exact config-version tag so gateway spend logs attribute to the running
+    # version, not the sub-agent's default version (which the backend would otherwise infer).
+    if sub_agent_config_version_id is not None:
+        tags.append(f"sub_agent_config_version:{sub_agent_config_version_id}")
+
     # Add scheduled_job tag when running as part of a scheduled job
     if scheduled_job_id is not None:
         tags.append(f"scheduled_job:{scheduled_job_id}")
@@ -127,6 +137,7 @@ def create_runnable_config(
         conversation_id=conversation_id,
         sub_agent_id=resolved_sub_agent_id,
         scheduled_job_id=scheduled_job_id,
+        sub_agent_config_version_id=sub_agent_config_version_id,
     )
 
     # Build configurable dict

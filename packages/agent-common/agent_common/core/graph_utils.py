@@ -1636,7 +1636,16 @@ def build_sub_agent_graph(
         broaden_baseline_tools=all_tools,
     )
     if extra_middlewares:
-        middleware = list(extra_middlewares) + middleware
+        # Insert extra middlewares *after* GatewayAttributionMiddleware (always
+        # middleware[0], the outermost entry from build_common_middleware_stack),
+        # never before it. If an extra middleware makes its own gateway model call
+        # inside wrap_model_call — e.g. ToolsetSelectorMiddleware's per-turn
+        # tool-selection LLM — running it outside the attribution scope stamps the
+        # caller's ContextVars (the orchestrator) onto the spend log instead of
+        # this sub-agent's, silently misattributing those tokens. Extra middlewares
+        # still sit outer to the deep-agents block (ToolRetryMiddleware, …), which
+        # is all AuthErrorDetectionMiddleware needs to intercept ToolExceptions.
+        middleware[1:1] = list(extra_middlewares)
     return create_agent(
         model,
         system_prompt=system_prompt,

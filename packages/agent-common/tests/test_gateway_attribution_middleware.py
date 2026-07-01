@@ -13,13 +13,13 @@ from langchain_core.messages import AIMessage
 
 from agent_common.middleware.gateway_attribution_middleware import (
     GatewayAttributionMiddleware,
-    _parse_attribution_from_tags,
 )
 from ringier_a2a_sdk.cost_tracking.attribution import (
     current_conversation_id,
     current_scheduled_job_id,
     current_sub_agent_id,
     current_user_sub,
+    parse_attribution_tags,
 )
 
 
@@ -49,7 +49,7 @@ def _agent(capture: _CaptureMiddleware):
 
 class TestParseAttributionFromTags:
     def test_parses_all_fields(self):
-        fields = _parse_attribution_from_tags(
+        fields = parse_attribution_tags(
             [
                 "user_sub:u1",
                 "conversation:c1",
@@ -69,16 +69,16 @@ class TestParseAttributionFromTags:
 
     def test_config_version_tag_not_confused_with_sub_agent_tag(self):
         # "sub_agent_config_version:99" must NOT be parsed as sub_agent_id.
-        fields = _parse_attribution_from_tags(["sub_agent_config_version:99"])
+        fields = parse_attribution_tags(["sub_agent_config_version:99"])
         assert fields == {"sub_agent_config_version_id": 99}
         assert "sub_agent_id" not in fields
 
     def test_empty_and_none(self):
-        assert _parse_attribution_from_tags(None) == {}
-        assert _parse_attribution_from_tags([]) == {}
+        assert parse_attribution_tags(None) == {}
+        assert parse_attribution_tags([]) == {}
 
     def test_non_integer_ids_dropped(self):
-        fields = _parse_attribution_from_tags(["sub_agent:not-an-int", "user_sub:u1"])
+        fields = parse_attribution_tags(["sub_agent:not-an-int", "user_sub:u1"])
         assert fields == {"user_sub": "u1"}
 
 
@@ -169,3 +169,37 @@ def test_middleware_is_outermost_in_common_stack():
 
     stack = build_common_middleware_stack(model=MagicMock(model_name="claude-sonnet-4.6"), backend=MagicMock())
     assert isinstance(stack[0], GatewayAttributionMiddleware)
+
+
+def test_extra_middlewares_do_not_displace_attribution_outermost(monkeypatch):
+    """build_sub_agent_graph must keep GatewayAttributionMiddleware outermost even
+    when extra_middlewares are supplied. An extra middleware that makes its own
+    gateway model call in wrap_model_call (e.g. ToolsetSelectorMiddleware) would
+    otherwise run before the attribution scope is established and misattribute its
+    tokens to the caller instead of this sub-agent."""
+    from unittest.mock import MagicMock
+
+    import agent_common.core.graph_utils as gu
+
+    captured: dict = {}
+
+    def _fake_create_agent(model, **kwargs):
+        captured["middleware"] = kwargs["middleware"]
+        return MagicMock()
+
+    monkeypatch.setattr(gu, "create_agent", _fake_create_agent)
+
+    extra = AgentMiddleware()
+    gu.build_sub_agent_graph(
+        model=MagicMock(model_name="claude-sonnet-4.6"),
+        tools=[],
+        system_prompt="",
+        checkpointer=None,
+        backend_factory=MagicMock(),
+        exclude_deep_agents_middlewares=True,  # keep the stack light; attribution still runs
+        extra_middlewares=[extra],
+    )
+
+    mw = captured["middleware"]
+    assert isinstance(mw[0], GatewayAttributionMiddleware), "attribution must stay outermost"
+    assert extra in mw and mw.index(extra) > 0, "extra middleware must sit inside the attribution scope"

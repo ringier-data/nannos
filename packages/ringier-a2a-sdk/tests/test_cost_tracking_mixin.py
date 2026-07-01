@@ -331,6 +331,34 @@ class TestCostTrackingMixin:
                     assert "sub_agent:42" in config.tags
                     assert config.tags == ["user_sub:sub-123", "conversation:conv-456", "sub_agent:42"]
 
+    def test_create_runnable_config_with_config_version(self):
+        """create_runnable_config adds the sub_agent_config_version tag (read by
+        GatewayAttributionMiddleware) so scheduled/local langgraph sub-agents attribute
+        gateway spend to the running version, not the agent's default version."""
+        agent = TestAgent()
+        agent._cost_tracking_enabled = True
+        agent._langchain_callbacks = []
+
+        config = agent.create_runnable_config(
+            user_sub="sub-123",
+            conversation_id="conv-456",
+            sub_agent_id=42,
+            sub_agent_config_version_id=99,
+        )
+        tags = config["tags"] if isinstance(config, dict) else config.tags
+        assert "sub_agent:42" in tags
+        assert "sub_agent_config_version:99" in tags
+
+    def test_create_runnable_config_without_config_version_omits_tag(self):
+        """No config-version → no tag (backend infers the default version)."""
+        agent = TestAgent()
+        agent._cost_tracking_enabled = True
+        agent._langchain_callbacks = []
+
+        config = agent.create_runnable_config(user_sub="sub-123", conversation_id="conv-456")
+        tags = config["tags"] if isinstance(config, dict) else config.tags
+        assert not any(t.startswith("sub_agent_config_version:") for t in tags)
+
     def test_create_runnable_config_with_extra_configurable(self):
         """Test create_runnable_config accepts extra configurable parameters."""
         agent = TestAgent()
@@ -426,3 +454,28 @@ class TestCostTrackingMixin:
         payloads = [call["json"]["logs"] for call in post_calls]
         assert any(r["conversation_id"] == "convA" for r in payloads[0] + payloads[1])
         assert any(r["conversation_id"] == "convB" for r in payloads[0] + payloads[1])
+
+    def test_record_carries_sub_agent_config_version_id(self):
+        """log_cost_async record must include sub_agent_config_version_id — from the
+        explicit tag param (preferred) or the CostLogger instance fallback — so the
+        manual usage event points at the exact version (parity with gateway spend logs)."""
+        # Instance fallback
+        logger = CostLogger(backend_url="http://test-backend", sub_agent_config_version_id=42)
+        logger.log_cost_async(user_sub="u1", billing_unit_breakdown={"input_tokens": 1})
+        record, _ = logger._queue.get_nowait()
+        assert record["sub_agent_config_version_id"] == 42
+
+        # Explicit per-call value wins over the instance fallback
+        logger.log_cost_async(
+            user_sub="u1",
+            billing_unit_breakdown={"input_tokens": 1},
+            _sub_agent_config_version_id_from_tag=99,
+        )
+        record, _ = logger._queue.get_nowait()
+        assert record["sub_agent_config_version_id"] == 99
+
+        # Absent everywhere → None (backend infers the default version)
+        logger_none = CostLogger(backend_url="http://test-backend")
+        logger_none.log_cost_async(user_sub="u1", billing_unit_breakdown={"input_tokens": 1})
+        record, _ = logger_none._queue.get_nowait()
+        assert record["sub_agent_config_version_id"] is None

@@ -64,6 +64,14 @@ class LocalFoundrySubAgentConfig(BaseLocalSubAgentConfig):
     sub_agent_id: Optional[int] = Field(
         default=None, description="Console backend sub_agent ID for tracking agent-created agents"
     )
+    sub_agent_config_version_id: Optional[int] = Field(
+        default=None,
+        description=(
+            "Console backend sub_agent_config_versions.id for the version actually running. "
+            "Carried into the manual usage event (report_llm_usage) so spend points at the exact "
+            "config version, not the agent's default version (which the backend would otherwise infer)."
+        ),
+    )
     hostname: str = Field(
         default="https://blumen.palantirfoundry.de",
         description="Foundry instance hostname (e.g., 'https://blumen.palantirfoundry.de')",
