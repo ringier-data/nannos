@@ -494,6 +494,16 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         """
         ...
 
+    def get_sub_agent_config_version_id(self, input_data: SubAgentInput) -> Optional[int]:
+        """Return the running config-version id for cost attribution, or None.
+
+        When known, it is added as a ``sub_agent_config_version:{id}`` tag so the
+        gateway spend log is attributed to the exact config version rather than the
+        agent's default version (which the backend would otherwise infer from
+        sub_agent_id). Defaults to None; sub-agents that know their version override.
+        """
+        return None
+
     def get_thread_id(self, context_id: str, input_data: SubAgentInput) -> str:
         """Build thread_id for checkpoint isolation.
 
@@ -694,6 +704,7 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         thread_id: str,
         checkpoint_ns: str,
         checkpointer: Optional[Any] = None,
+        sub_agent_config_version_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Extend parent config with checkpoint isolation AND cost tracking.
 
@@ -722,7 +733,10 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
         )
 
         # 2. Observability layer: cost tracking tags
-        extended["tags"] = extended.get("tags", []) + [f"sub_agent:{sub_agent_identifier}"]
+        tags = extended.get("tags", []) + [f"sub_agent:{sub_agent_identifier}"]
+        if sub_agent_config_version_id is not None:
+            tags.append(f"sub_agent_config_version:{sub_agent_config_version_id}")
+        extended["tags"] = tags
 
         return extended
 
@@ -904,6 +918,7 @@ class LocalA2ARunnable(CostTrackingMixin, BaseA2ARunnable):
             thread_id=thread_id,
             checkpoint_ns=checkpoint_ns,
             checkpointer=checkpointer,
+            sub_agent_config_version_id=self.get_sub_agent_config_version_id(input_data),
         )
         return extended_config
 

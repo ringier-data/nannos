@@ -174,6 +174,28 @@ class TestExtendConfigForSubagent:
         assert "parent-tag" in result["tags"]
         assert "sub_agent:stub-id" in result["tags"]
 
+    def test_appends_config_version_tag_when_provided(self):
+        config = _base_config()
+        result = self.agent.extend_config_for_subagent(
+            config=config,
+            sub_agent_identifier="123",
+            thread_id="ctx::stub-ns",
+            checkpoint_ns="stub-ns",
+            sub_agent_config_version_id=99,
+        )
+        assert "sub_agent:123" in result["tags"]
+        assert "sub_agent_config_version:99" in result["tags"]
+
+    def test_no_config_version_tag_when_absent(self):
+        config = _base_config()
+        result = self.agent.extend_config_for_subagent(
+            config=config,
+            sub_agent_identifier="123",
+            thread_id="ctx::stub-ns",
+            checkpoint_ns="stub-ns",
+        )
+        assert not any(t.startswith("sub_agent_config_version:") for t in result["tags"])
+
     def test_thread_id_set_correctly(self):
         config = _base_config()
         result = self.agent.extend_config_for_subagent(

@@ -50,14 +50,28 @@ def _agent(capture: _CaptureMiddleware):
 class TestParseAttributionFromTags:
     def test_parses_all_fields(self):
         fields = _parse_attribution_from_tags(
-            ["user_sub:u1", "conversation:c1", "sub_agent:42", "scheduled_job:7", "other:x"]
+            [
+                "user_sub:u1",
+                "conversation:c1",
+                "sub_agent:42",
+                "sub_agent_config_version:99",
+                "scheduled_job:7",
+                "other:x",
+            ]
         )
         assert fields == {
             "user_sub": "u1",
             "conversation_id": "c1",
             "sub_agent_id": 42,
+            "sub_agent_config_version_id": 99,
             "scheduled_job_id": 7,
         }
+
+    def test_config_version_tag_not_confused_with_sub_agent_tag(self):
+        # "sub_agent_config_version:99" must NOT be parsed as sub_agent_id.
+        fields = _parse_attribution_from_tags(["sub_agent_config_version:99"])
+        assert fields == {"sub_agent_config_version_id": 99}
+        assert "sub_agent_id" not in fields
 
     def test_empty_and_none(self):
         assert _parse_attribution_from_tags(None) == {}
@@ -102,6 +116,33 @@ class TestGatewayAttributionMiddleware:
             assert current_sub_agent_id.get() == 99
         finally:
             current_sub_agent_id.reset(prev)
+
+    async def test_config_version_derived_from_tag(self):
+        from ringier_a2a_sdk.cost_tracking.attribution import current_sub_agent_config_version_id
+
+        capture = _CaptureMiddleware()
+
+        class _CaptureCfgVer(_CaptureMiddleware):
+            async def awrap_model_call(self, request, handler):
+                self.seen = {"cfg_ver": current_sub_agent_config_version_id.get()}
+                return await handler(request)
+
+        cap = _CaptureCfgVer()
+        from langchain_core.messages import AIMessage
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="done")])
+        agent = create_agent(model=model, tools=[], middleware=[GatewayAttributionMiddleware(), cap])
+        prev = current_sub_agent_config_version_id.set(None)
+        try:
+            await agent.ainvoke(
+                {"messages": [("user", "hi")]},
+                config={"tags": ["sub_agent:5", "sub_agent_config_version:99"]},
+            )
+            assert cap.seen["cfg_ver"] == 99
+            assert current_sub_agent_config_version_id.get() is None  # restored
+        finally:
+            current_sub_agent_config_version_id.reset(prev)
 
     async def test_scheduled_job_and_restore(self):
         capture = _CaptureMiddleware()

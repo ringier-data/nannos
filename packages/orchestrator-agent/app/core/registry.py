@@ -424,6 +424,9 @@ class RegistryService:
                             enable_thinking=cv.enable_thinking,
                             thinking_level=cv.thinking_level,
                             sub_agent_id=sa.id,  # Include console backend ID for tracking
+                            # The exact running config version, for precise cost attribution
+                            # (falls back to backend default-version derivation when absent).
+                            sub_agent_config_version_id=cv.id,
                             skills=cv.skills if cv.skills else [],
                             sandbox_enabled=cv.sandbox_enabled if cv.sandbox_enabled else False,
                             effective_permission=sa.effective_permission,

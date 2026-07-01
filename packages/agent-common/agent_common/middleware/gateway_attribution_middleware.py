@@ -55,6 +55,11 @@ def _parse_attribution_from_tags(tags: list[str] | None) -> dict[str, Any]:
             fields["user_sub"] = tag.split(":", 1)[1]
         elif tag.startswith("conversation:"):
             fields["conversation_id"] = tag.split(":", 1)[1]
+        elif tag.startswith("sub_agent_config_version:"):
+            try:
+                fields["sub_agent_config_version_id"] = int(tag.split(":", 1)[1])
+            except ValueError:
+                logger.debug("Could not parse sub_agent_config_version id from tag %r", tag)
         elif tag.startswith("sub_agent:"):
             try:
                 fields["sub_agent_id"] = int(tag.split(":", 1)[1])
