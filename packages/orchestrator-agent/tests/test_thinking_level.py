@@ -45,9 +45,15 @@ class TestGetReasoningEffort:
 class TestCreateModelGateway:
     """create_model builds a single gateway-backed ChatOpenAI (no provider branches)."""
 
+    # create_model instantiates the gateway-aware ChatOpenAI *subclass* returned by
+    # _gateway_chat_openai_cls(), not langchain_openai.ChatOpenAI directly. Patch the
+    # factory so the constructor kwargs land on a mock we can inspect (and so the real
+    # subclass — cached in a module global — is never built against a mock base class).
+
     @patch.dict(os.environ, _GW_ENV)
-    @patch("langchain_openai.ChatOpenAI")
-    def test_thinking_model_sets_reasoning_effort(self, mock_chat):
+    @patch("agent_common.core.model_factory._gateway_chat_openai_cls")
+    def test_thinking_model_sets_reasoning_effort(self, mock_cls):
+        mock_chat = mock_cls.return_value
         create_model("claude-sonnet-4.6", thinking_level=ThinkingLevel.high)
         kwargs = mock_chat.call_args[1]
         assert kwargs["model"] == "claude-sonnet-4.6"
@@ -56,20 +62,20 @@ class TestCreateModelGateway:
         assert kwargs["model_kwargs"]["reasoning_effort"] == "high"
 
     @patch.dict(os.environ, _GW_ENV)
-    @patch("langchain_openai.ChatOpenAI")
-    def test_effort_always_forwarded(self, mock_chat):
+    @patch("agent_common.core.model_factory._gateway_chat_openai_cls")
+    def test_effort_always_forwarded(self, mock_cls):
         # No per-model capability table in the app: reasoning_effort is always
         # forwarded when a thinking_level is set; the gateway drops it for
         # non-reasoning models via drop_params.
         create_model("gpt-4o", thinking_level=ThinkingLevel.low)
-        kwargs = mock_chat.call_args[1]
+        kwargs = mock_cls.return_value.call_args[1]
         assert kwargs["model_kwargs"]["reasoning_effort"] == "low"
 
     @patch.dict(os.environ, _GW_ENV)
-    @patch("langchain_openai.ChatOpenAI")
-    def test_no_thinking_level(self, mock_chat):
+    @patch("agent_common.core.model_factory._gateway_chat_openai_cls")
+    def test_no_thinking_level(self, mock_cls):
         create_model("claude-sonnet-4.6", thinking_level=None)
-        kwargs = mock_chat.call_args[1]
+        kwargs = mock_cls.return_value.call_args[1]
         assert kwargs["model_kwargs"] == {}
 
     def test_missing_gateway_url_raises(self):
@@ -86,8 +92,8 @@ class TestThinkingLevelCaching:
     """GraphFactory caches models by (model_type, thinking_level)."""
 
     @patch.dict(os.environ, _GW_ENV)
-    @patch("langchain_openai.ChatOpenAI")
-    def test_different_thinking_levels_create_separate_instances(self, mock_chat):
+    @patch("agent_common.core.model_factory._gateway_chat_openai_cls")
+    def test_different_thinking_levels_create_separate_instances(self, mock_cls):
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
@@ -110,8 +116,8 @@ class TestThinkingLevelCaching:
             assert ("claude-sonnet-4.5", ThinkingLevel.high) in factory._models
 
     @patch.dict(os.environ, _GW_ENV)
-    @patch("langchain_openai.ChatOpenAI")
-    def test_same_thinking_level_reuses_instance(self, mock_chat):
+    @patch("agent_common.core.model_factory._gateway_chat_openai_cls")
+    def test_same_thinking_level_reuses_instance(self, mock_cls):
         from app.core.graph_factory import GraphFactory
 
         config = Mock(spec=AgentSettings)
