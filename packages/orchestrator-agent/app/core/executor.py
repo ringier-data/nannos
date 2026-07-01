@@ -543,14 +543,30 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         budget_guard = get_budget_guard()
         if budget_guard and budget_guard.enabled and budget_guard.is_locked:
             status = budget_guard.get_status()
-            logger.warning(
-                f"Request rejected due to budget lock. "
-                f"Spend: ${status.spend_usd}/${status.limit_usd} ({status.usage_percentage:.1f}%)."
-            )
+            if status.locked_by_error:
+                # Fail-closed because spend couldn't be verified (transient IdP/network/backend
+                # blip), NOT a real overspend. Don't misdirect the user to an administrator — the
+                # guard fast-retries and typically clears within seconds.
+                logger.warning(
+                    f"Request rejected: budget status could not be verified ({status.lock_reason}). "
+                    f"Fail-closed until the next successful poll."
+                )
+                budget_message = (
+                    "Service temporarily unavailable: I couldn't verify the spending budget just "
+                    "now. This is usually a brief hiccup — please try again in a moment."
+                )
+            else:
+                logger.warning(
+                    f"Request rejected due to budget lock. "
+                    f"Spend: ${status.spend_usd}/${status.limit_usd} ({status.usage_percentage:.1f}%)."
+                )
+                budget_message = (
+                    "Service temporarily unavailable: the monthly spending budget has been exceeded. "
+                    "Please contact an administrator to increase the budget or wait until next month."
+                )
             await updater.update_status(
                 TaskState.TASK_STATE_FAILED,
-                new_text_message("Service temporarily unavailable: the monthly spending budget has been exceeded. "
-                    "Please contact an administrator to increase the budget or wait until next month.", context_id=task.context_id, task_id=task.id),
+                new_text_message(budget_message, context_id=task.context_id, task_id=task.id),
             )
             return
 

@@ -83,6 +83,10 @@ class BudgetStatus:
     is_locked: bool
     last_refresh: Optional[datetime]
     warnings: list[float]
+    lock_reason: Optional[str] = None
+    # True when the lock is a fail-closed "couldn't verify spend" state (transient) rather
+    # than a real budget breach. Lets callers show an honest message and expect fast recovery.
+    locked_by_error: bool = False
 
 
 @dataclass
@@ -94,22 +98,32 @@ class BudgetGuard:
     authenticate (no OIDC client — local dev), which `enabled` reports as a capability.
 
     Fail-closed: when polling fails the guard locks until a healthy status is seen again.
+    Such error-locks (transient IdP/network/backend failures — distinct from a real budget
+    breach) retry on a short, backing-off cadence so a brief blip doesn't keep the
+    orchestrator locked for a full poll interval.
 
     Attributes:
         base_url: console-backend base URL.
         oauth2_client: OIDC client-credentials client (None keeps the guard inert).
         audience: console-backend client id used as the token audience.
-        check_interval_seconds: Poll interval (default 300 = 5 minutes).
+        check_interval_seconds: Poll interval when healthy or on a real breach (default 300 = 5 min).
+        error_retry_interval_seconds: Base retry delay while locked by a transient error; backs off
+            exponentially toward check_interval_seconds until a healthy status is seen (default 15s).
     """
 
     base_url: str
     oauth2_client: "OidcOAuth2Client | None" = None
     audience: str = "agent-console"
     check_interval_seconds: int = 300
+    error_retry_interval_seconds: int = 15
 
     # Internal state
     _is_locked: bool = field(default=False, init=False)
     _lock_reason: Optional[str] = field(default=None, init=False)
+    # True when the current lock is a fail-closed error state, not a real breach.
+    _locked_by_error: bool = field(default=False, init=False)
+    # Consecutive error-locks; drives the retry backoff, reset on any healthy poll.
+    _error_streak: int = field(default=0, init=False)
     _spend_usd: Decimal = field(default_factory=lambda: Decimal("0"), init=False)
     _limit_usd: Decimal = field(default_factory=lambda: Decimal("0"), init=False)
     _usage_percentage: float = field(default=0.0, init=False)
@@ -140,6 +154,11 @@ class BudgetGuard:
         """True if budget is locked (exceeded or status unavailable) and the guard can operate."""
         return self._is_locked and self.enabled
 
+    @property
+    def locked_by_error(self) -> bool:
+        """True when locked because spend couldn't be verified (transient), not a real breach."""
+        return self.is_locked and self._locked_by_error
+
     def get_status(self) -> BudgetStatus:
         """Get the last-polled budget status snapshot."""
         return BudgetStatus(
@@ -149,6 +168,8 @@ class BudgetGuard:
             is_locked=self._is_locked,
             last_refresh=self._last_refresh,
             warnings=list(self._warnings),
+            lock_reason=self._lock_reason,
+            locked_by_error=self._locked_by_error,
         )
 
     def _get_client(self) -> httpx.AsyncClient:
@@ -156,17 +177,28 @@ class BudgetGuard:
             self._client = httpx.AsyncClient(base_url=self.base_url, timeout=_HTTP_TIMEOUT)
         return self._client
 
-    def _lock(self, reason: str) -> None:
+    def _lock(self, reason: str, *, by_error: bool) -> None:
+        """Lock the guard.
+
+        by_error distinguishes a fail-closed "couldn't verify spend" lock (transient — token,
+        network, or backend failure) from a real budget breach. Error-locks drive the fast-retry
+        backoff so a brief blip recovers in seconds rather than a full poll interval; a genuine
+        breach clears the streak and uses the normal cadence.
+        """
         if not self._is_locked:
             logger.warning("BudgetGuard LOCKED: %s", reason)
         self._is_locked = True
         self._lock_reason = reason
+        self._locked_by_error = by_error
+        self._error_streak = self._error_streak + 1 if by_error else 0
 
     def _unlock(self) -> None:
         if self._is_locked:
             logger.info("BudgetGuard unlocked")
         self._is_locked = False
         self._lock_reason = None
+        self._locked_by_error = False
+        self._error_streak = 0
 
     async def refresh(self) -> None:
         """Poll console-backend for the budget status and update the cached lock decision.
@@ -180,7 +212,7 @@ class BudgetGuard:
         try:
             token = await self.oauth2_client.get_token(self.audience)  # type: ignore[union-attr]
         except Exception as e:
-            self._lock(f"Could not obtain service token: {e}")
+            self._lock(f"Could not obtain service token: {e}", by_error=True)
             return
 
         try:
@@ -188,7 +220,7 @@ class BudgetGuard:
                 _STATUS_PATH, headers={"Authorization": f"Bearer {token}"}
             )
             if resp.status_code != 200:
-                self._lock(f"Budget status endpoint returned {resp.status_code}")
+                self._lock(f"Budget status endpoint returned {resp.status_code}", by_error=True)
                 return
 
             data = resp.json()
@@ -199,7 +231,7 @@ class BudgetGuard:
             self._last_refresh = datetime.now(timezone.utc)
 
             if data.get("is_locked"):
-                self._lock("Monthly spending budget exceeded")
+                self._lock("Monthly spending budget exceeded", by_error=False)
             else:
                 self._unlock()
 
@@ -209,7 +241,7 @@ class BudgetGuard:
             )
         except Exception as e:
             # FAIL-CLOSED: lock on any error.
-            self._lock(f"Budget status poll failed: {e}")
+            self._lock(f"Budget status poll failed: {e}", by_error=True)
 
     async def start_polling(self) -> None:
         """Start the background polling task."""
@@ -235,6 +267,19 @@ class BudgetGuard:
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
 
+    def _next_poll_delay(self) -> float:
+        """Seconds to wait before the next poll.
+
+        While locked by a transient error, retry fast and back off exponentially from
+        error_retry_interval_seconds toward check_interval_seconds — so a brief IdP/network/backend
+        blip recovers in seconds instead of leaving the orchestrator locked for a full interval. A
+        healthy status or a real breach uses the normal cadence.
+        """
+        if self._locked_by_error:
+            backoff = self.error_retry_interval_seconds * (2 ** max(0, self._error_streak - 1))
+            return float(min(backoff, self.check_interval_seconds))
+        return float(self.check_interval_seconds)
+
     async def _polling_loop(self) -> None:
         """Background loop that periodically refreshes the budget status."""
         # Initial refresh immediately.
@@ -242,7 +287,7 @@ class BudgetGuard:
 
         while True:
             try:
-                await asyncio.sleep(self.check_interval_seconds)
+                await asyncio.sleep(self._next_poll_delay())
                 await self.refresh()
             except asyncio.CancelledError:
                 logger.debug("Polling loop cancelled")

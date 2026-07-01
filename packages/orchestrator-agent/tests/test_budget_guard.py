@@ -84,12 +84,76 @@ class TestInitialization:
 class TestLocking:
     def test_lock_unlock(self):
         guard = BudgetGuard(base_url="http://c", oauth2_client=_oauth())
-        guard._lock("boom")
+        guard._lock("boom", by_error=True)
         assert guard.is_locked is True
         assert guard._lock_reason == "boom"
         guard._unlock()
         assert guard.is_locked is False
         assert guard._lock_reason is None
+
+    def test_error_lock_flags_locked_by_error(self):
+        guard = BudgetGuard(base_url="http://c", oauth2_client=_oauth())
+        guard._lock("transient blip", by_error=True)
+        assert guard.locked_by_error is True
+        assert guard.get_status().locked_by_error is True
+        assert guard.get_status().lock_reason == "transient blip"
+
+    def test_breach_lock_is_not_locked_by_error(self):
+        guard = BudgetGuard(base_url="http://c", oauth2_client=_oauth())
+        guard._lock("over budget", by_error=False)
+        assert guard.is_locked is True
+        assert guard.locked_by_error is False
+        assert guard.get_status().locked_by_error is False
+
+    def test_locked_by_error_false_when_inert(self):
+        """An inert guard (no OIDC) never enforces, so locked_by_error stays False too."""
+        guard = BudgetGuard(base_url="http://c", oauth2_client=None)
+        guard._lock("transient blip", by_error=True)
+        assert guard.locked_by_error is False
+
+    def test_breach_lock_clears_error_streak(self):
+        guard = BudgetGuard(base_url="http://c", oauth2_client=_oauth())
+        guard._lock("blip", by_error=True)
+        guard._lock("blip", by_error=True)
+        assert guard._error_streak == 2
+        guard._lock("over budget", by_error=False)
+        assert guard._error_streak == 0
+
+
+class TestRetryBackoff:
+    def test_normal_cadence_when_healthy(self):
+        guard = BudgetGuard(base_url="http://c", oauth2_client=_oauth(), check_interval_seconds=300)
+        assert guard._next_poll_delay() == 300.0
+
+    def test_normal_cadence_on_real_breach(self):
+        guard = BudgetGuard(base_url="http://c", oauth2_client=_oauth(), check_interval_seconds=300)
+        guard._lock("over budget", by_error=False)
+        assert guard._next_poll_delay() == 300.0
+
+    def test_fast_retry_backs_off_toward_interval(self):
+        guard = BudgetGuard(
+            base_url="http://c",
+            oauth2_client=_oauth(),
+            check_interval_seconds=300,
+            error_retry_interval_seconds=15,
+        )
+        guard._lock("blip", by_error=True)  # streak 1
+        assert guard._next_poll_delay() == 15.0
+        guard._lock("blip", by_error=True)  # streak 2
+        assert guard._next_poll_delay() == 30.0
+        guard._lock("blip", by_error=True)  # streak 3
+        assert guard._next_poll_delay() == 60.0
+
+    def test_backoff_capped_at_interval(self):
+        guard = BudgetGuard(
+            base_url="http://c",
+            oauth2_client=_oauth(),
+            check_interval_seconds=300,
+            error_retry_interval_seconds=15,
+        )
+        for _ in range(20):
+            guard._lock("blip", by_error=True)
+        assert guard._next_poll_delay() == 300.0
 
 
 class TestRefresh:
@@ -140,7 +204,15 @@ class TestRefresh:
         guard.oauth2_client.get_token = AsyncMock(side_effect=Exception("no idp"))
         await guard.refresh()
         assert guard.is_locked is True
+        assert guard.locked_by_error is True
         assert "service token" in guard._lock_reason
+
+    @pytest.mark.asyncio
+    async def test_real_breach_not_flagged_as_error(self):
+        guard = _guard_with_http(_status_payload(is_locked=True))
+        await guard.refresh()
+        assert guard.is_locked is True
+        assert guard.locked_by_error is False
 
     @pytest.mark.asyncio
     async def test_fail_closed_on_non_200(self):
