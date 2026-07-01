@@ -1123,30 +1123,51 @@ def build_common_middleware_stack(
 ) -> list:
     """Build the common middleware stack shared by every LangGraph agent in this project.
 
-    Creates middlewares that every agent should run beneath its
-    tool-selection / dispatch layer:
+    Returns middlewares in outermost-to-innermost order (the first entry wraps the
+    rest; the outermost sees each model call first).
 
-    1. ``FilesystemMiddleware`` - virtual file-system backed by *backend*.
-       When *backend* is a ``CompositeBackend`` with an ``IndexingStoreBackend``
-       route for ``/memories/`` and ``/large_tool_results/``, written files and
-       evicted tool results are automatically indexed for semantic search.
-       When *add_docstore_hint* is ``True``, eviction messages are extended
-       with a note that ``docstore_search`` can be used on the indexed content.
-    2. ``SummarizationMiddleware`` - summarises old messages to stay within the
-       model's context-window limit.  Trigger / keep values are computed from
-       the model's token profile via ``compute_summarization_defaults``.
-    3. ``LiteLLMPromptCachingMiddleware`` - injects an OpenAI-format
-       ``cache_control`` breakpoint on the system prefix that survives the
-       ChatOpenAI → LiteLLM gateway; LiteLLM translates it to the
-       provider's native format and ignores it for non-caching providers.
-    6. ``PatchToolCallsMiddleware`` - normalises tool-call format across
-       providers (Bedrock, OpenAI, Gemini, \u2026).
-    7. ``ToolRetryMiddleware`` - retries failed tool calls with exponential
-       back-off (max 5 retries, factor 2.0).
-    8. ``RepeatedToolCallMiddleware`` - detects and breaks tool-call loops
-       (max 5 identical calls within a window of 10).
-    9. ``ToolSchemaCleaningMiddleware`` - cleans tool schemas at model-binding
-       time for Gemini compatibility.
+    1. ``GatewayAttributionMiddleware`` - always outermost. Stamps gateway
+       cost-attribution ContextVars from each model call's own LangGraph tags
+       (``sub_agent:``/``sub_agent_config_version:``/``conversation:``/``scheduled_job:``)
+       so litellm spend logs bill the right user / sub-agent / config version, even
+       for in-process sub-agent calls.
+
+    The following run only when *exclude_deep_agents_middlewares* is ``False``:
+
+    2. Code-interpreter (PTC) middlewares - from ``build_code_interpreter_middlewares``;
+       expose filesystem/tools inside the sandboxed ``eval`` REPL when PTC is enabled.
+    3. ``StoragePathsInstructionMiddleware`` - injects workspace path instructions
+       (right before ``FilesystemMiddleware``).
+    4. ``FilesystemMiddleware`` (or ``_FilesystemMiddlewareWithDocstoreHint`` when
+       *add_docstore_hint*) - virtual file-system backed by *backend*. With a
+       ``CompositeBackend``/``IndexingStoreBackend`` route for ``/memories/`` and
+       ``/large_tool_results/``, written files and evicted tool results are indexed
+       for semantic search; the docstore-hint variant tells the agent it can
+       ``docstore_search`` the indexed content.
+    5. ``ToolStatusMiddleware`` - emits tool-call status events.
+    6. ``SummarizationMiddleware`` - summarises old messages to stay within the
+       model's context-window limit (trigger/keep from ``compute_summarization_defaults``).
+    7. ``LiteLLMPromptCachingMiddleware`` - injects an OpenAI-format ``cache_control``
+       breakpoint that survives the ChatOpenAI -> LiteLLM gateway; LiteLLM translates
+       it to the provider's native format and ignores it for non-caching providers.
+    8. ``PatchToolCallsMiddleware`` - normalises tool-call format across providers
+       (Bedrock, OpenAI, Gemini, ...).
+    9. ``ToolRetryMiddleware`` - retries failed tool calls with exponential back-off
+       (max 5 retries, factor 2.0).
+
+    Conditionally appended:
+
+    10. ``ConditionalHumanInTheLoopMiddleware`` - when *hitl_guarded_tools* or a
+        *risk_scorer* is provided; interrupts for approval on guarded/risky tools.
+    11. ``ConversationContextToolsMiddleware`` - when *context_gated_tools* is set;
+        additively injects context-gated tools (e.g. ``read_personal_file``).
+
+    Always appended (innermost):
+
+    12. ``RepeatedToolCallMiddleware`` - detects and breaks tool-call loops
+        (max 5 identical calls within a window of 10).
+    13. ``ToolSchemaCleaningMiddleware`` - cleans tool schemas at model-binding time
+        for Gemini compatibility.
 
     Args:
         model: The ``BaseChatModel`` instance used to compute summarization
@@ -1154,8 +1175,11 @@ def build_common_middleware_stack(
         backend: A backend instance **or** a backend factory
             ``Callable[[Runtime], Backend]``.  Passed directly to both
             ``FilesystemMiddleware`` and ``SummarizationMiddleware``.
-        exclude_deep_agents_middlewares: When ``True``, omits
-            ``FilesystemMiddleware`` and ``SummarizationMiddleware``.
+        exclude_deep_agents_middlewares: When ``True``, omits the deep-agents block
+            (items 2-9: code-interpreter, storage-paths, filesystem, tool-status,
+            summarization, prompt-caching, patch-tool-calls, tool-retry). The
+            attribution, HITL/context-gated, loop-detection and schema-cleaning
+            middlewares still run.
         add_docstore_hint: When ``True`` (and *exclude_deep_agents_middlewares*
             is ``False``), uses ``_FilesystemMiddlewareWithDocstoreHint``
             instead of plain ``FilesystemMiddleware``.  Set this to ``True``
@@ -1575,10 +1599,9 @@ def build_sub_agent_graph(
         response_format: Pre-computed structured-output strategy
             (``AutoStrategy``, ``ToolStrategy``, ``None``, …).  Pass the
             result of ``get_response_format()`` here.
-        exclude_deep_agents_middlewares: When ``True``, omits
-            ``FilesystemMiddleware`` and ``SummarizationMiddleware`` from the
-            middleware stack (intended for ``agent-runner`` which manages its
-            own file-system lifecycle).
+        exclude_deep_agents_middlewares: When ``True``, omits the deep-agents block
+            from the common middleware stack (see ``build_common_middleware_stack``);
+            intended for ``agent-runner`` which manages its own file-system lifecycle.
         backend_factory: Optional pre-built backend instance
             (``BackendProtocol``).  When provided it is used directly
             instead of calling ``create_indexing_backend_factory``.
