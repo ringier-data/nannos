@@ -554,6 +554,48 @@ _intermediate_buffers: dict[str, str] = {}
 # reload ordering aligned with how the thoughts streamed live.
 _intermediate_buffer_ts: dict[str, datetime] = {}
 
+# Pending interactive prompt (HITL / feedback-request) per conversation, keyed by
+# context_id. Captured when the orchestrator asks for input and cleared when the turn
+# ends, so a client that (re)subscribes mid-turn can restore a prompt that arrived
+# while it was disconnected — otherwise the turn would hang waiting on input the user
+# never saw. Value is the raw agent_response payload of the prompt event.
+_pending_interactions: dict[str, dict[str, Any]] = {}
+
+
+def _conversation_room(conversation_id: str) -> str:
+    """Socket.IO room name carrying a conversation's live stream.
+
+    Delivery is keyed by conversation_id (not the ephemeral connection), so a client
+    that reconnects/reloads (new sid) resumes the stream by rejoining this room, and
+    multiple tabs on the same conversation all receive it.
+    """
+    return f"conversation:{conversation_id}"
+
+
+def _accumulate_reply_buffer(context_id: str, response_data: dict[str, Any]) -> int | None:
+    """Append an orchestrator-reply artifact chunk to the resumable buffer; return the new length.
+
+    Runs BEFORE the chunk is emitted so a client subscribing mid-stream gets a snapshot
+    consistent with the live chunks: the returned offset (cumulative reply length) is
+    attached to the emitted chunk as ``turnOffset``, and the client drops any chunk whose
+    ``turnOffset`` is already covered by its snapshot. Only orchestrator content is
+    buffered — intermediate (sub-agent) output is handled separately and is best-effort
+    on resume. Returns None when the event is not a resumable reply chunk.
+    """
+    if not context_id or response_data.get("kind") != "artifact-update":
+        return None
+    artifact = response_data.get("artifact", {})
+    if not isinstance(artifact, dict):
+        return None
+    if "urn:nannos:a2a:intermediate-output:1.0" in artifact.get("extensions", []):
+        return None
+    parts = artifact.get("parts", [])
+    chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
+    # Always update on an artifact chunk (even empty, e.g. the final last_chunk) so the
+    # offset is defined for every emitted reply chunk.
+    _streaming_buffers[context_id] = _streaming_buffers.get(context_id, "") + chunk_text
+    return len(_streaming_buffers[context_id])
+
 
 # ==============================================================================
 # Active Task Helpers
@@ -750,16 +792,27 @@ async def _process_a2a_response(
         logger.info("Agent response (sid=%s) id=%s", sid, response_id)
 
     effective_context_id = context_id or response_data.get("contextId")
+    # Deliver to the conversation room (keyed by conversation_id) so a reconnected or
+    # multi-tab client receives the stream; fall back to the originating socket only when
+    # there is no conversation context to route by.
+    emit_target = _conversation_room(effective_context_id) if effective_context_id else sid
+
+    # Accumulate the resumable reply buffer BEFORE emitting and tag the chunk with its
+    # cumulative offset, so a client subscribing mid-stream dedupes live chunks against its
+    # snapshot (accumulate-then-emit ⇒ every emitted chunk is already in the buffer).
+    turn_offset = _accumulate_reply_buffer(effective_context_id, response_data) if effective_context_id else None
+    if turn_offset is not None:
+        response_data["turnOffset"] = turn_offset
 
     # EMIT IMMEDIATELY for real-time streaming - do this BEFORE database access
     # Artifact chunks with append=true need to appear on the client immediately
     is_streaming_chunk = response_data.get("kind") == "artifact-update" and response_data.get("append")
     if is_streaming_chunk:
         logger.info(
-            f"[STREAMING] Emitting artifact chunk immediately: sid={sid}, "
+            f"[STREAMING] Emitting artifact chunk immediately: target={emit_target}, "
             f"append={response_data.get('append')}, last_chunk={response_data.get('lastChunk')}, context={effective_context_id}"
         )
-        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
+        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=emit_target)
         await _emit_debug_log(sid, response_id, "artifact_chunk", response_data)
         # Don't return yet - we still need to accumulate for persistence below
 
@@ -803,15 +856,19 @@ async def _process_a2a_response(
                 status_obj = response_data.get("status", {})
                 status_state = _short_state_name(status_obj.get("state")) if isinstance(status_obj, dict) else None
 
-                # Accumulate streaming artifact text for persistence.
-                # Individual chunks are transient (not saved to DB); the assembled
-                # content is persisted when last_chunk arrives.
-                # Use is_artifact_update (not is_artifact_append): the FIRST chunk of an
-                # artifact is append=False (it creates the artifact). It must be
-                # accumulated with the rest — otherwise it falls through to
-                # save_agent_response as its own standalone message and the content is
-                # split into two messages, which reload renders as two fragments
-                # (e.g. an orchestrator thought split mid-sentence).
+                # Capture a pending interactive prompt (HITL / feedback-request) so a client
+                # that (re)subscribes mid-turn can restore a prompt that arrived while it was
+                # disconnected — otherwise the turn hangs on input the user never saw. Kept in
+                # memory keyed by conversation; cleared when the turn ends without asking.
+                if is_feedback_request or status_state == "input-required":
+                    _pending_interactions[effective_context_id] = response_data
+
+                # Orchestrator reply chunks are accumulated into _streaming_buffers earlier
+                # (see _accumulate_reply_buffer, before the emit) so the resumable snapshot
+                # and the live chunk offsets stay consistent. Here we only accumulate
+                # intermediate output (sub-agent thoughts), which is persisted at turn end
+                # so reasoning blocks survive page reload. The FIRST artifact chunk has
+                # append=False (it creates the artifact); it is buffered the same way.
                 if is_artifact_update:
                     artifact = response_data.get("artifact", {})
                     artifact_metadata = artifact.get("metadata", {}) if isinstance(artifact, dict) else {}
@@ -819,26 +876,7 @@ async def _process_a2a_response(
                     artifact_extensions = artifact.get("extensions", []) if isinstance(artifact, dict) else []
                     is_intermediate_output = "urn:nannos:a2a:intermediate-output:1.0" in artifact_extensions
 
-                    if not is_intermediate_output:
-                        # Only accumulate orchestrator content, not intermediate output
-                        parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
-                        chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
-
-                        # Always update buffer on artifact-append, even if chunk is empty (for last_chunk handling)
-                        current_buffer = _streaming_buffers.get(effective_context_id, "")
-                        _streaming_buffers[effective_context_id] = current_buffer + chunk_text
-                        if chunk_text:  # Only log if there's actual content
-                            logger.info(
-                                f"[STREAMING] Accumulated chunk ({len(chunk_text)} chars) for context {effective_context_id}. "
-                                f"Total buffer: {len(_streaming_buffers[effective_context_id])} chars. last_chunk={is_last_chunk}. "
-                                f"chunk_preview: {chunk_text[:50]}..."
-                            )
-                        elif is_last_chunk:
-                            logger.info(
-                                f"[STREAMING] Received final empty chunk for context {effective_context_id}. "
-                                f"Buffer size: {len(_streaming_buffers[effective_context_id])} chars"
-                            )
-                    else:
+                    if is_intermediate_output:
                         # Accumulate intermediate output for persistence at turn end
                         parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
                         chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
@@ -928,6 +966,12 @@ async def _process_a2a_response(
                             f"kind={response_data.get('kind')}, append={response_data.get('append')}"
                         )
 
+                    # The turn ended: clear any pending interactive prompt unless it ended
+                    # BY asking for input (input-required), in which case the prompt must
+                    # persist for a mid-turn (re)subscribe to restore.
+                    if status_state != "input-required" and not is_feedback_request:
+                        _pending_interactions.pop(effective_context_id, None)
+
                 # ── Persist non-streaming responses ──
                 # Skip: work-plan (transient), artifact chunks (accumulated above),
                 # bare completion signals (no content to save), safety-net (already saved).
@@ -967,8 +1011,8 @@ async def _process_a2a_response(
 
     # Emit the response to the client (skip if already emitted as streaming chunk)
     if not is_streaming_chunk:
-        logger.info(f"[BACKEND_RESPONSE] Emitting response: sid={sid}, kind={response_data.get('kind')}")
-        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
+        logger.info(f"[BACKEND_RESPONSE] Emitting response: target={emit_target}, kind={response_data.get('kind')}")
+        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=emit_target)
     else:
         logger.debug(
             f"[BACKEND_RESPONSE] Skipping double-emit for streaming chunk: sid={sid}, kind={response_data.get('kind')}, append={response_data.get('append')}"
@@ -1601,7 +1645,7 @@ async def _send_steering_message_to_agent(
                 "steering": True,
                 "status": {"state": "accepted"},
             },
-            to=sid,
+            to=_conversation_room(message.context_id) if message.context_id else sid,
         )
         return create_success_response({"id": message_id, "steering": True})
 
@@ -1679,6 +1723,11 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             error_response["id"] = message_id
             await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
             return error_response
+
+        # Join the conversation room so this connection receives the turn's stream by
+        # conversation (not by sid). Keeps delivery working for the sending client even
+        # before it issues an explicit subscribe, and lets the stream survive reconnects.
+        await sio.enter_room(sid, _conversation_room(context_id))
 
         metadata = json_data.get("metadata", {})
         if not isinstance(metadata, dict):
@@ -1856,6 +1905,72 @@ async def handle_cancel_task(sid: str, json_data: dict[str, Any]) -> dict[str, A
         logger.info(f"No active task to cancel for sid={sid}, conversationId={conversation_id}")
 
     return create_success_response({"cancelled": task_info is not None})
+
+
+def _has_active_turn(conversation_id: str) -> bool:
+    """Whether a turn is currently streaming for this conversation on this pod."""
+    if conversation_id in _streaming_buffers or conversation_id in _pending_interactions:
+        return True
+    suffix = f":{conversation_id}"
+    return any(key.endswith(suffix) for key in active_tasks)
+
+
+@sio.on(SocketEvents.SUBSCRIBE_CONVERSATION)  # type: ignore
+@require_socket_auth(sio)
+async def handle_subscribe_conversation(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Join the conversation's stream room and return a snapshot of any in-flight turn.
+
+    Lets a client resume after a reconnect or page reload (new sid): it rejoins the room
+    to receive live chunks, and the snapshot backfills the reply produced while it was
+    away plus any pending interactive (HITL) prompt. Membership is gated on the same
+    conversation-ownership check used on the persistence path.
+    """
+    conversation_id = json_data.get("conversationId")
+    if not conversation_id:
+        return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "conversationId is required"})
+
+    socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
+    if not socket_session or not socket_session.user_id:
+        return create_error_response(SocketError.SESSION_NOT_FOUND, details={"reason": "Client session not found."})
+
+    # Authorize: the subscriber must own the conversation.
+    conversation_service = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
+    conversation = await conversation_service.get_conversation(
+        conversation_id=conversation_id,
+        user_id=socket_session.user_id,
+    )
+    if not conversation:
+        logger.warning(
+            f"Subscribe rejected: conversation {conversation_id} not owned by user {socket_session.user_id} (sid={sid})"
+        )
+        return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"})
+
+    # Enter the room BEFORE reading the snapshot: any reply chunk emitted after this point
+    # is delivered live, and any chunk already accounted for is reflected in the snapshot
+    # offset — so the client dedupes cleanly with no gap and no double-count.
+    await sio.enter_room(sid, _conversation_room(conversation_id))
+
+    reply = _streaming_buffers.get(conversation_id)
+    pending = _pending_interactions.get(conversation_id)
+    snapshot = {
+        "conversationId": conversation_id,
+        "inFlight": _has_active_turn(conversation_id),
+        "offset": len(reply) if reply is not None else 0,
+        "replyText": reply or "",
+        "pendingHitl": pending,
+    }
+    await sio.emit(SocketEvents.CONVERSATION_SNAPSHOT, snapshot, to=sid)
+    return create_success_response({"subscribed": True, "inFlight": snapshot["inFlight"]})
+
+
+@sio.on(SocketEvents.UNSUBSCRIBE_CONVERSATION)  # type: ignore
+@require_socket_auth(sio)
+async def handle_unsubscribe_conversation(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Leave a conversation's stream room (e.g. the user switched conversations)."""
+    conversation_id = json_data.get("conversationId")
+    if conversation_id:
+        await sio.leave_room(sid, _conversation_room(conversation_id))
+    return create_success_response({"unsubscribed": True})
 
 
 # ==============================================================================

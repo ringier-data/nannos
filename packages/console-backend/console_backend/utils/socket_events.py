@@ -17,6 +17,14 @@ class SocketEvents:
     AGENT_RESPONSE = "agent_response"
     CANCEL_TASK = "cancel_task"
 
+    # Conversation stream subscription (resume after reconnect / reload; multi-tab)
+    # A client joins the room for the conversation it is viewing; the backend delivers
+    # a conversation's live stream to that room (keyed by conversation_id) rather than
+    # to a single ephemeral connection, and replies with a snapshot of any in-flight turn.
+    SUBSCRIBE_CONVERSATION = "subscribe_conversation"
+    UNSUBSCRIBE_CONVERSATION = "unsubscribe_conversation"
+    CONVERSATION_SNAPSHOT = "conversation_snapshot"
+
     # Debugging
     DEBUG_LOG = "debug_log"
 

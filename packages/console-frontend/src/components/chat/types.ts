@@ -154,6 +154,9 @@ export interface AgentResponseData {
   role?: string;
   messageId?: string;
   persistedMessageId?: string;
+  // Cumulative reply length after this streamed chunk; used to dedupe live chunks
+  // against a resume snapshot after reconnect/reload.
+  turnOffset?: number;
   parts?: Array<{ text?: string; kind?: string }>;
   status?: TaskStatusDetails;
   metadata?: Record<string, unknown>;

@@ -307,3 +307,150 @@ def test_short_state_name_normalizes_v1_states():
     # Already-short values and non-strings pass through untouched.
     assert _short_state_name("completed") == "completed"
     assert _short_state_name(None) is None
+
+
+# ── W3: room delivery + subscribe/snapshot resume ────────────────────────────
+
+
+def test_accumulate_reply_buffer_tracks_offsets_and_skips_intermediate():
+    """The resumable buffer accumulates only orchestrator reply text and returns the
+    cumulative offset used to dedupe live chunks against a snapshot."""
+    import app
+
+    app._streaming_buffers.pop("conv-acc", None)
+
+    def artifact_event(text, intermediate=False):
+        exts = ["urn:nannos:a2a:intermediate-output:1.0"] if intermediate else []
+        return {"kind": "artifact-update", "artifact": {"parts": [{"text": text}], "extensions": exts}}
+
+    try:
+        assert app._accumulate_reply_buffer("conv-acc", artifact_event("Hello")) == 5
+        assert app._accumulate_reply_buffer("conv-acc", artifact_event(" world")) == 11
+        assert app._streaming_buffers["conv-acc"] == "Hello world"
+        # intermediate (sub-agent) output is not part of the resumable reply
+        assert app._accumulate_reply_buffer("conv-acc", artifact_event("thinking", intermediate=True)) is None
+        # non-artifact events don't contribute
+        assert app._accumulate_reply_buffer("conv-acc", {"kind": "message"}) is None
+        assert app._streaming_buffers["conv-acc"] == "Hello world"
+    finally:
+        app._streaming_buffers.pop("conv-acc", None)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_conversation_returns_snapshot_and_joins_room():
+    """Subscribing to an in-flight conversation joins its room and returns a snapshot
+    of the reply-so-far plus any pending HITL prompt (resume after reconnect/reload)."""
+    import app
+    from app import handle_subscribe_conversation
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.enter_room = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(
+        return_value=MagicMock(user_id="user-1")
+    )
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(
+        return_value=MagicMock(conversation_id="conv-sub", user_id="user-1")
+    )
+
+    app._streaming_buffers["conv-sub"] = "partial reply"
+    app._pending_interactions["conv-sub"] = {"kind": "status-update", "status": {"state": "input-required"}}
+    try:
+        with patch("app.sio", mock_sio):
+            result = await handle_subscribe_conversation.__wrapped__("sid-1", {"conversationId": "conv-sub"})
+
+        mock_sio.enter_room.assert_awaited_once_with("sid-1", "conversation:conv-sub")
+        snap_call = mock_sio.emit.call_args
+        assert snap_call.args[0] == app.SocketEvents.CONVERSATION_SNAPSHOT
+        snapshot = snap_call.args[1]
+        assert snapshot["replyText"] == "partial reply"
+        assert snapshot["offset"] == len("partial reply")
+        assert snapshot["inFlight"] is True
+        assert snapshot["pendingHitl"]["status"]["state"] == "input-required"
+        assert result is not None
+    finally:
+        app._streaming_buffers.pop("conv-sub", None)
+        app._pending_interactions.pop("conv-sub", None)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_conversation_rejected_when_not_owner():
+    """A socket cannot join a conversation room it does not own — no room join, no snapshot."""
+    import app
+    from app import handle_subscribe_conversation
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.enter_room = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(
+        return_value=MagicMock(user_id="user-1")
+    )
+    # Ownership check fails.
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(return_value=None)
+
+    with patch("app.sio", mock_sio):
+        await handle_subscribe_conversation.__wrapped__("sid-x", {"conversationId": "conv-not-mine"})
+
+    mock_sio.enter_room.assert_not_called()
+    assert all(c.args[0] != app.SocketEvents.CONVERSATION_SNAPSHOT for c in mock_sio.emit.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_pending_hitl_is_captured_on_input_required_and_cleared_on_completion():
+    """A HITL prompt (input-required) is retained for mid-turn resume, then cleared once
+    the turn completes without asking — so a stale prompt isn't replayed forever."""
+    from a2a.types import StreamResponse, TaskStatus, TaskState, TaskStatusUpdateEvent
+
+    import app
+    from app import _process_a2a_response
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(
+        return_value=MagicMock(user_id="user-1")
+    )
+    mock_sio.app_instance.state.conversation_service.get_conversation = AsyncMock(
+        return_value=MagicMock(conversation_id="conv-hitl", user_id="user-1")
+    )
+    mock_sio.app_instance.state.messages_service.save_agent_response = AsyncMock()
+    mock_sio.app_instance.state.messages_service.insert_message = AsyncMock()
+
+    app._pending_interactions.pop("conv-hitl", None)
+    try:
+        with patch("app.sio", mock_sio):
+            # Orchestrator asks for input → prompt retained for resume.
+            await _process_a2a_response(
+                client_event=StreamResponse(
+                    status_update=TaskStatusUpdateEvent(
+                        task_id="t1",
+                        context_id="conv-hitl",
+                        status=TaskStatus(state=TaskState.TASK_STATE_INPUT_REQUIRED),
+                    )
+                ),
+                sid="sid",
+                request_id="req-hitl-1",
+                context_id="conv-hitl",
+                user_id="user-1",
+            )
+            assert "conv-hitl" in app._pending_interactions
+
+            # Turn later completes without asking → prompt cleared.
+            await _process_a2a_response(
+                client_event=StreamResponse(
+                    status_update=TaskStatusUpdateEvent(
+                        task_id="t1",
+                        context_id="conv-hitl",
+                        status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+                    )
+                ),
+                sid="sid",
+                request_id="req-hitl-2",
+                context_id="conv-hitl",
+                user_id="user-1",
+            )
+            assert "conv-hitl" not in app._pending_interactions
+    finally:
+        app._pending_interactions.pop("conv-hitl", None)

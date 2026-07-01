@@ -31,6 +31,17 @@ export interface CatalogSyncProgressData {
   [key: string]: unknown;
 }
 
+// Snapshot of an in-flight turn, returned when (re)subscribing to a conversation.
+// Lets a client that reconnected or reloaded resume the reply produced while it was
+// away (replyText up to `offset`) and restore any pending interactive prompt.
+export interface ConversationSnapshotData {
+  conversationId: string;
+  inFlight: boolean;
+  offset: number;
+  replyText: string;
+  pendingHitl?: AgentResponseData | null;
+}
+
 interface SocketContextType {
   socket: Socket | null;
   isConnected: boolean;
@@ -39,7 +50,10 @@ interface SocketContextType {
   initializeClient: (settings: Settings, sessionId: string) => Promise<boolean>;
   sendMessage: (payload: SendMessagePayload) => void;
   cancelTask: (conversationId: string) => void;
+  subscribeConversation: (conversationId: string) => void;
+  unsubscribeConversation: (conversationId: string) => void;
   onAgentResponse: (callback: (data: AgentResponseData) => void) => () => void;
+  onConversationSnapshot: (callback: (data: ConversationSnapshotData) => void) => () => void;
   onSchedulerNotification: (callback: (data: SchedulerNotification) => void) => () => void;
   onCallCompleted: (callback: (data: CallCompletedData) => void) => () => void;
   onCatalogReindexProgress: (callback: (data: CatalogReindexProgressData) => void) => () => void;
@@ -60,6 +74,7 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
   const [isSocketReady, setIsSocketReady] = useState(false);
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const responseCallbacksRef = useRef<Set<(data: AgentResponseData) => void>>(new Set());
+  const conversationSnapshotCallbacksRef = useRef<Set<(data: ConversationSnapshotData) => void>>(new Set());
   const schedulerCallbacksRef = useRef<Set<(data: SchedulerNotification) => void>>(new Set());
   const callCompletedCallbacksRef = useRef<Set<(data: CallCompletedData) => void>>(new Set());
   const catalogReindexCallbacksRef = useRef<Set<(data: CatalogReindexProgressData) => void>>(new Set());
@@ -99,6 +114,15 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
 
     newSocket.on('agent_response', (data: AgentResponseData) => {
       responseCallbacksRef.current.forEach((callback) => callback(data));
+    });
+
+    newSocket.on('conversation_snapshot', (data: ConversationSnapshotData) => {
+      // Restore any pending interactive prompt through the normal agent_response path so
+      // the existing HITL rendering handles it (a prompt that arrived while disconnected).
+      if (data?.pendingHitl) {
+        responseCallbacksRef.current.forEach((callback) => callback(data.pendingHitl as AgentResponseData));
+      }
+      conversationSnapshotCallbacksRef.current.forEach((callback) => callback(data));
     });
 
     newSocket.on('scheduler_notification', (data: SchedulerNotification) => {
@@ -183,10 +207,33 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
     [socket]
   );
 
+  const subscribeConversation = useCallback(
+    (conversationId: string) => {
+      if (!socket?.connected || !conversationId) return;
+      socket.emit('subscribe_conversation', { conversationId });
+    },
+    [socket]
+  );
+
+  const unsubscribeConversation = useCallback(
+    (conversationId: string) => {
+      if (!socket?.connected || !conversationId) return;
+      socket.emit('unsubscribe_conversation', { conversationId });
+    },
+    [socket]
+  );
+
   const onAgentResponse = useCallback((callback: (data: AgentResponseData) => void) => {
     responseCallbacksRef.current.add(callback);
     return () => {
       responseCallbacksRef.current.delete(callback);
+    };
+  }, []);
+
+  const onConversationSnapshot = useCallback((callback: (data: ConversationSnapshotData) => void) => {
+    conversationSnapshotCallbacksRef.current.add(callback);
+    return () => {
+      conversationSnapshotCallbacksRef.current.delete(callback);
     };
   }, []);
 
@@ -228,7 +275,10 @@ export function SocketProvider({ children, socketPath = '/api/v1/socket.io', cus
         initializeClient,
         sendMessage,
         cancelTask,
+        subscribeConversation,
+        unsubscribeConversation,
         onAgentResponse,
+        onConversationSnapshot,
         onSchedulerNotification,
         onCallCompleted,
         onCatalogReindexProgress,
