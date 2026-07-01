@@ -152,7 +152,7 @@ The `/skills/` virtual filesystem is **read-only** for agents. All mutations go 
 
 `build_sub_agent_graph()` is the shared helper for creating LangGraph agents. It handles:
 - Backend factory selection (injected vs. auto-created)
-- Middleware stack assembly (HITL, tool status, storage paths, prompt caching, etc.)
+- Middleware stack assembly (`GatewayAttributionMiddleware` outermost for per-model-call cost attribution, HITL, tool status, storage paths, prompt caching, etc.)
 - Response format strategy (auto/tool based on model type)
 - Sandbox-aware configuration
 
