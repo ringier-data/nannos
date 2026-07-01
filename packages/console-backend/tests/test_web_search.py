@@ -290,7 +290,9 @@ class TestEndpoint:
             endpoint, "gateway_web_search", AsyncMock(side_effect=RuntimeError("boom"))
         ):
             out = await endpoint.web_search_mcp(_req(), query="q", db=None, user=SimpleNamespace(sub="u1"))
-        assert out.startswith("Web search failed:") and "boom" in out
+        # Failure is caught and returned as a readable message, but the exception detail is NOT
+        # leaked to the calling agent (CodeQL: information exposure through an exception).
+        assert out.startswith("Web search failed") and "boom" not in out
 
     @pytest.mark.asyncio
     async def test_forwards_conversation_id_and_overrides_user_sub(self):
