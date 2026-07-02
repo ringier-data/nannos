@@ -229,7 +229,7 @@ async def create_voice_session(
     if session is None:
         logger.error(
             "Voice session insert returned None for user=%s sub_agent=%s call_sid=%s — "
-            "check that migration 070_create_voice_sessions.sql has been applied",
+            "check that migration 073_create_voice_sessions.sql has been applied",
             body.user_id, body.sub_agent_id, body.call_sid,
         )
         raise HTTPException(status_code=500, detail="Failed to create voice session")
