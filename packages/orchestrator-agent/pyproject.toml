@@ -20,6 +20,10 @@ dependencies = [
     "sse-starlette>=2.3.6",
     "starlette>=0.46.2",
     "deepagents[quickjs]>=0.6.0,<0.7.0",
+    # Floor the langchain-quickjs wasm line (>=0.2). The pre-wasm in-process
+    # engine could SIGABRT the whole pod on a GC fault; transitive via the
+    # uncapped deepagents extra, so pin explicitly to prevent regression.
+    "langchain-quickjs>=0.3.2,<0.4",
     "rcplus-alloy-common>=8.6.1",
     "langchain-mcp-adapters>=0.1.11",
     "pytest>=8.4.2",

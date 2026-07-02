@@ -637,7 +637,7 @@ class GraphFactory:
         # Supports argument-based conditions (e.g., docstore_search only when include_personal=True).
         hitl_middleware = _create_hitl_middleware()
 
-        # CodeInterpreterMiddleware exposes an ``eval`` JS REPL (with skills_backend).
+        # CodeInterpreterMiddleware exposes a wasm-sandboxed ``eval`` JS REPL.
         # The orchestrator passes ``broaden_exposure=False`` so ``eval`` exposes
         # only the filesystem baseline — NOT the per-user tool registry (hundreds
         # of MCP tools). The orchestrator's job is to plan and delegate via

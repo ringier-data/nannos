@@ -15,6 +15,10 @@ dependencies = [
     "langgraph-checkpoint-aws>=1.0.1",
     # DeepAgents
     "deepagents[quickjs]>=0.6.0,<0.7.0",
+    # Floor the langchain-quickjs wasm line (>=0.2). The pre-wasm in-process
+    # engine could SIGABRT the whole pod on a GC fault; transitive via the
+    # uncapped deepagents extra, so pin explicitly to prevent regression.
+    "langchain-quickjs>=0.3.2,<0.4",
     # MCP adapters
     "langchain-mcp-adapters>=0.1.11",
     # HTTP client
