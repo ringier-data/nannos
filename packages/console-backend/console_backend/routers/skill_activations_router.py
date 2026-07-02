@@ -48,6 +48,45 @@ async def _get_user_group_ids(request: Request, db: AsyncSession, user: User) ->
     return [g.id for g in groups] if groups else []
 
 
+def _get_sub_agent_service(request: Request):
+    return request.app.state.sub_agent_service
+
+
+async def _authorize_activation_mutation(
+    request: Request,
+    db: AsyncSession,
+    user: User,
+    *,
+    scope: str,
+    owner_user_id: str | None,
+    group_id: int | None,
+    sub_agent_id: int,
+) -> None:
+    """Authorize a mutation (deactivate/update) on a specific activation.
+
+    Activation rows are addressed by a sequential integer id, so resolving one by id
+    alone lets any authenticated user act on another user's or group's activation. Gate
+    the mutation on the activation's scope:
+      - personal: caller must own it
+      - group: caller must belong to the group
+      - sub-agent: caller must have write permission on the sub-agent
+
+    Raises 404 (not 403) on mismatch so existence of others' activations is not confirmed.
+    """
+    if scope == "personal":
+        if owner_user_id == user.id:
+            return
+    elif scope == "group":
+        if group_id is not None and group_id in await _get_user_group_ids(request, db, user):
+            return
+    elif scope == "sub-agent":
+        sub_agent_service = _get_sub_agent_service(request)
+        if await sub_agent_service.check_user_permission(db, sub_agent_id, user.id, "write"):
+            return
+
+    raise HTTPException(status_code=404, detail="Activation not found")
+
+
 # --- Response Models ---
 
 
@@ -178,7 +217,7 @@ async def deactivate_skill(
 
     result = await db.execute(
         sa_text("""
-            SELECT sa.sub_agent_id, s.name as agent_name
+            SELECT sa.sub_agent_id, sa.scope, sa.user_id, sa.group_id, s.name as agent_name
             FROM skill_activations sa
             JOIN sub_agents s ON s.id = sa.sub_agent_id
             WHERE sa.id = :id
@@ -188,6 +227,16 @@ async def deactivate_skill(
     row = result.mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Activation not found")
+
+    await _authorize_activation_mutation(
+        request,
+        db,
+        user,
+        scope=row["scope"],
+        owner_user_id=row["user_id"],
+        group_id=row["group_id"],
+        sub_agent_id=row["sub_agent_id"],
+    )
 
     try:
         deactivated = await activation_service.deactivate(
@@ -226,7 +275,7 @@ async def update_activation(
 
     result = await db.execute(
         sa_text("""
-            SELECT s.name as agent_name
+            SELECT sa.sub_agent_id, sa.scope, sa.user_id, sa.group_id, s.name as agent_name
             FROM skill_activations sa
             JOIN sub_agents s ON s.id = sa.sub_agent_id
             WHERE sa.id = :id
@@ -236,6 +285,16 @@ async def update_activation(
     row = result.mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Activation not found")
+
+    await _authorize_activation_mutation(
+        request,
+        db,
+        user,
+        scope=row["scope"],
+        owner_user_id=row["user_id"],
+        group_id=row["group_id"],
+        sub_agent_id=row["sub_agent_id"],
+    )
 
     try:
         new_hash = await activation_service.update_activation(
@@ -280,7 +339,7 @@ async def bulk_update_activations(
 
         result = await db.execute(
             sa_text("""
-                SELECT s.name as agent_name
+                SELECT sa.sub_agent_id, sa.scope, sa.user_id, sa.group_id, s.name as agent_name
                 FROM skill_activations sa
                 JOIN sub_agents s ON s.id = sa.sub_agent_id
                 WHERE sa.id = :id
@@ -289,6 +348,21 @@ async def bulk_update_activations(
         )
         row = result.mappings().first()
         if not row:
+            failed.append({"id": activation_id, "reason": "Activation not found"})
+            continue
+
+        try:
+            await _authorize_activation_mutation(
+                request,
+                db,
+                user,
+                scope=row["scope"],
+                owner_user_id=row["user_id"],
+                group_id=row["group_id"],
+                sub_agent_id=row["sub_agent_id"],
+            )
+        except HTTPException:
+            # Not authorized — report as not-found to avoid confirming existence.
             failed.append({"id": activation_id, "reason": "Activation not found"})
             continue
 
