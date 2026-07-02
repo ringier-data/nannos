@@ -304,6 +304,12 @@ class SkillsRegistryConfig(BaseModel):
     )
 
 
+class VoiceAgentConfig(BaseModel):
+    """Voice-agent service principal configuration."""
+
+    client_id: str = Field(default_factory=lambda: os.getenv("VOICE_AGENT_CLIENT_ID", "voice-agent"))
+
+
 class Config(BaseModel):
     """Application configuration."""
 
@@ -315,6 +321,7 @@ class Config(BaseModel):
 
     oidc: OidcConfig = Field(default_factory=OidcConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
+    voice_agent: VoiceAgentConfig = Field(default_factory=VoiceAgentConfig)
     docstore: DocstoreConfig = Field(default_factory=DocstoreConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     keycloak_admin: KeycloakAdminConfig = Field(default_factory=KeycloakAdminConfig)

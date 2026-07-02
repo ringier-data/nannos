@@ -18,6 +18,7 @@ When ``OIDC_ISSUER`` is absent the server runs without auth (local dev).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -59,6 +60,8 @@ from ringier_a2a_sdk.server.context_builder import AuthRequestContextBuilder
 from ringier_a2a_sdk.server.executor import BaseAgentExecutor
 
 from voice_agent.a2a_agent import JSON_SCHEMA
+from voice_agent.agent import warm_up_mcp_gateway
+from voice_agent.inbound import inbound_router
 from voice_agent.twilio_transport import _voice_agent, twilio_router
 
 load_dotenv()
@@ -73,9 +76,15 @@ configure_existing_logger(logging.getLogger("ringier_a2a_sdk"))
 @asynccontextmanager
 async def lifespan(app) -> AsyncIterator[None]:
     """Startup / shutdown lifecycle hook."""
+    # Warm the (external, scale-to-zero) MCP gateway in the background so the first
+    # call does not pay its cold-start cost. Best-effort and non-blocking — see
+    # voice_agent.agent.warm_up_mcp_gateway (disable with MCP_WARMUP_ENABLED=false).
+    app.state.mcp_warmup_task = asyncio.create_task(warm_up_mcp_gateway())
     logger.info("Voice Agent startup complete")
     yield
     await _voice_agent.close()
+    from voice_agent.console_client import _http_client  # noqa: PLC0415
+    await _http_client.aclose()
     logger.info("Voice Agent shutdown complete")
 
 
@@ -175,10 +184,13 @@ def create_app():
         # they must be public.  Subclass to extend the hardcoded PUBLIC_PATHS list.
         class _VoiceAgentJWTMiddleware(JWTValidatorMiddleware):
             PUBLIC_PATHS = JWTValidatorMiddleware.PUBLIC_PATHS + [
-                "/twilio/voice",  # TwiML webhook called by Twilio when call connects
-                "/twilio/stream",  # Media Streams WebSocket (WS upgrade, no auth header)
-                "/twilio/call",  # Direct outbound call trigger (internal use)
+                "/twilio/voice",     # TwiML webhook (outbound answer URL)
+                "/twilio/stream",    # Media Streams WebSocket
+                "/twilio/call",      # Direct outbound call trigger
                 "/twilio/call/custom",
+                "/twilio/incoming",          # Inbound call webhook
+                "/twilio/incoming/resume",   # DTMF resume opt-in (before picker)
+                "/twilio/incoming/menu",     # DTMF sub-agent selection
             ]
 
         # Middleware is added last-first; execution order: JWT → SubAgentId → UserContext
@@ -233,6 +245,7 @@ def create_app():
 
     # ── Twilio routes ─────────────────────────────────────────────────────────
     app.include_router(twilio_router)
+    app.include_router(inbound_router)
 
     return app
 

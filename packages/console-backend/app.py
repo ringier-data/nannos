@@ -30,9 +30,9 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi_mcp import FastApiMCP
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from rcplus_alloy_common.logging import (
     configure_existing_logger,
     configure_logger,
@@ -57,11 +57,12 @@ from console_backend.routers.admin_group_router import router as admin_group_rou
 from console_backend.routers.admin_mcp_gateway_server_access_router import (
     router as admin_mcp_gateway_server_access_router,
 )
+from console_backend.routers.admin_model_gateway_router import router as admin_model_gateway_router
+from console_backend.routers.admin_system_status_router import router as admin_system_status_router
 from console_backend.routers.admin_user_router import router as admin_user_router
 from console_backend.routers.analytics_router import router as analytics_router
 from console_backend.routers.auth_router import router as auth_router
 from console_backend.routers.bug_report_mcp_tools import router as bug_report_mcp_router
-from console_backend.routers.web_search_mcp_tools import router as web_search_mcp_router
 from console_backend.routers.bug_report_router import router as bug_report_router
 from console_backend.routers.catalog_router import router as catalog_router
 from console_backend.routers.conversation_router import router as conversation_router
@@ -75,8 +76,6 @@ from console_backend.routers.models_router import router as models_router
 from console_backend.routers.notification_router import router as notification_router
 from console_backend.routers.outbound_scim_router import router as outbound_scim_router
 from console_backend.routers.playbook_router import router as playbook_router
-from console_backend.routers.admin_model_gateway_router import router as admin_model_gateway_router
-from console_backend.routers.admin_system_status_router import router as admin_system_status_router
 from console_backend.routers.rate_card_router import router as rate_card_router
 from console_backend.routers.scheduler_router import router as scheduler_router
 from console_backend.routers.scim_router import router as scim_router
@@ -87,6 +86,8 @@ from console_backend.routers.skills_registry_router import router as skills_regi
 from console_backend.routers.sub_agent_router import router as sub_agent_router
 from console_backend.routers.tool_risk_router import router as tool_risk_router
 from console_backend.routers.usage_router import router as usage_router
+from console_backend.routers.voice_agent_router import router as voice_agent_router
+from console_backend.routers.web_search_mcp_tools import router as web_search_mcp_router
 from console_backend.service_instances import cleanup_services, initialize_services
 from console_backend.services.conversation_service import ConversationService
 from console_backend.services.messages_service import MessagesService, _parse_task_state
@@ -372,6 +373,7 @@ app.include_router(scim_token_router)
 app.include_router(scim_router)
 # Outbound SCIM endpoint management (push provisioning to external IdPs)
 app.include_router(outbound_scim_router)
+app.include_router(voice_agent_router)
 
 # Configure CORS origins for Socket.IO
 # In development, allow localhost. In production, use BASE_DOMAIN env var.
@@ -486,6 +488,7 @@ async def _execute_api_tool_with_keepalive(*args: Any, **kwargs: Any) -> Any:
 
 
 mcp._execute_api_tool = _execute_api_tool_with_keepalive
+
 
 # Mount the MCP server over a *streaming* StreamableHTTP transport.
 #

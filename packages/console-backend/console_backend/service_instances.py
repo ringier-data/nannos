@@ -31,6 +31,7 @@ from .repositories.tool_risk_repository import ToolRiskRepository
 from .repositories.usage_repository import UsageRepository
 from .repositories.user_group_repository import UserGroupRepository
 from .repositories.user_repository import UserRepository
+from .repositories.voice_session_repository import VoiceSessionRepository
 from .services import SecretsService, SessionService, SocketSessionService, UserService
 from .services.analytics_service import AnalyticsService
 from .services.audit_service import AuditService
@@ -60,6 +61,7 @@ from .services.mcp_gateway_server_access_service import McpGatewayServerAccessSe
 from .services.sub_agent_service import SubAgentService
 from .services.tool_risk_service import ToolRiskService
 from .services.usage_service import UsageService
+from .services.voice_session_service import VoiceSessionService
 from .services.user_group_service import UserGroupService
 from .services.user_settings_service import UserSettingsService
 from .utils.orchestrator_cookie_cache import OrchestratorCookieCache
@@ -307,6 +309,12 @@ async def initialize_services(app: "FastAPI") -> None:
         agent_runner_url=config.scheduler.agent_runner_url,
         oauth_service=app.state.oauth_service,
     )
+
+    # Initialize voice session repository and service
+    app.state.voice_session_repository = VoiceSessionRepository()
+    app.state.voice_session_repository.set_audit_service(app.state.audit_service)
+    app.state.voice_session_service = VoiceSessionService()
+    app.state.voice_session_service.set_repository(app.state.voice_session_repository)
 
     # Initialize feedback repository and service
     app.state.feedback_repository = FeedbackRepository()

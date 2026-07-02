@@ -94,6 +94,15 @@ _MCP_GATEWAY_URL: str | None = os.getenv("MCP_GATEWAY_URL") or None
 
 logger = logging.getLogger(__name__)
 
+# Strong references to fire-and-forget tasks — prevents GC before completion.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 class VoiceName(str, Enum):
     """
@@ -272,12 +281,19 @@ class VoiceAgent(BaseAgent):
         mcp_tools: list[str],
         access_token: str | None,
         phone_number: str | None = None,
+        session_resumption_handle: str | None = None,
+        voice_session_id: str | None = None,
+        mcp_headers: dict[str, str] | None = None,
     ) -> None:
         """Create a GeminiLiveAgent, start it, and register in ``_active_sessions``.
 
         Single source of truth for session creation — used by both
         ``_prewarm_audio_session`` (outbound calls, fired during ringing) and
         ``_start_audio_session`` (cold-start fallback for inbound / browser).
+
+        ``mcp_headers`` may be supplied pre-built (inbound calls, where the backend
+        mints a user-scoped gateway token from the stored offline token). Otherwise
+        they are derived from ``access_token`` via the credential injector (outbound).
         """
         if session_key in self._active_sessions:
             return
@@ -286,8 +302,9 @@ class VoiceAgent(BaseAgent):
 
         voice = voice_name or "Kore"
 
-        mcp_headers: dict[str, str] | None = None
-        if access_token:
+        if mcp_headers:
+            logger.info("Using pre-built MCP headers (session=%s)", session_key)
+        elif access_token:
             set_request_user_sub(session_key)
             set_request_access_token(access_token)
             try:
@@ -302,9 +319,11 @@ class VoiceAgent(BaseAgent):
         agent = GeminiLiveAgent(
             system_prompt=prompt,
             voice_name=voice,
-            mcp_gateway_url=_MCP_GATEWAY_URL,
+            mcp_gateway_url=_MCP_GATEWAY_URL if mcp_headers else None,
             mcp_headers=mcp_headers,
             mcp_tool_filter=mcp_tools if mcp_tools else None,
+            session_resumption_handle=session_resumption_handle,
+            session_id=session_key,
         )
         agent_task = asyncio.create_task(agent.run(audio_in, event_out))
 
@@ -314,13 +333,15 @@ class VoiceAgent(BaseAgent):
             "agent": agent,
             "agent_task": agent_task,
             "phone_number": phone_number,
+            "voice_session_id": voice_session_id,
         }
         logger.info(
-            "Gemini session created: %s (voice=%s, mcp_tools=%s, gateway=%s)",
+            "Gemini session created: %s (voice=%s, mcp_tools=%s, gateway=%s, resume=%s)",
             session_key,
             voice,
             mcp_tools,
             _MCP_GATEWAY_URL,
+            bool(session_resumption_handle),
         )
 
     async def _prewarm_audio_session(
@@ -404,6 +425,9 @@ class VoiceAgent(BaseAgent):
                     mcp_tools=init_config.get("mcp_tools") or [],
                     access_token=init_config.get("access_token"),
                     phone_number=None,
+                    session_resumption_handle=init_config.get("gemini_session_handle"),
+                    voice_session_id=init_config.get("voice_session_id"),
+                    mcp_headers=init_config.get("mcp_headers"),
                 )
 
         voice_name = self._active_sessions[session_key]["agent"].voice_name
@@ -476,6 +500,13 @@ class VoiceAgent(BaseAgent):
                         content="Tool authorization required — SMS sent with instructions.",
                         metadata={"type": "mcp_auth_failed", "authorize_url": authorize_url},
                     )
+                elif event_type == "session_resumption_handle":
+                    handle = event.get("handle", "")
+                    voice_session_id = self._active_sessions.get(session_key, {}).get("voice_session_id")
+                    if voice_session_id and handle:
+                        from voice_agent.console_client import update_session_handle  # noqa: PLC0415
+                        _fire_and_forget(update_session_handle(voice_session_id, handle))
+                        logger.debug("Queued session handle update (session=%s)", session_key)
                 elif event_type == "error":
                     error_msg = event.get("message", "Unknown error")
                     logger.error(f"Gemini error: {error_msg}")
@@ -588,6 +619,8 @@ class VoiceAgent(BaseAgent):
             mcp_tools=mcp_tools,
             access_token=user_config.access_token.get_secret_value() if user_config.access_token else None,
             context_messages=context_messages or [],
+            sub_agent_id=sub_agent_id,
+            user_sub=user_config.user_sub,
         ):
             yield event
 
@@ -655,6 +688,8 @@ class VoiceAgent(BaseAgent):
         mcp_tools: list[str],
         access_token: str | None,
         context_messages: list[str] | None,
+        sub_agent_id: int | None = None,
+        user_sub: str | None = None,
     ) -> AsyncIterable[AgentStreamResponse]:
         """Initiate a Twilio phone call and hold the A2A stream open until it ends.
 
@@ -783,6 +818,17 @@ class VoiceAgent(BaseAgent):
         self._prewarm_tasks[call_sid] = prewarm_task
         logger.info("Pre-warm session keyed to call_sid=%s", call_sid)
 
+        # Create the voice session record so the Gemini resume handle is saved
+        # (memory always on). Outbound calls never *offer* resume, but an inbound
+        # callback can continue an outbound conversation. The handle is persisted
+        # during the call via _active_sessions[call_sid]["voice_session_id"].
+        voice_session_id = await self._create_outbound_voice_session(
+            call_sid=call_sid,
+            phone_number=phone_number,
+            sub_agent_id=sub_agent_id,
+            user_sub=user_sub,
+        )
+
         # Register config so twilio_stream picks it up when the call connects.
         _PENDING_CALLS[call_sid] = OutboundCallRequest(
             to=phone_number,
@@ -791,6 +837,7 @@ class VoiceAgent(BaseAgent):
             mcp_tools=mcp_tools,
             access_token=access_token,
             context_messages=context_messages,
+            voice_session_id=voice_session_id,
         )
 
         # Register futures:
@@ -864,6 +911,61 @@ class VoiceAgent(BaseAgent):
 
         logger.info("Call %s finished with %d transcript entries", call_sid, len(transcript))
         yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
+
+    async def _create_outbound_voice_session(
+        self,
+        *,
+        call_sid: str,
+        phone_number: str,
+        sub_agent_id: int | None,
+        user_sub: str | None,
+    ) -> str | None:
+        """Create a voice session record for an outbound call. Returns its id or None.
+
+        Resolves the stable user id from the dialled number (outbound always calls
+        the user's own number) so records share the same user_id as inbound calls —
+        letting an inbound callback resume an outbound conversation. Best-effort:
+        on any failure the call still proceeds, just without a saved resume handle.
+        """
+        from voice_agent.console_client import (  # noqa: PLC0415
+            create_voice_session,
+            lookup_user_by_phone,
+        )
+
+        try:
+            user = await lookup_user_by_phone(phone_number)
+        except Exception as exc:
+            logger.warning("Outbound voice session: phone lookup failed (%s)", exc)
+            user = None
+        if user is None:
+            logger.warning(
+                "Outbound voice session: caller not resolved (sub=%s, call_sid=%s, sub_agent_id=%s) — no record created",
+                user_sub,
+                call_sid,
+                sub_agent_id,
+            )
+            return None
+
+        try:
+            session = await create_voice_session(
+                user_id=user.id,
+                phone_number=phone_number,
+                sub_agent_id=sub_agent_id,
+                call_sid=call_sid,
+                use_session_memory=True,
+            )
+        except Exception as exc:
+            logger.error("Outbound voice session creation failed: %s", exc)
+            return None
+        if session is None:
+            logger.error("Outbound voice session creation returned None (call_sid=%s)", call_sid)
+            return None
+
+        # Make the id available to the resume-handle event handler during the call.
+        if call_sid in self._active_sessions:
+            self._active_sessions[call_sid]["voice_session_id"] = session.id
+        logger.info("Outbound voice session created: id=%s call_sid=%s", session.id, call_sid)
+        return session.id
 
     async def _end_session(self, session_key: str):
         # Cancel any pending pre-warm task that never got picked up

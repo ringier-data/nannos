@@ -198,7 +198,10 @@ class TestGatewayWebSearch:
                         "message": {
                             "content": "Latest LTS is Node 24.",
                             "annotations": [
-                                {"type": "url_citation", "url_citation": {"title": "nodejs.org", "url": "https://nodejs.org"}},
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {"title": "nodejs.org", "url": "https://nodejs.org"},
+                                },
                                 {"type": "url_citation", "url_citation": {"title": "dup", "url": "https://nodejs.org"}},
                                 {"type": "other", "url_citation": {"url": "https://skip"}},
                             ],
@@ -278,16 +281,22 @@ class TestEndpoint:
 
     @pytest.mark.asyncio
     async def test_success_formats_answer_and_sources(self):
-        with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="gemini-flash")), patch.object(
-            endpoint, "gateway_web_search", AsyncMock(return_value=("Answer.", [{"title": "t", "url": "https://u"}]))
+        with (
+            patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="gemini-flash")),
+            patch.object(
+                endpoint,
+                "gateway_web_search",
+                AsyncMock(return_value=("Answer.", [{"title": "t", "url": "https://u"}])),
+            ),
         ):
             out = await endpoint.web_search_mcp(_req(), query="q", db=None, user=SimpleNamespace(sub="u1"))
         assert "Answer." in out and "https://u" in out
 
     @pytest.mark.asyncio
     async def test_failure_is_caught(self):
-        with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="m")), patch.object(
-            endpoint, "gateway_web_search", AsyncMock(side_effect=RuntimeError("boom"))
+        with (
+            patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="m")),
+            patch.object(endpoint, "gateway_web_search", AsyncMock(side_effect=RuntimeError("boom"))),
         ):
             out = await endpoint.web_search_mcp(_req(), query="q", db=None, user=SimpleNamespace(sub="u1"))
         # Failure is caught and returned as a readable message, but the exception detail is NOT
@@ -300,8 +309,9 @@ class TestEndpoint:
         # gateway call but always uses the authenticated user_sub (never the client-supplied one).
         header = json.dumps({"conversation_id": "conv-123", "sub_agent_id": "sa-9", "user_sub": "spoofed"})
         gw = AsyncMock(return_value=("Answer.", []))
-        with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="gemini-flash")), patch.object(
-            endpoint, "gateway_web_search", gw
+        with (
+            patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="gemini-flash")),
+            patch.object(endpoint, "gateway_web_search", gw),
         ):
             await endpoint.web_search_mcp(
                 _req({"x-nannos-context": header}),
@@ -317,8 +327,9 @@ class TestEndpoint:
     @pytest.mark.asyncio
     async def test_malformed_attribution_header_is_ignored(self):
         gw = AsyncMock(return_value=("Answer.", []))
-        with patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="m")), patch.object(
-            endpoint, "gateway_web_search", gw
+        with (
+            patch.object(endpoint, "resolve_web_search_model", AsyncMock(return_value="m")),
+            patch.object(endpoint, "gateway_web_search", gw),
         ):
             await endpoint.web_search_mcp(
                 _req({"x-nannos-context": "not-json"}),

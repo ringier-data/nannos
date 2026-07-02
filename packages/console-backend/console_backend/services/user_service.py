@@ -153,6 +153,57 @@ class UserService:
             logger.error(f"Failed to get user by sub: {e}")
             return None
 
+    async def get_user_by_phone_number(self, db: AsyncSession, phone_number: str) -> User | None:
+        """Retrieve a user by phone number.
+
+        Checks phone_number_override (user_settings) first, then phone_number_idp (users table).
+
+        Args:
+            db: The database session
+            phone_number: E.164 phone number string
+
+        Returns:
+            The user or None if not found
+        """
+        try:
+            query = text("""
+                SELECT u.id, u.sub, u.email, u.first_name, u.last_name, u.company_name,
+                       u.is_administrator, u.role, u.status, u.phone_number_idp,
+                       u.scim_attributes, u.deleted_at, u.created_at, u.updated_at
+                FROM users u
+                LEFT JOIN user_settings us ON u.id = us.user_id
+                WHERE (us.phone_number_override = :phone_number
+                   OR u.phone_number_idp = :phone_number)
+                  AND u.status != 'deleted'
+                LIMIT 1
+            """)
+            result = await db.execute(query, {"phone_number": phone_number})
+            row = result.mappings().first()
+
+            if row is None:
+                logger.debug("User not found by phone number")
+                return None
+
+            return User(
+                id=row["id"],
+                sub=row["sub"],
+                email=row["email"],
+                first_name=row["first_name"],
+                last_name=row["last_name"],
+                company_name=row["company_name"],
+                is_administrator=row["is_administrator"],
+                role=row["role"],
+                status=UserStatus(row["status"]),
+                phone_number_idp=row["phone_number_idp"],
+                scim_attributes=row["scim_attributes"],
+                deleted_at=row["deleted_at"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+        except Exception as e:
+            logger.error(f"Failed to get user by phone number: {e}")
+            return None
+
     async def get_user_with_groups(self, db: AsyncSession, user_id: str) -> UserWithGroups | None:
         """Retrieve a user by ID with group memberships.
 

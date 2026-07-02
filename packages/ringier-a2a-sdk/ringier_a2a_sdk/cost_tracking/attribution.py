@@ -186,9 +186,7 @@ async def _stamp_metadata(request) -> None:
         request.headers[_HEADER] = json.dumps(attrib)
 
 
-_shared_http_client = LazyClient(
-    lambda: httpx.AsyncClient(event_hooks={"request": [_stamp_metadata]}, timeout=600.0)
-)
+_shared_http_client = LazyClient(lambda: httpx.AsyncClient(event_hooks={"request": [_stamp_metadata]}, timeout=600.0))
 
 
 def build_attribution_http_client():

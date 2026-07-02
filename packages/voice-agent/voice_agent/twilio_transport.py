@@ -59,12 +59,23 @@ from voice_agent.call_bridge import (
     _CALL_ANSWERED,
     _CALL_FUTURES,
     _PENDING_CALLS,
-    build_effective_prompt
+    build_effective_prompt,
 )
+from voice_agent.inbound import build_inbound_init_config, pop_inbound_state
 
 logger = logging.getLogger(__name__)
 
 twilio_router = APIRouter(prefix="/twilio", tags=["twilio"])
+
+# Strong references to fire-and-forget tasks — prevents GC before completion.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 # ── Audio constants ───────────────────────────────────────────────────────────
 
@@ -93,11 +104,13 @@ async def twilio_voice_webhook(request: Request) -> Response:
     forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     scheme = "wss" if forwarded_proto == "https" else "ws"
     stream_url = f"{scheme}://{host}/twilio/stream"
-    logger.info("Twilio voice webhook — stream_url=%s (x-forwarded-proto=%s)", stream_url, forwarded_proto)
-
-    twiml = (
-        f'<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="{stream_url}" /></Connect></Response>'
+    logger.info(
+        "Twilio voice webhook — stream_url=%s (x-forwarded-proto=%s)",
+        stream_url,
+        forwarded_proto,
     )
+
+    twiml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="{stream_url}" /></Connect></Response>'
     return Response(content=twiml, media_type="text/xml")
 
 
@@ -142,22 +155,40 @@ async def twilio_stream(websocket: WebSocket) -> None:
                     logger.debug("Twilio: protocol handshake received")
 
                 elif event == "start":
-                    state["stream_sid"] = msg.get("streamSid") or msg["start"]["streamSid"]
+                    state["stream_sid"] = (
+                        msg.get("streamSid") or msg["start"]["streamSid"]
+                    )
                     state["call_sid"] = msg["start"].get("callSid")
-                    state["session_key"] = state["call_sid"]  # Use call_sid as session key
+                    state["session_key"] = state[
+                        "call_sid"
+                    ]  # Use call_sid as session key
 
-                    # Check for custom config (registered by VoiceAgent._stream_phone_call)
-                    call_config = _PENDING_CALLS.pop(state["call_sid"], None) if state["call_sid"] else None
+                    # Check for custom config — outbound first, then inbound.
+                    call_config = (
+                        _PENDING_CALLS.pop(state["call_sid"], None)
+                        if state["call_sid"]
+                        else None
+                    )
+                    inbound_state = (
+                        pop_inbound_state(state["call_sid"])
+                        if (state["call_sid"] and not call_config)
+                        else None
+                    )
 
                     # Initialize A2A session with config
                     if call_config and call_config.system_prompt:
                         logger.info(
-                            "Starting A2A voice session with custom prompt (streamSid=%s, callSid=%s)",
+                            "Starting outbound A2A voice session (streamSid=%s, callSid=%s)",
                             state["stream_sid"],
                             state["call_sid"],
                         )
-                        system_prompt = build_effective_prompt(call_config.system_prompt, call_config.context_messages)
-                        
+                        system_prompt = build_effective_prompt(
+                            call_config.system_prompt, call_config.context_messages
+                        )
+                        # Carry the voice_session_id for the finally-block cleanup
+                        # (complete_voice_session). The Gemini handle is persisted
+                        # during the call via _active_sessions, set in a2a_agent.
+                        state["voice_session_id"] = call_config.voice_session_id
                         init_query = json.dumps(
                             {
                                 "system_prompt": system_prompt,
@@ -166,6 +197,21 @@ async def twilio_stream(websocket: WebSocket) -> None:
                                 "access_token": call_config.access_token,
                             }
                         )
+                    elif inbound_state and inbound_state.ready:
+                        logger.info(
+                            "Starting inbound A2A voice session (streamSid=%s, callSid=%s, agent=%s)",
+                            state["stream_sid"],
+                            state["call_sid"],
+                            inbound_state.selected_agent.name
+                            if inbound_state.selected_agent
+                            else "unknown",
+                        )
+                        init_config = build_inbound_init_config(inbound_state)
+                        # Store voice_session_id in WebSocket state (for finally-block cleanup)
+                        # AND keep it in init_config so _create_audio_session can use it
+                        # to persist the Gemini session handle via update_session_handle.
+                        state["voice_session_id"] = init_config.get("voice_session_id")
+                        init_query = json.dumps(init_config)
                     else:
                         logger.info(
                             "Starting A2A voice session with default config (streamSid=%s, callSid=%s)",
@@ -173,7 +219,6 @@ async def twilio_stream(websocket: WebSocket) -> None:
                             state["call_sid"],
                         )
                         init_query = json.dumps({})  # Use defaults
-
 
                     # Signal _stream_phone_call that the callee answered.
                     answered_future = _CALL_ANSWERED.pop(state["call_sid"], None)
@@ -217,7 +262,9 @@ async def twilio_stream(websocket: WebSocket) -> None:
                         await _voice_agent.inject_text(state["session_key"], text_input)
 
                 elif event == "stop":
-                    logger.info("Twilio: stream stopped (streamSid=%s)", state["stream_sid"])
+                    logger.info(
+                        "Twilio: stream stopped (streamSid=%s)", state["stream_sid"]
+                    )
                     break
 
         except WebSocketDisconnect:
@@ -235,8 +282,12 @@ async def twilio_stream(websocket: WebSocket) -> None:
             # The call is already connected at this point — start a Gemini Live
             # audio session directly rather than going through _stream_impl
             # (which now requires a phone number and would fail here).
-            init_config = json.loads(init_query) if init_query.strip().startswith("{") else {}
-            async for response in _voice_agent._start_audio_session(init_config, session_key):
+            init_config = (
+                json.loads(init_query) if init_query.strip().startswith("{") else {}
+            )
+            async for response in _voice_agent._start_audio_session(
+                init_config, session_key
+            ):
                 if response.state == TaskState.TASK_STATE_FAILED:
                     logger.error(f"A2A agent failed: {response.content}")
                     break
@@ -279,7 +330,9 @@ async def twilio_stream(websocket: WebSocket) -> None:
                         break
 
                 # Handle interruptions
-                elif response.metadata and response.metadata.get("type") == "interrupted":
+                elif (
+                    response.metadata and response.metadata.get("type") == "interrupted"
+                ):
                     if state["stream_sid"]:
                         try:
                             await websocket.send_text(
@@ -296,7 +349,9 @@ async def twilio_stream(websocket: WebSocket) -> None:
                     state["ratecv_out_state"] = None
 
                 # Accumulate transcript
-                elif response.metadata and response.metadata.get("type") == "transcript":
+                elif (
+                    response.metadata and response.metadata.get("type") == "transcript"
+                ):
                     role = response.metadata.get("role", "assistant")
                     if response.content:
                         if transcript and role == transcript[-1]["role"]:
@@ -328,3 +383,12 @@ async def twilio_stream(websocket: WebSocket) -> None:
         if _fut and not _fut.done():
             _fut.set_result({"transcript": transcript, "call_sid": call_sid})
             logger.info("Resolved A2A future for call_sid=%s", call_sid)
+
+        # Mark inbound voice session complete (fire-and-forget)
+        voice_session_id = state.get("voice_session_id")
+        if voice_session_id:
+            from voice_agent.console_client import (
+                complete_voice_session,  # noqa: PLC0415
+            )
+
+            _fire_and_forget(complete_voice_session(voice_session_id))
