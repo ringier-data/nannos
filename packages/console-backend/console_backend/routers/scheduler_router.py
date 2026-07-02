@@ -231,7 +231,7 @@ async def update_job(
     "/jobs/{job_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a scheduled job.",
-    # tags=["MCP"],
+    tags=["MCP"],
     operation_id="scheduler_delete_job",
 )
 async def delete_job(
@@ -306,6 +306,8 @@ async def pause_job(
     response_model=ScheduledJob,
     summary="Resume a paused scheduled job.",
     description="Re-enables the job and resets the failure counter.",
+    tags=["MCP"],
+    operation_id="scheduler_resume_job",
 )
 async def resume_job(
     job_id: int,

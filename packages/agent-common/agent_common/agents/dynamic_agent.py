@@ -110,6 +110,17 @@ _SUB_AGENT_RECURSION_LIMIT = int(
     )
 )
 
+# Tool-name prefixes served by the console-backend MCP (FastAPI routes tagged
+# ``MCP``): the ``console_*`` tools AND the ``scheduler_*`` scheduler tools.
+# Everything else is served by the Gatana gateway. This is the single source of
+# truth for deciding which MCP server connection(s) to open during discovery.
+CONSOLE_BACKEND_TOOL_PREFIXES = ("console_", "scheduler_")
+
+
+def is_console_backend_tool(name: str) -> bool:
+    """Return True if ``name`` is served by the console-backend MCP, not the gateway."""
+    return name.startswith(CONSOLE_BACKEND_TOOL_PREFIXES)
+
 
 def _validate_tool_schema(tool: BaseTool) -> BaseTool:
     """Validate and fix MCP tool schema for OpenAI API compatibility.
@@ -570,9 +581,12 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
         mcp_gateway_client_id = self.mcp_gateway_client_id
         mcp_tool_names = set(self.config.mcp_tools or [])
 
-        # Determine which MCP servers to connect to
-        has_console_tools = any(name.startswith("console_") for name in mcp_tool_names)
-        has_gateway_tools = any(not name.startswith("console_") for name in mcp_tool_names)
+        # Determine which MCP servers to connect to. ``is_console_backend_tool``
+        # (module-level) is the single source of truth for the console-backend
+        # tool prefixes (``console_*`` and ``scheduler_*``); everything else is a
+        # Gatana gateway tool.
+        has_console_tools = any(is_console_backend_tool(name) for name in mcp_tool_names)
+        has_gateway_tools = any(not is_console_backend_tool(name) for name in mcp_tool_names)
 
         logger.info(f"Discovering MCP tools for {self.name}: gateway={has_gateway_tools}, console={has_console_tools}")
 

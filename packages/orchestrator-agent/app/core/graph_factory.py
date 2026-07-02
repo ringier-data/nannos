@@ -23,13 +23,10 @@ from typing import Any, Optional
 from a2a.types import Message as A2AMessage
 from a2a.types import Role as A2ARole
 from agent_common.a2a.client_runnable import A2AClientRunnable as _ClientRunnable
-from agent_common.a2a.structured_response import A2A_PROTOCOL_ADDENDUM as SUB_AGENT_PROTOCOL_ADDENDUM
-from agent_common.a2a.structured_response import get_response_format as get_sub_agent_response_format
 from agent_common.a2a.structured_response import select_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.graph_utils import (
     build_code_interpreter_middlewares,
-    build_common_middleware_stack,
     create_indexing_backend_factory,
 )
 from agent_common.core.model_factory import (
@@ -47,7 +44,6 @@ from agent_common.middleware.storage_paths_middleware import StoragePathsInstruc
 from agent_common.middleware.tool_status import ToolStatusMiddleware
 from agent_common.models.base import ModelType, ThinkingLevel
 from deepagents import create_deep_agent
-from langchain.agents import create_agent
 from langchain.agents.middleware import ToolRetryMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
@@ -131,7 +127,6 @@ class GraphFactory:
         # Model and graph caches
         self._models: dict[tuple[str, str | None], BaseChatModel] = {}
         self._graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
-        self._task_scheduler_graphs: dict[tuple[str, str | None], CompiledStateGraph] = {}
 
         # Static tools cache (created once per model type, reused)
         self._static_tools_cache: list[BaseTool] = []
@@ -286,7 +281,6 @@ class GraphFactory:
         self._store_setup_complete = False
         self._embeddings_model = None
         self._graphs.clear()
-        self._task_scheduler_graphs.clear()
 
     @property
     def store(self):
@@ -521,9 +515,7 @@ class GraphFactory:
             self._models[cache_key] = self._create_model(model_type, thinking_level)
         return self._models[cache_key]
 
-    def _create_middleware_stack(
-        self, model: BaseChatModel | None = None, is_gemini: bool = False
-    ) -> list[Any]:
+    def _create_middleware_stack(self, model: BaseChatModel | None = None, is_gemini: bool = False) -> list[Any]:
         """Create the complete middleware stack for a graph.
 
         Middleware Execution Order (LangChain convention):
@@ -855,115 +847,9 @@ class GraphFactory:
         # it binds store=None permanently. A decided mode ("indexed"/"absent") is stable and
         # safe to cache; ensure_store_ready() busts the cache if "absent" later upgrades.
         if self._store_enabled and self._store_mode is None:
-            logger.warning("Graph for %s built before document store is ready; not caching (will retry)", effective_model)
+            logger.warning(
+                "Graph for %s built before document store is ready; not caching (will retry)", effective_model
+            )
             return graph
         self._graphs[cache_key] = graph
-        return graph
-
-    def _create_task_scheduler_graph(self, model_type: ModelType) -> CompiledStateGraph:
-        """Create a custom task scheduler agent graph with middleware.
-
-        The task-scheduler agent has:
-        - context_schema=GraphRuntimeContext for accessing tools at runtime
-        - DynamicToolDispatchMiddleware for tool execution (scheduler + console tools from SYSTEM_TOOLS)
-        - Common middleware stack for file handling, summarization, caching, etc.
-        - Structured output via SubAgentResponseSchema for explicit task_state determination
-
-        Unlike GP agent, task-scheduler does NOT use ToolsetSelectorMiddleware because it
-        always needs the same fixed set of tools (scheduler_* and console_*). These tools
-        are provided via SYSTEM_TOOLS in DynamicToolDispatchMiddleware, which bypasses the
-        user's tool whitelist.
-
-        Middleware ordering (first = outermost wrapper):
-        1. DynamicToolDispatchMiddleware: Injects scheduler/console tools from SYSTEM_TOOLS,
-           handles tool execution for MCP tools
-        2-8. common_middleware_stack: FilesystemMiddleware, SummarizationMiddleware,
-           LiteLLMPromptCachingMiddleware,
-           PatchToolCallsMiddleware,
-           ToolRetryMiddleware, RepeatedToolCallMiddleware, ToolSchemaCleaningMiddleware
-
-        Args:
-            model_type: The type of model (defaults to claude-3.7-sonnet)
-
-        Returns:
-            CompiledStateGraph: The compiled task-scheduler agent graph
-        """
-        from ..agents.task_scheduler import (
-            TASK_SCHEDULER_SYSTEM_PROMPT,
-        )
-
-        model = self._get_or_create_model(model_type, thinking_level=None)
-
-        backend = self.backend_factory
-
-        # DynamicToolDispatchMiddleware without tool selection
-        # - Injects scheduler/console tools from SYSTEM_TOOLS
-        # - Handles tool execution for MCP tools not in ToolNode
-        task_scheduler_dispatch = DynamicToolDispatchMiddleware(
-            static_tools=[],
-            skip_tool_injection=False,  # Inject tools from registry + SYSTEM_TOOLS
-            agent_settings=self.config,
-            cost_logger=self.cost_logger,
-        )
-
-        # Common middleware stack (file handling, summarization, caching, etc.)
-        common_stack = build_common_middleware_stack(model, backend, add_docstore_hint=self.store is not None)
-        middleware = [
-            task_scheduler_dispatch,
-            *common_stack,  # FilesystemMiddleware, SummarizationMiddleware, caching, retry, etc.
-        ]
-
-        # Get response_format for structured output (SubAgentResponseSchema)
-        # Enables task-scheduler to explicitly set task_state
-        static_tools_list = self.get_static_tools(with_response_tool=False)
-        response_format = get_sub_agent_response_format(
-            model_type=model_type,
-            tools=static_tools_list,
-            thinking_enabled=False,  # Task-scheduler doesn't use thinking
-        )
-
-        task_scheduler_graph = create_agent(
-            model=model,
-            tools=static_tools_list,
-            system_prompt=TASK_SCHEDULER_SYSTEM_PROMPT + SUB_AGENT_PROTOCOL_ADDENDUM,
-            middleware=middleware,  # type: ignore[arg-type]
-            context_schema=GraphRuntimeContext,
-            checkpointer=self._checkpointer,
-            store=self.store,
-            response_format=response_format,
-        )
-
-        task_scheduler_graph = task_scheduler_graph.with_config({"recursion_limit": self.config.MAX_RECURSION_LIMIT})
-        logger.info(f"Task-scheduler graph created for model: {model_type}")
-
-        return task_scheduler_graph
-
-    def get_task_scheduler_graph(self, model_type: ModelType | None = None) -> CompiledStateGraph:
-        """Get or create a custom task-scheduler graph for the given model type.
-
-        Task-scheduler graphs are cached by model_type only (no thinking_level).
-        They are created lazily on first request. And will be used as task_scheduler_graph_provider for
-        the scheduler agent runnable.
-
-        Args:
-            model_type: The type of model (defaults to claude-3.7-sonnet)
-
-        Returns:
-            CompiledStateGraph: The task-scheduler graph instance (cached or newly created)
-        """
-        from ..agents.task_scheduler import DEFAULT_TASK_SCHEDULER_MODEL
-
-        effective_model: ModelType = model_type or DEFAULT_TASK_SCHEDULER_MODEL
-        cache_key = (effective_model, None)  # No thinking level for task-scheduler
-
-        if cache_key in self._task_scheduler_graphs:
-            return self._task_scheduler_graphs[cache_key]
-
-        logger.info(f"Creating task-scheduler graph for model: {effective_model}")
-        graph = self._create_task_scheduler_graph(effective_model)
-        # See get_graph: don't cache a store-less graph built during a transient cold start.
-        if self._store_enabled and self._store_mode is None:
-            logger.warning("Task-scheduler graph for %s built before store is ready; not caching", effective_model)
-            return graph
-        self._task_scheduler_graphs[cache_key] = graph
         return graph
