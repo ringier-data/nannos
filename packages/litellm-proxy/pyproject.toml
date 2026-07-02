@@ -3,6 +3,6 @@
 # is built from the upstream LiteLLM base (see Dockerfile); there is no Python build.
 [project]
 name = "nannos-litellm-proxy"
-version = "1.1.0"
+version = "1.1.1"
 description = "Nannos Model Gateway — LiteLLM proxy config + cost-capture callback"
 requires-python = ">=3.12"
