@@ -38,6 +38,7 @@ from rcplus_alloy_common.logging import (
     configure_logger,
 )
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import Receive, Scope, Send
 
@@ -611,7 +612,7 @@ def _accumulate_reply_buffer(context_id: str, response_data: dict[str, Any]) -> 
     return len(_streaming_buffers[context_id])
 
 
-def _clear_turn_state(context_id: str) -> None:
+def _clear_turn_state(context_id: str, *, preserve_pending_interaction: bool = False) -> None:
     """Drop all in-memory turn state for a conversation.
 
     Called from the single turn exit point (handle_send_message's finally) so the state
@@ -619,13 +620,35 @@ def _clear_turn_state(context_id: str) -> None:
     the turn-ending event inside _process_a2a_response. Without this, a cancelled or
     errored turn leaves residue in these dicts and _has_active_turn reports the
     conversation as permanently in-flight (stale snapshot / stuck spinner on reload).
+
+    preserve_pending_interaction: keep the pending HITL prompt. A turn that ends in
+    input-required closes the A2A stream (LangGraph interrupt), so this teardown runs
+    right after the prompt was captured — wiping it here would make the pendingHitl
+    snapshot-restore impossible. The prompt is instead cleared when the user's answer
+    starts the next turn (handle_send_message) or when a later turn ends without asking.
     """
     _streaming_buffers.pop(context_id, None)
-    _pending_interactions.pop(context_id, None)
+    if not preserve_pending_interaction:
+        _pending_interactions.pop(context_id, None)
     prefix = f"{context_id}:"
     for key in [k for k in _intermediate_buffers if k.startswith(prefix)]:
         _intermediate_buffers.pop(key, None)
         _intermediate_buffer_ts.pop(key, None)
+
+
+def _pending_input_required(context_id: str) -> bool:
+    """Whether the stored pending interaction is an input-required (HITL) prompt.
+
+    Feedback-requests are mid-stream events whose turn keeps running; only an
+    input-required prompt legitimately outlives its turn's stream (the interrupt
+    closes the stream while the conversation waits on the user's answer).
+    """
+    pending = _pending_interactions.get(context_id)
+    if not pending:
+        return False
+    status = pending.get("status", {})
+    state = _short_state_name(status.get("state")) if isinstance(status, dict) else None
+    return state == "input-required"
 
 
 # ==============================================================================
@@ -852,20 +875,11 @@ async def _process_a2a_response(
             # (user_id, conversation_id) at Turn start, NOT to the ephemeral socket
             # session — which is destroyed on disconnect. This lets a Turn that
             # outlives its originating connection still persist its reply.
+            # Ownership was verified once at Turn start (handle_send_message's
+            # get_or_create gate) and cannot change mid-turn, so no per-event
+            # re-check here — this runs on EVERY streamed chunk and a DB round-trip
+            # per chunk would delay the forwarding pipeline.
             if user_id:
-                # Verify conversation exists and belongs to user
-                conversation_service = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
-
-                conversation = await conversation_service.get_conversation(
-                    conversation_id=effective_context_id,
-                    user_id=user_id,
-                )
-
-                if not conversation:
-                    raise ConversationOwnershipError(
-                        f"Conversation {effective_context_id} does not exist or does not belong to user {user_id}"
-                    )
-
                 messages_service = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
 
                 # Detect work-plan events via extensions on the status message
@@ -1024,11 +1038,6 @@ async def _process_a2a_response(
                         conversation_id=effective_context_id,
                         user_id=user_id,
                     )
-        except ConversationOwnershipError as ownership_error:
-            logger.error(
-                f"Conversation ownership violation in agent response: sid={sid}, response_id={response_id}, "
-                f"context_id={effective_context_id}, error={ownership_error!s}"
-            )
         except Exception as db_error:
             # Log but don't fail the response if DB write fails
             logger.error(f"Failed to save agent response to DynamoDB: {db_error}", exc_info=True)
@@ -1445,7 +1454,6 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
 
 
 async def _save_user_message_to_db(
-    conversation_service: ConversationService,
     messages_service: MessagesService,
     context_id: str,
     socket_session: SocketSession | None,
@@ -1457,8 +1465,10 @@ async def _save_user_message_to_db(
 ) -> None:
     """Save user message to DynamoDB with conversation tracking.
 
+    The conversation row must already exist: the caller (handle_send_message) creates
+    and ownership-verifies it via its get_or_create gate before this runs.
+
     Args:
-        conversation_service: ConversationService instance
         messages_service: MessagesService instance
         context_id: Conversation context ID
         socket_session: Socket session with user_id (guaranteed non-None after validation)
@@ -1471,9 +1481,6 @@ async def _save_user_message_to_db(
     try:
         if not socket_session or not socket_session.user_id:
             raise ValueError("Socket session or user ID is missing")
-
-        # The conversation is already created/ownership-verified by the caller's ownership
-        # gate (handle_send_message) before this runs, so we don't get_or_create again here.
 
         # Build parts array: text part (if non-empty) + file parts (if any)
         parts = []
@@ -1783,10 +1790,13 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
 
         # Enforce conversation ownership BEFORE joining its stream room or forwarding to the
         # orchestrator. The sender must own the conversation, or it must be new (created here
-        # under the sender). get_or_create raises for a conversation_id owned by another user
-        # (PK conflict on insert), so we fail closed — otherwise a caller could join a victim's
-        # room and eavesdrop the stream, or run a turn on the victim's orchestrator thread.
-        # (_save_user_message_to_db calls get_or_create again idempotently.)
+        # under the sender). A conversation_id owned by another user surfaces as an
+        # IntegrityError (PK conflict on insert — get_conversation filters by user, so the
+        # foreign row is invisible and the create path collides) or a ConversationOwnershipError,
+        # and we fail closed — otherwise a caller could join a victim's room and eavesdrop the
+        # stream, or run a turn on the victim's orchestrator thread. Other exceptions (DB
+        # outage, timeouts) are NOT ownership violations and propagate to the generic error
+        # handler below so they surface as retryable server errors, not "Conversation not found".
         sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
         try:
             await conversation_service.get_or_create_conversation(
@@ -1796,7 +1806,7 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
                 message=message_text,
                 sub_agent_config_hash=sub_agent_config_hash,
             )
-        except Exception:
+        except (ConversationOwnershipError, IntegrityError):
             logger.warning(
                 f"send_message rejected: conversation {context_id} is not owned by user "
                 f"{socket_session.user_id} (sid={sid})"
@@ -1815,7 +1825,6 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
 
         # Save message to database
         await _save_user_message_to_db(
-            conversation_service,
             messages_service,
             context_id,
             socket_session,
@@ -1848,19 +1857,27 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             logger.info(f"[STEERING] Active turn detected for conversation {task_key}, routing as steering message")
             return await _send_steering_message_to_agent(a2a_client, message, sid, message_id, sio)
 
+        # This send is the user's response to any prompt the previous turn left pending
+        # (input-required prompts survive their turn's teardown, see _clear_turn_state),
+        # so drop it now — otherwise a mid-turn (re)subscribe would replay it.
+        _pending_interactions.pop(context_id, None)
+
         send_task = asyncio.create_task(
             _send_message_to_agent(
                 a2a_client, message, sid, message_id, sio, task_key=task_key, user_id=socket_session.user_id
             )
         )
-        active_tasks[task_key] = ActiveTaskInfo(
+        turn_info = ActiveTaskInfo(
             asyncio_task=send_task,
             a2a_client=a2a_client,
             origin_sid=sid,
         )
+        active_tasks[task_key] = turn_info
+        turn_cancelled = False
         try:
             return await send_task
         except asyncio.CancelledError:
+            turn_cancelled = True
             logger.info(f"Send message task cancelled: context_id={context_id}")
             cancelled_response = {
                 "id": message_id,
@@ -1873,8 +1890,19 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             # Single teardown point for the turn: clear task tracking AND all in-memory
             # turn state on every exit (completion, cancel, error) so the conversation
             # doesn't stay falsely "in-flight" (stale resume snapshot / stuck spinner).
-            active_tasks.pop(task_key, None)
-            _clear_turn_state(context_id)
+            # Identity-checked: if another send already superseded this turn (our task was
+            # done but this finally hadn't run yet), the state now belongs to the new turn
+            # and must not be torn down by this stale handler. A missing entry (popped by
+            # handle_cancel_task) still means the state is ours to clear.
+            current = active_tasks.get(task_key)
+            if current is turn_info or current is None:
+                active_tasks.pop(task_key, None)
+                # A turn that ended BY asking for input (LangGraph interrupt closes the
+                # stream) must keep its prompt so a (re)subscribing client can restore it.
+                _clear_turn_state(
+                    context_id,
+                    preserve_pending_interaction=not turn_cancelled and _pending_input_required(context_id),
+                )
 
     except ValueError as e:
         # Validation errors - send specific error details

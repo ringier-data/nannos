@@ -95,8 +95,10 @@ class StreamCoordinator(ABC):
 class InMemoryStreamCoordinator(StreamCoordinator):
     """Per-process coordinator backed by the module-level registry (single-replica).
 
-    Uses the shared `_active_streams`/`_active_streams_lock` so callers that still touch
-    the registry directly (e.g. the orchestrator subclass) stay consistent with it.
+    The module-level `_active_streams`/`_active_streams_lock` remain the backing store
+    (tests seed them directly), but all runtime callers — including the orchestrator's
+    executor — must go through the coordinator API so that installing a cross-replica
+    implementation via set_stream_coordinator covers every executor.
     """
 
     async def try_register(self, info: ActiveStreamInfo) -> ActiveStreamInfo | None:
@@ -367,16 +369,19 @@ class BaseAgentExecutor(AgentExecutor, ABC):
 
             raise InternalError() from e
         finally:
-            # Log unconsumed steering messages before cleanup.
-            # These arrive between the last abefore_model call and stream
-            # completion — they will be picked up as a normal next turn.
+            # Log unconsumed steering messages before cleanup. Count via qsize() —
+            # get_pending_messages would DRAIN the queue just to count it. These
+            # messages were already acknowledged to their sender but nothing replays
+            # them once the queue is cleared below, so this is a message drop and
+            # must be logged as one.
             try:
-                unconsumed = self.agent.get_pending_messages(context_id)
-                if unconsumed:
-                    logger.warning(
-                        f"[STEERING] {len(unconsumed)} unconsumed steering message(s) "
-                        f"for context_id={context_id} after execution finished. "
-                        f"They will be handled as the next conversation turn."
+                unconsumed_count = stream_info.message_queue.qsize()
+                if unconsumed_count:
+                    logger.error(
+                        f"[STEERING] Dropping {unconsumed_count} unconsumed steering message(s) "
+                        f"for context_id={context_id}: they arrived after the post-completion "
+                        f"re-invocation check and the stream has ended. The sender was already "
+                        f"acked; the user must resend."
                     )
             except Exception:
                 pass  # Best-effort; don't mask the original result

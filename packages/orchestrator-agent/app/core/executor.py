@@ -29,8 +29,7 @@ from ringier_a2a_sdk.server.executor import (
     MAX_STEERING_QUEUE_DEPTH,
     MAX_STEERING_REINVOCATIONS,
     ActiveStreamInfo,
-    _active_streams,
-    _active_streams_lock,
+    get_stream_coordinator,
 )
 
 from app.models.responses import AgentStreamResponse
@@ -394,65 +393,68 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 "googleChatSpaceId"
             )
 
-        # --- Continuous Interaction Turn: route to active stream if one exists ---
-        async with _active_streams_lock:
-            active = _active_streams.get(context_id)
-            if active is not None:
-                # Verify the caller belongs to this conversation.
-                # Channel (Slack): check caller's channel matches the stream's assistant_id.
-                # Personal: check caller's user_sub matches the stream owner.
-                # If scope is not yet set (race: stream just registered), allow through.
-                if active.scope == "channel":
-                    if active.assistant_id and caller_channel_id != active.assistant_id:
-                        logger.warning(
-                            f"[STEERING] Rejected steering for context_id={context_id}: "
-                            f"caller channel_id does not match stream assistant_id"
-                        )
-                        raise InvalidParamsError()
-                elif active.scope == "personal":
-                    if active.owner_sub and caller_sub != active.owner_sub:
-                        logger.warning(
-                            f"[STEERING] Rejected steering for context_id={context_id}: "
-                            f"caller_sub={caller_sub} does not match stream owner"
-                        )
-                        raise InvalidParamsError()
-                if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
+        # --- Continuous Interaction Turn: register this turn, or route to the active one ---
+        # try_register atomically claims the turn for this context_id, or returns the
+        # already-active stream so we steer into it instead of starting a second execution.
+        # Going through the StreamCoordinator (not the registry dict directly) keeps this
+        # executor covered when a cross-replica coordinator is installed via
+        # set_stream_coordinator, and closes the old check-then-register gap between two
+        # separate lock acquisitions.
+        stream_info = ActiveStreamInfo(context_id=context_id, task_id=task.id, owner_sub=caller_sub)
+        active = await get_stream_coordinator().try_register(stream_info)
+        if active is not None:
+            # Verify the caller belongs to this conversation.
+            # Channel (Slack): check caller's channel matches the stream's assistant_id.
+            # Personal: check caller's user_sub matches the stream owner.
+            # If scope is not yet set (race: stream just registered), allow through.
+            if active.scope == "channel":
+                if active.assistant_id and caller_channel_id != active.assistant_id:
                     logger.warning(
-                        f"[STEERING] Queue full for context_id={context_id} "
-                        f"(depth={active.message_queue.qsize()}), rejecting"
+                        f"[STEERING] Rejected steering for context_id={context_id}: "
+                        f"caller channel_id does not match stream assistant_id"
                     )
                     raise InvalidParamsError()
-                logger.info(
-                    f"[STEERING] Active stream found for context_id={context_id}, "
-                    f"queuing message for running orchestrator (queue depth: {active.message_queue.qsize() + 1})"
-                )
-                active.message_queue.put_nowait(context.message)
-                # Also put into orchestrator-local queue (read by SteeringMiddleware)
-                orch_queue = get_steering_queue(context_id)
-                if orch_queue is not None:
-                    orch_queue.put_nowait(context.message)
-                # Acknowledge-only: emit a status-update (NOT a raw Task object)
-                # so the SSE response has at least one event, then return.
-                # Using TaskStatusUpdateEvent avoids the "Task is already set"
-                # error on the client's ClientTaskManager when the event queue
-                # is a tapped child that also receives parent events.
-                await event_queue.enqueue_event(
-                    TaskStatusUpdateEvent(
-                        task_id=task.id,
-                        context_id=task.context_id,
-                        status=TaskStatus(
-                            state=task.status.state,
-                            message=task.status.message,
-                        ),
+            elif active.scope == "personal":
+                if active.owner_sub and caller_sub != active.owner_sub:
+                    logger.warning(
+                        f"[STEERING] Rejected steering for context_id={context_id}: "
+                        f"caller_sub={caller_sub} does not match stream owner"
                     )
+                    raise InvalidParamsError()
+            if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
+                logger.warning(
+                    f"[STEERING] Queue full for context_id={context_id} "
+                    f"(depth={active.message_queue.qsize()}), rejecting"
                 )
-                return
+                raise InvalidParamsError()
+            logger.info(
+                f"[STEERING] Active stream found for context_id={context_id}, "
+                f"queuing message for running orchestrator (queue depth: {active.message_queue.qsize() + 1})"
+            )
+            active.message_queue.put_nowait(context.message)
+            # Also put into orchestrator-local queue (read by SteeringMiddleware)
+            steering_queue = get_steering_queue(context_id)
+            if steering_queue is not None:
+                steering_queue.put_nowait(context.message)
+            # Acknowledge-only: emit a status-update (NOT a raw Task object)
+            # so the SSE response has at least one event, then return.
+            # Using TaskStatusUpdateEvent avoids the "Task is already set"
+            # error on the client's ClientTaskManager when the event queue
+            # is a tapped child that also receives parent events.
+            await event_queue.enqueue_event(
+                TaskStatusUpdateEvent(
+                    task_id=task.id,
+                    context_id=task.context_id,
+                    status=TaskStatus(
+                        state=task.status.state,
+                        message=task.status.message,
+                    ),
+                )
+            )
+            return
 
-        # No active stream — register ourselves and proceed with execution
-        stream_info = ActiveStreamInfo(context_id=context_id, task_id=task.id, owner_sub=caller_sub)
+        # Turn claimed — set up the orchestrator-local steering queue and proceed.
         orch_queue: asyncio.Queue[Message] = asyncio.Queue()
-        async with _active_streams_lock:
-            _active_streams[context_id] = stream_info
         register_steering_queue(context_id, orch_queue)
 
         # ZERO-TRUST: Extract verified user_sub and token from call_context (set by RequestContextBuilder)
@@ -926,19 +928,22 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     except Exception:
                         logger.warning("Failed to persist bypass rules", exc_info=True)
 
-            # Log unconsumed steering messages before cleanup.
-            # These arrive between the last abefore_model call and stream
-            # completion — they will be handled as the next conversation turn.
-            unconsumed = get_orchestrator_pending_messages(context_id)
-            if unconsumed:
-                logger.warning(
-                    f"[STEERING] {len(unconsumed)} unconsumed steering message(s) "
-                    f"for context_id={context_id} after execution finished. "
-                    f"They will be handled as the next conversation turn."
+            # Log unconsumed steering messages before cleanup. Count via qsize() —
+            # get_orchestrator_pending_messages would DRAIN the queue just to count it.
+            # These messages were already acknowledged to their sender but nothing
+            # replays them once the queue is removed below, so this is a message drop
+            # and must be logged as one.
+            remaining_queue = get_steering_queue(context_id)
+            unconsumed_count = remaining_queue.qsize() if remaining_queue is not None else 0
+            if unconsumed_count:
+                logger.error(
+                    f"[STEERING] Dropping {unconsumed_count} unconsumed steering message(s) "
+                    f"for context_id={context_id}: they arrived after the post-completion "
+                    f"re-invocation check and the stream has ended. The sender was already "
+                    f"acked; the user must resend."
                 )
             # Deregister active stream and clean up orchestrator steering queue
-            async with _active_streams_lock:
-                _active_streams.pop(context_id, None)
+            await get_stream_coordinator().release(context_id)
             remove_steering_queue(context_id)
 
     async def _handle_stream_item(

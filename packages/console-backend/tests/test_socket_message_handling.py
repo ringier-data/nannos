@@ -112,16 +112,15 @@ async def test_process_a2a_response_receives_context_id():
             user_id="user-1",
         )
 
-        # Verify conversation service was called to check ownership
-        mock_sio.app_instance.state.conversation_service.get_conversation.assert_called_once()
-        call_kwargs = mock_sio.app_instance.state.conversation_service.get_conversation.call_args.kwargs
-        assert call_kwargs["conversation_id"] == "conv-context-123"
-        assert call_kwargs["user_id"] == "user-1"
+        # Ownership is verified once at Turn start (handle_send_message's gate), NOT
+        # re-fetched per streamed event — that would add a DB round-trip per chunk.
+        mock_sio.app_instance.state.conversation_service.get_conversation.assert_not_called()
 
-        # Verify message was saved with context_id
+        # Verify message was saved with context_id under the captured user_id
         mock_sio.app_instance.state.messages_service.save_agent_response.assert_called_once()
         save_call_kwargs = mock_sio.app_instance.state.messages_service.save_agent_response.call_args.kwargs
         assert save_call_kwargs["conversation_id"] == "conv-context-123"
+        assert save_call_kwargs["user_id"] == "user-1"
 
 
 @pytest.mark.asyncio
@@ -162,11 +161,11 @@ async def test_process_a2a_response_uses_fallback_context_id():
             user_id="user-1",
         )
 
-        # Should use contextId from the message's model_dump and verify ownership
-        mock_sio.app_instance.state.conversation_service.get_conversation.assert_called_once()
-        call_kwargs = mock_sio.app_instance.state.conversation_service.get_conversation.call_args.kwargs
-        assert call_kwargs["conversation_id"] == "conv-from-response-456"
-        assert call_kwargs["user_id"] == "user-1"
+        # Should use contextId from the message's model_dump for persistence
+        mock_sio.app_instance.state.messages_service.save_agent_response.assert_called_once()
+        save_call_kwargs = mock_sio.app_instance.state.messages_service.save_agent_response.call_args.kwargs
+        assert save_call_kwargs["conversation_id"] == "conv-from-response-456"
+        assert save_call_kwargs["user_id"] == "user-1"
 
 
 @pytest.mark.asyncio
@@ -210,9 +209,7 @@ async def test_process_a2a_response_persists_when_socket_session_is_gone():
             user_id="user-1",  # captured at Turn start, survives the disconnect
         )
 
-    # Ownership checked and the reply persisted — under the captured user_id, despite no session.
-    mock_sio.app_instance.state.conversation_service.get_conversation.assert_called_once()
-    assert mock_sio.app_instance.state.conversation_service.get_conversation.call_args.kwargs["user_id"] == "user-1"
+    # The reply persisted — under the captured user_id, despite no session.
     mock_sio.app_instance.state.messages_service.save_agent_response.assert_called_once()
     save_kwargs = mock_sio.app_instance.state.messages_service.save_agent_response.call_args.kwargs
     assert save_kwargs["conversation_id"] == "conv-disconnected"
@@ -461,6 +458,8 @@ async def test_send_message_rejects_conversation_not_owned():
     """A caller cannot send to (or join the room of, or run an orchestrator turn on) a
     conversation owned by another user. get_or_create raises on the foreign conversation_id
     and the handler fails closed — no room join, no forward to the orchestrator."""
+    from sqlalchemy.exc import IntegrityError
+
     from app import handle_send_message
 
     mock_sio = MagicMock()
@@ -471,8 +470,12 @@ async def test_send_message_rejects_conversation_not_owned():
         return_value=MagicMock(user_id="attacker", agent_url="http://agent")
     )
     # Victim owns the conversation → get_or_create raises (PK conflict on insert).
+    # Only ownership-shaped failures (IntegrityError / ConversationOwnershipError) are
+    # treated as rejections; other exceptions surface as server errors.
     mock_sio.app_instance.state.conversation_service.get_or_create_conversation = AsyncMock(
-        side_effect=Exception("duplicate key value violates unique constraint")
+        side_effect=IntegrityError(
+            "INSERT INTO conversations ...", {}, Exception("duplicate key value violates unique constraint")
+        )
     )
 
     mock_a2a_client = MagicMock()
@@ -591,3 +594,81 @@ def test_clear_turn_state_resets_in_flight_after_cancel_or_error():
         app._pending_interactions.pop("c-leak", None)
         app._intermediate_buffers.pop("c-leak:general-purpose", None)
         app._intermediate_buffer_ts.pop("c-leak:general-purpose", None)
+
+
+def test_clear_turn_state_can_preserve_pending_input_required_prompt():
+    """A turn that ends BY asking for input closes its stream (LangGraph interrupt), so
+    the teardown runs right after the prompt was captured. The teardown must be able to
+    keep the prompt — otherwise a reconnecting client's snapshot can never restore it
+    and the conversation hangs on input the user never saw."""
+    import app
+
+    app._streaming_buffers["c-hitl"] = "partial reply"
+    app._pending_interactions["c-hitl"] = {"kind": "status-update", "status": {"state": "input-required"}}
+    try:
+        assert app._pending_input_required("c-hitl") is True
+
+        app._clear_turn_state("c-hitl", preserve_pending_interaction=True)
+
+        # Buffers cleared, but the prompt survives for a mid-HITL (re)subscribe —
+        # and it alone keeps the conversation visible as in-flight for the snapshot.
+        assert "c-hitl" not in app._streaming_buffers
+        assert "c-hitl" in app._pending_interactions
+        assert app._has_active_turn("c-hitl") is True
+    finally:
+        app._streaming_buffers.pop("c-hitl", None)
+        app._pending_interactions.pop("c-hitl", None)
+
+
+def test_pending_input_required_is_false_for_feedback_requests():
+    """Only input-required prompts outlive their turn's stream; a feedback-request is a
+    mid-stream WORKING event whose turn keeps running, so it must not be preserved
+    past teardown (a stale one would be replayed on every resubscribe)."""
+    import app
+
+    app._pending_interactions["c-fb"] = {"kind": "status-update", "status": {"state": "working"}}
+    try:
+        assert app._pending_input_required("c-fb") is False
+    finally:
+        app._pending_interactions.pop("c-fb", None)
+    assert app._pending_input_required("c-missing") is False
+
+
+@pytest.mark.asyncio
+async def test_send_message_surfaces_db_errors_instead_of_conversation_not_found():
+    """A transient DB failure in the ownership gate is NOT an ownership violation: it
+    must surface as a generic send failure (retryable server error), not reject the
+    owner's send with a misleading 'Conversation not found'."""
+    from sqlalchemy.exc import OperationalError
+
+    from app import handle_send_message
+
+    mock_sio = MagicMock()
+    mock_sio.emit = AsyncMock()
+    mock_sio.enter_room = AsyncMock()
+    mock_sio.app_instance = MagicMock()
+    mock_sio.app_instance.state.socket_session_service.get_session = AsyncMock(
+        return_value=MagicMock(user_id="owner", agent_url="http://agent")
+    )
+    # Postgres blip: the pool cannot connect — nothing to do with ownership.
+    mock_sio.app_instance.state.conversation_service.get_or_create_conversation = AsyncMock(
+        side_effect=OperationalError("SELECT 1", {}, Exception("connection refused"))
+    )
+
+    mock_a2a_client = MagicMock()
+    mock_a2a_client.send_message = MagicMock()
+    mock_pool = MagicMock()
+    mock_pool.get_or_create_a2a_client = AsyncMock(return_value=mock_a2a_client)
+
+    with patch("app.sio", mock_sio), patch("app.connection_pool", mock_pool):
+        result = await handle_send_message.__wrapped__(
+            "owner-sid",
+            {"message": "hello", "conversationId": "my-conv"},
+        )
+
+    # Still fails closed (no room join, no orchestrator forward), but as a server
+    # error — not the ownership rejection.
+    mock_sio.enter_room.assert_not_called()
+    mock_a2a_client.send_message.assert_not_called()
+    assert result is not None
+    assert result.get("details", {}).get("reason") != "Conversation not found"
