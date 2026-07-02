@@ -47,7 +47,11 @@ from langgraph.errors import GraphInterrupt
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.oauth import OidcOAuth2Client
-from ringier_a2a_sdk.utils.mcp_errors import format_mcp_error, is_retryable_mcp_error
+from ringier_a2a_sdk.utils.mcp_errors import (
+    format_mcp_error,
+    guarded_streamable_http,
+    is_retryable_mcp_error,
+)
 from ringier_a2a_sdk.utils.mcp_progress import on_mcp_progress
 from ringier_a2a_sdk.utils.streaming import (
     StreamBuffer,
@@ -645,7 +649,15 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                     callbacks=Callbacks(on_progress=on_mcp_progress),
                 )
 
-                tools = await client.get_tools()
+                # Best-effort: surface the first connection's URL/slug to the
+                # streamable-HTTP guard so unexpected-content-type failures
+                # log with caller context. ``get_tools()`` discovers across all
+                # connections; per-server enrichment happens in the patched
+                # transport via the contextvar.
+                first_slug = next(iter(connections), None)
+                first_url = getattr(connections[first_slug], "url", None) if first_slug else None
+                async with guarded_streamable_http(url=first_url, server_slug=first_slug):
+                    tools = await client.get_tools()
                 logger.info(f"Discovered {len(tools)} MCP tools for {self.name}")
 
                 tools = [tool for tool in tools if tool.name in mcp_tool_names]
@@ -800,7 +812,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 callbacks=Callbacks(on_progress=on_mcp_progress),
             )
 
-            tools = await client.get_tools()
+            async with guarded_streamable_http(url=self.console_backend_mcp_url, server_slug="console"):
+                tools = await client.get_tools()
             tools = [t for t in tools if t.name in self._CONSOLE_SELF_IMPROVEMENT_TOOLS]
             validated = [_validate_tool_schema(t) for t in tools]
 
