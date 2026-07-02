@@ -657,7 +657,11 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         own renderer (also fixing nested-arg type hints on the sub-agent inline path).
         """
         if self._ptc is None:
-            return self._base_system_prompt
+            # ``_base_system_prompt`` (an ``__init__`` attribute in langchain-quickjs
+            # <0.2) became the ``_base_prompt(*, ptc_attached=...)`` method in the
+            # 0.2 wasm rewrite; the flag toggles whether the base prompt describes
+            # the ``tools.*`` namespace.
+            return self._base_prompt(ptc_attached=False)
         exposed = [t for t in self._ptc if isinstance(t, BaseTool) and t.name != self._tool_name]
         thread_id = _resolve_thread_id(self._fallback_thread_id)
         repl = self._registry.get(thread_id)
@@ -671,7 +675,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         if self._ptc_prompt_cache is None or self._ptc_prompt_cache[0] != cache_key:
             body = render_tools_namespace(render_set, tool_name=self._tool_name, discovery_note=discovery_note)
             self._ptc_prompt_cache = (cache_key, body)
-        return self._base_system_prompt + self._ptc_prompt_cache[1]
+        return self._base_prompt(ptc_attached=bool(exposed)) + self._ptc_prompt_cache[1]
 
     def _ptc_prompt_and_hidden(self, request: Any) -> tuple[str, set[str]]:
         """Build the PTC prompt and the set of tool names exposed this turn.
@@ -947,8 +951,8 @@ def build_code_interpreter_middlewares(
 ) -> list[Any]:
     """Build the code-interpreter middleware(s) for a graph.
 
-    Returns a single ``_PTCToleranceCodeInterpreterMiddleware`` (exposing an
-    ``eval`` JS REPL with a ``skills_backend``).
+    Returns a single ``_PTCToleranceCodeInterpreterMiddleware`` (exposing a
+    wasm-sandboxed ``eval`` JS REPL).
 
     When PTC (``CODE_INTERPRETER_PTC``, default off) is enabled, the eligible
     tools the agent carries for a turn are exposed inside ``eval`` as
@@ -1030,7 +1034,14 @@ def build_code_interpreter_middlewares(
             default_risk_threshold=default_risk_threshold,
             tool_server_map=tool_server_map,
             backend_supports_execution=exec_supported,
-            skills_backend=backend,
+            # ``skills_backend`` was removed in langchain-quickjs 0.2.0 (wasm
+            # sandbox has no host filesystem, so ``@/skills`` REPL imports and
+            # eval-side skill metadata are gone). No repo skill declares a
+            # ``module:`` frontmatter, so the dynamic-import half was already
+            # dormant. ``subagents=False`` keeps the upstream middleware from
+            # injecting its own subagent tooling into ``eval`` — we manage
+            # delegation via ``task`` + risk-guarded ``broaden_exposure``.
+            subagents=False,
             max_result_chars=PTC_MAX_RESULT_CHARS,
         )
     ]
