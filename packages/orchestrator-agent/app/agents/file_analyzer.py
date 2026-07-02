@@ -26,9 +26,13 @@ Model: the fleet's cheap/fast chat tier, resolved at runtime from the gateway
 (image/PDF/audio/video). No env var or hardcoded alias: models are registered at runtime.
 """
 
+import asyncio
+import ipaddress
 import logging
 import re
+import socket
 from typing import Any, Dict, List, Optional, cast
+from urllib.parse import urlparse
 
 import httpx
 from agent_common.a2a.base import LocalA2ARunnable, SubAgentInput
@@ -160,6 +164,60 @@ When analyzing a file:
 Always provide actionable, useful information based on what is actually in the file — not what you imagine might be there."""
 
 
+class SSRFError(ValueError):
+    """Raised when a URL targets a non-public address (SSRF guard)."""
+
+
+def _is_blocked_address(ip: str) -> bool:
+    """True if an IP is loopback/private/link-local/reserved (i.e. not publicly routable)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local  # blocks 169.254.0.0/16, incl. the cloud metadata endpoint
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+async def _assert_public_url(url: str) -> None:
+    """Reject URLs whose host resolves to a non-public address.
+
+    The file-analyzer fetches attacker-supplied URLs server-side (from inside the
+    orchestrator pod) and returns their body, so an unrestricted fetch is an SSRF that
+    can reach cluster-internal services and cloud-metadata endpoints. Resolve the host
+    and refuse any URL that maps to a loopback/private/link-local/reserved address.
+
+    Note: this validates at resolution time and does not pin the connection to the
+    resolved IP, so it does not defend against active DNS rebinding; combine with an
+    egress NetworkPolicy for defense-in-depth.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise SSRFError(f"Unsupported URL scheme: {parsed.scheme!r}")
+    host = parsed.hostname
+    if not host:
+        raise SSRFError("URL has no host")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise SSRFError(f"Could not resolve host {host!r}: {e}")
+
+    resolved = {info[4][0] for info in infos}
+    if not resolved:
+        raise SSRFError(f"Host {host!r} did not resolve")
+    for ip in resolved:
+        if _is_blocked_address(ip):
+            raise SSRFError(f"Refusing to fetch a URL that resolves to a non-public address ({ip})")
+
+
 def _get_file_extension(url: str) -> str:
     """Extract file extension from URL, ignoring query parameters."""
     path = url.split("?")[0]
@@ -178,8 +236,10 @@ async def _detect_file_type(url: str, client: httpx.AsyncClient) -> str:
     Returns one of: 'text', 'image', 'document', 'audio', 'video', 'unknown'
     """
     try:
-        # Use Range GET instead of HEAD - S3 presigned URLs are signed for GET only
-        response = await client.get(url, headers={"Range": "bytes=0-0"}, follow_redirects=True)
+        # Use Range GET instead of HEAD - S3 presigned URLs are signed for GET only.
+        # follow_redirects stays off so a redirect can't bounce the SSRF-guarded URL
+        # into an internal/metadata address after validation.
+        response = await client.get(url, headers={"Range": "bytes=0-0"}, follow_redirects=False)
         # Accept both 200 (full content) and 206 (partial content) as success
         content_type = response.headers.get("content-type", "").lower().split(";")[0].strip()
 
@@ -353,6 +413,8 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
 
         for file_url in urls:
             logger.info(f"Processing: {file_url[:80]}...")
+            # SSRF guard: refuse URLs pointing at internal/metadata addresses before any fetch.
+            await _assert_public_url(file_url)
             file_type = await _detect_file_type(file_url, client)
 
             if file_type == "text":
