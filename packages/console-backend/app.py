@@ -38,6 +38,7 @@ from rcplus_alloy_common.logging import (
     configure_logger,
 )
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import Receive, Scope, Send
 
@@ -507,7 +508,13 @@ async def _mcp_streamable_asgi(scope: Scope, receive: Receive, send: Send) -> No
 
 
 app.mount("/mcp", _mcp_streamable_asgi)
-# Initialize Socket.IO server with optimized settings
+# Initialize Socket.IO server with optimized settings.
+# NOTE: no cross-node client_manager (Redis/pub-sub) — conversation rooms, active_tasks,
+# and the in-memory turn buffers are per-process. Stream resume and the one-turn-per-
+# conversation guard therefore assume a client's reconnect lands on the SAME pod (session
+# affinity). Scaling to multiple replicas without affinity + a cross-pod adapter would make
+# a reconnect that lands elsewhere see an empty snapshot and could start a second turn on
+# the same orchestrator thread. Cross-pod coordination is planned (Postgres lease-lock).
 sio = socketio.AsyncServer(
     async_mode="asgi",
     cors_allowed_origins=cors_origins,
@@ -535,8 +542,16 @@ class ActiveTaskInfo:
     asyncio_task: asyncio.Task[Any]
     a2a_client: Client | None = None
     a2a_task_id: str | None = None
+    # The connection that started the turn. The turn is keyed by conversation (so it
+    # survives that connection dropping and can be steered/cancelled from any later
+    # connection), but its httpx/A2A client belongs to origin_sid's connection-pool
+    # entry — so deferred cleanup must keep that entry alive until the task finishes.
+    origin_sid: str | None = None
 
 
+# Active turns keyed by conversation_id (== A2A context_id): a turn is owned by the
+# conversation, not the connection, so a reconnected client can steer/cancel it and
+# at most one turn runs per conversation (a concurrent send becomes steering).
 active_tasks: dict[str, ActiveTaskInfo] = {}
 
 # Buffer for accumulating streaming artifact chunks per conversation.
@@ -553,6 +568,87 @@ _intermediate_buffers: dict[str, str] = {}
 # turn-end, but persisting them with this real start time (not turn-end) keeps
 # reload ordering aligned with how the thoughts streamed live.
 _intermediate_buffer_ts: dict[str, datetime] = {}
+
+# Pending interactive prompt (HITL / feedback-request) per conversation, keyed by
+# context_id. Captured when the orchestrator asks for input and cleared when the turn
+# ends, so a client that (re)subscribes mid-turn can restore a prompt that arrived
+# while it was disconnected — otherwise the turn would hang waiting on input the user
+# never saw. Value is the raw agent_response payload of the prompt event.
+_pending_interactions: dict[str, dict[str, Any]] = {}
+
+
+def _conversation_room(conversation_id: str) -> str:
+    """Socket.IO room name carrying a conversation's live stream.
+
+    Delivery is keyed by conversation_id (not the ephemeral connection), so a client
+    that reconnects/reloads (new sid) resumes the stream by rejoining this room, and
+    multiple tabs on the same conversation all receive it.
+    """
+    return f"conversation:{conversation_id}"
+
+
+def _accumulate_reply_buffer(context_id: str, response_data: dict[str, Any]) -> int | None:
+    """Append an orchestrator-reply artifact chunk to the resumable buffer; return the new length.
+
+    Runs BEFORE the chunk is emitted so a client subscribing mid-stream gets a snapshot
+    consistent with the live chunks: the returned offset (cumulative reply length) is
+    attached to the emitted chunk as ``turnOffset``, and the client drops any chunk whose
+    ``turnOffset`` is already covered by its snapshot. Only orchestrator content is
+    buffered — intermediate (sub-agent) output is handled separately and is best-effort
+    on resume. Returns None when the event is not a resumable reply chunk.
+    """
+    if not context_id or response_data.get("kind") != "artifact-update":
+        return None
+    artifact = response_data.get("artifact", {})
+    if not isinstance(artifact, dict):
+        return None
+    if "urn:nannos:a2a:intermediate-output:1.0" in artifact.get("extensions", []):
+        return None
+    parts = artifact.get("parts", [])
+    chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
+    # Always update on an artifact chunk (even empty, e.g. the final last_chunk) so the
+    # offset is defined for every emitted reply chunk.
+    _streaming_buffers[context_id] = _streaming_buffers.get(context_id, "") + chunk_text
+    return len(_streaming_buffers[context_id])
+
+
+def _clear_turn_state(context_id: str, *, preserve_pending_interaction: bool = False) -> None:
+    """Drop all in-memory turn state for a conversation.
+
+    Called from the single turn exit point (handle_send_message's finally) so the state
+    is cleared on EVERY termination path — normal completion, cancel, and error — not only
+    the turn-ending event inside _process_a2a_response. Without this, a cancelled or
+    errored turn leaves residue in these dicts and _has_active_turn reports the
+    conversation as permanently in-flight (stale snapshot / stuck spinner on reload).
+
+    preserve_pending_interaction: keep the pending HITL prompt. A turn that ends in
+    input-required closes the A2A stream (LangGraph interrupt), so this teardown runs
+    right after the prompt was captured — wiping it here would make the pendingHitl
+    snapshot-restore impossible. The prompt is instead cleared when the user's answer
+    starts the next turn (handle_send_message) or when a later turn ends without asking.
+    """
+    _streaming_buffers.pop(context_id, None)
+    if not preserve_pending_interaction:
+        _pending_interactions.pop(context_id, None)
+    prefix = f"{context_id}:"
+    for key in [k for k in _intermediate_buffers if k.startswith(prefix)]:
+        _intermediate_buffers.pop(key, None)
+        _intermediate_buffer_ts.pop(key, None)
+
+
+def _pending_input_required(context_id: str) -> bool:
+    """Whether the stored pending interaction is an input-required (HITL) prompt.
+
+    Feedback-requests are mid-stream events whose turn keeps running; only an
+    input-required prompt legitimately outlives its turn's stream (the interrupt
+    closes the stream while the conversation waits on the user's answer).
+    """
+    pending = _pending_interactions.get(context_id)
+    if not pending:
+        return False
+    status = pending.get("status", {})
+    state = _short_state_name(status.get("state")) if isinstance(status, dict) else None
+    return state == "input-required"
 
 
 # ==============================================================================
@@ -619,13 +715,12 @@ async def _cancel_active_task(task_info: ActiveTaskInfo, key: str, reason: str) 
 
 
 async def _deferred_connection_cleanup(sid: str) -> None:
-    """Wait for all tasks of a disconnected socket to finish, then clean up the connection pool."""
-    prefix = f"{sid}:"
+    """Wait for all tasks started by a disconnected socket to finish, then clean up its connection."""
     while True:
         running = [
             info.asyncio_task
-            for key, info in active_tasks.items()
-            if key.startswith(prefix) and not info.asyncio_task.done()
+            for info in active_tasks.values()
+            if info.origin_sid == sid and not info.asyncio_task.done()
         ]
         if not running:
             break
@@ -702,6 +797,7 @@ async def _process_a2a_response(
     sid: str,
     request_id: str,
     context_id: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Processes a response from the A2A client, validates it, and emits events.
 
@@ -713,6 +809,8 @@ async def _process_a2a_response(
     sid: The session ID associated with the original request.
     request_id: The unique ID of the original request.
     context_id: The context ID (conversation ID) from the original message request.
+    user_id: The owning user's id, captured at Turn start. Used for persistence so
+        the Turn's reply is saved even after the originating socket session is gone.
     """
     # The response payload 'event' (Task, Message, etc.) may have its own 'id',
     # which can differ from the JSON-RPC request/response 'id'. We prioritize
@@ -747,36 +845,41 @@ async def _process_a2a_response(
         logger.info("Agent response (sid=%s) id=%s", sid, response_id)
 
     effective_context_id = context_id or response_data.get("contextId")
+    # Deliver to the conversation room (keyed by conversation_id) so a reconnected or
+    # multi-tab client receives the stream; fall back to the originating socket only when
+    # there is no conversation context to route by.
+    emit_target = _conversation_room(effective_context_id) if effective_context_id else sid
+
+    # Accumulate the resumable reply buffer BEFORE emitting and tag the chunk with its
+    # cumulative offset, so a client subscribing mid-stream dedupes live chunks against its
+    # snapshot (accumulate-then-emit ⇒ every emitted chunk is already in the buffer).
+    turn_offset = _accumulate_reply_buffer(effective_context_id, response_data) if effective_context_id else None
+    if turn_offset is not None:
+        response_data["turnOffset"] = turn_offset
 
     # EMIT IMMEDIATELY for real-time streaming - do this BEFORE database access
     # Artifact chunks with append=true need to appear on the client immediately
     is_streaming_chunk = response_data.get("kind") == "artifact-update" and response_data.get("append")
     if is_streaming_chunk:
         logger.info(
-            f"[STREAMING] Emitting artifact chunk immediately: sid={sid}, "
+            f"[STREAMING] Emitting artifact chunk immediately: target={emit_target}, "
             f"append={response_data.get('append')}, last_chunk={response_data.get('lastChunk')}, context={effective_context_id}"
         )
-        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
+        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=emit_target)
         await _emit_debug_log(sid, response_id, "artifact_chunk", response_data)
         # Don't return yet - we still need to accumulate for persistence below
 
     if effective_context_id:
         try:
-            socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
-            if socket_session:
-                # Verify conversation exists and belongs to user
-                conversation_service = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
-
-                conversation = await conversation_service.get_conversation(
-                    conversation_id=effective_context_id,
-                    user_id=socket_session.user_id,
-                )
-
-                if not conversation:
-                    raise ConversationOwnershipError(
-                        f"Conversation {effective_context_id} does not exist or does not belong to user {socket_session.user_id}"
-                    )
-
+            # Persist under the Turn's captured user_id: identity is bound to
+            # (user_id, conversation_id) at Turn start, NOT to the ephemeral socket
+            # session — which is destroyed on disconnect. This lets a Turn that
+            # outlives its originating connection still persist its reply.
+            # Ownership was verified once at Turn start (handle_send_message's
+            # get_or_create gate) and cannot change mid-turn, so no per-event
+            # re-check here — this runs on EVERY streamed chunk and a DB round-trip
+            # per chunk would delay the forwarding pipeline.
+            if user_id:
                 messages_service = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
 
                 # Detect work-plan events via extensions on the status message
@@ -797,15 +900,19 @@ async def _process_a2a_response(
                 status_obj = response_data.get("status", {})
                 status_state = _short_state_name(status_obj.get("state")) if isinstance(status_obj, dict) else None
 
-                # Accumulate streaming artifact text for persistence.
-                # Individual chunks are transient (not saved to DB); the assembled
-                # content is persisted when last_chunk arrives.
-                # Use is_artifact_update (not is_artifact_append): the FIRST chunk of an
-                # artifact is append=False (it creates the artifact). It must be
-                # accumulated with the rest — otherwise it falls through to
-                # save_agent_response as its own standalone message and the content is
-                # split into two messages, which reload renders as two fragments
-                # (e.g. an orchestrator thought split mid-sentence).
+                # Capture a pending interactive prompt (HITL / feedback-request) so a client
+                # that (re)subscribes mid-turn can restore a prompt that arrived while it was
+                # disconnected — otherwise the turn hangs on input the user never saw. Kept in
+                # memory keyed by conversation; cleared when the turn ends without asking.
+                if is_feedback_request or status_state == "input-required":
+                    _pending_interactions[effective_context_id] = response_data
+
+                # Orchestrator reply chunks are accumulated into _streaming_buffers earlier
+                # (see _accumulate_reply_buffer, before the emit) so the resumable snapshot
+                # and the live chunk offsets stay consistent. Here we only accumulate
+                # intermediate output (sub-agent thoughts), which is persisted at turn end
+                # so reasoning blocks survive page reload. The FIRST artifact chunk has
+                # append=False (it creates the artifact); it is buffered the same way.
                 if is_artifact_update:
                     artifact = response_data.get("artifact", {})
                     artifact_metadata = artifact.get("metadata", {}) if isinstance(artifact, dict) else {}
@@ -813,26 +920,7 @@ async def _process_a2a_response(
                     artifact_extensions = artifact.get("extensions", []) if isinstance(artifact, dict) else []
                     is_intermediate_output = "urn:nannos:a2a:intermediate-output:1.0" in artifact_extensions
 
-                    if not is_intermediate_output:
-                        # Only accumulate orchestrator content, not intermediate output
-                        parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
-                        chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
-
-                        # Always update buffer on artifact-append, even if chunk is empty (for last_chunk handling)
-                        current_buffer = _streaming_buffers.get(effective_context_id, "")
-                        _streaming_buffers[effective_context_id] = current_buffer + chunk_text
-                        if chunk_text:  # Only log if there's actual content
-                            logger.info(
-                                f"[STREAMING] Accumulated chunk ({len(chunk_text)} chars) for context {effective_context_id}. "
-                                f"Total buffer: {len(_streaming_buffers[effective_context_id])} chars. last_chunk={is_last_chunk}. "
-                                f"chunk_preview: {chunk_text[:50]}..."
-                            )
-                        elif is_last_chunk:
-                            logger.info(
-                                f"[STREAMING] Received final empty chunk for context {effective_context_id}. "
-                                f"Buffer size: {len(_streaming_buffers[effective_context_id])} chars"
-                            )
-                    else:
+                    if is_intermediate_output:
                         # Accumulate intermediate output for persistence at turn end
                         parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
                         chunk_text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text"))
@@ -864,7 +952,7 @@ async def _process_a2a_response(
                     await _flush_intermediate_buffers(
                         effective_context_id,
                         messages_service,
-                        socket_session.user_id,
+                        user_id,
                         task_id=task_id,
                     )
 
@@ -880,7 +968,7 @@ async def _process_a2a_response(
                                 )
                                 saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
-                                    user_id=socket_session.user_id,
+                                    user_id=user_id,
                                     role="assistant",
                                     parts=[{"kind": "text", "text": accumulated}],
                                     task_id=task_id,
@@ -899,7 +987,7 @@ async def _process_a2a_response(
                                 )
                                 saved_msg = await messages_service.insert_message(
                                     conversation_id=effective_context_id,
-                                    user_id=socket_session.user_id,
+                                    user_id=user_id,
                                     role="assistant",
                                     parts=[{"kind": "text", "text": accumulated}],
                                     task_id=task_id,
@@ -922,6 +1010,12 @@ async def _process_a2a_response(
                             f"kind={response_data.get('kind')}, append={response_data.get('append')}"
                         )
 
+                    # The turn ended: clear any pending interactive prompt unless it ended
+                    # BY asking for input (input-required), in which case the prompt must
+                    # persist for a mid-turn (re)subscribe to restore.
+                    if status_state != "input-required" and not is_feedback_request:
+                        _pending_interactions.pop(effective_context_id, None)
+
                 # ── Persist non-streaming responses ──
                 # Skip: work-plan (transient), artifact chunks (accumulated above),
                 # bare completion signals (no content to save), safety-net (already saved).
@@ -942,13 +1036,8 @@ async def _process_a2a_response(
                     await messages_service.save_agent_response(
                         response_data=response_data,
                         conversation_id=effective_context_id,
-                        user_id=socket_session.user_id,
+                        user_id=user_id,
                     )
-        except ConversationOwnershipError as ownership_error:
-            logger.error(
-                f"Conversation ownership violation in agent response: sid={sid}, response_id={response_id}, "
-                f"context_id={effective_context_id}, error={ownership_error!s}"
-            )
         except Exception as db_error:
             # Log but don't fail the response if DB write fails
             logger.error(f"Failed to save agent response to DynamoDB: {db_error}", exc_info=True)
@@ -961,8 +1050,8 @@ async def _process_a2a_response(
 
     # Emit the response to the client (skip if already emitted as streaming chunk)
     if not is_streaming_chunk:
-        logger.info(f"[BACKEND_RESPONSE] Emitting response: sid={sid}, kind={response_data.get('kind')}")
-        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=sid)
+        logger.info(f"[BACKEND_RESPONSE] Emitting response: target={emit_target}, kind={response_data.get('kind')}")
+        await sio.emit(SocketEvents.AGENT_RESPONSE, response_data, to=emit_target)
     else:
         logger.debug(
             f"[BACKEND_RESPONSE] Skipping double-emit for streaming chunk: sid={sid}, kind={response_data.get('kind')}, append={response_data.get('append')}"
@@ -1195,11 +1284,10 @@ async def handle_disconnect(sid: str, reason: str | None = None) -> None:
     # the httpx client backs the SSE stream the task is consuming.  We schedule
     # deferred cleanup so the connection is removed once all tasks finish.
     has_running_tasks = False
-    prefix = f"{sid}:"
     for key in list(active_tasks.keys()):
-        if key.startswith(prefix):
-            task_info = active_tasks.get(key)
-            if task_info and not task_info.asyncio_task.done():
+        task_info = active_tasks.get(key)
+        if task_info and task_info.origin_sid == sid:
+            if not task_info.asyncio_task.done():
                 has_running_tasks = True
             else:
                 active_tasks.pop(key, None)
@@ -1366,7 +1454,6 @@ async def handle_initialize_client(sid: str, data: dict[str, Any]) -> dict[str, 
 
 
 async def _save_user_message_to_db(
-    conversation_service: ConversationService,
     messages_service: MessagesService,
     context_id: str,
     socket_session: SocketSession | None,
@@ -1378,8 +1465,10 @@ async def _save_user_message_to_db(
 ) -> None:
     """Save user message to DynamoDB with conversation tracking.
 
+    The conversation row must already exist: the caller (handle_send_message) creates
+    and ownership-verifies it via its get_or_create gate before this runs.
+
     Args:
-        conversation_service: ConversationService instance
         messages_service: MessagesService instance
         context_id: Conversation context ID
         socket_session: Socket session with user_id (guaranteed non-None after validation)
@@ -1392,19 +1481,6 @@ async def _save_user_message_to_db(
     try:
         if not socket_session or not socket_session.user_id:
             raise ValueError("Socket session or user ID is missing")
-
-        sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
-        logger.info(
-            f"Creating/getting conversation {context_id} with sub_agent_config_hash={sub_agent_config_hash}, metadata={metadata}"
-        )
-
-        await conversation_service.get_or_create_conversation(
-            conversation_id=context_id,
-            user_id=socket_session.user_id,
-            agent_url=socket_session.agent_url or "",
-            message=message_text,
-            sub_agent_config_hash=sub_agent_config_hash,
-        )
 
         # Build parts array: text part (if non-empty) + file parts (if any)
         parts = []
@@ -1488,6 +1564,7 @@ async def _send_message_to_agent(
     message_id: str,
     sio: socketio.AsyncServer,
     task_key: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Send message to agent via A2A client and process stream response.
 
@@ -1498,6 +1575,8 @@ async def _send_message_to_agent(
         message_id: Message ID
         sio: Socket.IO server
         task_key: Key in active_tasks to update with A2A task_id from stream
+        user_id: Owning user's id, captured at Turn start; threaded to persistence
+            so the reply is saved even if the originating socket session is gone.
 
     Returns:
         Success response or error response if HTTP error occurs
@@ -1531,7 +1610,7 @@ async def _send_message_to_agent(
                 if artifact.HasField("metadata"):
                     logger.info(f"[BACKEND_STREAM] artifact-update metadata: {MessageToDict(artifact.metadata)}")
 
-            await _process_a2a_response(stream_result, sid, message_id, message.context_id)
+            await _process_a2a_response(stream_result, sid, message_id, message.context_id, user_id=user_id)
 
         logger.info(f"[BACKEND_STREAM] Stream complete - received {stream_item_count} total items")
         return create_success_response({"id": message_id})
@@ -1592,7 +1671,7 @@ async def _send_steering_message_to_agent(
                 "steering": True,
                 "status": {"state": "accepted"},
             },
-            to=sid,
+            to=_conversation_room(message.context_id) if message.context_id else sid,
         )
         return create_success_response({"id": message_id, "steering": True})
 
@@ -1709,9 +1788,43 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         conversation_service: ConversationService = sio.app_instance.state.conversation_service  # type: ignore[attr-defined]
         messages_service: MessagesService = sio.app_instance.state.messages_service  # type: ignore[attr-defined]
 
+        # Enforce conversation ownership BEFORE joining its stream room or forwarding to the
+        # orchestrator. The sender must own the conversation, or it must be new (created here
+        # under the sender). A conversation_id owned by another user surfaces as an
+        # IntegrityError (PK conflict on insert — get_conversation filters by user, so the
+        # foreign row is invisible and the create path collides) or a ConversationOwnershipError,
+        # and we fail closed — otherwise a caller could join a victim's room and eavesdrop the
+        # stream, or run a turn on the victim's orchestrator thread. Other exceptions (DB
+        # outage, timeouts) are NOT ownership violations and propagate to the generic error
+        # handler below so they surface as retryable server errors, not "Conversation not found".
+        sub_agent_config_hash = metadata.get("subAgentConfigHash") if isinstance(metadata, dict) else None
+        try:
+            await conversation_service.get_or_create_conversation(
+                conversation_id=context_id,
+                user_id=socket_session.user_id,
+                agent_url=socket_session.agent_url or "",
+                message=message_text,
+                sub_agent_config_hash=sub_agent_config_hash,
+            )
+        except (ConversationOwnershipError, IntegrityError):
+            logger.warning(
+                f"send_message rejected: conversation {context_id} is not owned by user "
+                f"{socket_session.user_id} (sid={sid})"
+            )
+            error_response = create_error_response(
+                SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"}
+            )
+            error_response["id"] = message_id
+            await sio.emit(SocketEvents.AGENT_RESPONSE, error_response, to=sid)
+            return error_response
+
+        # Ownership confirmed — safe to join the conversation's stream room. Keeps delivery
+        # working for this connection before it issues an explicit subscribe, and lets the
+        # stream survive reconnects.
+        await sio.enter_room(sid, _conversation_room(context_id))
+
         # Save message to database
         await _save_user_message_to_db(
-            conversation_service,
             messages_service,
             context_id,
             socket_session,
@@ -1732,36 +1845,64 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
             metadata=metadata,
         )
 
-        task_key = f"{sid}:{context_id}"
+        # Turns are keyed by conversation, not connection, so a turn started on one
+        # socket can be steered/cancelled after a reconnect (new sid).
+        task_key = context_id
 
-        # Steering: if there's already an active task for this context_id,
-        # send as a steering message (continuous interaction turn) instead
-        # of starting a new full stream.
+        # Steering: if there's already an active turn for this conversation (from this
+        # or a previous connection), send as a steering message (continuous interaction
+        # turn) instead of starting a second full stream.
         existing_task = active_tasks.get(task_key)
         if existing_task is not None and not existing_task.asyncio_task.done():
-            logger.info(f"[STEERING] Active task detected for {task_key}, routing as steering message")
+            logger.info(f"[STEERING] Active turn detected for conversation {task_key}, routing as steering message")
             return await _send_steering_message_to_agent(a2a_client, message, sid, message_id, sio)
 
+        # This send is the user's response to any prompt the previous turn left pending
+        # (input-required prompts survive their turn's teardown, see _clear_turn_state),
+        # so drop it now — otherwise a mid-turn (re)subscribe would replay it.
+        _pending_interactions.pop(context_id, None)
+
         send_task = asyncio.create_task(
-            _send_message_to_agent(a2a_client, message, sid, message_id, sio, task_key=task_key)
+            _send_message_to_agent(
+                a2a_client, message, sid, message_id, sio, task_key=task_key, user_id=socket_session.user_id
+            )
         )
-        active_tasks[task_key] = ActiveTaskInfo(
+        turn_info = ActiveTaskInfo(
             asyncio_task=send_task,
             a2a_client=a2a_client,
+            origin_sid=sid,
         )
+        active_tasks[task_key] = turn_info
+        turn_cancelled = False
         try:
             return await send_task
         except asyncio.CancelledError:
-            logger.info(f"Send message task cancelled: sid={sid}, context_id={context_id}")
+            turn_cancelled = True
+            logger.info(f"Send message task cancelled: context_id={context_id}")
             cancelled_response = {
                 "id": message_id,
                 "contextId": context_id,
                 "status": {"state": "cancelled"},
             }
-            await sio.emit(SocketEvents.AGENT_RESPONSE, cancelled_response, to=sid)
+            await sio.emit(SocketEvents.AGENT_RESPONSE, cancelled_response, to=_conversation_room(context_id))
             return cancelled_response
         finally:
-            active_tasks.pop(task_key, None)
+            # Single teardown point for the turn: clear task tracking AND all in-memory
+            # turn state on every exit (completion, cancel, error) so the conversation
+            # doesn't stay falsely "in-flight" (stale resume snapshot / stuck spinner).
+            # Identity-checked: if another send already superseded this turn (our task was
+            # done but this finally hadn't run yet), the state now belongs to the new turn
+            # and must not be torn down by this stale handler. A missing entry (popped by
+            # handle_cancel_task) still means the state is ours to clear.
+            current = active_tasks.get(task_key)
+            if current is turn_info or current is None:
+                active_tasks.pop(task_key, None)
+                # A turn that ended BY asking for input (LangGraph interrupt closes the
+                # stream) must keep its prompt so a (re)subscribing client can restore it.
+                _clear_turn_state(
+                    context_id,
+                    preserve_pending_interaction=not turn_cancelled and _pending_input_required(context_id),
+                )
 
     except ValueError as e:
         # Validation errors - send specific error details
@@ -1823,28 +1964,104 @@ async def handle_send_message(sid: str, json_data: dict[str, Any]) -> dict[str, 
         return error_response
 
 
+async def _authorized_conversation(sid: str, conversation_id: str) -> Any | None:
+    """Return the conversation iff the socket's authenticated user owns it, else None.
+
+    Shared read-only ownership gate for handlers acting on an EXISTING conversation
+    (subscribe, cancel). The send path uses get_or_create instead, since it may
+    legitimately create a brand-new conversation under the sender.
+    """
+    socket_session = await sio.app_instance.state.socket_session_service.get_session(sid)  # type: ignore[attr-defined]
+    if not socket_session or not socket_session.user_id:
+        return None
+    return await sio.app_instance.state.conversation_service.get_conversation(  # type: ignore[attr-defined]
+        conversation_id=conversation_id,
+        user_id=socket_session.user_id,
+    )
+
+
 @sio.on(SocketEvents.CANCEL_TASK)  # type: ignore
 @require_socket_auth(sio)
 async def handle_cancel_task(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
     """Handle the 'cancel_task' socket.io event.
 
-    Cancels an active send_message task for the given conversation.
+    Cancels the active turn for the given conversation. The turn is keyed by
+    conversation (not the connection), so a reconnected client can cancel a turn it
+    started earlier — but only for a conversation it owns.
     """
     conversation_id = json_data.get("conversationId")
     if not conversation_id:
         return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Missing conversationId"})
 
-    # Look up the task by sid + conversationId (the same value used as
-    # context_id when the task was created in handle_send_message).
-    task_key = f"{sid}:{conversation_id}"
-    task_info = active_tasks.pop(task_key, None)
-    if task_info:
-        await _cancel_active_task(task_info, task_key, reason="user requested")
+    # Ownership check: cancel is keyed by conversation_id alone, so verify the caller
+    # owns it — otherwise any authenticated user could cancel another user's turn.
+    if not await _authorized_conversation(sid, conversation_id):
+        logger.warning(f"Cancel rejected: conversation {conversation_id} not owned (sid={sid})")
+        return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"})
 
-    if not task_info:
-        logger.info(f"No active task to cancel for sid={sid}, conversationId={conversation_id}")
+    task_info = active_tasks.pop(conversation_id, None)
+    if task_info:
+        await _cancel_active_task(task_info, conversation_id, reason="user requested")
+    else:
+        logger.info(f"No active turn to cancel for conversation {conversation_id}")
 
     return create_success_response({"cancelled": task_info is not None})
+
+
+def _has_active_turn(conversation_id: str) -> bool:
+    """Whether a turn is currently streaming for this conversation on this pod."""
+    return (
+        conversation_id in active_tasks
+        or conversation_id in _streaming_buffers
+        or conversation_id in _pending_interactions
+    )
+
+
+@sio.on(SocketEvents.SUBSCRIBE_CONVERSATION)  # type: ignore
+@require_socket_auth(sio)
+async def handle_subscribe_conversation(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Join the conversation's stream room and return a snapshot of any in-flight turn.
+
+    Lets a client resume after a reconnect or page reload (new sid): it rejoins the room
+    to receive live chunks, and the snapshot backfills the reply produced while it was
+    away plus any pending interactive (HITL) prompt. Membership is gated on the same
+    conversation-ownership check used on the persistence path.
+    """
+    conversation_id = json_data.get("conversationId")
+    if not conversation_id:
+        return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "conversationId is required"})
+
+    # Authorize: the subscriber must own the conversation.
+    if not await _authorized_conversation(sid, conversation_id):
+        logger.warning(f"Subscribe rejected: conversation {conversation_id} not owned (sid={sid})")
+        return create_error_response(SocketError.MSG_SEND_FAILED, details={"reason": "Conversation not found"})
+
+    # Enter the room BEFORE reading the snapshot: any reply chunk emitted after this point
+    # is delivered live, and any chunk already accounted for is reflected in the snapshot
+    # offset — so the client dedupes cleanly with no gap and no double-count.
+    await sio.enter_room(sid, _conversation_room(conversation_id))
+
+    reply = _streaming_buffers.get(conversation_id)
+    pending = _pending_interactions.get(conversation_id)
+    snapshot = {
+        "conversationId": conversation_id,
+        "inFlight": _has_active_turn(conversation_id),
+        "offset": len(reply) if reply is not None else 0,
+        "replyText": reply or "",
+        "pendingHitl": pending,
+    }
+    await sio.emit(SocketEvents.CONVERSATION_SNAPSHOT, snapshot, to=sid)
+    return create_success_response({"subscribed": True, "inFlight": snapshot["inFlight"]})
+
+
+@sio.on(SocketEvents.UNSUBSCRIBE_CONVERSATION)  # type: ignore
+@require_socket_auth(sio)
+async def handle_unsubscribe_conversation(sid: str, json_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Leave a conversation's stream room (e.g. the user switched conversations)."""
+    conversation_id = json_data.get("conversationId")
+    if conversation_id:
+        await sio.leave_room(sid, _conversation_room(conversation_id))
+    return create_success_response({"unsubscribed": True})
 
 
 # ==============================================================================

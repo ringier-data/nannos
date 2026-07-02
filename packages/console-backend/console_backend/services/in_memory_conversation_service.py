@@ -8,6 +8,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
+from ..exceptions import ConversationOwnershipError
 from ..models.conversation import Conversation
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,13 @@ class InMemoryConversationService:
     ) -> Conversation:
         now = datetime.now(timezone.utc)
         cid = conversation_id or _uuid7_str()
+
+        # Mirror the PostgreSQL PK constraint: creating a conversation_id that already
+        # exists (necessarily under another user — get_conversation filters by owner)
+        # must fail closed, not silently rebind the conversation to the new user.
+        existing = self._conversations.get(cid)
+        if existing and existing.user_id != user_id:
+            raise ConversationOwnershipError(f"Conversation {cid} is owned by another user")
 
         conv = Conversation(
             conversation_id=cid,

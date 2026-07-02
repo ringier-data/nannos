@@ -63,8 +63,68 @@ class ActiveStreamInfo:
 
 # Module-level registry of active streams, keyed by context_id.
 # Access is safe from a single asyncio event loop (no threading lock needed).
+# NOTE: this in-process registry only serializes concurrent turns within ONE replica.
+# Cross-replica serialization (so two pods can't run the same thread_id concurrently)
+# will come from a distributed StreamCoordinator impl (Postgres lease-lock) selected via
+# set_stream_coordinator(); the abstraction below is the seam for that.
 _active_streams: dict[str, ActiveStreamInfo] = {}
 _active_streams_lock = asyncio.Lock()
+
+
+class StreamCoordinator(ABC):
+    """Decides whether a turn may start for a context_id, or must fold into a running one.
+
+    Encapsulates the active-stream registry so the single-replica in-memory registry can
+    be swapped for a cross-replica (Postgres lease-lock) implementation without touching
+    the executor's control flow.
+    """
+
+    async def try_register(self, info: ActiveStreamInfo) -> ActiveStreamInfo | None:
+        """Atomically register `info` as the active stream for its context_id.
+
+        Returns None if registration succeeded (this caller owns the turn), or the already
+        -active ActiveStreamInfo if one exists (the caller must steer into it instead).
+        """
+        raise NotImplementedError
+
+    async def release(self, context_id: str) -> None:
+        """Release the active stream for a context_id (turn finished)."""
+        raise NotImplementedError
+
+
+class InMemoryStreamCoordinator(StreamCoordinator):
+    """Per-process coordinator backed by the module-level registry (single-replica).
+
+    The module-level `_active_streams`/`_active_streams_lock` remain the backing store
+    (tests seed them directly), but all runtime callers — including the orchestrator's
+    executor — must go through the coordinator API so that installing a cross-replica
+    implementation via set_stream_coordinator covers every executor.
+    """
+
+    async def try_register(self, info: ActiveStreamInfo) -> ActiveStreamInfo | None:
+        async with _active_streams_lock:
+            existing = _active_streams.get(info.context_id)
+            if existing is not None:
+                return existing
+            _active_streams[info.context_id] = info
+            return None
+
+    async def release(self, context_id: str) -> None:
+        async with _active_streams_lock:
+            _active_streams.pop(context_id, None)
+
+
+_stream_coordinator: StreamCoordinator = InMemoryStreamCoordinator()
+
+
+def get_stream_coordinator() -> StreamCoordinator:
+    return _stream_coordinator
+
+
+def set_stream_coordinator(coordinator: StreamCoordinator) -> None:
+    """Install a coordinator (e.g. a Postgres lease-lock impl for multi-replica)."""
+    global _stream_coordinator
+    _stream_coordinator = coordinator
 
 
 class BaseAgentExecutor(AgentExecutor, ABC):
@@ -157,49 +217,46 @@ class BaseAgentExecutor(AgentExecutor, ABC):
 
         logger.debug(f"[ZERO-TRUST] Executing with verified user_sub: {user_sub}, sub_agent_id: {sub_agent_id}")
 
-        # --- Continuous Interaction Turn: route to active stream if one exists ---
-        async with _active_streams_lock:
-            active = _active_streams.get(context_id)
-            if active is not None:
-                # Verify the caller is the same user who started the stream
-                if active.owner_sub and user_sub != active.owner_sub:
-                    logger.warning(
-                        f"[STEERING] Rejected steering for context_id={context_id}: "
-                        f"caller_sub={user_sub} does not match stream owner"
-                    )
-                    raise InvalidParamsError()
-                if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
-                    logger.warning(
-                        f"[STEERING] Queue full for context_id={context_id} "
-                        f"(depth={active.message_queue.qsize()}), rejecting"
-                    )
-                    raise InvalidParamsError()
-                logger.info(
-                    f"[STEERING] Active stream found for context_id={context_id}, "
-                    f"queuing message for running agent (queue depth: {active.message_queue.qsize() + 1})"
-                )
-                active.message_queue.put_nowait(context.message)
-                # Acknowledge-only: emit a status-update (NOT a raw Task object)
-                # so the SSE response has at least one event, then return.
-                # Using TaskStatusUpdateEvent avoids the "Task is already set"
-                # error on the client's ClientTaskManager when the event queue
-                # is a tapped child that also receives parent events.
-                await event_queue.enqueue_event(
-                    TaskStatusUpdateEvent(
-                        task_id=task.id,
-                        context_id=task.context_id,
-                        status=TaskStatus(
-                            state=task.status.state,
-                            message=task.status.message,
-                        ),
-                    )
-                )
-                return
-
-        # No active stream — register ourselves and proceed with execution
+        # --- Continuous Interaction Turn: register this turn, or route to the active one ---
+        # try_register atomically claims the turn for this context_id, or returns the
+        # already-active stream so we steer into it instead of starting a second execution.
         stream_info = ActiveStreamInfo(context_id=context_id, task_id=task.id, owner_sub=user_sub)
-        async with _active_streams_lock:
-            _active_streams[context_id] = stream_info
+        active = await get_stream_coordinator().try_register(stream_info)
+        if active is not None:
+            # Verify the caller is the same user who started the stream
+            if active.owner_sub and user_sub != active.owner_sub:
+                logger.warning(
+                    f"[STEERING] Rejected steering for context_id={context_id}: "
+                    f"caller_sub={user_sub} does not match stream owner"
+                )
+                raise InvalidParamsError()
+            if active.message_queue.qsize() >= MAX_STEERING_QUEUE_DEPTH:
+                logger.warning(
+                    f"[STEERING] Queue full for context_id={context_id} "
+                    f"(depth={active.message_queue.qsize()}), rejecting"
+                )
+                raise InvalidParamsError()
+            logger.info(
+                f"[STEERING] Active stream found for context_id={context_id}, "
+                f"queuing message for running agent (queue depth: {active.message_queue.qsize() + 1})"
+            )
+            active.message_queue.put_nowait(context.message)
+            # Acknowledge-only: emit a status-update (NOT a raw Task object)
+            # so the SSE response has at least one event, then return.
+            # Using TaskStatusUpdateEvent avoids the "Task is already set"
+            # error on the client's ClientTaskManager when the event queue
+            # is a tapped child that also receives parent events.
+            await event_queue.enqueue_event(
+                TaskStatusUpdateEvent(
+                    task_id=task.id,
+                    context_id=task.context_id,
+                    status=TaskStatus(
+                        state=task.status.state,
+                        message=task.status.message,
+                    ),
+                )
+            )
+            return
 
         # Share the message queue reference with the agent so SteeringMiddleware
         # can consume pending messages during graph execution.
@@ -312,22 +369,24 @@ class BaseAgentExecutor(AgentExecutor, ABC):
 
             raise InternalError() from e
         finally:
-            # Log unconsumed steering messages before cleanup.
-            # These arrive between the last abefore_model call and stream
-            # completion — they will be picked up as a normal next turn.
+            # Log unconsumed steering messages before cleanup. Count via qsize() —
+            # get_pending_messages would DRAIN the queue just to count it. These
+            # messages were already acknowledged to their sender but nothing replays
+            # them once the queue is cleared below, so this is a message drop and
+            # must be logged as one.
             try:
-                unconsumed = self.agent.get_pending_messages(context_id)
-                if unconsumed:
-                    logger.warning(
-                        f"[STEERING] {len(unconsumed)} unconsumed steering message(s) "
-                        f"for context_id={context_id} after execution finished. "
-                        f"They will be handled as the next conversation turn."
+                unconsumed_count = stream_info.message_queue.qsize()
+                if unconsumed_count:
+                    logger.error(
+                        f"[STEERING] Dropping {unconsumed_count} unconsumed steering message(s) "
+                        f"for context_id={context_id}: they arrived after the post-completion "
+                        f"re-invocation check and the stream has ended. The sender was already "
+                        f"acked; the user must resend."
                     )
             except Exception:
                 pass  # Best-effort; don't mask the original result
             # Deregister active stream and clean up agent's message queue
-            async with _active_streams_lock:
-                _active_streams.pop(context_id, None)
+            await get_stream_coordinator().release(context_id)
             self.agent.clear_message_queue(context_id)
 
     async def _handle_stream_item(

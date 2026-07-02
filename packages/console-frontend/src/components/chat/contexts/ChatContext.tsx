@@ -213,7 +213,17 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const locationRef = useRef(location);
   const navigate = useNavigate();
   const navigateRef = useRef(navigate);
-  const { isConnected, isSocketReady, initializeClient, sendMessage: socketSendMessage, cancelTask, onAgentResponse } = useSocket();
+  const {
+    isConnected,
+    isSocketReady,
+    initializeClient,
+    sendMessage: socketSendMessage,
+    cancelTask,
+    subscribeConversation,
+    unsubscribeConversation,
+    onAgentResponse,
+    onConversationSnapshot,
+  } = useSocket();
 
   // Keep refs in sync for use inside event handler closures
   useEffect(() => {
@@ -245,6 +255,18 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
   const [pendingFeedbackRequest, setPendingFeedbackRequest] = useState<{ conversationId: string; subAgents: string[] } | null>(null);
   const workingStepsMapRef = useRef<Map<string, TodoItem[]>>(new Map());
   const streamingMapRef = useRef<Map<string, string>>(new Map());
+  // Server-side offset (Unicode code points, from the backend's turnOffset/snapshot
+  // offset) that streamingMapRef's buffer corresponds to. Kept as its own ref because
+  // JS string.length counts UTF-16 units — deriving the offset from the buffer length
+  // would disagree with the backend as soon as the reply contains an astral-plane
+  // character (emoji) and silently drop chunks. Must be cleared wherever the streaming
+  // buffer is cleared.
+  const streamingOffsetMapRef = useRef<Map<string, number>>(new Map());
+  // Mirror of waitingMap for synchronous reads inside socket-event handlers.
+  const waitingMapRef = useRef<Map<string, boolean>>(new Map());
+  useEffect(() => {
+    waitingMapRef.current = waitingMap;
+  }, [waitingMap]);
   const subagentThoughtsMapRef = useRef<Map<string, Array<{agent_name: string; content: string; complete: boolean; startedAt?: Date}>>>(new Map());
   const statusHistoryMapRef = useRef<Map<string, Array<{timestamp: Date; message: string; source?: string}>>>(new Map());
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
@@ -453,8 +475,22 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
                 thoughts.forEach(t => { t.complete = true; });
                 setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
               }
+              // Dedupe against a resume snapshot: turnOffset is the cumulative reply
+              // length (in code points, per the backend) after this chunk. Compare it to
+              // the applied offset we track alongside the buffer — NOT to the buffer's
+              // .length, which counts UTF-16 units and runs ahead of the backend offset
+              // whenever the reply contains emoji, wrongly discarding chunks. Skip any
+              // chunk already covered so reconnect/reload never double-appends.
               const existing = streamingMapRef.current.get(resolvedConversationId) || '';
+              const applied = streamingOffsetMapRef.current.get(resolvedConversationId) ?? 0;
+              const chunkOffset = data.turnOffset;
+              if (typeof chunkOffset === 'number' && chunkOffset <= applied) {
+                return;
+              }
               streamingMapRef.current.set(resolvedConversationId, existing + text);
+              if (typeof chunkOffset === 'number') {
+                streamingOffsetMapRef.current.set(resolvedConversationId, chunkOffset);
+              }
               setStreamingMap(new Map(streamingMapRef.current));
             }
           }
@@ -518,6 +554,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       if (data.role === 'agent' && Array.isArray(data.parts) && shouldDisplayMessageParts(data.parts)) {
         if (streamingMapRef.current.has(resolvedConversationId)) {
           streamingMapRef.current.delete(resolvedConversationId);
+          streamingOffsetMapRef.current.delete(resolvedConversationId);
           setStreamingMap(new Map(streamingMapRef.current));
         }
       }
@@ -637,6 +674,7 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
           // Always clear streaming buffer and waiting indicator on completion
           streamingMapRef.current.delete(resolvedConversationId);
+          streamingOffsetMapRef.current.delete(resolvedConversationId);
           setStreamingMap(new Map(streamingMapRef.current));
           setWaitingMap((prev) => {
             const m = new Map(prev);
@@ -867,6 +905,14 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
 
     return unsubscribe;
   }, [onAgentResponse, addMessage, addOrUpdateTask, updateConversation, tasksMap]);
+
+  // Subscribe to the active conversation's stream room, and re-subscribe on reconnect
+  // (isSocketReady flips) so an in-flight turn resumes after a drop or page reload.
+  useEffect(() => {
+    if (!isSocketReady || !activeConversationId) return;
+    subscribeConversation(activeConversationId);
+    return () => unsubscribeConversation(activeConversationId);
+  }, [isSocketReady, activeConversationId, subscribeConversation, unsubscribeConversation]);
 
   // Load conversations from backend
   const loadConversations = useCallback(async (search?: string) => {
@@ -1165,6 +1211,81 @@ export function ChatProvider({ children, playgroundMode }: ChatProviderProps) {
       setIsLoadingMessages(false);
     }
   }, []);
+
+  // Apply the snapshot returned when (re)subscribing to a conversation.
+  //
+  // inFlight: seeds the streaming buffer with the reply produced while the client was
+  // away. A pending HITL prompt (if any) is restored separately via the normal
+  // agent_response path (see SocketContext). Only overwrite when the snapshot is AHEAD
+  // of what we already hold: a live chunk can race ahead of the snapshot (server enters
+  // the room, then reads the buffer), and rewinding to the shorter snapshot would drop
+  // that segment.
+  //
+  // Not inFlight: the turn (if any) ended while we were out of the room — its terminal
+  // events went to a room we had left, so nothing cleared our in-flight UI state.
+  // Reconcile: drop the stale spinner/stream state and refetch the persisted messages,
+  // which include the reply we missed. Without this the spinner never clears and the
+  // stale buffer makes the next turn's turnOffset dedup drop its chunks.
+  useEffect(() => {
+    const unsubscribe = onConversationSnapshot((snap) => {
+      if (!snap?.conversationId) return;
+      const conversationId = snap.conversationId;
+
+      if (!snap.inFlight) {
+        const hadStaleStream = streamingMapRef.current.has(conversationId);
+        const hadWaiting = !!waitingMapRef.current.get(conversationId);
+        if (!hadStaleStream && !hadWaiting) return;
+        if (hadStaleStream) {
+          streamingMapRef.current.delete(conversationId);
+          streamingOffsetMapRef.current.delete(conversationId);
+          setStreamingMap(new Map(streamingMapRef.current));
+        }
+        if (hadWaiting) {
+          setWaitingMap((prev) => {
+            const m = new Map(prev);
+            m.delete(conversationId);
+            return m;
+          });
+        }
+        // Match the live finalize path: thoughts/history were attached to the persisted
+        // messages at turn end server-side, so drop the in-progress copies.
+        subagentThoughtsMapRef.current.delete(conversationId);
+        setSubagentThoughtsMap(new Map(subagentThoughtsMapRef.current));
+        statusHistoryMapRef.current.delete(conversationId);
+        setStatusHistoryMap(new Map(statusHistoryMapRef.current));
+        loadMessages(conversationId);
+        return;
+      }
+
+      if (typeof snap.offset === 'number') {
+        const applied = streamingOffsetMapRef.current.get(conversationId) ?? 0;
+        if (snap.offset > applied) {
+          streamingMapRef.current.set(conversationId, snap.replyText || '');
+          streamingOffsetMapRef.current.set(conversationId, snap.offset);
+          setStreamingMap(new Map(streamingMapRef.current));
+        }
+        // A pending HITL prompt means the turn is waiting on the USER, not the agent.
+        // The prompt was just replayed through the agent_response path (SocketContext),
+        // which rendered it and cleared the waiting spinner — don't re-set the spinner
+        // on top of it; nothing would ever clear it until the user answers.
+        if (snap.pendingHitl) {
+          setWaitingMap((prev) => {
+            if (!prev.has(conversationId)) return prev;
+            const m = new Map(prev);
+            m.delete(conversationId);
+            return m;
+          });
+        } else {
+          setWaitingMap((prev) => {
+            const m = new Map(prev);
+            m.set(conversationId, true);
+            return m;
+          });
+        }
+      }
+    });
+    return unsubscribe;
+  }, [onConversationSnapshot, loadMessages]);
 
   // Create a new conversation
   const createConversation = useCallback(() => {
