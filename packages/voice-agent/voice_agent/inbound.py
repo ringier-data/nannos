@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import Response
+from twilio.twiml.voice_response import Connect, Gather, VoiceResponse  # noqa: PLC0415
 
 from voice_agent.agent import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
 from voice_agent.console_client import (
@@ -60,7 +61,7 @@ from voice_agent.console_client import (
 logger = logging.getLogger(__name__)
 
 inbound_router = APIRouter(prefix="/twilio/incoming", tags=["twilio-inbound"])
-_VALIDATE_SIG = os.getenv("TWILIO_VALIDATE_SIGNATURE", "false").lower() == "true"
+_VALIDATE_SIG = os.getenv("TWILIO_VALIDATE_SIGNATURE", "true").lower() == "true"
 _PUBLIC_URL = os.getenv("PUBLIC_URL", os.getenv("VOICE_AGENT_BASE_URL", ""))
 
 # ── Shared inbound state dict ─────────────────────────────────────────────────
@@ -108,42 +109,40 @@ def _evict_expired_inbound_state() -> None:
 # ── TwiML helpers ─────────────────────────────────────────────────────────────
 
 
+def _twiml_response(vr) -> Response:
+    return Response(content=str(vr), media_type="text/xml")
+
+
 def _twiml_reject(message: str) -> Response:
-    twiml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        f"<Response><Say>{message}</Say><Hangup/></Response>"
-    )
-    return Response(content=twiml, media_type="text/xml")
+    vr = VoiceResponse()
+    vr.say(message)
+    vr.hangup()
+    return _twiml_response(vr)
 
 
 def _twiml_gather(action_url: str, say_text: str, num_digits: int = 1) -> Response:
-    twiml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        "<Response>"
-        f'<Gather numDigits="{num_digits}" action="{action_url}" method="POST">'
-        f"<Say>{say_text}</Say>"
-        "</Gather>"
-        "<Say>We didn't receive your selection. Please call back and try again.</Say>"
-        "<Hangup/>"
-        "</Response>"
-    )
-    return Response(content=twiml, media_type="text/xml")
+    vr = VoiceResponse()
+    gather = Gather(num_digits=num_digits, action=action_url, method="POST")
+    gather.say(say_text)
+    vr.append(gather)
+    vr.say("We didn't receive your selection. Please call back and try again.")
+    vr.hangup()
+    return _twiml_response(vr)
 
 
 def _twiml_stream(
     stream_url: str,
     say_text: str | None = None,
 ) -> Response:
-    """Build <Connect><Stream> TwiML, optionally preceded by a spoken message
-    and/or a media file.
+    """Build <Connect><Stream> TwiML, optionally preceded by a spoken message."""
 
-    """
-    parts = ['<?xml version="1.0" encoding="UTF-8"?>', "<Response>"]
+    vr = VoiceResponse()
     if say_text:
-        parts.append(f"<Say>{say_text}</Say>")
-    parts.append(f'<Connect><Stream url="{stream_url}"/></Connect>')
-    parts.append("</Response>")
-    return Response(content="".join(parts), media_type="text/xml")
+        vr.say(say_text)
+    connect = Connect()
+    connect.stream(url=stream_url)
+    vr.append(connect)
+    return _twiml_response(vr)
 
 
 def _normalize_e164(number: str) -> str:
