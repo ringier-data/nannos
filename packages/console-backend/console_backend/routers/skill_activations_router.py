@@ -275,7 +275,7 @@ async def update_activation(
 
     result = await db.execute(
         sa_text("""
-            SELECT s.name as agent_name
+            SELECT sa.sub_agent_id, sa.scope, sa.user_id, sa.group_id, s.name as agent_name
             FROM skill_activations sa
             JOIN sub_agents s ON s.id = sa.sub_agent_id
             WHERE sa.id = :id
@@ -285,6 +285,16 @@ async def update_activation(
     row = result.mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Activation not found")
+
+    await _authorize_activation_mutation(
+        request,
+        db,
+        user,
+        scope=row["scope"],
+        owner_user_id=row["user_id"],
+        group_id=row["group_id"],
+        sub_agent_id=row["sub_agent_id"],
+    )
 
     try:
         new_hash = await activation_service.update_activation(
@@ -329,7 +339,7 @@ async def bulk_update_activations(
 
         result = await db.execute(
             sa_text("""
-                SELECT s.name as agent_name
+                SELECT sa.sub_agent_id, sa.scope, sa.user_id, sa.group_id, s.name as agent_name
                 FROM skill_activations sa
                 JOIN sub_agents s ON s.id = sa.sub_agent_id
                 WHERE sa.id = :id
@@ -338,6 +348,21 @@ async def bulk_update_activations(
         )
         row = result.mappings().first()
         if not row:
+            failed.append({"id": activation_id, "reason": "Activation not found"})
+            continue
+
+        try:
+            await _authorize_activation_mutation(
+                request,
+                db,
+                user,
+                scope=row["scope"],
+                owner_user_id=row["user_id"],
+                group_id=row["group_id"],
+                sub_agent_id=row["sub_agent_id"],
+            )
+        except HTTPException:
+            # Not authorized — report as not-found to avoid confirming existence.
             failed.append({"id": activation_id, "reason": "Activation not found"})
             continue
 
