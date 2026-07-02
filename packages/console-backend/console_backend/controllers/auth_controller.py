@@ -1,7 +1,7 @@
 """Authentication controller for OIDC flow using Authlib."""
 
 import logging
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from authlib.integrations.starlette_client import OAuth, OAuthError, StarletteOAuth2App
 from fastapi import HTTPException, Request, Response
@@ -97,13 +97,31 @@ class AuthController:
                 return True
 
             # In dev mode, allow http URLs to base_domain
-            if url.startswith("http://") and self.is_dev and self.base_domain in url:
+            if url.startswith("http://") and self.is_dev and self._host_matches_base_domain(url):
                 return True
 
             # In production, require https and base_domain
-            return url.startswith("https://") and self.base_domain in url
+            return url.startswith("https://") and self._host_matches_base_domain(url)
         except Exception:
             return False
+
+    def _host_matches_base_domain(self, url: str) -> bool:
+        """Return True only if the URL's host is the base domain or a subdomain of it.
+
+        Compares the parsed hostname (userinfo and port stripped) rather than doing a
+        substring match on the whole URL — a substring check accepts hostile hosts such
+        as ``https://<base_domain>.evil.com`` (base_domain appears as a prefix) or
+        ``https://evil.com/?x=<base_domain>`` (base_domain appears in the query), turning
+        the redirect into an open redirect.
+        """
+        hostname = (urlparse(url).hostname or "").lower()
+        if not hostname:
+            return False
+        # Strip any userinfo/port from the configured base domain before comparing.
+        base_host = self.base_domain.split("@")[-1].split(":")[0].lower()
+        if not base_host:
+            return False
+        return hostname == base_host or hostname.endswith("." + base_host)
 
     async def get_login(self, request: Request) -> RedirectResponse:
         """Initiate the OIDC login flow.
