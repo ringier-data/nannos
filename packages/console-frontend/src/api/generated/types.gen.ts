@@ -160,7 +160,7 @@ export type AuditAction = 'create' | 'update' | 'delete' | 'approve' | 'reject' 
  *
  * Audit entity type enum.
  */
-export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting';
+export type AuditEntityType = 'user' | 'group' | 'sub_agent' | 'session' | 'secret' | 'rate_card' | 'scheduled_job' | 'delivery_channel' | 'catalog' | 'bug_report' | 'scim_token' | 'outbound_scim_endpoint' | 'skill' | 'tool_risk_score' | 'model_default' | 'budget_setting' | 'voice_session';
 
 /**
  * AuditLog
@@ -6965,6 +6965,105 @@ export type VisibilityUpdate = {
 };
 
 /**
+ * VoiceSession
+ */
+export type VoiceSession = {
+    /**
+     * Id
+     */
+    id?: string;
+    /**
+     * User Id
+     */
+    user_id: string;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Phone Number
+     */
+    phone_number: string;
+    /**
+     * Call Sid
+     */
+    call_sid?: string | null;
+    /**
+     * Gemini Session Handle
+     */
+    gemini_session_handle?: string | null;
+    status?: VoiceSessionStatus;
+    /**
+     * Use Session Memory
+     */
+    use_session_memory?: boolean;
+    /**
+     * Started At
+     */
+    started_at?: string;
+    /**
+     * Ended At
+     */
+    ended_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+};
+
+/**
+ * VoiceSessionCreate
+ */
+export type VoiceSessionCreate = {
+    /**
+     * User Id
+     */
+    user_id: string;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Phone Number
+     */
+    phone_number: string;
+    /**
+     * Call Sid
+     */
+    call_sid?: string | null;
+    /**
+     * Use Session Memory
+     */
+    use_session_memory?: boolean;
+};
+
+/**
+ * VoiceSessionHandleUpdate
+ */
+export type VoiceSessionHandleUpdate = {
+    /**
+     * Gemini Session Handle
+     */
+    gemini_session_handle: string;
+};
+
+/**
+ * VoiceSessionResponse
+ */
+export type VoiceSessionResponse = {
+    data: VoiceSession;
+};
+
+/**
+ * VoiceSessionStatus
+ */
+export type VoiceSessionStatus = 'active' | 'completed' | 'failed' | 'abandoned';
+
+/**
  * WebSearchConfig
  *
  * Fully-resolved Web Search picker state — the single backend-owned source of which model
@@ -11017,7 +11116,7 @@ export type SchedulerPauseJobResponses = {
 
 export type SchedulerPauseJobResponse = SchedulerPauseJobResponses[keyof SchedulerPauseJobResponses];
 
-export type ResumeJobApiV1SchedulerJobsJobIdResumePostData = {
+export type SchedulerResumeJobData = {
     body?: never;
     path: {
         /**
@@ -11029,23 +11128,23 @@ export type ResumeJobApiV1SchedulerJobsJobIdResumePostData = {
     url: '/api/v1/scheduler/jobs/{job_id}/resume';
 };
 
-export type ResumeJobApiV1SchedulerJobsJobIdResumePostErrors = {
+export type SchedulerResumeJobErrors = {
     /**
      * Validation Error
      */
     422: HttpValidationError;
 };
 
-export type ResumeJobApiV1SchedulerJobsJobIdResumePostError = ResumeJobApiV1SchedulerJobsJobIdResumePostErrors[keyof ResumeJobApiV1SchedulerJobsJobIdResumePostErrors];
+export type SchedulerResumeJobError = SchedulerResumeJobErrors[keyof SchedulerResumeJobErrors];
 
-export type ResumeJobApiV1SchedulerJobsJobIdResumePostResponses = {
+export type SchedulerResumeJobResponses = {
     /**
      * Successful Response
      */
     200: ScheduledJob;
 };
 
-export type ResumeJobApiV1SchedulerJobsJobIdResumePostResponse = ResumeJobApiV1SchedulerJobsJobIdResumePostResponses[keyof ResumeJobApiV1SchedulerJobsJobIdResumePostResponses];
+export type SchedulerResumeJobResponse = SchedulerResumeJobResponses[keyof SchedulerResumeJobResponses];
 
 export type ListRunsApiV1SchedulerJobsJobIdRunsGetData = {
     body?: never;
@@ -14750,6 +14849,272 @@ export type PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPos
 };
 
 export type PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponse = PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponses[keyof PushAllToEndpointApiV1AdminOutboundScimEndpointsEndpointIdPushAllPostResponses];
+
+export type GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetData = {
+    body?: never;
+    path: {
+        /**
+         * Phone Number
+         */
+        phone_number: string;
+    };
+    query?: never;
+    url: '/api/v1/voice/users/by-phone/{phone_number}';
+};
+
+export type GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetError = GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetErrors[keyof GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetErrors];
+
+export type GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetResponses = {
+    /**
+     * Response Get User By Phone Api V1 Voice Users By Phone  Phone Number  Get
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetResponse = GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetResponses[keyof GetUserByPhoneApiV1VoiceUsersByPhonePhoneNumberGetResponses];
+
+export type ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetData = {
+    body?: never;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: {
+        /**
+         * Limit
+         */
+        limit?: number;
+    };
+    url: '/api/v1/voice/users/{user_id}/sub-agents';
+};
+
+export type ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetError = ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetErrors[keyof ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetErrors];
+
+export type ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetResponses = {
+    /**
+     * Successful Response
+     */
+    200: SubAgentListResponse;
+};
+
+export type ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetResponse = ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetResponses[keyof ListSubAgentsForMenuApiV1VoiceUsersUserIdSubAgentsGetResponses];
+
+export type GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetData = {
+    body?: never;
+    path: {
+        /**
+         * User Id
+         */
+        user_id: string;
+    };
+    query?: never;
+    url: '/api/v1/voice/users/{user_id}/mcp-token';
+};
+
+export type GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetError = GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetErrors[keyof GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetErrors];
+
+export type GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetResponses = {
+    /**
+     * Response Get User Mcp Token Api V1 Voice Users  User Id  Mcp Token Get
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetResponse = GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetResponses[keyof GetUserMcpTokenApiV1VoiceUsersUserIdMcpTokenGetResponses];
+
+export type CreateVoiceSessionApiV1VoiceSessionsPostData = {
+    body: VoiceSessionCreate;
+    path?: never;
+    query?: never;
+    url: '/api/v1/voice/sessions';
+};
+
+export type CreateVoiceSessionApiV1VoiceSessionsPostErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CreateVoiceSessionApiV1VoiceSessionsPostError = CreateVoiceSessionApiV1VoiceSessionsPostErrors[keyof CreateVoiceSessionApiV1VoiceSessionsPostErrors];
+
+export type CreateVoiceSessionApiV1VoiceSessionsPostResponses = {
+    /**
+     * Successful Response
+     */
+    201: VoiceSessionResponse;
+};
+
+export type CreateVoiceSessionApiV1VoiceSessionsPostResponse = CreateVoiceSessionApiV1VoiceSessionsPostResponses[keyof CreateVoiceSessionApiV1VoiceSessionsPostResponses];
+
+export type GetLatestResumableSessionApiV1VoiceSessionsLatestGetData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * User Id
+         */
+        user_id: string;
+        /**
+         * Sub Agent Id
+         */
+        sub_agent_id?: number | null;
+    };
+    url: '/api/v1/voice/sessions/latest';
+};
+
+export type GetLatestResumableSessionApiV1VoiceSessionsLatestGetErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type GetLatestResumableSessionApiV1VoiceSessionsLatestGetError = GetLatestResumableSessionApiV1VoiceSessionsLatestGetErrors[keyof GetLatestResumableSessionApiV1VoiceSessionsLatestGetErrors];
+
+export type GetLatestResumableSessionApiV1VoiceSessionsLatestGetResponses = {
+    /**
+     * Response Get Latest Resumable Session Api V1 Voice Sessions Latest Get
+     *
+     * Successful Response
+     */
+    200: VoiceSessionResponse | null;
+};
+
+export type GetLatestResumableSessionApiV1VoiceSessionsLatestGetResponse = GetLatestResumableSessionApiV1VoiceSessionsLatestGetResponses[keyof GetLatestResumableSessionApiV1VoiceSessionsLatestGetResponses];
+
+export type UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchData = {
+    body: VoiceSessionHandleUpdate;
+    path: {
+        /**
+         * Session Id
+         */
+        session_id: string;
+    };
+    query?: never;
+    url: '/api/v1/voice/sessions/{session_id}/handle';
+};
+
+export type UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchError = UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchErrors[keyof UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchErrors];
+
+export type UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchResponses = {
+    /**
+     * Response Update Session Handle Api V1 Voice Sessions  Session Id  Handle Patch
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchResponse = UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchResponses[keyof UpdateSessionHandleApiV1VoiceSessionsSessionIdHandlePatchResponses];
+
+export type CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchData = {
+    body?: never;
+    path: {
+        /**
+         * Session Id
+         */
+        session_id: string;
+    };
+    query?: never;
+    url: '/api/v1/voice/sessions/{session_id}/complete';
+};
+
+export type CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchError = CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchErrors[keyof CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchErrors];
+
+export type CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchResponses = {
+    /**
+     * Response Complete Voice Session Api V1 Voice Sessions  Session Id  Complete Patch
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchResponse = CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchResponses[keyof CompleteVoiceSessionApiV1VoiceSessionsSessionIdCompletePatchResponses];
+
+export type FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchData = {
+    body?: never;
+    path: {
+        /**
+         * Session Id
+         */
+        session_id: string;
+    };
+    query?: never;
+    url: '/api/v1/voice/sessions/{session_id}/fail';
+};
+
+export type FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchErrors = {
+    /**
+     * Validation Error
+     */
+    422: HttpValidationError;
+};
+
+export type FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchError = FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchErrors[keyof FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchErrors];
+
+export type FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchResponses = {
+    /**
+     * Response Fail Voice Session Api V1 Voice Sessions  Session Id  Fail Patch
+     *
+     * Successful Response
+     */
+    200: {
+        [key: string]: unknown;
+    };
+};
+
+export type FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchResponse = FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchResponses[keyof FailVoiceSessionApiV1VoiceSessionsSessionIdFailPatchResponses];
 
 export type HealthCheckApiV1HealthGetData = {
     body?: never;
