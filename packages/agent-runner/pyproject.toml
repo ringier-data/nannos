@@ -11,6 +11,10 @@ dependencies = [
     "uvicorn>=0.38.0",
     # LangChain / DeepAgents
     "deepagents[quickjs]>=0.6.0,<0.7.0",
+    # Floor the langchain-quickjs wasm line (>=0.2). The pre-wasm in-process
+    # engine could SIGABRT the whole pod on a GC fault; transitive via the
+    # uncapped deepagents extra, so pin explicitly to prevent regression.
+    "langchain-quickjs>=0.3.2,<0.4",
     "langchain>=1.0.0",
     "langchain-aws>=1.4.3",
     "langchain-mcp-adapters>=0.1.11",
