@@ -1,10 +1,10 @@
 """File Analyzer Sub-Agent.
 
-A local sub-agent for analyzing files (images, PDFs, text, audio, video) using multimodal capabilities.
+A local sub-agent for analyzing files (images, PDFs, text, audio) using multimodal capabilities.
 This is a built-in capability, not an external A2A service, providing:
 
 1. Clean LangSmith observability (separate agent trace)
-2. A multimodal model (the fleet's cheap chat tier, resolved at runtime) supporting audio/video natively
+2. A multimodal model (the fleet's cheap chat tier, resolved at runtime)
 3. Consistent sub-agent interface with the rest of the system
 
 The sub-agent accepts any HTTPS URL directly (public URLs work as-is).
@@ -12,21 +12,28 @@ For S3 URIs (s3://...), the orchestrator should first convert them to
 presigned HTTPS URLs using the generate_presigned_url tool.
 
 Supported file types:
-- Images: PNG, JPG, JPEG, GIF, WebP, BMP, TIFF
-- Documents: PDF
-- Text: TXT, JSON, CSV, MD, XML, YAML, HTML
-- Audio: MP3, WAV, M4A, MPEG, OGG, WEBM (with transcription)
-- Video: MP4, WEBM, AVI, MOV (with audio analysis)
+- Images: PNG, JPG, JPEG, GIF, WebP, BMP, TIFF (sent as image_url)
+- Documents: PDF (fetched and inlined as base64)
+- Text: TXT, JSON, CSV, MD, XML, YAML, HTML (fetched inline)
+- Audio: MP3, WAV, M4A, MPEG, OGG, WEBM (first-class chat input; inlined as base64 —
+  requires an audio-capable resolved model, e.g. Gemini; Claude has no audio modality)
+
+NOT supported (rejected with a clear message — see the video branch in _fetch_files):
+- Video. Blocked by transport, not capability (the Gemini tier can do video): the ChatOpenAI
+  wire format (ADR-0001) rejects a URL `file` block, and base64 doesn't scale to video. Real
+  support is an upload pipeline — Vertex needs a gs:// (or Gemini File API) URI and won't fetch
+  our S3 presigned URLs, so the file must be staged there first. See AGENTS.md ("the Video Gap").
 
 This module uses LocalA2ARunnable to provide the same response format
 as remote A2A agents, ensuring consistent middleware behavior.
 
 Model: the fleet's cheap/fast chat tier, resolved at runtime from the gateway
-(model_factory.get_default_fast_model). The configured default must be multimodal-capable
-(image/PDF/audio/video). No env var or hardcoded alias: models are registered at runtime.
+(model_factory.get_default_fast_model). No env var or hardcoded alias: models are
+registered at runtime.
 """
 
 import asyncio
+import base64
 import ipaddress
 import logging
 import re
@@ -62,7 +69,8 @@ logger = logging.getLogger(__name__)
 FILE_ANALYZER_NAME = "file-analyzer"
 FILE_ANALYZER_DESCRIPTION = (
     "Analyzes the content of attached files or files at HTTPS URLs and answers questions about them. "
-    "Automatically detects and handles: images, PDFs, text files, audio files, and videos. "
+    "Handles images, PDFs, text, and audio files. "
+    "Video is NOT supported yet — do not route video files here. "
     "Attached files from the user's message are forwarded automatically — just describe what analysis you need. "
     "For HTTPS URLs in text, include the full URL. "
     "Do NOT assume the file type - let the analyzer determine it. "
@@ -132,6 +140,49 @@ VIDEO_EXTENSIONS = {".mp4", ".webm", ".avi", ".mov", ".mkv", ".flv", ".wmv"}
 # Maximum text file size to fetch (1MB)
 MAX_TEXT_FETCH_BYTES = 1 * 1024 * 1024
 
+# Maximum document (PDF) size to fetch and inline as base64. Documents are sent to the
+# model as base64 (see _fetch_files) because the Chat Completions wire format the gateway
+# speaks rejects file *URLs* — only base64/file_id file sources are accepted. Base64 inflates
+# ~33%, and Anthropic/Bedrock cap the whole request near 32MB, so keep the raw file well under.
+MAX_DOC_FETCH_BYTES = 20 * 1024 * 1024
+
+# Maximum audio size to fetch and inline as base64. Audio is inlined for the same wire-format
+# reason as PDFs (a file URL can't be expressed in Chat Completions), and Gemini's inline-data
+# path caps the whole request near 20MB. Chat voice recordings are far smaller than this.
+MAX_AUDIO_FETCH_BYTES = 20 * 1024 * 1024
+
+# Content types the file-analyzer can process end-to-end, in advertised order. Used by
+# get_supported_input_modes() to narrow the resolved model's declared input_modes. Excludes
+# "video" (the gateway path can't carry it — see _fetch_files); "audio"/"file" pass through
+# only when the model also declares them (audio needs an audio-capable model, e.g. Gemini).
+_HANDLEABLE_MODES = ("text", "image", "file", "audio")
+
+# Audio extension → MIME type for the base64 file block. Extensions not listed fall back to
+# audio/mpeg (covers .mp3 and anything unrecognized). Detection accepts more (AUDIO_EXTENSIONS);
+# this only needs the wire MIME for the formats we tag distinctly.
+_AUDIO_EXT_TO_MIME = {
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".webm": "audio/webm",
+    ".m4a": "audio/m4a",
+    ".flac": "audio/flac",
+}
+
+# User-facing rejection messages. Shared between the preflight (_reject_unsupported_media,
+# which routes on the declared block type) and _fetch_files (which routes on the type detected
+# from the actual content) so both entry points emit the same message — audio/video can be
+# discovered at either stage (e.g. a user-pasted URL only surfaces its type in _fetch_files).
+_VIDEO_UNSUPPORTED_MSG = (
+    "Video files aren't supported for analysis yet — "
+    "I can analyze images, PDFs, audio, and text files."
+)
+_AUDIO_UNAVAILABLE_MSG = (
+    "Audio transcription isn't available: the configured file-analyzer model doesn't "
+    "accept audio input. An admin must set an audio-capable model (e.g. a Gemini model "
+    "with 'audio' input mode) as the Low chat tier or the Chat default in "
+    "Admin → Model Gateway."
+)
+
 # System prompt for the file analyzer
 FILE_ANALYZER_SYSTEM_PROMPT = """<role>
 You are a file analysis assistant. Your job is to analyze files and answer questions about their content.
@@ -150,7 +201,6 @@ When analyzing a file:
 - PDFs: Extract and summarize text, describe layouts, identify key information.
 - Text files: Summarize content, answer questions, extract specific data.
 - Audio files (audio/webm, audio/wav, etc.): Transcribe speech EXACTLY as spoken, word for word. Do not describe visual content — audio files have no video.
-- Video files (video/mp4, video/webm, etc.): Describe visual content AND transcribe audio EXACTLY as spoken.
 </file_type_guidelines>
 
 <audio_transcription_rules>
@@ -277,12 +327,37 @@ async def _detect_file_type(url: str, client: httpx.AsyncClient) -> str:
     return "unknown"
 
 
+async def _fetch_bytes_capped(
+    client: httpx.AsyncClient, url: str, max_bytes: int, too_large_msg: str
+) -> bytes:
+    """GET ``url`` and return its body, aborting as soon as it exceeds ``max_bytes``.
+
+    Streams the response so an oversized (or malicious) URL is never fully buffered before the
+    limit is enforced: a declared ``Content-Length`` over the cap is rejected before reading the
+    body, and the incremental read still caps memory at ~``max_bytes`` when the header is absent
+    or lies. Raises ``ValueError(too_large_msg)`` when the cap is exceeded.
+    """
+    async with client.stream("GET", url) as response:
+        response.raise_for_status()
+        cl = response.headers.get("content-length")
+        if cl and cl.strip().isdigit() and int(cl) > max_bytes:
+            raise ValueError(too_large_msg)
+        buf = bytearray()
+        async for chunk in response.aiter_bytes():
+            buf.extend(chunk)
+            if len(buf) > max_bytes:
+                raise ValueError(too_large_msg)
+        return bytes(buf)
+
+
 def _create_file_analyzer_model(callbacks: Optional[List] = None):
     """Create the model for file analysis.
 
     Runs on the fleet's cheap/fast chat tier, resolved at runtime from the gateway
     (model_factory.get_default_fast_model). File analysis needs a multimodal-capable model
-    (image/PDF/audio/video), so the admin's chat / chat:low default must support file content.
+    (image/PDF/audio), so the admin's chat / chat:low default must support file content. Audio
+    additionally requires an audio-capable tier (e.g. Gemini); video is not supported (see
+    _fetch_files / AGENTS.md "the Video Gap").
 
     Args:
         callbacks: Optional list of callbacks to attach to the model
@@ -296,10 +371,11 @@ def _create_file_analyzer_model(callbacks: Optional[List] = None):
 
 
 class FileAnalyzerRunnable(LocalA2ARunnable):
-    """Local sub-agent for analyzing files (images, PDFs, text, audio, video).
+    """Local sub-agent for analyzing files (images, PDFs, text, audio).
 
     Uses multimodal LLM capabilities (default: Gemini) to analyze file content.
-    Natively supports audio transcription and video analysis without separate services.
+    Supports audio transcription (on an audio-capable tier) without a separate service; video is
+    not supported through the gateway path (see _fetch_files / AGENTS.md "the Video Gap").
     Uses CostTrackingCallback for automatic cost tracking through LangChain.
     Extends LocalA2ARunnable to ensure consistent response format with remote A2A agents.
 
@@ -338,24 +414,64 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
         return FILE_ANALYZER_NAME
 
     def get_supported_input_modes(self) -> List[str]:
-        """Get list of input modes supported by the file analyzer.
+        """Content types the file-analyzer actually handles end-to-end.
 
-        Derived from the resolved model's gateway-declared input_modes (set at registration),
-        so the advertised modes track the actual multimodal capability of whatever the admin
-        configured as the cheap chat tier — rather than assuming full audio/video support.
-        Falls back to text+image when no default is configured or the gateway snapshot is
-        unavailable.
+        Starts from the resolved model's gateway-declared input_modes (set at registration) and
+        narrows to what this agent can genuinely process (`_HANDLEABLE_MODES`):
+        - **Video is always dropped** — the gateway path can't carry it (see `_fetch_files`),
+          regardless of what the model declares.
+        - **Audio / file (PDF) are offered only when the model declares them** — audio needs an
+          audio-capable model (e.g. Gemini); a text/vision-only tier (e.g. Claude/Bedrock) can't
+          transcribe audio, so we neither advertise nor attempt it.
 
-        Returns:
-            List of supported content types
+        This is both the agent-card capability (so the orchestrator routes honestly) and the
+        input to the base block-strip. Falls back to text+image when no default is configured
+        or the gateway snapshot is unavailable.
         """
         model_type = self.get_model_type()
+        model_modes: List[str] = ["text", "image"]
         if model_type:
             try:
-                return get_model_input_capabilities(model_type)  # type: ignore[arg-type]
+                model_modes = list(get_model_input_capabilities(model_type))  # type: ignore[arg-type]
             except Exception:
                 pass
-        return ["text", "image"]
+        return [m for m in _HANDLEABLE_MODES if m in model_modes]
+
+    def _supports_audio(self) -> bool:
+        """Whether the resolved file-analyzer model accepts audio input.
+
+        True only when the model declares `audio` in its gateway input_modes — in practice an
+        audio-capable model such as Gemini. On a text/vision-only tier (e.g. Claude on Bedrock)
+        audio transcription is unavailable and audio attachments are rejected with a clear
+        message (see `_reject_unsupported_media`) rather than attempted and silently failed.
+        """
+        return "audio" in self.get_supported_input_modes()
+
+    def _reject_unsupported_media(self, input_data: SubAgentInput) -> None:
+        """Fail fast with a clear, user-facing message for media this agent can't process.
+
+        Runs before the base block-strip so unsupported media doesn't get silently rewritten to
+        a text description — which surfaces as the generic "No processable files" error and, worse,
+        prompts the orchestrator to pointlessly re-delegate to general-purpose.
+
+        - **Video** is never supported (the gateway path can't carry it — see `_fetch_files`).
+        - **Audio** requires an audio-capable resolved model (e.g. Gemini). On a text/vision-only
+          tier there's no point attempting it.
+
+        Gated on the block's declared type (the same signal the base strip routes on), so no fetch
+        happens first.
+        """
+        if not input_data.messages:
+            return
+        content = input_data.messages[-1].content
+        if not isinstance(content, list):
+            return
+        types = {b.get("type") for b in content if isinstance(b, dict)}
+
+        if "video" in types:
+            raise ValueError(_VIDEO_UNSUPPORTED_MSG)
+        if "audio" in types and not self._supports_audio():
+            raise ValueError(_AUDIO_UNAVAILABLE_MSG)
 
     def get_model_type(self) -> str | None:
         """Return the file analyzer model type for provider-specific transforms.
@@ -439,57 +555,79 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
                 content_blocks.append(image_block)
 
             elif file_type == "document":
-                logger.info("Detected document file, adding to request...")
+                # Documents must be sent as base64, NOT as a URL — and this is NOT a
+                # Bedrock-specific choice, so don't gate it on the provider. Every model goes
+                # through the gateway as a langchain ChatOpenAI client speaking OpenAI Chat
+                # Completions (ADR-0001), whose file content part has no URL form: a file block
+                # carrying a `url` is rejected at payload build ("file URLs ... with Chat
+                # Completions"), for every provider. base64 is the one source that works across
+                # all of them (Bedrock/Vertex additionally accept base64 only at the provider
+                # layer). Images differ — image_url accepts a URL — which is why only documents
+                # need this. Revisit only if we ever route documents through a native
+                # (non-ChatOpenAI) client or the Responses API.
+                logger.info("Detected document file, fetching bytes to inline as base64...")
+                content = await _fetch_bytes_capped(
+                    client,
+                    file_url,
+                    MAX_DOC_FETCH_BYTES,
+                    f"PDF too large. Maximum is {MAX_DOC_FETCH_BYTES:,} bytes.",
+                )
+
+                filename = file_url.split("?")[0].rsplit("/", 1)[-1] or "document.pdf"
                 file_block: FileContentBlock = {
                     "type": "file",
-                    "url": file_url,
+                    "base64": base64.b64encode(content).decode("ascii"),
                     "mime_type": "application/pdf",
+                    "filename": filename,
                 }
                 content_blocks.append(file_block)
 
             elif file_type == "audio":
-                logger.info("Detected audio file, adding to multimodal request...")
-                # Audio files are passed as file blocks with MIME type detection
-                # Gemini models will transcribe and analyze the audio content
-                content_type = "audio/mpeg"  # Default; can be refined based on extension
-                ext = _get_file_extension(file_url)
-                if ext == ".wav":
-                    content_type = "audio/wav"
-                elif ext == ".ogg":
-                    content_type = "audio/ogg"
-                elif ext == ".webm":
-                    content_type = "audio/webm"
-                elif ext == ".m4a":
-                    content_type = "audio/m4a"
-                elif ext == ".flac":
-                    content_type = "audio/flac"
+                # Audio must be inlined as base64, NOT sent as a URL — same wire-format reason as
+                # documents: a `file` block carrying a `url` is rejected at payload build ("file
+                # URLs ... with Chat Completions"). base64 is viable here because chat voice
+                # recordings are small; the resolved model must be audio-capable (e.g. Gemini) —
+                # Claude has no audio modality. LiteLLM's Vertex path accepts base64 `file` blocks.
+                # Capability gate — also enforced here, not only in the preflight. The preflight
+                # (_reject_unsupported_media) routes on the declared block type, but audio can be
+                # discovered here for the first time when it wasn't typed "audio" upstream — e.g. a
+                # user-pasted audio URL (regex fallback, no block) or a file block whose mime isn't
+                # audio/*. Without this check such audio would be inlined and fail opaquely deep in
+                # the model call on a text/vision-only tier, instead of the clear message below.
+                if not self._supports_audio():
+                    raise ValueError(_AUDIO_UNAVAILABLE_MSG)
+                logger.info("Detected audio file, fetching bytes to inline as base64...")
+                content_type = _AUDIO_EXT_TO_MIME.get(_get_file_extension(file_url), "audio/mpeg")
 
+                content = await _fetch_bytes_capped(
+                    client,
+                    file_url,
+                    MAX_AUDIO_FETCH_BYTES,
+                    f"Audio file too large. Maximum is {MAX_AUDIO_FETCH_BYTES:,} bytes.",
+                )
+
+                filename = file_url.split("?")[0].rsplit("/", 1)[-1] or "audio"
                 file_block: FileContentBlock = {
                     "type": "file",
-                    "url": file_url,
+                    "base64": base64.b64encode(content).decode("ascii"),
                     "mime_type": content_type,
+                    "filename": filename,
                 }
                 content_blocks.append(file_block)
 
             elif file_type == "video":
-                logger.info("Detected video file, adding to multimodal request...")
-                # Video files are passed as file blocks
-                # Gemini models will analyze both video and audio content
-                content_type = "video/mp4"  # Default; can be refined based on extension
-                ext = _get_file_extension(file_url)
-                if ext == ".webm":
-                    content_type = "video/webm"
-                elif ext == ".avi":
-                    content_type = "video/avi"
-                elif ext == ".mov":
-                    content_type = "video/quicktime"
-
-                file_block: FileContentBlock = {
-                    "type": "file",
-                    "url": file_url,
-                    "mime_type": content_type,
-                }
-                content_blocks.append(file_block)
+                # KNOWN GAP: video is not supported through the current gateway path. Reject with
+                # a clear message rather than emitting a block that fails opaquely deep in the
+                # model call. The blocker is TRANSPORT, not model capability (the Gemini tier can
+                # do video): a URL `file` block is rejected at payload build ("file URLs ... with
+                # Chat Completions", ADR-0001's ChatOpenAI wire format), and base64 doesn't scale
+                # to video (Gemini inline ~20MB, request cap 32MB) — so neither form we can send
+                # works. Real support is an upload pipeline: Vertex requires a gs:// (or Gemini
+                # File API) URI — it won't fetch our S3 presigned URLs — so the file must be
+                # staged into a Gemini-reachable location first. See AGENTS.md ("the Video Gap").
+                # (Audio is kept above: small enough to base64, and the Gemini tier handles it.)
+                logger.info("Rejecting unsupported video file: %s", file_url[:80])
+                raise ValueError(_VIDEO_UNSUPPORTED_MSG)
 
             else:
                 logger.info("Unknown file type, adding as generic file...")
@@ -579,18 +717,23 @@ class FileAnalyzerRunnable(LocalA2ARunnable):
         an unnecessary decompose/recompose roundtrip, then applies file-analyzer-
         specific processing:
         1. Image blocks passed through directly (natively supported by multimodal models)
-        2. Other file blocks (audio, video, documents) routed through _fetch_files
-           for proper MIME type detection — critical for audio/webm correction
-           where browsers send video/webm but Gemini requires audio/webm
+        2. Other file blocks (audio, documents) routed through _fetch_files for content-type
+           detection and base64 inlining; video blocks reach _fetch_files only to be rejected
+           (unsupported through the gateway path)
         3. Regex URL fallback when no file blocks are present (user-typed URLs)
 
         S3 URI validation is handled by the base _extract_and_validate_blocks().
 
         Raises:
-            ValueError: For user-facing input issues (S3 URIs, no URLs, no processable files)
+            ValueError: For user-facing input issues (S3 URIs, no URLs, no processable files,
+                unsupported media — see _reject_unsupported_media)
             httpx.HTTPStatusError: For HTTP errors during file fetching
             httpx.TimeoutException: For timeout during file fetching
         """
+        # Fail fast on media this agent can't process, with a clear message — before the base
+        # block-strip silently converts it to a text description ("No processable files").
+        self._reject_unsupported_media(input_data)
+
         text_content, file_blocks = await self._extract_and_validate_blocks(input_data)
 
         if file_blocks:
