@@ -62,6 +62,7 @@ const entityTypeLabels: Record<AuditEntityType, string> = {
   tool_risk_score: 'Tool Risk Score',
   model_default: 'Model Default',
   budget_setting: 'Budget Setting',
+  voice_session: 'Voice Session',
 };
 
 export function AuditPage() {
