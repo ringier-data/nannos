@@ -137,6 +137,21 @@ The orchestrator's whitelisted tools always include `scheduler_*` and `console_*
 
 `file-analyzer` is created with `sub_agent_id=None`. This means its LLM costs are attributed to the orchestrator (not to any user-created sub-agent). This is intentional — it's a system capability.
 
+### File-Analyzer Media Support & the Video Gap
+
+`file-analyzer` (`app/agents/file_analyzer.py`) supports **images, PDFs, text, and audio**; **video is deliberately rejected** with a clear message (`_fetch_files`).
+
+How each type reaches the model (all traffic goes through the gateway as a langchain `ChatOpenAI` client speaking OpenAI **Chat Completions** — ADR-0001):
+- **Images** → `image_url` (a URL is valid for images in Chat Completions; LiteLLM fetches it for Bedrock).
+- **PDFs** → fetched and **inlined as base64** (`file` block with `base64`). A `file` block carrying a *URL* is rejected at payload build ("file URLs … with Chat Completions"), and Bedrock/Vertex accept base64 document sources only — so base64 is the one portable form. Do **not** provider-gate this.
+- **Text** → fetched inline as a text block.
+- **Audio** → fetched and **inlined as base64** (same wire reason as PDFs — a URL `file` block is rejected). Kept because audio is a first-class chat input. **Capability-gated:** requires the resolved model to declare `audio` input (i.e. be audio-capable, e.g. Gemini — the fleet's cheap tier is `gemini-3.5-flash`); Claude has no audio modality. On a non-audio tier, audio is **rejected up front** with a clear message (`_reject_unsupported_media`) — *not* silently dropped to text (which read as "No processable files" and triggered pointless re-delegation to general-purpose). LiteLLM's Vertex path accepts base64 `file` blocks.
+
+`get_supported_input_modes()` reflects this honestly: it narrows the model's declared modes to `_HANDLEABLE_MODES` — always drops `video`, and offers `audio`/`file` only when the model declares them — so the agent card and orchestrator routing don't over-promise. The **System Status** page has an "Audio transcription (file-analyzer)" row (`feature_status._audio_transcription_feature`) so an admin can see whether audio works and what to configure (an audio-capable model on the `chat:low`/`chat` default).
+- **Video** → **rejected.** Model *capability* is no longer the blocker — the cheap tier is `gemini-3.5-flash`, which handles video. The blocker is **transport**: (1) a URL `file` block is rejected at payload build ("file URLs … with Chat Completions"), and (2) base64 doesn't scale to video (Gemini inline ~20 MB, request cap 32 MB). So neither form we can currently send works.
+
+**Enabling video later — it's an upload pipeline, not a client tweak.** Vertex `fileData.file_uri` requires a `gs://` GCS URI or a **Gemini File API** handle; it will **not** fetch an arbitrary S3 presigned HTTPS URL (confirmed). Our attachments live in **S3**, so the real work is: (a) stage the video into a Gemini-reachable location — an S3→GCS copy (`gs://`) or a Gemini File API upload — which pulls **GCP credentials app-side** (the proxy holds Vertex creds, but the upload is orchestrator-side), a staging bucket + lifecycle cleanup, and File-API retention/size limits; (b) provider-aware model routing (video ⇒ Gemini); (c) emit the `file` block with the resulting URI + `format`/`video_metadata`. **Client choice for step (c):** patch `_GatewayChatOpenAI` to pre-rewrite the media block into the raw OpenAI `file` shape before the base translator runs — do **not** switch to `langchain-litellm`/`ChatLiteLLM` (a second client that bypasses the proxy and loses cost tracking, virtual keys, and the reasoning/`thinking_blocks`/`cache_control` handling). Bedrock video is limited to TwelveLabs Pegasus via a non-content-block `mediaSource` param the `ChatOpenAI` path can't express.
+
 ### Error Classification for Sub-Agent Failures
 
 `ErrorClassificationMiddleware` classifies errors from sub-agent execution (auth failures, tool errors, etc.) to provide actionable feedback to the orchestrator's planning loop.

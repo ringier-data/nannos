@@ -99,6 +99,77 @@ async def test_list_models_cached_and_invalidated_on_write(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_model_recreates_deployment_to_persist_model_info(svc, monkeypatch):
+    """update_model re-registers (so custom model_info like input_modes actually persists),
+    then deletes the old deployment — it must NOT call LiteLLM's /model/update, which drops
+    custom model_info keys. Register happens before delete so the alias is never without a
+    live deployment."""
+    calls: list[tuple[str, dict]] = []
+
+    async def _fake_request(method, path, **kwargs):
+        calls.append((path, kwargs.get("json") or {}))
+        if path == "/model/new":
+            return {"model_info": {"id": "new-id"}}
+        return {}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    result = await svc.update_model(
+        "old-id",
+        "claude-sonnet-4-6",
+        {"model": "eu.anthropic.claude-sonnet-4-6"},
+        {"input_modes": ["text", "image", "file"], "mode": "chat"},
+    )
+
+    paths = [p for p, _ in calls]
+    assert "/model/update" not in paths  # the whole point: /model/update can't persist model_info
+    assert paths == ["/model/new", "/model/delete"]  # register first, then delete old
+
+    _, new_body = calls[0]
+    assert new_body["model_name"] == "claude-sonnet-4-6"
+    assert new_body["model_info"]["input_modes"] == ["text", "image", "file"]
+    assert calls[1][1] == {"id": "old-id"}  # old deployment deleted by id
+    assert result["model_info"]["id"] == "new-id"
+
+
+@pytest.mark.asyncio
+async def test_update_model_survives_failed_old_delete(svc, monkeypatch):
+    """If deleting the old deployment fails, the re-registration still stands (it was created
+    first) — update_model logs and returns rather than raising, so the edit isn't lost. It also
+    signals the lingering old deployment via _stale_duplicate_deployment_id so the endpoint can
+    report a partial success instead of a clean 'updated'."""
+
+    async def _fake_request(method, path, **kwargs):
+        if path == "/model/new":
+            return {"model_info": {"id": "new-id"}}
+        if path == "/model/delete":
+            raise ModelGatewayError("gateway unreachable")
+        return {}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    result = await svc.update_model("old-id", "m", {"model": "x"}, {"input_modes": ["file"]})
+    assert result["model_info"]["id"] == "new-id"
+    assert result["_stale_duplicate_deployment_id"] == "old-id"
+
+
+@pytest.mark.asyncio
+async def test_update_model_no_stale_signal_on_clean_delete(svc, monkeypatch):
+    """On the happy path (old delete succeeds) no stale-duplicate marker is attached, so the
+    endpoint reports a clean 'updated'."""
+
+    async def _fake_request(method, path, **kwargs):
+        if path == "/model/new":
+            return {"model_info": {"id": "new-id"}}
+        return {}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    result = await svc.update_model("old-id", "m", {"model": "x"}, {"input_modes": ["file"]})
+    assert "_stale_duplicate_deployment_id" not in result
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "litellm_model,provider,expect_dimensions",
     [

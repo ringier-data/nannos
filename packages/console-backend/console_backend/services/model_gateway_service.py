@@ -205,9 +205,39 @@ class ModelGatewayService:
         self._invalidate_list_cache()
         return result
 
-    async def update_model(self, model_id: str, litellm_params: dict, model_info: dict | None = None) -> dict:
-        payload = {"litellm_params": litellm_params, "model_info": {**(model_info or {}), "id": model_id}}
-        result = await self._request("POST", "/model/update", json=payload)
+    async def update_model(
+        self, model_id: str, model_name: str, litellm_params: dict, model_info: dict | None = None
+    ) -> dict:
+        """Edit a registered deployment by re-creating it (register new, then delete old).
+
+        LiteLLM's /model/update does NOT persist custom model_info keys (input_modes, mode,
+        the default flag, …) — only /model/new does (see model_defaults_service). So a plain
+        /model/update silently drops our capability metadata, leaving edits (e.g. adding the
+        'file' input mode) with no runtime effect. Re-registering forces model_info to stick.
+
+        Register-before-delete avoids a window where the alias has no live deployment; LiteLLM
+        allows multiple deployments per public model_name, so the brief overlap is safe. Returns
+        the newly registered deployment (carrying the NEW gateway model id).
+
+        If deleting the old deployment fails, the re-registration still stands but a stale
+        duplicate remains live under the same public model_name — the gateway will load-balance
+        across both, so the edit is only partially applied until the old one is removed. That is
+        signalled to the caller via ``_stale_duplicate_deployment_id`` on the returned dict (a
+        private key, never serialized to the API client) so the endpoint can surface it rather
+        than reporting a clean success.
+        """
+        result = await self.register_model(model_name, litellm_params, model_info)
+        try:
+            await self.delete_model(model_id)
+        except ModelGatewayError:
+            logger.warning(
+                "update_model: re-registered '%s' but failed to delete old deployment id %s; "
+                "a duplicate deployment may remain — delete it manually.",
+                model_name,
+                model_id,
+            )
+            if isinstance(result, dict):
+                result["_stale_duplicate_deployment_id"] = model_id
         self._invalidate_list_cache()
         return result
 

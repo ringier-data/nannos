@@ -165,6 +165,10 @@ async def collect_system_status(request: "Request", db: "AsyncSession") -> list[
     # Web search — the web_search tool, backed by the selected Search Provider (gateway-native).
     features.append(_web_search_feature(defaults.get("search"), model_info_by_name, registered))
 
+    # Audio transcription — the file-analyzer can only transcribe/analyze audio when its resolved
+    # model (chat:low → chat) declares audio input (i.e. a Gemini tier).
+    features.append(_audio_transcription_feature(defaults, model_info_by_name))
+
     # Catalog — embedding default registered + Google OAuth for source connection.
     features.append(await _catalog_feature(request, db))
 
@@ -382,6 +386,70 @@ def _web_search_feature(
             f"the cheapest capable model."
         )
     return FeatureStatus(key=key, name=name, status="ready", detail=detail, caveat=caveat)
+
+
+def _audio_transcription_feature(
+    defaults: dict[str, str], model_info_by_name: dict[str, dict] | None
+) -> FeatureStatus:
+    """Whether the file-analyzer can transcribe/analyze audio attachments.
+
+    The file-analyzer runs on the Low chat tier (``chat:low``), falling back to the Chat default —
+    the same resolution as ``model_factory.get_default_fast_model()``. Audio input requires that
+    resolved model to be **audio-capable**: it must declare ``audio`` in its gateway ``input_modes``
+    (in practice a Gemini model). On a text/vision-only tier (e.g. Claude on Bedrock) the
+    file-analyzer rejects audio with a clear message instead of attempting it — so surface the
+    requirement here so an admin knows what to configure.
+    """
+    key, name = "audio_transcription", "Audio transcription (file-analyzer)"
+    alias = defaults.get("chat:low") or defaults.get("chat")
+    tier = "Low tier (chat:low)" if defaults.get("chat:low") else "Chat default"
+
+    if not alias:
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="disabled",
+            detail="No chat model default is set, so the file-analyzer has no model to run.",
+            remediation="Set a Chat default (and ideally a Low tier) in Admin → Model Gateway.",
+        )
+
+    # Gateway list unreadable → fail open (don't hard-disable on a blip), matching the other rows.
+    if model_info_by_name is None:
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="ready",
+            detail=f"Gateway list unavailable — can't confirm audio support of '{alias}'.",
+        )
+
+    info = model_info_by_name.get(alias)
+    if info is None:
+        # Not found in the gateway list — the "Chat models" row already flags an unregistered
+        # default; here just note we can't confirm audio support rather than double-reporting.
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="degraded",
+            detail=f"The file-analyzer model '{alias}' ({tier}) isn't registered on the gateway.",
+            remediation="Register the model, or pick a registered default, in Admin → Model Gateway.",
+        )
+
+    if "audio" in (info.get("input_modes") or []):
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="ready",
+            detail=f"Enabled — the file-analyzer model '{alias}' ({tier}) accepts audio input.",
+        )
+    return FeatureStatus(
+        key=key,
+        name=name,
+        status="disabled",
+        detail=f"The file-analyzer model '{alias}' ({tier}) doesn't accept audio input — "
+        "audio files can't be transcribed.",
+        remediation="Set an audio-capable model (e.g. a Gemini model with 'audio' in its input "
+        "modes) as the Low chat tier (chat:low), or as the Chat default, in Admin → Model Gateway.",
+    )
 
 
 def _voice_agent_feature() -> FeatureStatus:

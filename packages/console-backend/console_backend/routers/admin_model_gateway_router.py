@@ -70,6 +70,15 @@ def _with_default_vertex_location(litellm_params: dict, provider: str) -> dict:
     return litellm_params
 
 
+def _gateway_model_id(result: object) -> str | None:
+    """The gateway deployment id from a /model/new (register or re-register) response, or None.
+
+    Both the register and edit endpoints read it the same way; the result is the raw gateway
+    response, so tolerate a non-dict / missing model_info defensively.
+    """
+    return (result.get("model_info") or {}).get("id") if isinstance(result, dict) else None
+
+
 # NOTE: Registrations carry NO per-model provider credentials. The proxy is the auth
 # authority for every provider: Vertex via pod ADC (GOOGLE_APPLICATION_CREDENTIALS, a file
 # projected from the GCP_KEY secret), Bedrock via the pod IAM role, Azure via the proxy's
@@ -270,7 +279,7 @@ async def register_model(
             detail=f"Rate card created but gateway registration failed ({e}); retry or clean up the rate card.",
         )
 
-    gateway_model_id = (result.get("model_info") or {}).get("id") if isinstance(result, dict) else None
+    gateway_model_id = _gateway_model_id(result)
     logger.info("Registered model %s (gateway id=%s) by %s", body.model_name, gateway_model_id, user.id)
     return ModelRegistrationResponse(
         model_name=body.model_name,
@@ -309,18 +318,39 @@ async def edit_model(
     model_info = {**body.model_info, "input_modes": body.input_modes, "mode": body.mode}
     litellm_params = _with_default_vertex_location(body.litellm_params, body.provider)
     try:
-        await svc.update_model(model_id, litellm_params, model_info)
+        result = await svc.update_model(model_id, body.model_name, litellm_params, model_info)
     except ModelGatewayError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Rate card updated but gateway update failed ({e}); retry.",
         )
-    logger.info("Updated model %s (gateway id=%s) by %s", body.model_name, model_id, user.id)
+    # update_model re-creates the deployment, so the gateway id changes.
+    new_model_id = _gateway_model_id(result)
+    # If the old deployment couldn't be deleted it lingers under the same model_name and the
+    # gateway load-balances across both — the edit is only partially applied. Surface that as a
+    # distinct status (instead of a clean "updated") so an admin knows to remove the stale one.
+    stale_duplicate_id = result.get("_stale_duplicate_deployment_id") if isinstance(result, dict) else None
+    if stale_duplicate_id:
+        logger.warning(
+            "Updated model %s (new gateway id=%s) but old deployment id=%s remains live "
+            "(delete failed); gateway will serve both until it is removed.",
+            body.model_name,
+            new_model_id,
+            stale_duplicate_id,
+        )
+    else:
+        logger.info(
+            "Updated model %s (old gateway id=%s, new gateway id=%s) by %s",
+            body.model_name,
+            model_id,
+            new_model_id,
+            user.id,
+        )
     return ModelRegistrationResponse(
         model_name=body.model_name,
         rate_card_entry_ids=entry_ids,
-        gateway_model_id=model_id,
-        status="updated",
+        gateway_model_id=new_model_id,
+        status="updated_with_stale_duplicate" if stale_duplicate_id else "updated",
     )
 
 

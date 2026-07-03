@@ -12,6 +12,7 @@ import pytest
 
 import console_backend.services.model_status as model_status
 from console_backend.services.feature_status import (
+    _audio_transcription_feature,
     _catalog_feature,
     _chat_tiers_feature,
     _web_search_feature,
@@ -271,3 +272,49 @@ def test_web_search_fails_open_when_gateway_unreadable():
     f = _web_search_feature("gemini-flash", None, None)
     assert f.status == "ready"
     assert "gemini-flash" in f.detail
+
+
+# _audio_transcription_feature: the file-analyzer transcribes audio only when its resolved model
+# (chat:low → chat) declares "audio" in its gateway input_modes (i.e. a Gemini tier). model_info_by_name
+# maps model_name → model_info (with input_modes).
+
+
+def test_audio_ready_when_low_tier_model_declares_audio():
+    info = {"gemini-flash": {"input_modes": ["text", "image", "audio", "video"]}}
+    f = _audio_transcription_feature({"chat": "claude", "chat:low": "gemini-flash"}, info)
+    assert f.status == "ready"
+    assert "gemini-flash" in f.detail
+    assert "Low tier" in f.detail
+
+
+def test_audio_disabled_when_model_lacks_audio_mode():
+    info = {"claude": {"input_modes": ["text", "image", "file"]}}
+    f = _audio_transcription_feature({"chat": "claude"}, info)
+    assert f.status == "disabled"
+    assert "doesn't accept audio input" in f.detail
+    assert "Gemini" in (f.remediation or "")
+
+
+def test_audio_falls_back_to_chat_default_when_no_low_tier():
+    info = {"gemini-flash": {"input_modes": ["text", "audio"]}}
+    f = _audio_transcription_feature({"chat": "gemini-flash"}, info)
+    assert f.status == "ready"
+    assert "Chat default" in f.detail
+
+
+def test_audio_disabled_when_no_chat_default():
+    f = _audio_transcription_feature({}, {})
+    assert f.status == "disabled"
+    assert "No chat model default" in f.detail
+
+
+def test_audio_degraded_when_model_not_registered():
+    f = _audio_transcription_feature({"chat:low": "ghost-model"}, {})
+    assert f.status == "degraded"
+    assert "isn't registered" in f.detail
+
+
+def test_audio_fails_open_when_gateway_unreadable():
+    f = _audio_transcription_feature({"chat:low": "gemini-flash"}, None)
+    assert f.status == "ready"
+    assert "can't confirm" in f.detail
