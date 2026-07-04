@@ -67,13 +67,6 @@ from typing_extensions import NotRequired
 from agent_common.backends.attachments_store import ContextScopedAttachmentsBackend
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
-from agent_common.middleware.conversation_context_tools_middleware import (
-    ContextGatedTool,
-    ConversationContextToolsMiddleware,
-)
-from agent_common.middleware.gateway_attribution_middleware import GatewayAttributionMiddleware
-from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
-from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.core.model_factory import is_gemini_model
 from agent_common.core.ptc_discovery import (
     PTC_DESCRIBE_TOOL_NAME,
@@ -81,6 +74,13 @@ from agent_common.core.ptc_discovery import (
     build_discovery_tools,
 )
 from agent_common.core.ptc_signatures import render_tools_namespace
+from agent_common.middleware.conversation_context_tools_middleware import (
+    ContextGatedTool,
+    ConversationContextToolsMiddleware,
+)
+from agent_common.middleware.gateway_attribution_middleware import GatewayAttributionMiddleware
+from agent_common.middleware.loop_detection_middleware import RepeatedToolCallMiddleware
+from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import (
     PTC_CODE_INTERPRETER_TOOL_NAME,
     begin_ptc_turn,
@@ -460,6 +460,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         tool_server_map: dict[str, str] | None = None,
         excluded_ptc_names: frozenset[str] = _PTC_EXCLUDED_TOOL_NAMES,
         backend_supports_execution: bool = False,
+        expose_context_registry: bool = False,
         **kwargs: Any,
     ) -> None:
         # Force a fresh REPL per ``eval`` call (no cross-eval persistence).
@@ -502,6 +503,14 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         # non-sandbox backends, so it must be kept out of the PTC ``eval`` namespace
         # (and stripped from the model) when execution is unsupported.
         self._supports_execution = backend_supports_execution
+        # When True (orchestrator "eval + task"), the per-user runtime
+        # ``tool_registry`` is harvested from the request context and exposed via
+        # ``eval`` — the same tools the graph binds natively today, just routed
+        # into the REPL and hidden from the model's bound list. Distinct from
+        # ``broaden_exposure`` (which harvests ``request.tools`` BaseTools): the
+        # orchestrator carries its registry as provider-native dict schemas, so
+        # the BaseTool instances must come from the runtime context instead.
+        self._expose_context_registry = expose_context_registry
         self._ptc_swap_lock = threading.Lock()
 
     @staticmethod
@@ -531,15 +540,44 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             seen.add(tool.name)
             collected.append(tool)
 
-        # When broadened exposure is disabled (e.g. the orchestrator), expose
-        # ONLY the stable filesystem baseline via ``eval``. The orchestrator's
-        # job is to plan and delegate via ``task``; harvesting its entire
-        # per-user ``tool_registry`` (hundreds of MCP tools) into the PTC system
-        # prompt both bloats the prompt and strips every dispatchable tool from
-        # the model's bound list, derailing it into emitting a final response
-        # instead of dispatching. Sub-agents keep broadened exposure so their
-        # own tools remain reachable through ``eval``.
+        # Orchestrator "eval + task" exposure: route the per-user runtime
+        # ``tool_registry`` — the SAME tools ``DynamicToolDispatchMiddleware``
+        # binds natively today — into ``eval`` instead of the model's bound list.
+        # Sourced from the request context (not ``request.tools``, which on the
+        # orchestrator carries provider-native dict schemas the PTC bridge can't
+        # wrap). Each is risk-wrapped so HITL still applies per inner call; the
+        # hide-strip in ``_ptc_prompt_and_hidden`` then removes the natively
+        # injected dict schemas from the bound list. Dispatch's tool-selection is
+        # untouched. Available on both the model-call and interrupt-resume paths
+        # (the runtime context is present on both), so no checkpoint dance.
+        if self._expose_context_registry:
+            for tool in self._context_tool_registry(request):
+                name = tool.name
+                if name in excluded or name in seen:
+                    continue
+                if name in _PTC_SANDBOX_TOOLS and not self._supports_execution:
+                    continue
+                seen.add(name)
+                collected.append(
+                    wrap_tool_for_ptc(
+                        tool,
+                        risk_scorer=self._ptc_risk_scorer,
+                        tool_risk_cache=self._ptc_tool_risk_cache,
+                        default_risk_threshold=self._ptc_default_risk_threshold,
+                        tool_server_map=self._ptc_tool_server_map,
+                    )
+                )
+
+        # When broadened exposure is disabled (e.g. the orchestrator), expose the
+        # stable filesystem baseline plus any curated static / context-registry
+        # tools gathered above — but NOT ``request.tools``. The orchestrator plans
+        # and delegates via ``task``; harvesting ``request.tools`` directly is a
+        # sub-agent concern. A large exposed catalog still renders core-only with
+        # pinned ``search``/``describe`` discovery tools (below) so the prompt
+        # stays bounded and the model can find the rest at runtime.
         if not self._broaden_exposure:
+            if self._is_core_only(collected):
+                collected.extend(build_discovery_tools(collected))
             return collected
 
         def _consider(tool: Any) -> None:
@@ -629,6 +667,29 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             render_set = [t for t in exposed if not (getattr(t, "metadata", None) or {}).get("server_name")]
             return render_set, _PTC_DISCOVERY_INSTRUCTION
         return list(exposed), ""
+
+    @staticmethod
+    def _context_tool_registry(request: Any) -> list[BaseTool]:
+        """Return the orchestrator's *bound* MCP tools from the request context.
+
+        ``GraphRuntimeContext.tool_registry`` is the FULL per-user catalog (all
+        discovered MCP tools). The orchestrator binds only the whitelisted subset —
+        the always-on system tools plus the tools the user enabled in the console
+        (``whitelisted_tool_names``) — so we expose exactly that subset via ``eval``,
+        mirroring the filter ``DynamicToolDispatchMiddleware`` applies at bind time
+        (see its step-3 injection). Exposing the raw registry would leak the entire
+        catalog (hundreds of tools) into ``eval``.
+
+        Read defensively — a request path without a runtime/context, or without a
+        whitelist, yields ``[]`` rather than raising or over-exposing.
+        """
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        registry = getattr(context, "tool_registry", None)
+        whitelist = getattr(context, "whitelisted_tool_names", None)
+        if not registry or whitelist is None:
+            return []
+        return [t for name, t in registry.items() if name in whitelist and isinstance(t, BaseTool)]
 
     @staticmethod
     def _checkpointed_exposure(request: Any) -> set[str] | None:
@@ -944,6 +1005,8 @@ def build_code_interpreter_middlewares(
     *,
     broaden_exposure: bool = True,
     broaden_baseline_tools: list[BaseTool] | None = None,
+    extra_static_ptc_tools: list[BaseTool] | None = None,
+    expose_context_registry: bool = False,
     risk_scorer: RiskScorerFn | None = None,
     tool_risk_cache: ToolRiskCache | None = None,
     default_risk_threshold: float = 0.8,
@@ -985,6 +1048,20 @@ def build_code_interpreter_middlewares(
             ``aafter_model`` (``PTC_EXPOSED_TOOL_NAMES_STATE_KEY``) so the rebuilt
             ``tools.*`` namespace mirrors the original (filtered) call; absent a
             checkpointed set, the full baseline is used as a safe fallback.
+        extra_static_ptc_tools: The agent's own build-time utility tools to
+            expose inside ``eval`` (and hide from the model) *in addition to* the
+            filesystem baseline, without broadening to the per-user registry.
+            Each is risk-wrapped like the baseline. Used by the orchestrator to
+            collapse its native surface toward ``eval`` + ``task`` while keeping
+            ``broaden_exposure=False`` (the registry stays out of the PTC prompt).
+        expose_context_registry: When ``True`` (orchestrator "eval + task"),
+            harvest the per-user runtime ``tool_registry`` from the request
+            context and expose those tools via ``eval`` — the same tools the graph
+            binds natively today — hiding their bound-list dict schemas. Sourced
+            from the context (not ``request.tools``) because the orchestrator
+            injects the registry as provider-native dict schemas. Independent of
+            ``broaden_exposure``; the tool-selection logic in
+            ``DynamicToolDispatchMiddleware`` is unchanged.
         risk_scorer: The dynamic risk scorer (``score_tool_risk``). When
             ``None``, PTC tools run unguarded.
         tool_risk_cache: Shared risk cache fallback when the runtime context
@@ -1023,6 +1100,25 @@ def build_code_interpreter_middlewares(
                     )
                 )
 
+        # Curated static exposure (Option D): expose the agent's own build-time
+        # utility tools inside ``eval`` (and hide them from the model) without
+        # broadening to the per-user registry. Skip anything never meant for the
+        # PTC namespace (dispatch / response-schema tools) so callers can pass a
+        # whole static-tool list without hand-filtering. Runtime dedup in
+        # ``_collect_ptc_tools`` tolerates any name overlap with the fs baseline.
+        for tool in extra_static_ptc_tools or []:
+            if tool.name in _PTC_EXCLUDED_TOOL_NAMES:
+                continue
+            static_ptc_tools.append(
+                wrap_tool_for_ptc(
+                    tool,
+                    risk_scorer=risk_scorer,
+                    tool_risk_cache=tool_risk_cache,
+                    default_risk_threshold=default_risk_threshold,
+                    tool_server_map=tool_server_map,
+                )
+            )
+
     return [
         _PTCToleranceCodeInterpreterMiddleware(
             static_ptc_tools=static_ptc_tools,
@@ -1034,6 +1130,7 @@ def build_code_interpreter_middlewares(
             default_risk_threshold=default_risk_threshold,
             tool_server_map=tool_server_map,
             backend_supports_execution=exec_supported,
+            expose_context_registry=expose_context_registry,
             # ``skills_backend`` was removed in langchain-quickjs 0.2.0 (wasm
             # sandbox has no host filesystem, so ``@/skills`` REPL imports and
             # eval-side skill metadata are gone). No repo skill declares a

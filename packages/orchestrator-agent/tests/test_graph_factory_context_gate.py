@@ -23,6 +23,7 @@ def _make_factory() -> GraphFactory:
     factory.config = MagicMock()
     factory.cost_logger = None
     factory._store_enabled = False  # store property → None
+    factory._static_tools_cache = []  # mirrors __init__; get_static_tools() builds on first use
     factory._loop_detection_middleware = MagicMock()
     factory._auth_middleware = MagicMock()
     factory._retry_middleware = MagicMock()

@@ -27,6 +27,7 @@ from agent_common.a2a.structured_response import select_response_format
 from agent_common.core.copy_file_tool import create_copy_file_tool
 from agent_common.core.graph_utils import (
     build_code_interpreter_middlewares,
+    code_interpreter_ptc_enabled,
     create_indexing_backend_factory,
 )
 from agent_common.core.model_factory import (
@@ -638,16 +639,36 @@ class GraphFactory:
         hitl_middleware = _create_hitl_middleware()
 
         # CodeInterpreterMiddleware exposes a wasm-sandboxed ``eval`` JS REPL.
-        # The orchestrator passes ``broaden_exposure=False`` so ``eval`` exposes
-        # only the filesystem baseline — NOT the per-user tool registry (hundreds
-        # of MCP tools). The orchestrator's job is to plan and delegate via
-        # ``task``; pulling the whole registry into the PTC prompt bloats it and
-        # strips every dispatchable tool from the model's bound list, derailing it
-        # into emitting a final response instead of dispatching. ``task``, ``eval``
-        # and the response-schema tools remain visible to the model.
+        # The orchestrator passes ``broaden_exposure=False``: that path harvests
+        # ``request.tools`` per turn (a sub-agent concern) and would additionally
+        # bloat the PTC prompt and strip dispatchable tools, historically derailing
+        # the model into emitting a final response instead of dispatching. By
+        # default ``eval`` therefore exposes only the filesystem baseline, and the
+        # per-user MCP registry stays natively bound (via DynamicToolDispatch).
+        # ``task``, ``eval`` and the response-schema tools always remain native.
+        #
+        # Opinionated exposure: when PTC is enabled the orchestrator reaches ALL of
+        # its tools through ``eval`` — its own static utilities (time, presigned-url,
+        # copy_file) AND the per-user MCP ``tool_registry`` (the same tools
+        # DynamicToolDispatchMiddleware binds today: gdrive_*, console_*, scheduler_*,
+        # …), sourced from the runtime context and routed into ``eval`` with their
+        # dict schemas hidden from the bound list. This does NOT change *which* tools
+        # the orchestrator has (dispatch's selection logic is untouched), only how it
+        # reaches them: the native surface collapses to ``eval`` + ``task`` (+
+        # ``write_todos`` + response schemas). A large catalog renders core-only with
+        # pinned search/describe discovery. There is intentionally no per-slice toggle
+        # — one exposure model keeps the system prompt and everything downstream
+        # single-branch. The whole behavior is gated by ``CODE_INTERPRETER_PTC``
+        # inside build_code_interpreter_middlewares (no-op when PTC is off).
+        #
+        # ``broaden_exposure`` stays False: that path harvests ``request.tools`` (a
+        # sub-agent concern) with different resume semantics; the orchestrator's
+        # registry lives in the runtime context, not ``request.tools``.
         code_interpreter_middlewares = build_code_interpreter_middlewares(
             self.backend_factory,
             broaden_exposure=False,
+            extra_static_ptc_tools=self.get_static_tools(),
+            expose_context_registry=True,
             risk_scorer=score_tool_risk,
             default_risk_threshold=0.8,
         )
@@ -805,6 +826,13 @@ class GraphFactory:
             if os.environ.get("USE_SHORT_PROMPTS") == "true" and self.config.SYSTEM_INSTRUCTION_SHORT
             else self.config.SYSTEM_INSTRUCTION
         )
+        # The base prompt names the orchestrator's support tools without saying how they
+        # are invoked (mechanism-agnostic), so it is correct whether they are natively
+        # bound or exposed via eval. Only when PTC is enabled do we append the
+        # code-interpreter mechanism (tools.* in eval); with PTC off the tools are
+        # native and no eval guidance applies.
+        if code_interpreter_ptc_enabled():
+            system_prompt = system_prompt + self.config.PTC_ORCHESTRATOR_GUIDANCE
         compiled_graph = create_deep_agent(
             model=model,
             tools=static_tools_list,

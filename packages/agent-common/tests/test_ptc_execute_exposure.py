@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from deepagents.backends.state import StateBackend
+from langchain_core.tools import tool
 
 import agent_common.core.graph_utils as gu
 
@@ -63,6 +64,70 @@ def test_baseline_execute_carries_the_risk_guard():
     # Wrapped tools expose an injected ``runtime`` arg (added by wrap_tool_for_ptc);
     # the raw filesystem execute tool does not advertise it on its LLM-facing schema.
     assert execute_tools[0].coroutine is not None
+
+
+def test_extra_static_ptc_tools_exposed_in_baseline():
+    """Option D: curated build-time utility tools are exposed inside ``eval``
+    alongside the filesystem baseline, without broadening to ``request.tools``."""
+
+    @tool
+    def get_current_time() -> str:
+        """Return the current time."""
+        return "now"
+
+    with patch("deepagents.middleware.filesystem.supports_execution", return_value=False):
+        middlewares = gu.build_code_interpreter_middlewares(
+            StateBackend(),
+            broaden_exposure=False,
+            extra_static_ptc_tools=[get_current_time],
+        )
+    names = _baseline_tool_names(middlewares)
+    assert "get_current_time" in names, f"curated utility must be exposed in the PTC baseline; got {names}"
+    # Filesystem baseline still present.
+    assert {"ls", "read_file", "glob", "grep", "write_file", "edit_file"} <= names
+
+
+def test_extra_static_ptc_tools_skips_excluded_names():
+    """Dispatch / response-schema tools are never exposed via PTC, so a caller can
+    pass a whole static-tool list without hand-filtering ``_PTC_EXCLUDED_TOOL_NAMES``."""
+
+    @tool("write_todos")
+    def write_todos() -> str:
+        """Record a work plan."""
+        return "ok"
+
+    @tool("copy_file")
+    def copy_file() -> str:
+        """Copy a file."""
+        return "ok"
+
+    with patch("deepagents.middleware.filesystem.supports_execution", return_value=False):
+        middlewares = gu.build_code_interpreter_middlewares(
+            StateBackend(),
+            broaden_exposure=False,
+            extra_static_ptc_tools=[write_todos, copy_file],
+        )
+    names = _baseline_tool_names(middlewares)
+    assert "write_todos" not in names, "write_todos is excluded from PTC exposure (stays native)"
+    assert "copy_file" in names, f"non-excluded utility should be exposed; got {names}"
+
+
+def test_extra_static_ptc_tools_not_exposed_when_ptc_disabled(monkeypatch):
+    """When PTC is off, curated utilities are not wrapped/exposed (they stay native)."""
+    monkeypatch.setenv("CODE_INTERPRETER_PTC", "0")
+
+    @tool
+    def get_current_time() -> str:
+        """Return the current time."""
+        return "now"
+
+    with patch("deepagents.middleware.filesystem.supports_execution", return_value=False):
+        middlewares = gu.build_code_interpreter_middlewares(
+            StateBackend(),
+            broaden_exposure=False,
+            extra_static_ptc_tools=[get_current_time],
+        )
+    assert middlewares[0]._static_ptc_tools == []
 
 
 def test_ptc_disabled_exposes_no_baseline_but_keeps_bare_eval(monkeypatch):
